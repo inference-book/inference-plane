@@ -24,6 +24,7 @@ import (
 
 	inferencev1 "github.com/inference-book/inference-plane/gen/go/inferenceplane/v1"
 	"github.com/inference-book/inference-plane/internal/backends"
+	"github.com/inference-book/inference-plane/internal/metrics"
 	"github.com/inference-book/inference-plane/internal/telemetry"
 )
 
@@ -42,11 +43,15 @@ var tracer = otel.Tracer("inference-plane/services")
 type InferenceServer struct {
 	inferencev1.UnimplementedInferenceServiceServer
 	backend backends.Backend
+	metrics *metrics.Recorder
+	cost    *metrics.CostRecorder
 }
 
 // NewInferenceServer constructs an InferenceServer over the given backend.
-func NewInferenceServer(b backends.Backend) *InferenceServer {
-	return &InferenceServer{backend: b}
+// metrics and cost may be nil (no-op recordings) for tests that don't
+// initialize the OTel SDK.
+func NewInferenceServer(b backends.Backend, m *metrics.Recorder, cost *metrics.CostRecorder) *InferenceServer {
+	return &InferenceServer{backend: b, metrics: m, cost: cost}
 }
 
 // compile-time check that InferenceServer satisfies the gRPC interface.
@@ -55,10 +60,29 @@ var _ inferencev1.InferenceServiceServer = (*InferenceServer)(nil)
 // Complete handles plain prompt completion. Maps to OpenAI's
 // POST /v1/completions via the proto's google.api.http annotation.
 func (s *InferenceServer) Complete(ctx context.Context, in *inferencev1.CompleteRequest) (*inferencev1.CompleteResponse, error) {
+	// Metric record deferred so every exit path (validation failure,
+	// backend error, success) emits the same counter+histogram pair.
+	// Cost records the same duration into inference.active.seconds.total.
+	start := time.Now()
+	status_ := "success"
+	model := "unknown"
+	var completionTokens int32
+	defer func() {
+		dur := time.Since(start).Seconds()
+		s.metrics.RecordRequest(ctx, model, status_, dur)
+		s.cost.RecordActive(ctx, model, dur)
+		if status_ == "success" && completionTokens > 0 {
+			s.metrics.RecordTokens(ctx, model, int64(completionTokens))
+		}
+	}()
+
 	if in.Model == "" {
+		status_ = "validation_error"
 		return nil, status.Error(gcodes.InvalidArgument, "model: required")
 	}
+	model = in.Model
 	if in.Prompt == "" {
+		status_ = "validation_error"
 		return nil, status.Error(gcodes.InvalidArgument, "prompt: required")
 	}
 
@@ -83,10 +107,12 @@ func (s *InferenceServer) Complete(ctx context.Context, in *inferencev1.Complete
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(otelcodes.Error, err.Error())
+		status_ = backendErrorStatus(err)
 		return nil, mapBackendError(s.backend.Name(), err)
 	}
 
 	annotateSuccess(span, bResp)
+	completionTokens = int32(bResp.Usage.CompletionTokens)
 
 	out := &inferencev1.CompleteResponse{
 		Id:      bResp.ID,
@@ -95,7 +121,7 @@ func (s *InferenceServer) Complete(ctx context.Context, in *inferencev1.Complete
 		Model:   bResp.Model,
 		Usage: &inferencev1.Usage{
 			PromptTokens:     int32(bResp.Usage.PromptTokens),
-			CompletionTokens: int32(bResp.Usage.CompletionTokens),
+			CompletionTokens: completionTokens,
 			TotalTokens:      int32(bResp.Usage.TotalTokens),
 		},
 	}
@@ -112,10 +138,26 @@ func (s *InferenceServer) Complete(ctx context.Context, in *inferencev1.Complete
 // ChatComplete handles chat-style completion. Maps to OpenAI's
 // POST /v1/chat/completions.
 func (s *InferenceServer) ChatComplete(ctx context.Context, in *inferencev1.ChatCompleteRequest) (*inferencev1.ChatCompleteResponse, error) {
+	start := time.Now()
+	status_ := "success"
+	model := "unknown"
+	var completionTokens int32
+	defer func() {
+		dur := time.Since(start).Seconds()
+		s.metrics.RecordRequest(ctx, model, status_, dur)
+		s.cost.RecordActive(ctx, model, dur)
+		if status_ == "success" && completionTokens > 0 {
+			s.metrics.RecordTokens(ctx, model, int64(completionTokens))
+		}
+	}()
+
 	if in.Model == "" {
+		status_ = "validation_error"
 		return nil, status.Error(gcodes.InvalidArgument, "model: required")
 	}
+	model = in.Model
 	if len(in.Messages) == 0 {
+		status_ = "validation_error"
 		return nil, status.Error(gcodes.InvalidArgument, "messages: at least one required")
 	}
 
@@ -145,10 +187,12 @@ func (s *InferenceServer) ChatComplete(ctx context.Context, in *inferencev1.Chat
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(otelcodes.Error, err.Error())
+		status_ = backendErrorStatus(err)
 		return nil, mapBackendError(s.backend.Name(), err)
 	}
 
 	annotateSuccess(span, bResp)
+	completionTokens = int32(bResp.Usage.CompletionTokens)
 
 	out := &inferencev1.ChatCompleteResponse{
 		Id:      bResp.ID,
@@ -157,7 +201,7 @@ func (s *InferenceServer) ChatComplete(ctx context.Context, in *inferencev1.Chat
 		Model:   bResp.Model,
 		Usage: &inferencev1.Usage{
 			PromptTokens:     int32(bResp.Usage.PromptTokens),
-			CompletionTokens: int32(bResp.Usage.CompletionTokens),
+			CompletionTokens: completionTokens,
 			TotalTokens:      int32(bResp.Usage.TotalTokens),
 		},
 	}
@@ -172,6 +216,25 @@ func (s *InferenceServer) ChatComplete(ctx context.Context, in *inferencev1.Chat
 		out.Choices = append(out.Choices, choice)
 	}
 	return out, nil
+}
+
+// backendErrorStatus returns the metric status label for a backend
+// error. Mirrors the codeToHTTP mapping in internal/web/server so
+// metrics and HTTP statuses describe the same outcome consistently.
+func backendErrorStatus(err error) string {
+	if errors.Is(err, context.Canceled) {
+		return "client_closed"
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "timeout"
+	}
+	var be *backends.BackendError
+	if errors.As(err, &be) {
+		if be.IsClientError() {
+			return "upstream_client_error"
+		}
+	}
+	return "backend_error"
 }
 
 // annotateSuccess attaches response-derived attributes to the active
