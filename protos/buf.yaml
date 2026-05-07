@@ -1,0 +1,23 @@
+version: v2
+
+# Module dependencies. Pulled from the Buf Schema Registry on `buf dep update`.
+# grpc-gateway plugin is wired via buf.gen.yaml (remote plugin reference,
+# not a proto import), so it doesn't appear here.
+deps:
+  - buf.build/googleapis/googleapis             # google.api.http annotations
+
+lint:
+  use:
+    - STANDARD
+  except:
+    # We don't enforce a directory match because protos sit under
+    # `inferenceplane/v1/` while the buf module root is `protos/`.
+    - PACKAGE_DIRECTORY_MATCH
+    # Field comments aren't required on every field; we comment what's
+    # not self-evident from the field name.
+    - FIELD_NOT_REQUIRED
+  disallow_comment_ignores: true
+
+breaking:
+  use:
+    - FILE

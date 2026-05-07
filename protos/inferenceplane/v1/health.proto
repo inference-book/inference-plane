@@ -1,0 +1,34 @@
+syntax = "proto3";
+
+package inferenceplane.v1;
+
+import "google/api/annotations.proto";
+
+// HealthService exposes the control plane's view of its own readiness.
+// Distinct from the OTel inference.backend.healthy gauge -- this is
+// the synchronous probe that load balancers, Kubernetes readiness
+// checks, and the smoke tests hit.
+service HealthService {
+  // Check returns the current health state. Always returns a status;
+  // the HTTP binding maps SERVING to 200 and any non-SERVING state to 503.
+  rpc Check(CheckRequest) returns (CheckResponse) {
+    option (google.api.http) = {
+      get: "/health"
+    };
+  }
+}
+
+message CheckRequest {}
+
+message CheckResponse {
+  // Three-state model. A degraded backend can be drained or
+  // deprioritized without an outage; an unhealthy one triggers alerts.
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    STATUS_SERVING = 1;
+    STATUS_DEGRADED = 2;
+    STATUS_NOT_SERVING = 3;
+  }
+  Status status = 1;
+  string message = 2;
+}
