@@ -1,0 +1,56 @@
+# OpenTelemetry Collector config.
+#
+# Receives OTLP from the control plane (gRPC on 4317, HTTP on 4318),
+# batches for efficiency, and fans out to Tempo (traces), Loki (logs),
+# and Mimir (metrics) via their OTLP-compatible endpoints.
+#
+# Production swap: add an additional exporter pointing at the hosted
+# backend (Grafana Cloud OTLP, Honeycomb, Datadog) and route either
+# alongside or instead of the local pipelines.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    timeout: 1s
+    send_batch_size: 8192
+
+exporters:
+  # Traces -> Tempo (OTLP gRPC)
+  otlp/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+
+  # Logs -> Loki (via Loki's OTLP endpoint)
+  otlphttp/loki:
+    endpoint: http://loki:3100/otlp
+
+  # Metrics -> Mimir (Prometheus remote write via OTLP)
+  otlphttp/mimir:
+    endpoint: http://mimir:9009/otlp
+
+  # Stdout for debugging during bring-up. Comment out for production.
+  debug:
+    verbosity: basic
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp/tempo, debug]
+    logs:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlphttp/loki, debug]
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlphttp/mimir, debug]
