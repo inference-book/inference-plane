@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+package inferenceplane.v1;
+
+// ChatMessage is one entry in a chat-style request's message list.
+// role is "system", "user", or "assistant".
+message ChatMessage {
+  string role = 1;
+  string content = 2;
+}
+
+// Usage tracks token accounting for a single inference request.
+// Populated on the response. Drives the inference.tokens.generated
+// metric and (in Part II) per-tenant billing attribution.
+message Usage {
+  int32 prompt_tokens = 1;
+  int32 completion_tokens = 2;
+  int32 total_tokens = 3;
+}

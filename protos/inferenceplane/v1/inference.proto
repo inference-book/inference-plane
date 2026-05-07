@@ -1,0 +1,93 @@
+syntax = "proto3";
+
+package inferenceplane.v1;
+
+import "google/api/annotations.proto";
+import "inferenceplane/v1/types.proto";
+
+// InferenceService is the central service of the control plane.
+//
+// Two RPCs match the OpenAI API split: Complete for plain prompts,
+// ChatComplete for chat-style messages. Splitting them keeps the
+// proto types unambiguous (no oneof gymnastics) and the OpenAI HTTP
+// bindings clean -- /v1/completions maps to Complete, /v1/chat/completions
+// maps to ChatComplete via the google.api.http annotations.
+//
+// Backends (vLLM, SGLang, TensorRT-LLM, etc.) implement a single
+// internal Backend interface; the service layer dispatches to either
+// RPC's path based on which one was called.
+service InferenceService {
+  // Complete runs plain prompt-completion inference.
+  // Maps to OpenAI's POST /v1/completions.
+  rpc Complete(CompleteRequest) returns (CompleteResponse) {
+    option (google.api.http) = {
+      post: "/v1/completions"
+      body: "*"
+    };
+  }
+
+  // ChatComplete runs chat-style inference over a list of messages.
+  // Maps to OpenAI's POST /v1/chat/completions.
+  rpc ChatComplete(ChatCompleteRequest) returns (ChatCompleteResponse) {
+    option (google.api.http) = {
+      post: "/v1/chat/completions"
+      body: "*"
+    };
+  }
+}
+
+// CompleteRequest is the OpenAI /v1/completions request shape.
+message CompleteRequest {
+  string model = 1;
+  string prompt = 2;
+  int32 max_tokens = 3;
+  double temperature = 4;
+  double top_p = 5;
+  repeated string stop = 6;
+  bool stream = 7;
+}
+
+// CompleteResponse mirrors the OpenAI /v1/completions response.
+message CompleteResponse {
+  string id = 1;
+  string object = 2;
+  int64 created = 3;
+  string model = 4;
+  repeated CompleteChoice choices = 5;
+  Usage usage = 6;
+}
+
+// CompleteChoice is one generated completion in CompleteResponse.choices.
+message CompleteChoice {
+  int32 index = 1;
+  string text = 2;
+  string finish_reason = 3;
+}
+
+// ChatCompleteRequest is the OpenAI /v1/chat/completions request shape.
+message ChatCompleteRequest {
+  string model = 1;
+  repeated ChatMessage messages = 2;
+  int32 max_tokens = 3;
+  double temperature = 4;
+  double top_p = 5;
+  repeated string stop = 6;
+  bool stream = 7;
+}
+
+// ChatCompleteResponse mirrors the OpenAI /v1/chat/completions response.
+message ChatCompleteResponse {
+  string id = 1;
+  string object = 2;
+  int64 created = 3;
+  string model = 4;
+  repeated ChatChoice choices = 5;
+  Usage usage = 6;
+}
+
+// ChatChoice is one generated message in ChatCompleteResponse.choices.
+message ChatChoice {
+  int32 index = 1;
+  ChatMessage message = 2;
+  string finish_reason = 3;
+}

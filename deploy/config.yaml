@@ -1,0 +1,31 @@
+# Reference deployment config for the v0.1 docker-compose stack.
+#
+# Most values can be left as-is; the env-var overrides defined in
+# .env.local (see .env.local.example) are the right place to tweak
+# per-instance details like the provider/gpu_type labels.
+
+server:
+  addr: ":8080"
+  read_timeout_sec: 60
+  write_timeout_sec: 600          # long enough for slow generations
+  shutdown_sec: 30                # graceful drain budget
+
+backend:
+  engine: "vllm"
+  url: "http://vllm:8000"         # docker-compose service name
+  name: "vllm-primary"            # label value for metrics/logs
+
+telemetry:
+  otlp_endpoint: "otel-collector:4317"
+  service_name: "inference-plane"
+  environment: "dev"
+  sample_ratio: 1.0               # sample 100% in dev; lower in prod
+
+deployment:
+  # These default values describe the lab GPU instance. Override per
+  # instance via CP_PROVIDER / CP_GPU_TYPE / CP_BILLING_MODE / CP_INSTANCE_ID
+  # so cost metrics carry the right labels for each deployment.
+  provider: "runpod"
+  gpu_type: "a10g"
+  billing_mode: "metered_per_second"
+  instance_id: ""                 # set per-instance via env override

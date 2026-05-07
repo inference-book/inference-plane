@@ -24,9 +24,22 @@ profile.cov
 go.work
 go.work.sum
 
-# env file
+# env files (.env.local holds user-specific secrets and overrides)
 .env
+.env.local
 
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# Local build artifacts
+/bin/
+/dist/
+/tmp/
+
+# Local observability data (mounted into Grafana stack containers)
+/deploy/data/
+
+# Local-only docker-compose overrides
+docker-compose.override.yaml
+deploy/docker-compose.override.yaml
