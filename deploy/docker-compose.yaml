@@ -1,0 +1,145 @@
+# v0.1 deployment stack.
+#
+# Run:  make up
+# Tear: make down
+# Test: make smoke
+#
+# Versions and the model name come from ../pinned-versions.env (mounted
+# via the Makefile's --env-file flag). Per-instance overrides (provider
+# labels, OTLP endpoint, etc.) come from .env.local if present.
+#
+# Four logical tiers:
+#   1. inference engine (vllm)         -- needs an NVIDIA GPU
+#   2. control plane (controlplane)    -- this repo's binary
+#   3. observability collector         -- otel-collector
+#   4. observability storage           -- tempo, loki, mimir, grafana
+
+name: inference-plane-v01
+
+services:
+
+  # ── Inference engine ──────────────────────────────────────────────
+  # vLLM serves the OpenAI-compatible API on port 8000. Model weights
+  # download to the named volume on first start (~16 GB for an 8B
+  # model at FP16). Subsequent starts reuse the cache.
+  vllm:
+    image: vllm/vllm-openai:v${ENGINE_VERSION:-0.7.3}
+    command:
+      - "--model=${MODEL_HF_ID:-Qwen/Qwen3.5-8B-Instruct}"
+      - "--host=0.0.0.0"
+      - "--port=8000"
+      - "--max-model-len=${MODEL_CONTEXT:-32768}"
+      - "--gpu-memory-utilization=0.90"
+    ports:
+      - "${ENGINE_PORT:-8000}:8000"
+    volumes:
+      - hf_cache:/root/.cache/huggingface
+    environment:
+      HF_HOME: /root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30   # generous start_period equivalent: model load takes 30-60s
+      start_period: 60s
+    restart: unless-stopped
+
+  # ── Control plane ────────────────────────────────────────────────
+  # Built from the local Dockerfile. Distroless image with no shell,
+  # which is why there's no in-container healthcheck command (we hit
+  # /health externally via `make smoke`).
+  controlplane:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: inference-plane/controlplane:${CP_VERSION:-v0.1.0}
+    depends_on:
+      vllm:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./config.yaml:/etc/controlplane/config.yaml:ro
+    environment:
+      CP_CONFIG_PATH: /etc/controlplane/config.yaml
+      CP_BACKEND_URL: http://vllm:8000
+      OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
+      # Per-instance labels for cost metrics. Override via .env.local.
+      CP_PROVIDER: ${CP_PROVIDER:-runpod}
+      CP_GPU_TYPE: ${CP_GPU_TYPE:-a10g}
+      CP_BILLING_MODE: ${CP_BILLING_MODE:-metered_per_second}
+      CP_INSTANCE_ID: ${CP_INSTANCE_ID:-}
+    restart: unless-stopped
+
+  # ── Observability collector ──────────────────────────────────────
+  # Receives OTLP gRPC from the control plane, fans out to Tempo /
+  # Loki / Mimir. One config file defines receivers, processors, and
+  # exporters; swapping to a hosted observability backend is a
+  # one-config-file change.
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:${OTEL_COLLECTOR_VERSION:-0.110.0}
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro
+    ports:
+      - "4317:4317"   # OTLP/gRPC
+      - "4318:4318"   # OTLP/HTTP
+    restart: unless-stopped
+
+  # ── Observability storage ────────────────────────────────────────
+  # Each component owns one signal type. Local file storage means
+  # `make clean` wipes them together. Production swaps each for a
+  # hosted equivalent (Grafana Cloud, Honeycomb, Datadog, etc.).
+  tempo:
+    image: grafana/tempo:${TEMPO_VERSION:-2.6.0}
+    command: ["-config.file=/etc/tempo.yaml"]
+    volumes:
+      - ./tempo-config.yaml:/etc/tempo.yaml:ro
+      - tempo_data:/var/tempo
+    restart: unless-stopped
+
+  loki:
+    image: grafana/loki:${LOKI_VERSION:-3.2.0}
+    command: ["-config.file=/etc/loki/config.yaml"]
+    volumes:
+      - ./loki-config.yaml:/etc/loki/config.yaml:ro
+      - loki_data:/var/loki
+    restart: unless-stopped
+
+  mimir:
+    image: grafana/mimir:${MIMIR_VERSION:-2.13.0}
+    command: ["-config.file=/etc/mimir.yaml"]
+    volumes:
+      - ./mimir-config.yaml:/etc/mimir.yaml:ro
+      - mimir_data:/var/mimir
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:${GRAFANA_VERSION:-11.3.0}
+    depends_on: [tempo, loki, mimir]
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana_data:/var/lib/grafana
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_USERS_DEFAULT_THEME: dark
+    restart: unless-stopped
+
+volumes:
+  hf_cache:
+  tempo_data:
+  loki_data:
+  mimir_data:
+  grafana_data:
