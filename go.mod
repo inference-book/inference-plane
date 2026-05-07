@@ -4,6 +4,7 @@ go 1.26.2
 
 require (
 	connectrpc.com/connect v1.19.2
+	github.com/grpc-ecosystem/grpc-gateway/v2 v2.28.0
 	github.com/panyam/servicekit v0.0.0-00010101000000-000000000000
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.68.0
 	go.opentelemetry.io/otel v1.43.0
@@ -27,7 +28,6 @@ require (
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/gorilla/websocket v1.5.0 // indirect
-	github.com/grpc-ecosystem/grpc-gateway/v2 v2.28.0 // indirect
 	github.com/panyam/gocurrent v0.1.0 // indirect
 	github.com/panyam/goutils v0.1.8 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect

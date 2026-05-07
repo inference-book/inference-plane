@@ -1,28 +1,31 @@
 // Command controlplane is the v0.1 entrypoint.
 //
-// Loads config from YAML + env, initializes the OpenTelemetry SDK,
-// constructs the backend and the gRPC service implementations, mounts
-// connect-rpc handlers + the OpenAI-compatible HTTP routes on a
-// single HTTP mux, wraps the chain with otelhttp + servicekit
-// middleware, and runs the lifecycle via servicekit's graceful
-// runner.
+// Topology: one process, two listeners.
 //
-// One process, one port (8080), two protocol surfaces:
+//   - gRPC server on a localhost-only port (default 127.0.0.1:9090).
+//     Hosts InferenceService and HealthService. Source of truth for
+//     the API; the HTTP layer below dials it for both gateway and
+//     connect surfaces. Localhost-only because the gRPC port isn't
+//     meant to be exposed externally -- HTTP at :8080 is the public
+//     surface.
 //
-//	/inferenceplane.v1.InferenceService/{Method}  -- Connect-RPC + gRPC
-//	/inferenceplane.v1.HealthService/{Method}     -- Connect-RPC + gRPC
-//	/v1/completions                                -- OpenAI HTTP
-//	/v1/chat/completions                           -- OpenAI HTTP
-//	/health                                        -- HTTP (also Connect-RPC)
+//   - HTTP server on the configured public port (default :8080). Mux
+//     hosts grpc-gateway routes (OpenAI-shaped JSON: /v1/completions,
+//     /v1/chat/completions, /health) and Connect-RPC handlers (typed
+//     SDK clients hit /inferenceplane.v1.* paths).
 //
-// The OpenAI routes call into the connect handlers in-process; no
-// loopback HTTP, no extra serialization round-trip.
+// Lifecycle: load config, init telemetry, build backend and services,
+// start gRPC server in a goroutine, build HTTP API, run the HTTP
+// server via servicekit's graceful runner. On shutdown the graceful
+// runner drains HTTP requests; an OnShutdown callback flushes
+// telemetry and stops the gRPC server.
 package main
 
 import (
 	"context"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"time"
@@ -30,17 +33,24 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
+	"google.golang.org/grpc"
 
 	skhttp "github.com/panyam/servicekit/http"
 	skmw "github.com/panyam/servicekit/middleware"
 
-	"github.com/inference-book/inference-plane/gen/go/inferenceplane/v1/inferenceplanev1connect"
+	inferencev1 "github.com/inference-book/inference-plane/gen/go/inferenceplane/v1"
 	"github.com/inference-book/inference-plane/internal/backends"
 	"github.com/inference-book/inference-plane/internal/config"
 	"github.com/inference-book/inference-plane/internal/services"
 	"github.com/inference-book/inference-plane/internal/telemetry"
-	"github.com/inference-book/inference-plane/internal/web/openai"
+	"github.com/inference-book/inference-plane/internal/web/server"
 )
+
+// grpcAddr is the localhost-only address the gRPC server listens on.
+// Not configurable for v0.1 -- it's an in-process implementation
+// detail, not a public surface. Wire it up to config when v0.2 lets
+// operators co-locate or split the gRPC and HTTP listeners.
+const grpcAddr = "127.0.0.1:9090"
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -64,31 +74,40 @@ func main() {
 		os.Exit(1)
 	}
 
-	inferenceSvc := services.NewInferenceServer(be)
-	healthSvc := services.NewHealthServer(be)
+	// gRPC server: source of truth for the API.
+	grpcSrv, grpcLis, err := startGRPCServer(be, logger)
+	if err != nil {
+		logger.Error("gRPC server start failed", "err", err)
+		os.Exit(1)
+	}
+	defer grpcLis.Close()
 
-	mux := buildMux(inferenceSvc, healthSvc, logger)
-	handler := wrapMiddleware(mux)
+	// HTTP API: gateway routes + connect handlers, both dialing the
+	// gRPC server via the local loopback address.
+	api, err := server.New(context.Background(), grpcAddr, logger)
+	if err != nil {
+		logger.Error("HTTP API build failed", "err", err)
+		os.Exit(1)
+	}
 
-	// h2c wraps the handler so cleartext HTTP/2 (gRPC over plain TCP)
-	// works alongside HTTP/1.1. Connect clients negotiate HTTP/1.1 +
-	// JSON or HTTP/2 + protobuf depending on configuration; we accept
-	// both on the same port.
-	srv := &http.Server{
+	httpSrv := &http.Server{
 		Addr:         cfg.Server.Addr,
-		Handler:      h2c.NewHandler(handler, &http2.Server{}),
+		Handler:      h2c.NewHandler(wrapMiddleware(api.Handler()), &http2.Server{}),
 		ReadTimeout:  time.Duration(cfg.Server.ReadTimeoutSec) * time.Second,
 		WriteTimeout: time.Duration(cfg.Server.WriteTimeoutSec) * time.Second,
 	}
 
-	logger.Info("control plane listening", "addr", cfg.Server.Addr,
+	logger.Info("control plane listening",
+		"http", cfg.Server.Addr,
+		"grpc", grpcAddr,
 		"backend.engine", cfg.Backend.Engine,
 		"backend.url", cfg.Backend.URL,
 		"deployment.provider", cfg.Deployment.Provider)
 
-	err = skhttp.ListenAndServeGraceful(srv,
+	err = skhttp.ListenAndServeGraceful(httpSrv,
 		skhttp.WithDrainTimeout(time.Duration(cfg.Server.ShutdownSec)*time.Second),
 		skhttp.WithOnShutdown(func() {
+			grpcSrv.GracefulStop()
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			if err := shutdownTel(ctx); err != nil {
@@ -103,37 +122,40 @@ func main() {
 	logger.Info("control plane stopped")
 }
 
-// buildMux composes the routing tree. Connect-rpc handlers register
-// themselves at fixed paths from the proto package + service name;
-// the OpenAI HTTP handler registers /v1/completions, /v1/chat/completions,
-// and /health on the same mux.
-func buildMux(inference *services.InferenceServer, health *services.HealthServer, logger *slog.Logger) *http.ServeMux {
-	mux := http.NewServeMux()
+// startGRPCServer constructs the gRPC server, registers the services,
+// starts the listener on grpcAddr, and serves in a goroutine. Returns
+// the server (so main can GracefulStop it) and the listener (so main
+// can close it on cleanup).
+func startGRPCServer(be backends.Backend, logger *slog.Logger) (*grpc.Server, net.Listener, error) {
+	lis, err := net.Listen("tcp", grpcAddr)
+	if err != nil {
+		return nil, nil, err
+	}
 
-	// Connect-RPC: typed/SDK clients hit the generated paths.
-	inferencePath, inferenceConnectHandler := inferenceplanev1connect.NewInferenceServiceHandler(inference)
-	healthPath, healthConnectHandler := inferenceplanev1connect.NewHealthServiceHandler(health)
-	mux.Handle(inferencePath, inferenceConnectHandler)
-	mux.Handle(healthPath, healthConnectHandler)
+	srv := grpc.NewServer()
+	inferencev1.RegisterInferenceServiceServer(srv, services.NewInferenceServer(be))
+	inferencev1.RegisterHealthServiceServer(srv, services.NewHealthServer(be))
 
-	// OpenAI compat: existing OpenAI SDK clients hit these.
-	openai.New(inference, health, logger).Register(mux)
-
-	return mux
+	go func() {
+		if err := srv.Serve(lis); err != nil && !errors.Is(err, grpc.ErrServerStopped) {
+			logger.Error("gRPC server crashed", "err", err)
+		}
+	}()
+	return srv, lis, nil
 }
 
-// wrapMiddleware wraps the mux in the request-handling chain. Outer
-// to inner: otelhttp -> RequestID -> Recovery -> RequestLogger.
+// wrapMiddleware wraps the API handler in the request-handling chain.
+// Outer to inner: otelhttp -> RequestID -> Recovery -> RequestLogger.
 //
 // otelhttp is outermost so the auto-generated server span wraps every
-// other layer, including request-ID generation -- so the request ID
-// and the trace ID are correlated. Logging skips /health so health
-// probes don't drown out real traffic at production rates.
-func wrapMiddleware(mux *http.ServeMux) http.Handler {
+// other layer, including request-ID generation -- request ID and
+// trace ID are correlated. Logging skips /health so health probes
+// don't drown out real traffic at production rates.
+func wrapMiddleware(h http.Handler) http.Handler {
 	return otelhttp.NewHandler(
 		skmw.NewRequestID().Middleware(
 			skmw.Recovery(
-				skmw.RequestLogger("/health")(mux),
+				skmw.RequestLogger("/health")(h),
 			),
 		),
 		"controlplane",
