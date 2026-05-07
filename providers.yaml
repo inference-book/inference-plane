@@ -1,0 +1,64 @@
+# GPU provider rate table.
+#
+# Each entry feeds two consumers:
+#
+#   1. The control plane emits one gpu_effective_rate_usd_per_second gauge
+#      per row, labeled by {provider, gpu_type, billing_mode}. The Grafana
+#      cross-provider snapshot panel multiplies these against observed
+#      uptime to project monthly cost on every provider in real time.
+#
+#   2. The book's cost calculators and comparison tables read the same
+#      file (via a small tex-export step) so the prose, the calculators,
+#      and the runtime stay in sync.
+#
+# Update one place; everything else picks it up.
+#
+# Rate sources:
+#   metered_per_second:  current quoted hourly rate from the provider's
+#                         pricing page (vantage.sh as a cross-check).
+#   reserved_monthly:    flat monthly fee from the 1-yr commitment tier.
+#   bare_metal_monthly:  flat monthly fee for the dedicated GPU server.
+#   owned_capex:         derived from capex / amort_months / 730 hours,
+#                         plus power: watts * kwh_usd / 1000.
+#
+# All rates are USD; billing modes are described in chapter 6.6 (cost
+# tracking subsection).
+
+last_updated: 2026-05-07
+sources:
+  - https://www.vantage.sh/  # cross-check for metered hourly rates
+
+providers:
+  - name: runpod
+    billing_mode: metered_per_second
+    gpu_type: a10g
+    rate_usd_per_hour: 0.44
+    notes: "community cloud tier; spot pricing fluctuates ~weekly"
+
+  - name: lambda
+    billing_mode: metered_per_second
+    gpu_type: a10
+    rate_usd_per_hour: 0.75
+    notes: "on-demand; reserved capacity available at lower rate"
+
+  - name: vast
+    billing_mode: metered_per_second
+    gpu_type: rtx4090
+    rate_usd_per_hour: 0.30
+    notes: "bid market; reliability varies by host"
+
+  - name: equinix_metal
+    billing_mode: bare_metal_monthly
+    gpu_type: a40
+    fixed_usd_per_month: 1200
+    notes: "dedicated server; ideal for sustained workloads"
+
+  # Reference entry for owned hardware. Useful for the break-even panel.
+  - name: owned_4090
+    billing_mode: owned_capex
+    gpu_type: rtx4090
+    capex_usd: 2400
+    amort_months: 36
+    avg_power_watts: 350
+    power_usd_per_kwh: 0.12
+    notes: "single-card workstation; effective rate ~ \$0.12/hr at 100% utilization"

@@ -1,0 +1,85 @@
+# Canonical vocabulary for OTel metrics, attributes, and labels.
+#
+# This file is the single source of truth for any name that appears in
+# Go code, chapter prose, dashboards, alert rules, or PromQL queries.
+# Drift between code and prose is silently corrosive (the chapter says
+# X, the metric is named Y, the dashboard returns nothing) -- code-gen
+# from one source eliminates the failure mode by construction.
+#
+# Run `make gen-names` (or `go generate ./...`) to regenerate:
+#   - inference_plane/internal/telemetry/names.go      (Go constants)
+#   - book/src/styles/metric-names.tex                  (LaTeX commands)
+#
+# Naming conventions:
+#   - Metric instruments use dotted OTel hierarchy: inference.requests.total
+#   - Attribute keys use dotted hierarchy: inference.model, deployment.provider
+#   - Labels are flat lowercase: model, status, provider
+#
+# To add a new entry: pick the right category, give it a snake_case
+# `key` (drives the Go const and tex command names), and the runtime
+# `value` (the actual string emitted to OTel and read by dashboards).
+
+metrics:
+  - key: requests_total
+    value: inference.requests.total
+    description: Counter of inference requests, labeled by model and status.
+
+  - key: request_duration
+    value: inference.request.duration
+    description: Histogram of request duration in seconds. Bucket edges tuned for the bimodal LLM latency distribution (Chapter 6.6.4).
+
+  - key: tokens_generated
+    value: inference.tokens.generated
+    description: Counter of tokens generated. The right load metric for LLM workloads -- correlates with cost in a way request count never can.
+
+  - key: backend_healthy
+    value: inference.backend.healthy
+    description: Gauge -- 1 if backend is healthy, 0 otherwise. Feeds alerts.
+
+  - key: instance_uptime_seconds
+    value: instance.uptime.seconds.total
+    description: Counter of wall-clock seconds since the control plane started. Base for billed-time cost calculations.
+
+  - key: inference_active_seconds
+    value: inference.active.seconds.total
+    description: Counter of seconds spent actively serving inference. Combined with instance.uptime gives utilization.
+
+  - key: gpu_effective_rate
+    value: gpu.effective_rate.usd_per_second
+    description: Gauge of per-second cost rate for each provider/gpu_type/billing_mode combination loaded from providers.yaml. One series per provider for the cross-provider cost-projection panel.
+
+inference_attributes:
+  - key: model
+    value: inference.model
+  - key: max_tokens
+    value: inference.max_tokens
+  - key: prompt_tokens
+    value: inference.prompt_tokens
+  - key: completion_tokens
+    value: inference.completion_tokens
+  - key: total_tokens
+    value: inference.total_tokens
+  - key: finish_reason
+    value: inference.finish_reason
+
+deployment_attributes:
+  - key: provider
+    value: deployment.provider
+  - key: gpu_type
+    value: deployment.gpu_type
+  - key: billing_mode
+    value: deployment.billing_mode
+  - key: instance_id
+    value: deployment.instance_id
+
+labels:
+  - key: model
+    value: model
+  - key: status
+    value: status
+  - key: provider
+    value: provider
+  - key: gpu_type
+    value: gpu_type
+  - key: billing_mode
+    value: billing_mode
