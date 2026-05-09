@@ -37,11 +37,23 @@ Grafana stack (Tempo, Loki, Mimir).
 
 ## Quick start
 
+**Local dev (any host, no GPU)** — control plane + full observability stack with the mock backend:
+
 ```sh
 git checkout release/v0.1
-make up         # bring up the stack (vLLM + control plane + observability)
+make up         # builds controlplane + brings up obs stack (skips vllm)
+make load       # synthetic traffic so dashboards populate
+make dashboards # open Grafana at http://localhost:3000
+```
+
+Mock backend returns synthetic OpenAI-shaped responses with realistic latency and token counts. Runs on Mac, Linux, CI — no GPU required.
+
+**Real inference (NVIDIA GPU host)** — switch the engine to `vllm` and bring the stack up with the `gpu` profile:
+
+```sh
+# In deploy/config.yaml: backend.engine: "vllm"
+docker compose --profile gpu --env-file pinned-versions.env -f deploy/docker-compose.yaml up -d --build
 make smoke      # Go integration tests against the live stack
-make dashboards # open Grafana
 ```
 
 See `Makefile` for the full target list, or run `make help`.
@@ -49,9 +61,10 @@ See `Makefile` for the full target list, or run `make help`.
 ## Repository layout
 
 ```
-cmd/
-  controlplane/       main.go entrypoint (runs gRPC + HTTP servers)
-  gennames/           code-gen for OTel name vocabulary
+cmd/iplane/           single binary with subcommands:
+                        iplane serve      run the control plane
+                        iplane load       fire synthetic traffic
+                        iplane gen-names  regenerate OTel name vocabulary
 protos/               buf-managed proto sources
   inferenceplane/v1/  service + type definitions
 gen/                  generated proto code (committed; regenerate via
