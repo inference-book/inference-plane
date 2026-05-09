@@ -61,32 +61,33 @@ services:
     restart: unless-stopped
 
   # ── Control plane ────────────────────────────────────────────────
-  # Built from the local Dockerfile. Distroless image with no shell,
-  # which is why there's no in-container healthcheck command (we hit
-  # /health externally via `make smoke`).
+  # Built from the local Dockerfile. Distroless image; ENTRYPOINT is
+  # the iplane binary, default CMD is "serve". No in-container
+  # healthcheck (we hit /health externally via `make smoke`).
+  #
+  # Config: viper auto-discovers /etc/iplane/config.yaml; env vars
+  # use the IPLANE_ prefix with dotted keys flattened to underscores
+  # (so `deployment.provider` -> IPLANE_DEPLOYMENT_PROVIDER).
   controlplane:
     build:
       context: ..
       dockerfile: Dockerfile
-    image: inference-plane/controlplane:${CP_VERSION:-v0.1.0}
+    image: inference-plane/iplane:${CP_VERSION:-v0.1.0}
     depends_on:
-      vllm:
-        condition: service_healthy
       otel-collector:
         condition: service_started
     ports:
       - "8080:8080"
     volumes:
-      - ./config.yaml:/etc/controlplane/config.yaml:ro
+      - ./config.yaml:/etc/iplane/config.yaml:ro
     environment:
-      CP_CONFIG_PATH: /etc/controlplane/config.yaml
-      CP_BACKEND_URL: http://vllm:8000
+      IPLANE_BACKEND_URL: http://vllm:8000
       OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
       # Per-instance labels for cost metrics. Override via .env.local.
-      CP_PROVIDER: ${CP_PROVIDER:-runpod}
-      CP_GPU_TYPE: ${CP_GPU_TYPE:-a10g}
-      CP_BILLING_MODE: ${CP_BILLING_MODE:-metered_per_second}
-      CP_INSTANCE_ID: ${CP_INSTANCE_ID:-}
+      IPLANE_DEPLOYMENT_PROVIDER: ${IPLANE_DEPLOYMENT_PROVIDER:-runpod}
+      IPLANE_DEPLOYMENT_GPU_TYPE: ${IPLANE_DEPLOYMENT_GPU_TYPE:-a10g}
+      IPLANE_DEPLOYMENT_BILLING_MODE: ${IPLANE_DEPLOYMENT_BILLING_MODE:-metered_per_second}
+      IPLANE_DEPLOYMENT_INSTANCE_ID: ${IPLANE_DEPLOYMENT_INSTANCE_ID:-}
     restart: unless-stopped
 
   # ── Observability collector ──────────────────────────────────────

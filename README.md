@@ -61,9 +61,10 @@ See `Makefile` for the full target list, or run `make help`.
 ## Repository layout
 
 ```
-cmd/
-  controlplane/       main.go entrypoint (runs gRPC + HTTP servers)
-  gennames/           code-gen for OTel name vocabulary
+cmd/iplane/           single binary with subcommands:
+                        iplane serve      run the control plane
+                        iplane load       fire synthetic traffic
+                        iplane gen-names  regenerate OTel name vocabulary
 protos/               buf-managed proto sources
   inferenceplane/v1/  service + type definitions
 gen/                  generated proto code (committed; regenerate via
