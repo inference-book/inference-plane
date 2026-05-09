@@ -36,14 +36,31 @@ Reference implementation of the control plane for *Inference Is All You Need* (A
 - `cd protos && buf generate` needs `buf.lock` populated — run `buf dep update` once after cloning.
 - `gen/go/google/api/` is generated via `include_imports: true`. Without it, the gateway code wouldn't compile.
 
+## CLI surface
+
+Single binary `iplane` with cobra subcommands. The Docker image
+`ENTRYPOINT` is the same binary, default `CMD` is `serve`.
+
+| Subcommand           | Purpose                                                |
+| -------------------- | ------------------------------------------------------ |
+| `iplane serve`       | Run the control plane (gRPC + HTTP)                    |
+| `iplane load`        | Fire synthetic OpenAI traffic                          |
+| `iplane gen-names`   | Regenerate Go consts + book LaTeX from `metric-names.yaml` |
+
+`--config <path>` is a persistent flag. Each subcommand has its own
+flags; `iplane <cmd> --help` for the full list.
+
 ## Env vars
 
-| Var                          | Purpose                                                |
-| ---------------------------- | ------------------------------------------------------ |
-| `CP_CONFIG_PATH`             | Path to deployment config (default `deploy/config.yaml`) |
-| `CP_BACKEND_URL`             | Override backend URL                                   |
-| `CP_PROVIDER` / `CP_GPU_TYPE` / `CP_BILLING_MODE` / `CP_INSTANCE_ID` | Cost-metric labels for this deployment |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP collector address                                |
+Viper binds env vars with the `IPLANE_` prefix; nested config keys
+flatten to underscore (so `deployment.provider` → `IPLANE_DEPLOYMENT_PROVIDER`).
+
+| Var                                | Purpose                                  |
+| ---------------------------------- | ---------------------------------------- |
+| `IPLANE_BACKEND_ENGINE`            | `mock` (default) or `vllm`               |
+| `IPLANE_BACKEND_URL`               | Backend base URL (vllm only)             |
+| `IPLANE_DEPLOYMENT_PROVIDER` / `_GPU_TYPE` / `_BILLING_MODE` / `_INSTANCE_ID` | Cost-metric labels |
+| `OTEL_EXPORTER_OTLP_ENDPOINT`      | OTLP collector address                   |
 
 Provider API keys for future `cmd/provision` tool (not used in v0.1): `RUNPOD_API_KEY`, `LAMBDA_API_KEY`, `VAST_API_KEY`, `EQUINIX_AUTH_TOKEN`, `EQUINIX_PROJECT_ID`. See `.env.local.example`.
 

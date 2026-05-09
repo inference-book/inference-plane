@@ -5,9 +5,9 @@ help:
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
 # ── Local code ──────────────────────────────────────────────────────────
-build: ## Compile the controlplane binary into bin/
+build: ## Compile the iplane binary into bin/
 	@mkdir -p bin
-	go build -o bin/controlplane ./cmd/controlplane
+	go build -o bin/iplane ./cmd/iplane
 
 # ── Stack lifecycle ─────────────────────────────────────────────────────
 up: ## Bring up the stack (builds the controlplane image locally)
@@ -27,7 +27,7 @@ smoke: ## Run smoke tests against a live stack (assumes `make up` has run)
 	go test -tags=smoke -v -count=1 ./tests/smoke/...
 
 load: ## Generate synthetic traffic against the running stack (safe with mock backend)
-	go run ./cmd/loadgen --url=http://localhost:8080
+	go run ./cmd/iplane load --url=http://localhost:8080
 
 test: ## Run unit tests (no live stack needed)
 	go test ./...
@@ -47,10 +47,10 @@ check-pins: ## Verify pinned-versions.env matches the book's pinned-versions.tex
 	 sh ../book/scripts/check-pins.sh
 
 gen-names: ## Regenerate names.go and metric-names.tex from metric-names.yaml
-	go run ./cmd/gennames
+	go run ./cmd/iplane gen-names
 
 check-names: ## Verify generated name files are up-to-date with the YAML schema (CI runs this)
-	@go run ./cmd/gennames
+	@go run ./cmd/iplane gen-names
 	@if ! git diff --quiet -- internal/telemetry/names.go ../book/src/styles/metric-names.tex; then \
 		echo "ERROR: generated name files are out of sync with metric-names.yaml."; \
 		echo "Run 'make gen-names' and commit the result."; \
