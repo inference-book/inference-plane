@@ -10,14 +10,17 @@ build: ## Compile the controlplane binary into bin/
 	go build -o bin/controlplane ./cmd/controlplane
 
 # ── Stack lifecycle ─────────────────────────────────────────────────────
-up: ## Bring up vLLM, control plane, OTel collector, Grafana stack
-	docker compose --env-file pinned-versions.env -f deploy/docker-compose.yaml up -d
+up: ## Bring up the stack (builds the controlplane image locally)
+	docker compose --env-file pinned-versions.env -f deploy/docker-compose.yaml up -d --build
 
 down: ## Tear the stack down
 	docker compose --env-file pinned-versions.env -f deploy/docker-compose.yaml down
 
-pull: ## Pre-pull all container images (warms the cache before `up`)
-	docker compose --env-file pinned-versions.env -f deploy/docker-compose.yaml pull
+pull: ## Pre-pull external images (skips the locally-built controlplane)
+	docker compose --env-file pinned-versions.env -f deploy/docker-compose.yaml pull --ignore-buildable
+
+build-image: ## Build the controlplane Docker image without starting the stack
+	docker compose --env-file pinned-versions.env -f deploy/docker-compose.yaml build controlplane
 
 # ── Verification ────────────────────────────────────────────────────────
 smoke: ## Run smoke tests against a live stack (assumes `make up` has run)
