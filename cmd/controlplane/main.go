@@ -41,6 +41,7 @@ import (
 	inferencev1 "github.com/inference-book/inference-plane/gen/go/inferenceplane/v1"
 	"github.com/inference-book/inference-plane/internal/backends"
 	"github.com/inference-book/inference-plane/internal/config"
+	"github.com/inference-book/inference-plane/internal/metrics"
 	"github.com/inference-book/inference-plane/internal/services"
 	"github.com/inference-book/inference-plane/internal/telemetry"
 	"github.com/inference-book/inference-plane/internal/web/server"
@@ -74,8 +75,35 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Application metrics (the four families from chapter 6.6.2).
+	recorder, err := metrics.NewRecorder()
+	if err != nil {
+		logger.Error("metrics recorder init failed", "err", err)
+		os.Exit(1)
+	}
+
+	// Cost metrics: load providers.yaml to populate per-provider rate
+	// gauges; the deployment-identity labels come from config.
+	providers, err := metrics.LoadProviders("providers.yaml")
+	if err != nil {
+		// Not fatal -- a deployment without providers.yaml emits the
+		// uptime + active counters but skips the cross-provider snapshot.
+		logger.Warn("providers.yaml not loaded; cross-provider snapshot disabled", "err", err)
+		providers = nil
+	}
+	costRecorder, err := metrics.NewCostRecorder(metrics.Deployment{
+		Provider:    cfg.Deployment.Provider,
+		GPUType:     cfg.Deployment.GPUType,
+		BillingMode: cfg.Deployment.BillingMode,
+		InstanceID:  cfg.Deployment.InstanceID,
+	}, providers)
+	if err != nil {
+		logger.Error("cost recorder init failed", "err", err)
+		os.Exit(1)
+	}
+
 	// gRPC server: source of truth for the API.
-	grpcSrv, grpcLis, err := startGRPCServer(be, logger)
+	grpcSrv, grpcLis, err := startGRPCServer(be, recorder, costRecorder, logger)
 	if err != nil {
 		logger.Error("gRPC server start failed", "err", err)
 		os.Exit(1)
@@ -126,15 +154,15 @@ func main() {
 // starts the listener on grpcAddr, and serves in a goroutine. Returns
 // the server (so main can GracefulStop it) and the listener (so main
 // can close it on cleanup).
-func startGRPCServer(be backends.Backend, logger *slog.Logger) (*grpc.Server, net.Listener, error) {
+func startGRPCServer(be backends.Backend, rec *metrics.Recorder, cost *metrics.CostRecorder, logger *slog.Logger) (*grpc.Server, net.Listener, error) {
 	lis, err := net.Listen("tcp", grpcAddr)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	srv := grpc.NewServer()
-	inferencev1.RegisterInferenceServiceServer(srv, services.NewInferenceServer(be))
-	inferencev1.RegisterHealthServiceServer(srv, services.NewHealthServer(be))
+	inferencev1.RegisterInferenceServiceServer(srv, services.NewInferenceServer(be, rec, cost))
+	inferencev1.RegisterHealthServiceServer(srv, services.NewHealthServer(be, rec))
 
 	go func() {
 		if err := srv.Serve(lis); err != nil && !errors.Is(err, grpc.ErrServerStopped) {
