@@ -125,5 +125,37 @@ func TestMock_Health_FailureInjection(t *testing.T) {
 	}
 }
 
+// TestMock_BimodalLatency samples many calls from the default mock
+// and confirms the latency distribution has both fast and slow
+// clusters present -- not a uniform rectangle in [100ms, 60s].
+//
+// This is a coarse statistical test (no chi-squared, no exact
+// fractions) -- it just asserts that across N samples we see at
+// least some values in the expected fast band and at least some in
+// the slow band. That's enough to catch a regression that flattens
+// the mixture back to uniform.
+func TestMock_BimodalLatency(t *testing.T) {
+	m := NewMock("test")
+	const samples = 200
+	var fast, slow int
+	for i := 0; i < samples; i++ {
+		d := m.sampleLatency()
+		if d <= 1500*time.Millisecond {
+			fast++
+		} else if d >= 3*time.Second {
+			slow++
+		}
+	}
+	// With weights 70 / 25 / 5 we expect ~140 fast, ~50 slow, ~10
+	// tail -- so 'at least 50 fast and at least 10 slow' is a
+	// generous lower bound that won't flake.
+	if fast < 50 {
+		t.Errorf("expected >=50 fast samples (<=1.5s), got %d", fast)
+	}
+	if slow < 10 {
+		t.Errorf("expected >=10 slow samples (>=3s), got %d", slow)
+	}
+}
+
 // Compile-time check: MockBackend implements Backend.
 var _ Backend = (*MockBackend)(nil)

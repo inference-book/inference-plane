@@ -25,16 +25,28 @@ import (
 // middleware chain, request routing, OTel emission, the OpenAI HTTP
 // surface -- exercises end-to-end against this backend exactly the
 // same way it does against vLLM.
+// LatencyCluster is one mode in a bimodal/multimodal latency mixture.
+// Generate picks a cluster by weighted random draw, then samples
+// uniformly within the cluster's [Min, Max] range. Weights are
+// normalized at sample time, so they don't need to sum to 1.0.
+type LatencyCluster struct {
+	Weight float64
+	Min    time.Duration
+	Max    time.Duration
+}
+
 type MockBackend struct {
 	name string
 	rng  *mathrand.Rand
 
-	// Latency configuration. Each Generate call sleeps for a duration
-	// sampled uniformly between min and max. Defaults are tuned for
-	// the bimodal LLM latency shape so the duration histogram has
-	// realistic distribution.
-	minLatency time.Duration
-	maxLatency time.Duration
+	// Latency mixture. Defaults are tuned for the bimodal LLM
+	// latency shape Chapter 6.6.4 describes -- a fast cluster (cached
+	// or short outputs), a slow cluster (long generations), and a
+	// thin tail (long context or contention). Without this shape,
+	// the duration histogram on the dashboard renders as a uniform
+	// rectangle, which undermines the chapter's narrative about why
+	// the bucket edges are tuned the way they are.
+	clusters []LatencyCluster
 
 	// Output token count is sampled uniformly between these bounds,
 	// clamped to req.MaxTokens if the caller specified one. Defaults
@@ -52,11 +64,22 @@ type MockBackend struct {
 // MockOption customizes a MockBackend at construction.
 type MockOption func(*MockBackend)
 
-// WithLatency sets the latency range a Generate call samples from.
+// WithLatency sets a single uniform-distribution latency range. Useful
+// for tests where deterministic-ish timing matters; flattens the
+// default bimodal mixture into one cluster.
 func WithLatency(min, max time.Duration) MockOption {
 	return func(m *MockBackend) {
-		m.minLatency = min
-		m.maxLatency = max
+		m.clusters = []LatencyCluster{{Weight: 1.0, Min: min, Max: max}}
+	}
+}
+
+// WithLatencyMix replaces the default bimodal mixture with the given
+// clusters. Use this to model a workload-specific shape -- e.g., a
+// chat workload with short outputs and almost no tail, or a RAG
+// workload with long generations dominating. Weights are normalized.
+func WithLatencyMix(clusters ...LatencyCluster) MockOption {
+	return func(m *MockBackend) {
+		m.clusters = append([]LatencyCluster(nil), clusters...)
 	}
 }
 
@@ -76,20 +99,33 @@ func WithHealthFailRate(p float64) MockOption {
 	return func(m *MockBackend) { m.healthFailRate = p }
 }
 
+// DefaultLatencyClusters is the bimodal-with-tail mixture the mock
+// uses unless overridden. Tuned to match the LLM latency shape
+// described in Chapter 6.6.4 so the dashboard's histogram renders
+// the expected bimodal pattern.
+//
+//	70%: fast cluster, 100 ms - 1.5 s   (cached or short outputs)
+//	25%: slow cluster, 3 s - 15 s       (long generations)
+//	 5%: tail,         20 s - 60 s      (long context, contention, KV pressure)
+var DefaultLatencyClusters = []LatencyCluster{
+	{Weight: 0.70, Min: 100 * time.Millisecond, Max: 1500 * time.Millisecond},
+	{Weight: 0.25, Min: 3 * time.Second, Max: 15 * time.Second},
+	{Weight: 0.05, Min: 20 * time.Second, Max: 60 * time.Second},
+}
+
 // NewMock constructs a MockBackend with default settings tuned for a
 // realistic-looking duration histogram and token throughput.
 //
 // Defaults:
 //
-//	latency:        100 ms .. 4 s   (most calls fast, some slow -- bimodal shape)
+//	latency:        bimodal mixture (see DefaultLatencyClusters)
 //	output tokens:  20 .. 200       (mix of short answers and longer ones)
 //	health fail:    0%              (always serving)
 func NewMock(name string, opts ...MockOption) *MockBackend {
 	m := &MockBackend{
 		name:            name,
 		rng:             mathrand.New(mathrand.NewPCG(uint64(time.Now().UnixNano()), 42)),
-		minLatency:      100 * time.Millisecond,
-		maxLatency:      4 * time.Second,
+		clusters:        append([]LatencyCluster(nil), DefaultLatencyClusters...),
 		minOutputTokens: 20,
 		maxOutputTokens: 200,
 	}
@@ -106,9 +142,7 @@ func (m *MockBackend) Name() string { return m.name }
 // shaped to match the request: Text for prompt-style requests, Message
 // for chat-style.
 func (m *MockBackend) Generate(ctx context.Context, req GenerateRequest) (GenerateResponse, error) {
-	// Sample a latency in [min, max].
-	jitter := m.maxLatency - m.minLatency
-	delay := m.minLatency + time.Duration(m.rng.Int64N(int64(jitter)+1))
+	delay := m.sampleLatency()
 
 	select {
 	case <-ctx.Done():
@@ -167,6 +201,37 @@ func (m *MockBackend) Health(ctx context.Context) error {
 		return fmt.Errorf("mock: synthetic health failure (rate=%.2f)", m.healthFailRate)
 	}
 	return nil
+}
+
+// sampleLatency picks a cluster by normalized weight, then samples
+// uniformly within the cluster's [Min, Max] range.
+func (m *MockBackend) sampleLatency() time.Duration {
+	if len(m.clusters) == 0 {
+		return 0
+	}
+	var total float64
+	for _, c := range m.clusters {
+		total += c.Weight
+	}
+	if total <= 0 {
+		// Fall back to the first cluster's lower bound so we don't
+		// blow up on a misconfigured mixture.
+		return m.clusters[0].Min
+	}
+	pick := m.rng.Float64() * total
+	cluster := m.clusters[len(m.clusters)-1]
+	for _, c := range m.clusters {
+		pick -= c.Weight
+		if pick <= 0 {
+			cluster = c
+			break
+		}
+	}
+	if cluster.Max <= cluster.Min {
+		return cluster.Min
+	}
+	jitter := cluster.Max - cluster.Min
+	return cluster.Min + time.Duration(m.rng.Int64N(int64(jitter)+1))
 }
 
 // approximateTokens estimates token count using the rough rule of thumb
