@@ -26,9 +26,8 @@ build-image: ## Build the controlplane Docker image without starting the stack
 smoke: ## Run smoke tests against a live stack (assumes `make up` has run)
 	go test -tags=smoke -v -count=1 ./tests/smoke/...
 
-load: ## Run a small load test (costs real GPU time on rented hardware!)
-	@echo "load: not implemented yet (planned: k6 or vegeta-based test)"
-	@exit 1
+load: ## Generate synthetic traffic against the running stack (safe with mock backend)
+	go run ./cmd/loadgen --url=http://localhost:8080
 
 test: ## Run unit tests (no live stack needed)
 	go test ./...

@@ -10,8 +10,10 @@ Reference implementation of the control plane for *Inference Is All You Need* (A
 | `make up`        | Bring up the full stack (vLLM + control plane + obs)   |
 | `make down`      | Tear it down                                           |
 | `make smoke`     | Go integration tests against a live stack              |
+| `make load`      | Synthetic traffic generator (works against mock or vllm) |
 | `make test`      | Unit tests (no live stack needed)                      |
 | `make build`     | Compile `bin/controlplane`                             |
+| `make build-image` | Build the controlplane Docker image without starting |
 | `make check-pins`  | Verify `pinned-versions.env` matches book's `.tex`   |
 | `make check-names` | Verify generated names match `metric-names.yaml`     |
 | `make gen-names` | Regenerate `internal/telemetry/names.go` + book `.tex` |
@@ -24,6 +26,8 @@ Reference implementation of the control plane for *Inference Is All You Need* (A
 - **gRPC server is source of truth.** Connect-RPC adapters and grpc-gateway are HTTP bindings on top — both dial the in-process gRPC server.
 - **No shell scripts for behavior tests.** Use Go integration tests (build tag gated). Shell is fine for orchestration (`make` targets, `docker compose` wrappers) but not for assertions.
 - **OTel name vocabulary** (`metric-names.yaml`) is paired with the book. Edit YAML → `make gen-names` → both `names.go` and the book's `metric-names.tex` regenerate together.
+- **Default engine is `mock`** for local dev. Real inference (`engine: vllm`) requires `--profile gpu` on the compose stack and an NVIDIA host. See `deploy/config.yaml` for the toggle.
+- **Branch-specific pins**: `main` carries `CP_VERSION=dev`; release branches carry `vX.Y.0`. `check-pins.sh` skips these.
 
 ## Gotchas
 

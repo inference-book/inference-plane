@@ -11,9 +11,12 @@ server:
   shutdown_sec: 30                # graceful drain budget
 
 backend:
-  engine: "vllm"
-  url: "http://vllm:8000"         # docker-compose service name
-  name: "vllm-primary"            # label value for metrics/logs
+  # 'mock' is the default so 'make up' works on any host (Mac / no-GPU).
+  # For real inference, switch to 'vllm' and bring the stack up with
+  # `docker compose --profile gpu up -d` so the vllm service starts.
+  engine: "mock"
+  url: ""                          # ignored by mock; set for vllm
+  name: "mock"                     # label value for metrics/logs
 
 telemetry:
   otlp_endpoint: "otel-collector:4317"

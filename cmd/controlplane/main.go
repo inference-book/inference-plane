@@ -193,13 +193,23 @@ func wrapMiddleware(h http.Handler) http.Handler {
 	)
 }
 
-// newBackendFromConfig constructs the configured Backend. v0.1 only
-// recognizes "vllm"; later versions extend this with "sglang",
-// "tensorrt", "llamacpp" -- each behind the same Backend interface.
+// newBackendFromConfig constructs the configured Backend.
+//
+//	"vllm" : real vLLM container; requires NVIDIA GPU and the docker
+//	         compose --profile gpu flag to pull in the vllm service.
+//	"mock" : synthetic responses with configurable latency and token
+//	         counts. The default for local development on hosts
+//	         without a GPU; also the right choice for CI smoke tests
+//	         and dashboard authoring with synthetic traffic.
+//
+// Later versions add "sglang", "tensorrt", "llamacpp" -- each behind
+// the same Backend interface.
 func newBackendFromConfig(cfg config.BackendConfig) (backends.Backend, error) {
 	switch cfg.Engine {
 	case "vllm":
 		return backends.NewVLLM(cfg.Name, cfg.URL), nil
+	case "mock":
+		return backends.NewMock(cfg.Name), nil
 	case "":
 		return nil, errors.New("controlplane: backend.engine is required (got empty string)")
 	default:
