@@ -1,0 +1,46 @@
+# Multi-provider rate table for the cost-projection panel
+# (chapter 6 §6.6.6, "Cost as an Observability Signal").
+#
+# The control plane reads this file at startup and emits one
+# gpu.effective_rate.usd_per_second gauge series per provider listed
+# below. The dashboard's cross-provider table multiplies each rate by
+# the workload's observed utilization so the operator sees what the
+# same workload would cost on every alternative provider, not just
+# the one currently hosting it.
+#
+# These are *sample* rates as of 2026-05-10 for ~24 GB GPU classes
+# (A10 / A10G / 4090). Replace each entry with your own contract or
+# market-checked numbers; the dashboard is only as honest as the
+# numbers it is fed. Sources for sample values are below.
+
+last_updated: "2026-05-10"
+sources:
+  - "https://www.runpod.io/pricing"
+  - "https://lambdalabs.com/service/gpu-cloud/pricing"
+  - "https://vast.ai/pricing"
+  - "https://deploy.equinix.com/product/servers/"
+
+providers:
+  - name: runpod
+    billing_mode: metered_per_second
+    gpu_type: a10g
+    rate_usd_per_hour: 0.44
+    notes: "RunPod Secure Cloud A10G; community pods run cheaper at ~$0.30."
+
+  - name: lambda_labs
+    billing_mode: metered_per_second
+    gpu_type: a10
+    rate_usd_per_hour: 0.75
+    notes: "Lambda Cloud on-demand A10; reserved instances bring this down."
+
+  - name: vast_ai
+    billing_mode: metered_per_second
+    gpu_type: rtx4090
+    rate_usd_per_hour: 0.34
+    notes: "Vast.ai community marketplace median for 24 GB consumer cards."
+
+  - name: equinix_metal
+    billing_mode: bare_metal_monthly
+    gpu_type: a10
+    fixed_usd_per_month: 1100
+    notes: "Equinix g3.large.x86 reserved monthly; bare-metal billing model."

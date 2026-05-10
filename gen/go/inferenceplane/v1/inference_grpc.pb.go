@@ -31,19 +31,25 @@ const (
 //
 // Two RPCs match the OpenAI API split: Complete for plain prompts,
 // ChatComplete for chat-style messages. Splitting them keeps the
-// proto types unambiguous (no oneof gymnastics) and the OpenAI HTTP
-// bindings clean -- /v1/completions maps to Complete, /v1/chat/completions
-// maps to ChatComplete via the google.api.http annotations.
+// proto types unambiguous (no oneof gymnastics).
+//
+// The service is the typed surface -- consumed by Connect-RPC clients
+// and the in-process gRPC server. The OpenAI-compatible HTTP routes
+// (POST /v1/completions, POST /v1/chat/completions) are NOT auto-routed
+// through grpc-gateway: protojson serializes int64 fields as JSON
+// strings and enum values as their proto names ("STATUS_SERVING"),
+// neither of which matches the OpenAI wire format. The HTTP layer in
+// internal/web/server/ owns those translations explicitly.
 //
 // Backends (vLLM, SGLang, TensorRT-LLM, etc.) implement a single
 // internal Backend interface; the service layer dispatches to either
 // RPC's path based on which one was called.
 type InferenceServiceClient interface {
 	// Complete runs plain prompt-completion inference.
-	// Maps to OpenAI's POST /v1/completions.
+	// Hand-mapped to OpenAI's POST /v1/completions in internal/web/server/.
 	Complete(ctx context.Context, in *CompleteRequest, opts ...grpc.CallOption) (*CompleteResponse, error)
 	// ChatComplete runs chat-style inference over a list of messages.
-	// Maps to OpenAI's POST /v1/chat/completions.
+	// Hand-mapped to OpenAI's POST /v1/chat/completions in internal/web/server/.
 	ChatComplete(ctx context.Context, in *ChatCompleteRequest, opts ...grpc.CallOption) (*ChatCompleteResponse, error)
 }
 
@@ -83,19 +89,25 @@ func (c *inferenceServiceClient) ChatComplete(ctx context.Context, in *ChatCompl
 //
 // Two RPCs match the OpenAI API split: Complete for plain prompts,
 // ChatComplete for chat-style messages. Splitting them keeps the
-// proto types unambiguous (no oneof gymnastics) and the OpenAI HTTP
-// bindings clean -- /v1/completions maps to Complete, /v1/chat/completions
-// maps to ChatComplete via the google.api.http annotations.
+// proto types unambiguous (no oneof gymnastics).
+//
+// The service is the typed surface -- consumed by Connect-RPC clients
+// and the in-process gRPC server. The OpenAI-compatible HTTP routes
+// (POST /v1/completions, POST /v1/chat/completions) are NOT auto-routed
+// through grpc-gateway: protojson serializes int64 fields as JSON
+// strings and enum values as their proto names ("STATUS_SERVING"),
+// neither of which matches the OpenAI wire format. The HTTP layer in
+// internal/web/server/ owns those translations explicitly.
 //
 // Backends (vLLM, SGLang, TensorRT-LLM, etc.) implement a single
 // internal Backend interface; the service layer dispatches to either
 // RPC's path based on which one was called.
 type InferenceServiceServer interface {
 	// Complete runs plain prompt-completion inference.
-	// Maps to OpenAI's POST /v1/completions.
+	// Hand-mapped to OpenAI's POST /v1/completions in internal/web/server/.
 	Complete(context.Context, *CompleteRequest) (*CompleteResponse, error)
 	// ChatComplete runs chat-style inference over a list of messages.
-	// Maps to OpenAI's POST /v1/chat/completions.
+	// Hand-mapped to OpenAI's POST /v1/chat/completions in internal/web/server/.
 	ChatComplete(context.Context, *ChatCompleteRequest) (*ChatCompleteResponse, error)
 }
 

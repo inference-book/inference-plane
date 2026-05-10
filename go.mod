@@ -5,7 +5,6 @@ go 1.26.2
 require (
 	connectrpc.com/connect v1.19.2
 	github.com/go-viper/mapstructure/v2 v2.4.0
-	github.com/grpc-ecosystem/grpc-gateway/v2 v2.28.0
 	github.com/panyam/servicekit v0.0.26
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/viper v1.21.0
@@ -33,6 +32,7 @@ require (
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/gorilla/websocket v1.5.0 // indirect
+	github.com/grpc-ecosystem/grpc-gateway/v2 v2.28.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/panyam/gocurrent v0.1.0 // indirect
 	github.com/panyam/goutils v0.1.8 // indirect
