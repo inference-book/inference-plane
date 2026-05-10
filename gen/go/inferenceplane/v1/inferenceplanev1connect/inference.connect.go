@@ -44,10 +44,10 @@ const (
 // InferenceServiceClient is a client for the inferenceplane.v1.InferenceService service.
 type InferenceServiceClient interface {
 	// Complete runs plain prompt-completion inference.
-	// Maps to OpenAI's POST /v1/completions.
+	// Hand-mapped to OpenAI's POST /v1/completions in internal/web/server/.
 	Complete(context.Context, *connect.Request[v1.CompleteRequest]) (*connect.Response[v1.CompleteResponse], error)
 	// ChatComplete runs chat-style inference over a list of messages.
-	// Maps to OpenAI's POST /v1/chat/completions.
+	// Hand-mapped to OpenAI's POST /v1/chat/completions in internal/web/server/.
 	ChatComplete(context.Context, *connect.Request[v1.ChatCompleteRequest]) (*connect.Response[v1.ChatCompleteResponse], error)
 }
 
@@ -96,10 +96,10 @@ func (c *inferenceServiceClient) ChatComplete(ctx context.Context, req *connect.
 // InferenceServiceHandler is an implementation of the inferenceplane.v1.InferenceService service.
 type InferenceServiceHandler interface {
 	// Complete runs plain prompt-completion inference.
-	// Maps to OpenAI's POST /v1/completions.
+	// Hand-mapped to OpenAI's POST /v1/completions in internal/web/server/.
 	Complete(context.Context, *connect.Request[v1.CompleteRequest]) (*connect.Response[v1.CompleteResponse], error)
 	// ChatComplete runs chat-style inference over a list of messages.
-	// Maps to OpenAI's POST /v1/chat/completions.
+	// Hand-mapped to OpenAI's POST /v1/chat/completions in internal/web/server/.
 	ChatComplete(context.Context, *connect.Request[v1.ChatCompleteRequest]) (*connect.Response[v1.ChatCompleteResponse], error)
 }
 

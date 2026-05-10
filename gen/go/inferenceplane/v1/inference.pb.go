@@ -7,7 +7,6 @@
 package inferenceplanev1
 
 import (
-	_ "github.com/inference-book/inference-plane/gen/go/google/api"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	reflect "reflect"
@@ -504,7 +503,7 @@ var File_inferenceplane_v1_inference_proto protoreflect.FileDescriptor
 
 const file_inferenceplane_v1_inference_proto_rawDesc = "" +
 	"\n" +
-	"!inferenceplane/v1/inference.proto\x12\x11inferenceplane.v1\x1a\x1cgoogle/api/annotations.proto\x1a\x1dinferenceplane/v1/types.proto\"\xc1\x01\n" +
+	"!inferenceplane/v1/inference.proto\x12\x11inferenceplane.v1\x1a\x1dinferenceplane/v1/types.proto\"\xc1\x01\n" +
 	"\x0fCompleteRequest\x12\x14\n" +
 	"\x05model\x18\x01 \x01(\tR\x05model\x12\x16\n" +
 	"\x06prompt\x18\x02 \x01(\tR\x06prompt\x12\x1d\n" +
@@ -545,10 +544,10 @@ const file_inferenceplane_v1_inference_proto_rawDesc = "" +
 	"ChatChoice\x12\x14\n" +
 	"\x05index\x18\x01 \x01(\x05R\x05index\x128\n" +
 	"\amessage\x18\x02 \x01(\v2\x1e.inferenceplane.v1.ChatMessageR\amessage\x12#\n" +
-	"\rfinish_reason\x18\x03 \x01(\tR\ffinishReason2\x86\x02\n" +
-	"\x10InferenceService\x12o\n" +
-	"\bComplete\x12\".inferenceplane.v1.CompleteRequest\x1a#.inferenceplane.v1.CompleteResponse\"\x1a\x82\xd3\xe4\x93\x02\x14:\x01*\"\x0f/v1/completions\x12\x80\x01\n" +
-	"\fChatComplete\x12&.inferenceplane.v1.ChatCompleteRequest\x1a'.inferenceplane.v1.ChatCompleteResponse\"\x1f\x82\xd3\xe4\x93\x02\x19:\x01*\"\x14/v1/chat/completionsB\xe1\x01\n" +
+	"\rfinish_reason\x18\x03 \x01(\tR\ffinishReason2\xc8\x01\n" +
+	"\x10InferenceService\x12S\n" +
+	"\bComplete\x12\".inferenceplane.v1.CompleteRequest\x1a#.inferenceplane.v1.CompleteResponse\x12_\n" +
+	"\fChatComplete\x12&.inferenceplane.v1.ChatCompleteRequest\x1a'.inferenceplane.v1.ChatCompleteResponseB\xe1\x01\n" +
 	"\x15com.inferenceplane.v1B\x0eInferenceProtoP\x01ZSgithub.com/inference-book/inference-plane/gen/go/inferenceplane/v1;inferenceplanev1\xa2\x02\x03IXX\xaa\x02\x11Inferenceplane.V1\xca\x02\x11Inferenceplane\\V1\xe2\x02\x1dInferenceplane\\V1\\GPBMetadata\xea\x02\x12Inferenceplane::V1b\x06proto3"
 
 var (

@@ -2,38 +2,33 @@ syntax = "proto3";
 
 package inferenceplane.v1;
 
-import "google/api/annotations.proto";
 import "inferenceplane/v1/types.proto";
 
 // InferenceService is the central service of the control plane.
 //
 // Two RPCs match the OpenAI API split: Complete for plain prompts,
 // ChatComplete for chat-style messages. Splitting them keeps the
-// proto types unambiguous (no oneof gymnastics) and the OpenAI HTTP
-// bindings clean -- /v1/completions maps to Complete, /v1/chat/completions
-// maps to ChatComplete via the google.api.http annotations.
+// proto types unambiguous (no oneof gymnastics).
+//
+// The service is the typed surface -- consumed by Connect-RPC clients
+// and the in-process gRPC server. The OpenAI-compatible HTTP routes
+// (POST /v1/completions, POST /v1/chat/completions) are NOT auto-routed
+// through grpc-gateway: protojson serializes int64 fields as JSON
+// strings and enum values as their proto names ("STATUS_SERVING"),
+// neither of which matches the OpenAI wire format. The HTTP layer in
+// internal/web/server/ owns those translations explicitly.
 //
 // Backends (vLLM, SGLang, TensorRT-LLM, etc.) implement a single
 // internal Backend interface; the service layer dispatches to either
 // RPC's path based on which one was called.
 service InferenceService {
   // Complete runs plain prompt-completion inference.
-  // Maps to OpenAI's POST /v1/completions.
-  rpc Complete(CompleteRequest) returns (CompleteResponse) {
-    option (google.api.http) = {
-      post: "/v1/completions"
-      body: "*"
-    };
-  }
+  // Hand-mapped to OpenAI's POST /v1/completions in internal/web/server/.
+  rpc Complete(CompleteRequest) returns (CompleteResponse);
 
   // ChatComplete runs chat-style inference over a list of messages.
-  // Maps to OpenAI's POST /v1/chat/completions.
-  rpc ChatComplete(ChatCompleteRequest) returns (ChatCompleteResponse) {
-    option (google.api.http) = {
-      post: "/v1/chat/completions"
-      body: "*"
-    };
-  }
+  // Hand-mapped to OpenAI's POST /v1/chat/completions in internal/web/server/.
+  rpc ChatComplete(ChatCompleteRequest) returns (ChatCompleteResponse);
 }
 
 // CompleteRequest is the OpenAI /v1/completions request shape.

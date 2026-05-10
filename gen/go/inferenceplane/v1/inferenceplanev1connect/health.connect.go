@@ -39,8 +39,8 @@ const (
 
 // HealthServiceClient is a client for the inferenceplane.v1.HealthService service.
 type HealthServiceClient interface {
-	// Check returns the current health state. Always returns a status;
-	// the HTTP binding maps SERVING to 200 and any non-SERVING state to 503.
+	// Check returns the current health state. The HTTP wrapper at
+	// /health maps SERVING -> 200, any non-SERVING state -> 503.
 	Check(context.Context, *connect.Request[v1.CheckRequest]) (*connect.Response[v1.CheckResponse], error)
 }
 
@@ -76,8 +76,8 @@ func (c *healthServiceClient) Check(ctx context.Context, req *connect.Request[v1
 
 // HealthServiceHandler is an implementation of the inferenceplane.v1.HealthService service.
 type HealthServiceHandler interface {
-	// Check returns the current health state. Always returns a status;
-	// the HTTP binding maps SERVING to 200 and any non-SERVING state to 503.
+	// Check returns the current health state. The HTTP wrapper at
+	// /health maps SERVING -> 200, any non-SERVING state -> 503.
 	Check(context.Context, *connect.Request[v1.CheckRequest]) (*connect.Response[v1.CheckResponse], error)
 }
 

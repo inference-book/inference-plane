@@ -30,9 +30,15 @@ const (
 // Distinct from the OTel inference.backend.healthy gauge -- this is
 // the synchronous probe that load balancers, Kubernetes readiness
 // checks, and the smoke tests hit.
+//
+// The typed surface (Connect-RPC, in-process gRPC) consumes Check
+// directly. The public GET /health endpoint is hand-written in
+// internal/web/server/ so the JSON shape is operator-friendly
+// ({"status":"ok"}) rather than the protojson default for an enum
+// ({"status":"STATUS_SERVING"}).
 type HealthServiceClient interface {
-	// Check returns the current health state. Always returns a status;
-	// the HTTP binding maps SERVING to 200 and any non-SERVING state to 503.
+	// Check returns the current health state. The HTTP wrapper at
+	// /health maps SERVING -> 200, any non-SERVING state -> 503.
 	Check(ctx context.Context, in *CheckRequest, opts ...grpc.CallOption) (*CheckResponse, error)
 }
 
@@ -62,9 +68,15 @@ func (c *healthServiceClient) Check(ctx context.Context, in *CheckRequest, opts 
 // Distinct from the OTel inference.backend.healthy gauge -- this is
 // the synchronous probe that load balancers, Kubernetes readiness
 // checks, and the smoke tests hit.
+//
+// The typed surface (Connect-RPC, in-process gRPC) consumes Check
+// directly. The public GET /health endpoint is hand-written in
+// internal/web/server/ so the JSON shape is operator-friendly
+// ({"status":"ok"}) rather than the protojson default for an enum
+// ({"status":"STATUS_SERVING"}).
 type HealthServiceServer interface {
-	// Check returns the current health state. Always returns a status;
-	// the HTTP binding maps SERVING to 200 and any non-SERVING state to 503.
+	// Check returns the current health state. The HTTP wrapper at
+	// /health maps SERVING -> 200, any non-SERVING state -> 503.
 	Check(context.Context, *CheckRequest) (*CheckResponse, error)
 }
 
