@@ -80,6 +80,12 @@ services:
       - "8080:8080"
     volumes:
       - ./config.yaml:/etc/iplane/config.yaml:ro
+      # providers.yaml is read from the working directory at startup
+      # (LoadProviders("providers.yaml") in cmd/iplane/cmd/serve.go).
+      # WORKDIR is /app in the image; mount the rate table there.
+      # Missing / unreadable file is non-fatal -- the cross-provider
+      # snapshot panel just goes blank in that case.
+      - ./providers.yaml:/app/providers.yaml:ro
     environment:
       IPLANE_BACKEND_URL: http://vllm:8000
       OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
