@@ -7,7 +7,6 @@
 package inferenceplanev1
 
 import (
-	_ "github.com/inference-book/inference-plane/gen/go/google/api"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	reflect "reflect"
@@ -168,7 +167,7 @@ var File_inferenceplane_v1_health_proto protoreflect.FileDescriptor
 
 const file_inferenceplane_v1_health_proto_rawDesc = "" +
 	"\n" +
-	"\x1einferenceplane/v1/health.proto\x12\x11inferenceplane.v1\x1a\x1cgoogle/api/annotations.proto\"\x0e\n" +
+	"\x1einferenceplane/v1/health.proto\x12\x11inferenceplane.v1\"\x0e\n" +
 	"\fCheckRequest\"\xcd\x01\n" +
 	"\rCheckResponse\x12?\n" +
 	"\x06status\x18\x01 \x01(\x0e2'.inferenceplane.v1.CheckResponse.StatusR\x06status\x12\x18\n" +
@@ -177,9 +176,9 @@ const file_inferenceplane_v1_health_proto_rawDesc = "" +
 	"\x12STATUS_UNSPECIFIED\x10\x00\x12\x12\n" +
 	"\x0eSTATUS_SERVING\x10\x01\x12\x13\n" +
 	"\x0fSTATUS_DEGRADED\x10\x02\x12\x16\n" +
-	"\x12STATUS_NOT_SERVING\x10\x032l\n" +
-	"\rHealthService\x12[\n" +
-	"\x05Check\x12\x1f.inferenceplane.v1.CheckRequest\x1a .inferenceplane.v1.CheckResponse\"\x0f\x82\xd3\xe4\x93\x02\t\x12\a/healthB\xde\x01\n" +
+	"\x12STATUS_NOT_SERVING\x10\x032[\n" +
+	"\rHealthService\x12J\n" +
+	"\x05Check\x12\x1f.inferenceplane.v1.CheckRequest\x1a .inferenceplane.v1.CheckResponseB\xde\x01\n" +
 	"\x15com.inferenceplane.v1B\vHealthProtoP\x01ZSgithub.com/inference-book/inference-plane/gen/go/inferenceplane/v1;inferenceplanev1\xa2\x02\x03IXX\xaa\x02\x11Inferenceplane.V1\xca\x02\x11Inferenceplane\\V1\xe2\x02\x1dInferenceplane\\V1\\GPBMetadata\xea\x02\x12Inferenceplane::V1b\x06proto3"
 
 var (
