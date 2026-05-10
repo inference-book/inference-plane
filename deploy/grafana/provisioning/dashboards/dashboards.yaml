@@ -1,7 +1,7 @@
-# Dashboard provisioning config. Grafana scans the path below and
-# loads any *.json files as dashboards. The dashboards/ folder is
-# empty in v0.1; dashboards land here once the OTel SDK is wired
-# (next increment) and we have data to display.
+# Dashboard provisioning config. Grafana scans the path below at
+# startup (and every updateIntervalSeconds thereafter) and loads any
+# *.json files as dashboards. The Inference Plane v0.1 dashboard
+# lives in this folder alongside this config.
 
 apiVersion: 1
 

@@ -96,13 +96,17 @@ services:
   # exporters; swapping to a hosted observability backend is a
   # one-config-file change.
   otel-collector:
-    image: otel/opentelemetry-collector-contrib:${OTEL_COLLECTOR_VERSION:-0.110.0}
+    # Pulled from GHCR (the canonical source) rather than Docker Hub
+    # because Docker Hub's otel/opentelemetry-collector-contrib has had
+    # spotty arm64 publishing; running on Apple Silicon hits "exec
+    # /otelcol-contrib: no such file or directory" with the Hub image.
+    image: ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector-contrib:${OTEL_COLLECTOR_VERSION:-0.110.0}
     command: ["--config=/etc/otelcol-contrib/config.yaml"]
     volumes:
       - ./otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro
     ports:
-      - "4317:4317"   # OTLP/gRPC
-      - "4318:4318"   # OTLP/HTTP
+      - "127.0.0.1:4317:4317"   # OTLP/gRPC
+      - "127.0.0.1:4318:4318"   # OTLP/HTTP
     restart: unless-stopped
 
   # ── Observability storage ────────────────────────────────────────
@@ -119,6 +123,12 @@ services:
 
   loki:
     image: grafana/loki:${LOKI_VERSION:-3.2.0}
+    # Loki >= v2.7 runs as UID 10001 by default. The named volume
+    # below gets created with root ownership the first time, which
+    # leads to "permission denied" trying to mkdir /var/loki/rules.
+    # Running as root is the simplest fix for a local-dev stack;
+    # production should pre-create the volume with proper ownership.
+    user: "0"
     command: ["-config.file=/etc/loki/config.yaml"]
     volumes:
       - ./loki-config.yaml:/etc/loki/config.yaml:ro
@@ -142,8 +152,18 @@ services:
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
       - grafana_data:/var/lib/grafana
     environment:
+      # Anonymous + login-form disabled means localhost:3000 lands the
+      # operator on the dashboards directly with Admin permissions, no
+      # sign-in screen at all.
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_AUTH_BASIC_ENABLED: "false"
+      # Send / to the inference-plane dashboard rather than the empty
+      # default Home page. Path is the file inside the provisioning
+      # mount; matches the JSON's "uid" so the dashboard exists by the
+      # time Grafana looks for it.
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/provisioning/dashboards/inference-plane-v01.json
       GF_USERS_DEFAULT_THEME: dark
     restart: unless-stopped
 
