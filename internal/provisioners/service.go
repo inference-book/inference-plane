@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"connectrpc.com/connect"
@@ -141,7 +140,7 @@ func (s *Service) CreateInstance(ctx context.Context, req *connect.Request[provi
 		TagOperator: s.operatorID,
 	})
 	for _, ref := range refs {
-		if !isActiveLikeProviderState(provider.Name(), ref.GetProviderState()) {
+		if !providerSaysActive(provider, ref.GetProviderState()) {
 			continue
 		}
 		adopted, descErr := provider.Describe(ctx, ref.GetProviderId())
@@ -467,18 +466,24 @@ func validateGPUSpec(g *provisionerv1.GpuSpec) error {
 	return nil
 }
 
-// isActiveLikeProviderState maps a provider's literal status string to
-// "this instance counts as active for idempotency adoption." Each
-// adapter ships its own vocabulary; this helper is the central
-// registry. Local always returns empty from List, so it never reaches
-// this function -- only RunPod (phase 1.3) and later providers do.
-func isActiveLikeProviderState(provider, providerState string) bool {
-	switch provider {
-	case ProviderRunPod:
-		switch strings.ToLower(providerState) {
-		case "running", "ready":
-			return true
-		}
+// ActiveStateChecker is an optional capability adapters can implement
+// to tell the Service which of their provider-side state strings count
+// as "this instance is up and idempotency-adoptable." Adapters that do
+// not implement it default to "nothing is adoptable from a List
+// result," which is correct for adapters that never populate
+// ProviderState (Local) and conservative for adapters that do.
+//
+// The point of pushing this into the adapter is that the central
+// Service should not know vocabularies like "RUNNING" vs "EXITED" --
+// those are RunPod's words, not iplane's. RunPod owns the mapping;
+// AWS will own its own; Local trivially needs nothing.
+type ActiveStateChecker interface {
+	IsActiveProviderState(state string) bool
+}
+
+func providerSaysActive(provider Provider, state string) bool {
+	if c, ok := provider.(ActiveStateChecker); ok {
+		return c.IsActiveProviderState(state)
 	}
 	return false
 }
