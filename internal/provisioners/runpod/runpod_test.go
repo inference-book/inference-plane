@@ -14,42 +14,38 @@ import (
 	"github.com/inference-book/inference-plane/internal/provisioners"
 )
 
-// fakeRunPod is a single-endpoint httptest handler that captures the
-// last request body for assertions and returns the canned response set
-// by the test.
+// fakeRunPod is an httptest handler that dispatches on (method, path)
+// and records the last request so tests can assert what we sent.
 type fakeRunPod struct {
-	t        *testing.T
-	mu       string // accumulated query (sniff which mutation we got)
-	lastBody map[string]any
-	respond  func(query string, vars map[string]any) (status int, body string)
+	t          *testing.T
+	mu         struct{}
+	lastMethod string
+	lastPath   string
+	lastQuery  string
+	lastBody   []byte
+	respond    func(method, path string, body []byte) (status int, response string)
 }
 
 func (f *fakeRunPod) handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/graphql" {
-			http.NotFound(w, r)
-			return
-		}
 		if got := r.Header.Get("Authorization"); !strings.HasPrefix(got, "Bearer ") {
 			f.t.Errorf("missing Bearer auth header, got %q", got)
 		}
+		f.lastMethod = r.Method
+		f.lastPath = r.URL.Path
+		f.lastQuery = r.URL.RawQuery
 		b, _ := io.ReadAll(r.Body)
-		var req gqlRequest
-		if err := json.Unmarshal(b, &req); err != nil {
-			f.t.Errorf("decode request: %v (body=%s)", err, string(b))
-			http.Error(w, "bad request", 400)
-			return
-		}
-		f.mu = req.Query
-		f.lastBody = req.Variables
-		status, body := f.respond(req.Query, req.Variables)
+		f.lastBody = b
+		status, body := f.respond(r.Method, r.URL.Path, b)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
-		_, _ = w.Write([]byte(body))
+		if body != "" {
+			_, _ = w.Write([]byte(body))
+		}
 	})
 }
 
-func newFake(t *testing.T, respond func(query string, vars map[string]any) (int, string)) (*fakeRunPod, *Provider) {
+func newFake(t *testing.T, respond func(method, path string, body []byte) (int, string)) (*fakeRunPod, *Provider) {
 	t.Helper()
 	f := &fakeRunPod{t: t, respond: respond}
 	srv := httptest.NewServer(f.handler())
@@ -64,7 +60,6 @@ func okSpec() *provisionerv1.Spec {
 		Provider: provisioners.ProviderRunPod,
 		Region:   "US-CA-1",
 		Gpu:      &provisionerv1.GpuSpec{Class: provisioners.GPUClassSmall},
-		Tags:     map[string]string{provisioners.TagID: "my-pod", provisioners.TagOperator: "default"},
 	}
 }
 
@@ -75,24 +70,32 @@ func TestProvider_Name(t *testing.T) {
 }
 
 func TestSpawn_HappyPath(t *testing.T) {
-	f, p := newFake(t, func(query string, vars map[string]any) (int, string) {
-		if !strings.Contains(query, "podFindAndDeployOnDemand") {
-			t.Errorf("expected spawn mutation, got %q", query)
-		}
-		return 200, `{
-			"data": {
-				"podFindAndDeployOnDemand": {
-					"id": "rp-7c8e",
-					"name": "iplane-my-pod",
-					"costPerHr": 0.39,
-					"createdAt": "2026-05-11T18:22:11Z",
-					"desiredStatus": "CREATED",
+	var sentBody map[string]any
+	_, p := newFake(t, func(method, path string, body []byte) (int, string) {
+		switch {
+		case method == "POST" && path == "/pods":
+			_ = json.Unmarshal(body, &sentBody)
+			return 201, `{"id": "rp-7c8e", "desiredStatus": "RUNNING", "status": "running"}`
+		case method == "GET" && path == "/pods/rp-7c8e":
+			return 200, `{
+				"id": "rp-7c8e",
+				"name": "iplane-my-pod",
+				"image": "runpod/pytorch:2.4.0",
+				"costPerHr": 0.39,
+				"createdAt": "2026-05-11T18:22:11Z",
+				"desiredStatus": "RUNNING",
+				"machine": {
+					"gpuTypeId": "NVIDIA GeForce RTX 4090",
 					"gpuCount": 1,
-					"gpus": [{"id": "NVIDIA GeForce RTX 4090", "displayName": "RTX 4090", "memoryInGb": 24}]
+					"dataCenterId": "US-CA-1",
+					"gpuType": {"id": "NVIDIA GeForce RTX 4090", "memoryInGb": 24}
 				}
-			}
-		}`
+			}`
+		}
+		t.Errorf("unexpected request %s %s", method, path)
+		return 500, "{}"
 	})
+
 	inst, err := p.Spawn(context.Background(), okSpec())
 	if err != nil {
 		t.Fatalf("Spawn: %v", err)
@@ -103,33 +106,61 @@ func TestSpawn_HappyPath(t *testing.T) {
 	if inst.GetHourlyRateUsd() != 0.39 {
 		t.Errorf("HourlyRateUsd = %v, want 0.39", inst.GetHourlyRateUsd())
 	}
-	if inst.GetState() != provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE {
-		t.Errorf("State = %v, want ACTIVE", inst.GetState())
-	}
 	if inst.GetGpu().GetSku() != "NVIDIA GeForce RTX 4090" {
 		t.Errorf("Sku = %q, want resolved from class small", inst.GetGpu().GetSku())
 	}
-	// Verify the input we sent: pod name prefix, gpu type id, env tags.
-	input, ok := f.lastBody["input"].(map[string]any)
-	if !ok {
-		t.Fatalf("input variable missing or wrong type: %T", f.lastBody["input"])
+	if inst.GetGpu().GetVramGb() != 24 {
+		t.Errorf("VramGb = %d, want 24", inst.GetGpu().GetVramGb())
 	}
-	if name, _ := input["name"].(string); name != "iplane-my-pod" {
-		t.Errorf("input.name = %q, want iplane-my-pod", name)
+	if inst.GetRegion() != "US-CA-1" {
+		t.Errorf("Region = %q, want US-CA-1", inst.GetRegion())
 	}
-	if gid, _ := input["gpuTypeId"].(string); gid != "NVIDIA GeForce RTX 4090" {
-		t.Errorf("input.gpuTypeId = %q, want NVIDIA GeForce RTX 4090", gid)
+	// Verify what we sent.
+	if name, _ := sentBody["name"].(string); name != "iplane-my-pod" {
+		t.Errorf("POST body name = %q, want iplane-my-pod", name)
 	}
-	env, _ := input["env"].([]any)
-	if len(env) != 2 {
-		t.Errorf("input.env should have 2 tags (iplane-id, iplane-operator), got %d", len(env))
+	ids, _ := sentBody["gpuTypeIds"].([]any)
+	if len(ids) == 0 || ids[0] != "NVIDIA GeForce RTX 4090" {
+		t.Errorf("POST body gpuTypeIds = %v, want [NVIDIA GeForce RTX 4090, ...]", ids)
+	}
+	dcs, _ := sentBody["dataCenterIds"].([]any)
+	if len(dcs) == 0 || dcs[0] != "US-CA-1" {
+		t.Errorf("POST body dataCenterIds = %v, want [US-CA-1]", dcs)
+	}
+	cloud, _ := sentBody["cloudType"].(string)
+	if cloud != "SECURE" {
+		t.Errorf("POST body cloudType = %q, want SECURE", cloud)
+	}
+}
+
+func TestSpawn_PassesFullSKUFallbackList(t *testing.T) {
+	var sentBody map[string]any
+	_, p := newFake(t, func(method, path string, body []byte) (int, string) {
+		if method == "POST" && path == "/pods" {
+			_ = json.Unmarshal(body, &sentBody)
+			return 201, `{"id": "rp-xyz"}`
+		}
+		if method == "GET" && path == "/pods/rp-xyz" {
+			return 200, `{"id": "rp-xyz", "name": "iplane-my-pod", "createdAt": "2026-05-11T18:22:11Z"}`
+		}
+		t.Errorf("unexpected request %s %s", method, path)
+		return 500, "{}"
+	})
+	spec := okSpec()
+	spec.Gpu.Class = provisioners.GPUClassLarge
+	if _, err := p.Spawn(context.Background(), spec); err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	ids, _ := sentBody["gpuTypeIds"].([]any)
+	if len(ids) < 2 {
+		t.Errorf("gpuTypeIds should carry the full class fallback list, got %v", ids)
 	}
 }
 
 func TestSpawn_UnknownClass(t *testing.T) {
-	_, p := newFake(t, func(query string, vars map[string]any) (int, string) {
+	_, p := newFake(t, func(method, path string, body []byte) (int, string) {
 		t.Error("provider should reject before HTTP")
-		return 200, `{"data": null}`
+		return 500, "{}"
 	})
 	spec := okSpec()
 	spec.Gpu.Class = "ginormous"
@@ -144,32 +175,31 @@ func TestSpawn_UnknownClass(t *testing.T) {
 }
 
 func TestSpawn_SkuOverridesClass(t *testing.T) {
-	var sentGpuType string
-	_, p := newFake(t, func(query string, vars map[string]any) (int, string) {
-		input := vars["input"].(map[string]any)
-		sentGpuType, _ = input["gpuTypeId"].(string)
-		return 200, `{
-			"data": {
-				"podFindAndDeployOnDemand": {
-					"id": "rp-xyz", "createdAt": "2026-05-11T18:22:11Z", "costPerHr": 2.49,
-					"desiredStatus": "RUNNING", "gpuCount": 1
-				}
-			}
-		}`
+	var sentBody map[string]any
+	_, p := newFake(t, func(method, path string, body []byte) (int, string) {
+		if method == "POST" && path == "/pods" {
+			_ = json.Unmarshal(body, &sentBody)
+			return 201, `{"id": "rp-xyz"}`
+		}
+		if method == "GET" && path == "/pods/rp-xyz" {
+			return 200, `{"id": "rp-xyz", "name": "iplane-my-pod", "createdAt": "2026-05-11T18:22:11Z"}`
+		}
+		t.Errorf("unexpected request %s %s", method, path)
+		return 500, "{}"
 	})
 	spec := okSpec()
 	spec.Gpu = &provisionerv1.GpuSpec{Sku: "NVIDIA H100 NVL"}
-	_, err := p.Spawn(context.Background(), spec)
-	if err != nil {
+	if _, err := p.Spawn(context.Background(), spec); err != nil {
 		t.Fatalf("Spawn: %v", err)
 	}
-	if sentGpuType != "NVIDIA H100 NVL" {
-		t.Errorf("gpuTypeId sent = %q, want operator-supplied SKU", sentGpuType)
+	ids, _ := sentBody["gpuTypeIds"].([]any)
+	if len(ids) != 1 || ids[0] != "NVIDIA H100 NVL" {
+		t.Errorf("gpuTypeIds = %v, want [NVIDIA H100 NVL] only", ids)
 	}
 }
 
 func TestSpawn_AuthFailure(t *testing.T) {
-	_, p := newFake(t, func(query string, vars map[string]any) (int, string) {
+	_, p := newFake(t, func(method, path string, body []byte) (int, string) {
 		return 401, `{"error": "invalid api key"}`
 	})
 	_, err := p.Spawn(context.Background(), okSpec())
@@ -178,7 +208,7 @@ func TestSpawn_AuthFailure(t *testing.T) {
 	}
 	var pe *provisioners.ProviderError
 	if !errors.As(err, &pe) {
-		t.Errorf("expected *ProviderError, got %T", err)
+		t.Fatalf("expected *ProviderError, got %T", err)
 	}
 	if pe.HTTP != 401 {
 		t.Errorf("HTTP = %d, want 401", pe.HTTP)
@@ -188,53 +218,74 @@ func TestSpawn_AuthFailure(t *testing.T) {
 	}
 }
 
-func TestSpawn_GraphQLError_PreservesMessage(t *testing.T) {
-	_, p := newFake(t, func(query string, vars map[string]any) (int, string) {
-		return 200, `{
-			"errors": [{"message": "no GPU available in datacenter US-CA-1 (quota exceeded)"}]
-		}`
+func TestSpawn_ErrorPreservesMessage(t *testing.T) {
+	_, p := newFake(t, func(method, path string, body []byte) (int, string) {
+		return 400, `{"error": "no GPU available in datacenter US-CA-1 (quota exceeded)"}`
 	})
 	_, err := p.Spawn(context.Background(), okSpec())
 	if err == nil {
-		t.Fatal("expected error from GraphQL errors[]")
+		t.Fatal("expected error from 400")
 	}
 	if !strings.Contains(err.Error(), "no GPU available") {
 		t.Errorf("error should preserve RunPod message verbatim, got %q", err.Error())
 	}
 }
 
-func TestSpawn_EmptyResponse_NoCapacity(t *testing.T) {
-	_, p := newFake(t, func(query string, vars map[string]any) (int, string) {
-		return 200, `{"data": {"podFindAndDeployOnDemand": null}}`
+func TestSpawn_EmptyId_NoCapacity(t *testing.T) {
+	_, p := newFake(t, func(method, path string, body []byte) (int, string) {
+		return 201, `{"id": "", "desiredStatus": ""}`
 	})
 	_, err := p.Spawn(context.Background(), okSpec())
 	if err == nil {
-		t.Fatal("expected error when RunPod returns null pod")
+		t.Fatal("expected error when RunPod returns empty id")
 	}
 	if !strings.Contains(err.Error(), "no capacity") {
 		t.Errorf("error should mention no capacity, got %q", err.Error())
 	}
 }
 
+func TestSpawn_FollowupFailure_FallsBackToMinimalInstance(t *testing.T) {
+	// Spawn succeeded at POST; GET /pods/{id} fails (e.g., 500). The
+	// adapter should still return an Instance the Service can record,
+	// because the pod really does exist in RunPod and refusing now
+	// would leak it.
+	_, p := newFake(t, func(method, path string, body []byte) (int, string) {
+		if method == "POST" {
+			return 201, `{"id": "rp-7c8e"}`
+		}
+		return 500, `{"error": "transient"}`
+	})
+	inst, err := p.Spawn(context.Background(), okSpec())
+	if err != nil {
+		t.Fatalf("Spawn should swallow follow-up GET failure: %v", err)
+	}
+	if inst.GetProviderId() != "rp-7c8e" {
+		t.Errorf("ProviderId = %q, want rp-7c8e", inst.GetProviderId())
+	}
+	if inst.GetGpu().GetSku() != "NVIDIA GeForce RTX 4090" {
+		t.Errorf("fallback should carry the resolved SKU; got %q", inst.GetGpu().GetSku())
+	}
+}
+
 func TestTerminate_HappyPath(t *testing.T) {
-	_, p := newFake(t, func(query string, vars map[string]any) (int, string) {
-		if !strings.Contains(query, "podTerminate") {
-			t.Errorf("expected terminate mutation, got %q", query)
+	f, p := newFake(t, func(method, path string, body []byte) (int, string) {
+		if method != "DELETE" {
+			t.Errorf("expected DELETE, got %s", method)
 		}
-		input := vars["input"].(map[string]any)
-		if input["podId"] != "rp-7c8e" {
-			t.Errorf("podId = %v, want rp-7c8e", input["podId"])
+		if path != "/pods/rp-7c8e" {
+			t.Errorf("path = %q, want /pods/rp-7c8e", path)
 		}
-		return 200, `{"data": {"podTerminate": null}}`
+		return 204, ""
 	})
 	if err := p.Terminate(context.Background(), "rp-7c8e"); err != nil {
 		t.Errorf("Terminate: %v", err)
 	}
+	_ = f
 }
 
 func TestTerminate_NotFound_IsIdempotent(t *testing.T) {
-	_, p := newFake(t, func(query string, vars map[string]any) (int, string) {
-		return 200, `{"errors": [{"message": "Pod not found"}]}`
+	_, p := newFake(t, func(method, path string, body []byte) (int, string) {
+		return 404, `{"error": "Pod not found"}`
 	})
 	if err := p.Terminate(context.Background(), "rp-gone"); err != nil {
 		t.Errorf("Terminate of not-found pod should be idempotent, got %v", err)
@@ -242,9 +293,9 @@ func TestTerminate_NotFound_IsIdempotent(t *testing.T) {
 }
 
 func TestTerminate_EmptyID(t *testing.T) {
-	_, p := newFake(t, func(query string, vars map[string]any) (int, string) {
+	_, p := newFake(t, func(method, path string, body []byte) (int, string) {
 		t.Error("provider should reject empty id before HTTP")
-		return 200, "{}"
+		return 500, "{}"
 	})
 	if err := p.Terminate(context.Background(), ""); err == nil {
 		t.Error("Terminate should reject empty providerID")
@@ -252,23 +303,22 @@ func TestTerminate_EmptyID(t *testing.T) {
 }
 
 func TestDescribe_HappyPath(t *testing.T) {
-	_, p := newFake(t, func(query string, vars map[string]any) (int, string) {
-		if !strings.Contains(query, "query Pod") {
-			t.Errorf("expected pod query, got %q", query)
+	_, p := newFake(t, func(method, path string, body []byte) (int, string) {
+		if method != "GET" || path != "/pods/rp-7c8e" {
+			t.Errorf("expected GET /pods/rp-7c8e, got %s %s", method, path)
 		}
 		return 200, `{
-			"data": {
-				"pod": {
-					"id": "rp-7c8e",
-					"name": "iplane-my-pod",
-					"costPerHr": 0.39,
-					"createdAt": "2026-05-11T18:22:11Z",
-					"desiredStatus": "RUNNING",
-					"gpuCount": 1,
-					"gpus": [{"id": "NVIDIA GeForce RTX 4090", "memoryInGb": 24}],
-					"env": ["iplane-id=my-pod", "iplane-operator=default"],
-					"ipAddress": {"ipAddress": "1.2.3.4"}
-				}
+			"id": "rp-7c8e",
+			"name": "iplane-my-pod",
+			"costPerHr": 0.39,
+			"createdAt": "2026-05-11T18:22:11Z",
+			"desiredStatus": "RUNNING",
+			"publicIp": "1.2.3.4",
+			"machine": {
+				"gpuTypeId": "NVIDIA GeForce RTX 4090",
+				"gpuCount": 1,
+				"dataCenterId": "US-CA-1",
+				"gpuType": {"id": "NVIDIA GeForce RTX 4090", "memoryInGb": 24}
 			}
 		}`
 	})
@@ -283,13 +333,13 @@ func TestDescribe_HappyPath(t *testing.T) {
 		t.Errorf("Gpu.VramGb = %d, want 24", inst.GetGpu().GetVramGb())
 	}
 	if inst.GetSpec().GetTags()[provisioners.TagID] != "my-pod" {
-		t.Errorf("env-decoded tag iplane-id = %q, want my-pod", inst.GetSpec().GetTags()[provisioners.TagID])
+		t.Errorf("name-decoded tag iplane-id = %q, want my-pod", inst.GetSpec().GetTags()[provisioners.TagID])
 	}
 }
 
 func TestDescribe_NotFound(t *testing.T) {
-	_, p := newFake(t, func(query string, vars map[string]any) (int, string) {
-		return 200, `{"data": {"pod": null}}`
+	_, p := newFake(t, func(method, path string, body []byte) (int, string) {
+		return 404, `{"error": "Pod not found"}`
 	})
 	_, err := p.Describe(context.Background(), "rp-gone")
 	if err == nil {
@@ -301,72 +351,52 @@ func TestDescribe_NotFound(t *testing.T) {
 }
 
 func TestList_ServerSideNameFilter(t *testing.T) {
-	f, p := newFake(t, func(query string, vars map[string]any) (int, string) {
-		return 200, `{
-			"data": {
-				"myself": {
-					"pods": [{
-						"id": "rp-7c8e",
-						"name": "iplane-my-pod",
-						"costPerHr": 0.39,
-						"createdAt": "2026-05-11T18:22:11Z",
-						"desiredStatus": "RUNNING",
-						"env": ["iplane-id=my-pod", "iplane-operator=default"]
-					}]
-				}
-			}
-		}`
+	f, p := newFake(t, func(method, path string, body []byte) (int, string) {
+		if method != "GET" || path != "/pods" {
+			t.Errorf("expected GET /pods, got %s %s", method, path)
+		}
+		return 200, `[{
+			"id": "rp-7c8e",
+			"name": "iplane-my-pod",
+			"costPerHr": 0.39,
+			"createdAt": "2026-05-11T18:22:11Z",
+			"desiredStatus": "RUNNING"
+		}]`
 	})
-	refs, err := p.List(context.Background(), map[string]string{
-		provisioners.TagID:       "my-pod",
-		provisioners.TagOperator: "default",
-	})
+	refs, err := p.List(context.Background(), map[string]string{provisioners.TagID: "my-pod"})
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
 	if len(refs) != 1 {
 		t.Fatalf("got %d refs, want 1", len(refs))
 	}
-	input, _ := f.lastBody["input"].(map[string]any)
-	if input == nil || input["name"] != "iplane-my-pod" {
-		t.Errorf("server-side PodsFilter.name should be iplane-my-pod, got %v", input)
+	if !strings.Contains(f.lastQuery, "name=iplane-my-pod") {
+		t.Errorf("server-side name filter not applied; got query %q", f.lastQuery)
 	}
 	if refs[0].GetProviderState() != "RUNNING" {
 		t.Errorf("ProviderState = %q, want RUNNING", refs[0].GetProviderState())
 	}
 	if refs[0].GetTags()[provisioners.TagID] != "my-pod" {
-		t.Errorf("env-decoded tag iplane-id missing")
+		t.Errorf("name-decoded tag iplane-id missing")
 	}
 }
 
-func TestList_ClientSideFilter_OperatorOnly(t *testing.T) {
-	// No iplane-id in filter -> no server-side name pre-filter; List
-	// returns everything under the account and we filter client-side
-	// by the iplane-operator env var.
-	_, p := newFake(t, func(query string, vars map[string]any) (int, string) {
-		return 200, `{
-			"data": {
-				"myself": {
-					"pods": [
-						{"id": "rp-mine",    "env": ["iplane-id=foo", "iplane-operator=default"], "desiredStatus": "RUNNING", "costPerHr": 0.39, "createdAt": "2026-05-11T18:22:11Z"},
-						{"id": "rp-theirs",  "env": ["iplane-operator=someone-else"], "desiredStatus": "RUNNING", "costPerHr": 0.39, "createdAt": "2026-05-11T18:22:11Z"},
-						{"id": "rp-no-tag",  "env": [], "desiredStatus": "RUNNING", "costPerHr": 0.39, "createdAt": "2026-05-11T18:22:11Z"}
-					]
-				}
-			}
-		}`
+func TestList_NoFilter_ReturnsAll(t *testing.T) {
+	f, p := newFake(t, func(method, path string, body []byte) (int, string) {
+		return 200, `[
+			{"id": "rp-mine", "name": "iplane-foo", "createdAt": "2026-05-11T18:22:11Z", "desiredStatus": "RUNNING"},
+			{"id": "rp-other", "name": "other-name", "createdAt": "2026-05-11T18:22:11Z", "desiredStatus": "RUNNING"}
+		]`
 	})
-	refs, err := p.List(context.Background(), map[string]string{
-		provisioners.TagOperator: "default",
-	})
+	refs, err := p.List(context.Background(), nil)
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if len(refs) != 1 {
-		t.Fatalf("client-side filter should keep only rp-mine, got %d refs", len(refs))
+	if len(refs) != 2 {
+		t.Errorf("got %d refs, want 2", len(refs))
 	}
-	if refs[0].GetProviderId() != "rp-mine" {
-		t.Errorf("ProviderId = %q, want rp-mine", refs[0].GetProviderId())
+	if f.lastQuery != "" {
+		t.Errorf("expected no query for empty filter, got %q", f.lastQuery)
 	}
 }
 
@@ -394,9 +424,9 @@ func TestIsActiveProviderState(t *testing.T) {
 
 func TestResolveSKU(t *testing.T) {
 	cases := []struct {
-		class    string
-		wantSKU  string
-		wantErr  bool
+		class   string
+		wantSKU string
+		wantErr bool
 	}{
 		{provisioners.GPUClassSmall, "NVIDIA GeForce RTX 4090", false},
 		{provisioners.GPUClassMedium, "NVIDIA RTX A6000", false},
@@ -422,41 +452,5 @@ func TestClassifySKU(t *testing.T) {
 	}
 	if got := classifySKU("Custom Unknown GPU"); got != "" {
 		t.Errorf("classifySKU(unknown) = %q, want empty", got)
-	}
-}
-
-func TestTagsToEnvInput_RoundTrip(t *testing.T) {
-	tags := map[string]string{
-		provisioners.TagID:       "my-pod",
-		provisioners.TagOperator: "default",
-		"owner":                  "demo",
-	}
-	envInput := tagsToEnvInput(tags)
-	if len(envInput) != 3 {
-		t.Fatalf("got %d entries, want 3", len(envInput))
-	}
-	// Simulate RunPod's response format ("KEY=VALUE") and decode back.
-	wireEnv := make([]string, 0, len(envInput))
-	for _, e := range envInput {
-		wireEnv = append(wireEnv, e["key"]+"="+e["value"])
-	}
-	decoded := envSliceToMap(wireEnv)
-	for k, v := range tags {
-		if decoded[k] != v {
-			t.Errorf("round-trip lost tag %q: got %q want %q", k, decoded[k], v)
-		}
-	}
-}
-
-func TestEnvSliceToMap_SkipsMalformed(t *testing.T) {
-	got := envSliceToMap([]string{"a=1", "no-equals", "=leading-equals", "b=2=with-extra"})
-	if len(got) != 2 {
-		t.Errorf("got %d entries, want 2 (a, b); have %v", len(got), got)
-	}
-	if got["a"] != "1" {
-		t.Errorf("a = %q, want 1", got["a"])
-	}
-	if got["b"] != "2=with-extra" {
-		t.Errorf("b = %q, want 2=with-extra (everything after first =)", got["b"])
 	}
 }
