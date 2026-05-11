@@ -1,0 +1,107 @@
+syntax = "proto3";
+
+package provisioner.v1;
+
+import "provisioner/v1/types.proto";
+
+// ProvisionerService is the operator-facing surface for instance
+// lifecycle. Implements the failure-mode contract from
+// docs/design/0001-provisioner.md: idempotency lookup before Spawn,
+// pending -> active state hygiene, list-with-self-heal, terminate
+// idempotency.
+//
+// The service struct that implements this interface is callable
+// directly in-process today (the v0.1 CLI instantiates it and calls
+// methods) and registers cleanly with a connect/grpc mux later (when
+// iplane serve grows the surface). Call signatures are identical
+// in both modes -- the only thing that changes is whether the caller
+// holds the struct or a generated ProvisionerServiceClient.
+//
+// Adapters for individual providers (RunPod, local, Lambda Labs) are
+// Go-internal -- they satisfy a separate Provider interface that the
+// service struct calls into. This matches the existing pattern in the
+// codebase: Backend is Go-internal, InferenceService is the gRPC
+// surface that consumes it.
+service ProvisionerService {
+  // CreateInstance runs the full idempotency + state-hygiene contract.
+  // Re-running with the same spec.id returns the existing instance if
+  // it is pending/active (already_existed=true), or spawns a fresh one
+  // if the previous record is terminated/failed (already_existed=false).
+  rpc CreateInstance(CreateInstanceRequest) returns (CreateInstanceResponse);
+
+  // DestroyInstance transitions an instance to terminating, calls the
+  // provider, then settles to terminated or failed. Idempotent: destroying
+  // an already-terminated id returns the existing record.
+  rpc DestroyInstance(DestroyInstanceRequest) returns (DestroyInstanceResponse);
+
+  // DescribeInstance returns the current view of one instance. SOURCE_LOCAL
+  // returns the local state-file record (fast, may be stale during a crash
+  // recovery window). SOURCE_REMOTE asks the provider directly and refreshes
+  // the local record.
+  rpc DescribeInstance(DescribeInstanceRequest) returns (DescribeInstanceResponse);
+
+  // ListInstances enumerates instances. SOURCE_LOCAL returns the
+  // state-file view and self-heals any pending/terminating records via
+  // a tag-filtered provider List. SOURCE_REMOTE returns the provider's
+  // view (under the operator tag) so the CLI can surface leaked
+  // instances the operator has no local record of.
+  rpc ListInstances(ListInstancesRequest) returns (ListInstancesResponse);
+}
+
+// Source selects whether the service consults local state, the provider,
+// or both. Default (SOURCE_UNSPECIFIED) is SOURCE_LOCAL.
+enum Source {
+  SOURCE_UNSPECIFIED = 0;
+  // State-file view, with self-heal for pending/terminating records.
+  SOURCE_LOCAL = 1;
+  // Provider's view via the underlying List call. Used to detect
+  // leaked instances and to recover after a wiped state file.
+  SOURCE_REMOTE = 2;
+}
+
+message CreateInstanceRequest {
+  Spec spec = 1;
+}
+
+message CreateInstanceResponse {
+  Instance instance = 1;
+  // True when the idempotency lookup found a pending/active match and
+  // no Spawn was called. The CLI uses this to pick its output ("created"
+  // vs "already exists, returning existing").
+  bool already_existed = 2;
+}
+
+message DestroyInstanceRequest {
+  string id = 1;
+  // Skip the provider Terminate call and mark the record terminated
+  // anyway. Used by the recovery workflow when the provider has
+  // already confirmed the instance is gone but local state is stuck
+  // in terminating.
+  bool force = 2;
+}
+
+message DestroyInstanceResponse {
+  Instance instance = 1;
+}
+
+message DescribeInstanceRequest {
+  string id = 1;
+  Source source = 2;
+}
+
+message DescribeInstanceResponse {
+  Instance instance = 1;
+}
+
+message ListInstancesRequest {
+  Source source = 1;
+  // Optional. When non-empty, restrict the result to instances on this
+  // provider. Empty means all providers. Required when source=REMOTE
+  // (we cannot enumerate "all providers" remotely without iterating
+  // every configured adapter, which v0.1 declines to do silently).
+  string provider = 2;
+}
+
+message ListInstancesResponse {
+  repeated Instance instances = 1;
+}

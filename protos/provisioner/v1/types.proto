@@ -1,0 +1,168 @@
+syntax = "proto3";
+
+package provisioner.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// Spec is what the operator asks for. Provider-agnostic. Everything in
+// the spec is decided before any provider call happens.
+//
+// Locked by docs/design/0001-provisioner.md. Read that for the rationale
+// behind every field (especially id, which is mandatory and tenant-globally
+// unique, and the gpu class-or-sku choice).
+message Spec {
+  // Operator-supplied identifier. Required. Tenant-globally unique
+  // across all providers. The service rejects ids starting with the
+  // reserved "iplane-" prefix.
+  string id = 1;
+
+  // Adapter that will fulfil the spec ("runpod", "local").
+  string provider = 2;
+
+  // Provider-specific region identifier. Required.
+  string region = 3;
+
+  // What hardware the operator wants.
+  GpuSpec gpu = 4;
+
+  // Docker-capable base image ref the provider should boot. Phase 2's
+  // deploy primitive docker-runs the engine container on top. Empty
+  // means "provider default."
+  string base_image = 5;
+
+  // Operator-supplied labels (cost attribution, owner, cluster
+  // membership). The adapter merges them with the iplane-id and
+  // iplane-operator tags it stamps automatically.
+  map<string, string> tags = 6;
+}
+
+// GpuSpec is how the operator describes the hardware they want. class
+// is the primary surface (portable across providers); sku is the escape
+// hatch for cases where class does not capture the requirement (specific
+// NVLink topology, particular generation). The two are mutually
+// exclusive; the service rejects specs that set both.
+message GpuSpec {
+  // small | medium | large | xlarge -- maps to the chapter taxonomy.
+  string class = 1;
+  // Provider-specific override.
+  string sku = 2;
+  // Default 1.
+  int32 count = 3;
+}
+
+// GpuInfo describes what was actually scheduled. Distinct from GpuSpec
+// because the operator asked for a class but the provider answers with
+// a concrete SKU and observed VRAM.
+message GpuInfo {
+  string class = 1;
+  string sku = 2;
+  int32 count = 3;
+  int32 vram_gb = 4;
+}
+
+// SshTarget is the reachability tuple returned for instances that expose
+// SSH (every provider in v0.1 except local). Phase 2's deploy primitive
+// uses it to docker-run the engine container.
+message SshTarget {
+  string host = 1;
+  int32 port = 2;
+  string user = 3;
+}
+
+// InstanceState is the lifecycle phase of a provisioned instance, as
+// iplane sees it. Five values, not three -- the two *ing states
+// (PENDING, TERMINATING) exist so partial-failure recovery can
+// distinguish "asked but do not know" from "tried and failed" without
+// over-charging or leaking.
+enum InstanceState {
+  INSTANCE_STATE_UNSPECIFIED = 0;
+  // Record written locally, Spawn call has not returned.
+  INSTANCE_STATE_PENDING = 1;
+  // Spawn returned success, instance reachable, billing started.
+  INSTANCE_STATE_ACTIVE = 2;
+  // Terminate requested, provider call has not returned.
+  INSTANCE_STATE_TERMINATING = 3;
+  // Provider confirms gone (or returned not-found).
+  INSTANCE_STATE_TERMINATED = 4;
+  // Provider returned an error; resolution requires operator action.
+  INSTANCE_STATE_FAILED = 5;
+}
+
+// Instance is what the provider returned, plus iplane-side bookkeeping.
+// The spec field is a snapshot of what was asked for so reconcile can
+// detect drift and errata cherry-picks that change the class -> SKU
+// table can still answer "what did class:large mean on the day this
+// was created."
+//
+// Instances are immutable from iplane's perspective. Resize, change
+// image, change region -- all destroy-and-recreate.
+message Instance {
+  // Mirror of spec.id. Iplane-side canonical identifier.
+  string id = 1;
+
+  // Provider's internal handle (RunPod pod id, AWS instance-id, a
+  // process identifier for local). Filled by Spawn; empty while
+  // state is PENDING or FAILED-pre-spawn.
+  string provider_id = 2;
+
+  // Which adapter owns this instance.
+  string provider = 3;
+
+  // Spec snapshot from the time of Spawn.
+  Spec spec = 4;
+
+  // Region as actually scheduled by the provider (may differ from
+  // spec.region if the provider auto-selects a sub-zone).
+  string region = 5;
+
+  // GPU as actually scheduled (concrete SKU, observed VRAM).
+  GpuInfo gpu = 6;
+
+  // What the operator is being billed at the moment of Spawn. Loaded
+  // from providers.yaml then confirmed against the provider's response
+  // where available.
+  double hourly_rate_usd = 7;
+
+  InstanceState state = 8;
+
+  // When the local record was first written (state=PENDING).
+  google.protobuf.Timestamp created_at = 9;
+
+  // When Spawn returned success and state moved to ACTIVE.
+  google.protobuf.Timestamp activated_at = 10;
+
+  // When state moved to TERMINATED.
+  google.protobuf.Timestamp terminated_at = 11;
+
+  // Empty until state==ACTIVE. Local instances leave this empty
+  // permanently (no remote shell on the laptop).
+  SshTarget ssh = 12;
+
+  // The wrapped provider-error message when state is FAILED. Surfaced
+  // to the operator on the next list.
+  string failure_reason = 13;
+
+  // Provider-specific extension data, opaque to iplane core. Raw JSON
+  // bytes so a v0.1 reader can deserialize state written by a future
+  // version without losing or rejecting unknown fields -- the
+  // forward-compatibility property the state file owes any reader
+  // pinned to ch06-final.
+  bytes provider_data = 14;
+}
+
+// InstanceRef is the lighter-weight record returned by the underlying
+// provider List operation. Carries the minimum needed to reconcile
+// against local state. Callers that need the full Instance call
+// Describe(provider_id).
+message InstanceRef {
+  string provider_id = 1;
+  // The provider's literal status string. The provider package documents
+  // the mapping to InstanceState; pushing the mapping into the adapter
+  // keeps the wire vocabulary visible for debugging.
+  string provider_state = 2;
+  // Includes iplane-id and iplane-operator if iplane created the
+  // instance.
+  map<string, string> tags = 3;
+  double hourly_rate_usd = 4;
+  google.protobuf.Timestamp created_at = 5;
+}

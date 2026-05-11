@@ -1,0 +1,503 @@
+package provisioners
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"connectrpc.com/connect"
+	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
+	"github.com/inference-book/inference-plane/gen/go/provisioner/v1/provisionerv1connect"
+	"github.com/inference-book/inference-plane/internal/provisioners/state"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
+)
+
+// Service implements the generated ProvisionerServiceHandler. It owns
+// the failure-mode contract from docs/design/0001-provisioner.md:
+// idempotency lookup before Spawn, pending -> active state hygiene,
+// list with per-record self-heal, terminate idempotency.
+//
+// The service is callable two ways with no code changes between them:
+//
+//	// today: in-process
+//	svc := provisioners.New(...)
+//	resp, err := svc.CreateInstance(ctx, connect.NewRequest(&pb.CreateInstanceRequest{...}))
+//
+//	// later, when iplane serve mounts it on a mux:
+//	mux.Handle(provisionerv1connect.NewProvisionerServiceHandler(svc))
+//	client := provisionerv1connect.NewProvisionerServiceClient(httpClient, base)
+//	resp, err := client.CreateInstance(ctx, connect.NewRequest(&pb.CreateInstanceRequest{...}))
+type Service struct {
+	providers  map[string]Provider
+	store      *state.Store
+	operatorID string
+	clock      func() time.Time
+}
+
+// Option configures the Service at construction time.
+type Option func(*Service)
+
+// WithClock injects a clock function. Tests pass a fixed-clock factory
+// so timestamps are assertable.
+func WithClock(c func() time.Time) Option {
+	return func(s *Service) { s.clock = c }
+}
+
+// New constructs a Service. Providers are keyed by their Name() so the
+// service can dispatch by spec.provider without an interface assertion
+// at call time.
+func New(providers []Provider, store *state.Store, operatorID string, opts ...Option) *Service {
+	s := &Service{
+		providers:  make(map[string]Provider, len(providers)),
+		store:      store,
+		operatorID: operatorID,
+		clock:      time.Now,
+	}
+	for _, p := range providers {
+		s.providers[p.Name()] = p
+	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
+}
+
+// CreateInstance implements the design doc's three-step contract:
+//
+//  1. Critical section: check local state; if no live record, claim a
+//     pending record atomically. This closes the same-laptop race
+//     window.
+//
+//  2. Outside the critical section: ask the target provider whether it
+//     already has an instance under our iplane-id tag (catches the
+//     wiped-state-file recovery case). If yes, adopt it.
+//
+//  3. Otherwise: call Spawn, then patch the pending record to active
+//     (or failed) in a final critical section.
+func (s *Service) CreateInstance(ctx context.Context, req *connect.Request[provisionerv1.CreateInstanceRequest]) (*connect.Response[provisionerv1.CreateInstanceResponse], error) {
+	spec := req.Msg.GetSpec()
+	if spec == nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("spec is required"))
+	}
+	if err := ValidateID(spec.GetId()); err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, err)
+	}
+	if err := validateGPUSpec(spec.GetGpu()); err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, err)
+	}
+	if spec.GetRegion() == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("region is required"))
+	}
+	provider, ok := s.providers[spec.GetProvider()]
+	if !ok {
+		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("unknown provider %q", spec.GetProvider()))
+	}
+
+	// Step 1: critical section.
+	var record *provisionerv1.Instance
+	var alreadyExisted bool
+	var claimedPending bool
+	err := s.store.Update(func(f *state.File) error {
+		if existing, ok := f.Instances[spec.GetId()]; ok {
+			switch existing.GetState() {
+			case provisionerv1.InstanceState_INSTANCE_STATE_PENDING, provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE:
+				if existing.GetProvider() != spec.GetProvider() {
+					return fmt.Errorf("id %q already exists on provider %q; destroy and recreate to move providers", spec.GetId(), existing.GetProvider())
+				}
+				record = existing
+				alreadyExisted = true
+				return nil
+			case provisionerv1.InstanceState_INSTANCE_STATE_TERMINATING:
+				return fmt.Errorf("id %q is currently terminating; wait for completion", spec.GetId())
+			}
+			// TERMINATED or FAILED: treat as gone, claim pending below.
+		}
+		record = newPendingInstance(spec, provider.Name(), s.clock())
+		f.Instances[spec.GetId()] = record
+		claimedPending = true
+		return nil
+	})
+	if err != nil {
+		return nil, connect.NewError(connect.CodeFailedPrecondition, err)
+	}
+	if alreadyExisted {
+		return connect.NewResponse(&provisionerv1.CreateInstanceResponse{
+			Instance:       record,
+			AlreadyExisted: true,
+		}), nil
+	}
+	if !claimedPending {
+		return nil, connect.NewError(connect.CodeInternal, errors.New("no record claimed and no existing record returned"))
+	}
+
+	// Step 2: remote lookup by iplane-id tag on the target provider.
+	// Listing failures are non-fatal: log into the failure path only if
+	// we cannot Spawn either.
+	refs, _ := provider.List(ctx, map[string]string{
+		TagID:       spec.GetId(),
+		TagOperator: s.operatorID,
+	})
+	for _, ref := range refs {
+		if !isActiveLikeProviderState(provider.Name(), ref.GetProviderState()) {
+			continue
+		}
+		adopted, descErr := provider.Describe(ctx, ref.GetProviderId())
+		if descErr != nil {
+			continue
+		}
+		adopted = s.finalizeActive(adopted, spec, provider.Name(), record.GetCreatedAt())
+		if patchErr := s.patchRecord(spec.GetId(), adopted); patchErr != nil {
+			return nil, connect.NewError(connect.CodeInternal, patchErr)
+		}
+		return connect.NewResponse(&provisionerv1.CreateInstanceResponse{
+			Instance:       adopted,
+			AlreadyExisted: true,
+		}), nil
+	}
+
+	// Step 3: Spawn (no flock held), then patch.
+	stampedSpec := withSystemTags(spec, s.operatorID)
+	spawned, spawnErr := provider.Spawn(ctx, stampedSpec)
+	if spawnErr != nil {
+		failed := proto.Clone(record).(*provisionerv1.Instance)
+		failed.State = provisionerv1.InstanceState_INSTANCE_STATE_FAILED
+		failed.FailureReason = spawnErr.Error()
+		if patchErr := s.patchRecord(spec.GetId(), failed); patchErr != nil {
+			return nil, connect.NewError(connect.CodeInternal, errors.Join(spawnErr, patchErr))
+		}
+		return nil, spawnErr
+	}
+	spawned = s.finalizeActive(spawned, spec, provider.Name(), record.GetCreatedAt())
+	if patchErr := s.patchRecord(spec.GetId(), spawned); patchErr != nil {
+		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("spawn succeeded but state patch failed: %w", patchErr))
+	}
+	return connect.NewResponse(&provisionerv1.CreateInstanceResponse{Instance: spawned}), nil
+}
+
+// DestroyInstance transitions a known record to terminating, calls the
+// provider, and settles to terminated or failed.
+func (s *Service) DestroyInstance(ctx context.Context, req *connect.Request[provisionerv1.DestroyInstanceRequest]) (*connect.Response[provisionerv1.DestroyInstanceResponse], error) {
+	id := req.Msg.GetId()
+	if err := ValidateID(id); err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, err)
+	}
+
+	// Step 1: read + transition to terminating, capture providerID.
+	var record *provisionerv1.Instance
+	var providerID string
+	var providerName string
+	err := s.store.Update(func(f *state.File) error {
+		existing, ok := f.Instances[id]
+		if !ok {
+			return fmt.Errorf("no instance with id %q", id)
+		}
+		switch existing.GetState() {
+		case provisionerv1.InstanceState_INSTANCE_STATE_TERMINATED:
+			record = existing
+			return nil
+		case provisionerv1.InstanceState_INSTANCE_STATE_PENDING:
+			// Pending means Spawn may have started -- still go through the
+			// provider Terminate (which is idempotent) so we do not leak.
+		}
+		providerID = existing.GetProviderId()
+		providerName = existing.GetProvider()
+		existing.State = provisionerv1.InstanceState_INSTANCE_STATE_TERMINATING
+		record = existing
+		return nil
+	})
+	if err != nil {
+		return nil, connect.NewError(connect.CodeNotFound, err)
+	}
+	if record.GetState() == provisionerv1.InstanceState_INSTANCE_STATE_TERMINATED {
+		return connect.NewResponse(&provisionerv1.DestroyInstanceResponse{Instance: record}), nil
+	}
+
+	// Step 2: provider call (no flock).
+	var terminateErr error
+	if !req.Msg.GetForce() && providerID != "" {
+		provider, ok := s.providers[providerName]
+		if !ok {
+			return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("provider %q not configured", providerName))
+		}
+		terminateErr = provider.Terminate(ctx, providerID)
+	}
+
+	// Step 3: patch.
+	now := timestamppb.New(s.clock())
+	patchErr := s.store.Update(func(f *state.File) error {
+		existing, ok := f.Instances[id]
+		if !ok {
+			return nil
+		}
+		if terminateErr != nil {
+			existing.State = provisionerv1.InstanceState_INSTANCE_STATE_FAILED
+			existing.FailureReason = terminateErr.Error()
+		} else {
+			existing.State = provisionerv1.InstanceState_INSTANCE_STATE_TERMINATED
+			existing.TerminatedAt = now
+		}
+		record = existing
+		return nil
+	})
+	if terminateErr != nil {
+		return nil, errors.Join(terminateErr, patchErr)
+	}
+	if patchErr != nil {
+		return nil, connect.NewError(connect.CodeInternal, patchErr)
+	}
+	return connect.NewResponse(&provisionerv1.DestroyInstanceResponse{Instance: record}), nil
+}
+
+// DescribeInstance returns the local-state record (SOURCE_LOCAL, default)
+// or asks the provider directly (SOURCE_REMOTE) and refreshes the local
+// record from the response.
+func (s *Service) DescribeInstance(ctx context.Context, req *connect.Request[provisionerv1.DescribeInstanceRequest]) (*connect.Response[provisionerv1.DescribeInstanceResponse], error) {
+	id := req.Msg.GetId()
+	if err := ValidateID(id); err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, err)
+	}
+	source := req.Msg.GetSource()
+	if source == provisionerv1.Source_SOURCE_UNSPECIFIED {
+		source = provisionerv1.Source_SOURCE_LOCAL
+	}
+
+	file, err := s.store.Read()
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+	existing, ok := file.Instances[id]
+	if !ok {
+		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("no instance with id %q", id))
+	}
+	if source == provisionerv1.Source_SOURCE_LOCAL {
+		return connect.NewResponse(&provisionerv1.DescribeInstanceResponse{Instance: existing}), nil
+	}
+
+	// SOURCE_REMOTE
+	provider, ok := s.providers[existing.GetProvider()]
+	if !ok {
+		return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("provider %q not configured", existing.GetProvider()))
+	}
+	if existing.GetProviderId() == "" {
+		return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("id %q has no provider_id yet (state=%s)", id, existing.GetState()))
+	}
+	refreshed, err := provider.Describe(ctx, existing.GetProviderId())
+	if err != nil {
+		return nil, err
+	}
+	refreshed = s.finalizeActive(refreshed, existing.GetSpec(), provider.Name(), existing.GetCreatedAt())
+	if patchErr := s.patchRecord(id, refreshed); patchErr != nil {
+		return nil, connect.NewError(connect.CodeInternal, patchErr)
+	}
+	return connect.NewResponse(&provisionerv1.DescribeInstanceResponse{Instance: refreshed}), nil
+}
+
+// ListInstances returns the local-state view (SOURCE_LOCAL, default,
+// with per-record self-heal for pending/terminating records) or the
+// provider's view (SOURCE_REMOTE -- requires a provider filter).
+func (s *Service) ListInstances(ctx context.Context, req *connect.Request[provisionerv1.ListInstancesRequest]) (*connect.Response[provisionerv1.ListInstancesResponse], error) {
+	source := req.Msg.GetSource()
+	if source == provisionerv1.Source_SOURCE_UNSPECIFIED {
+		source = provisionerv1.Source_SOURCE_LOCAL
+	}
+	providerFilter := req.Msg.GetProvider()
+
+	if source == provisionerv1.Source_SOURCE_REMOTE {
+		if providerFilter == "" {
+			return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("--remote requires a provider"))
+		}
+		provider, ok := s.providers[providerFilter]
+		if !ok {
+			return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("unknown provider %q", providerFilter))
+		}
+		refs, err := provider.List(ctx, map[string]string{TagOperator: s.operatorID})
+		if err != nil {
+			return nil, err
+		}
+		instances := make([]*provisionerv1.Instance, 0, len(refs))
+		for _, ref := range refs {
+			instances = append(instances, refToInstance(ref, provider.Name()))
+		}
+		return connect.NewResponse(&provisionerv1.ListInstancesResponse{Instances: instances}), nil
+	}
+
+	// SOURCE_LOCAL: self-heal pending/terminating before returning.
+	file, err := s.store.Read()
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+	for id, inst := range file.Instances {
+		if providerFilter != "" && inst.GetProvider() != providerFilter {
+			continue
+		}
+		st := inst.GetState()
+		if st != provisionerv1.InstanceState_INSTANCE_STATE_PENDING && st != provisionerv1.InstanceState_INSTANCE_STATE_TERMINATING {
+			continue
+		}
+		provider, ok := s.providers[inst.GetProvider()]
+		if !ok {
+			continue
+		}
+		refs, listErr := provider.List(ctx, map[string]string{
+			TagID:       id,
+			TagOperator: s.operatorID,
+		})
+		if listErr != nil {
+			continue
+		}
+		if len(refs) == 0 {
+			// Provider has no record; if we are terminating, declare terminated.
+			// If we are pending, leave it -- user inspects and decides.
+			if st == provisionerv1.InstanceState_INSTANCE_STATE_TERMINATING {
+				now := timestamppb.New(s.clock())
+				_ = s.store.Update(func(f *state.File) error {
+					if rec, ok := f.Instances[id]; ok {
+						rec.State = provisionerv1.InstanceState_INSTANCE_STATE_TERMINATED
+						rec.TerminatedAt = now
+					}
+					return nil
+				})
+			}
+			continue
+		}
+		// Provider has a record. If terminating, leave; if pending, promote to active.
+		if st == provisionerv1.InstanceState_INSTANCE_STATE_PENDING {
+			adopted, descErr := provider.Describe(ctx, refs[0].GetProviderId())
+			if descErr != nil {
+				continue
+			}
+			finalized := s.finalizeActive(adopted, inst.GetSpec(), provider.Name(), inst.GetCreatedAt())
+			_ = s.patchRecord(id, finalized)
+		}
+	}
+
+	// Reread after self-heal so callers see fresh state.
+	file, err = s.store.Read()
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+	instances := make([]*provisionerv1.Instance, 0, len(file.Instances))
+	for _, inst := range file.Instances {
+		if providerFilter != "" && inst.GetProvider() != providerFilter {
+			continue
+		}
+		instances = append(instances, inst)
+	}
+	return connect.NewResponse(&provisionerv1.ListInstancesResponse{Instances: instances}), nil
+}
+
+// patchRecord writes the supplied instance back to state under the
+// given id, taking the flock for the duration. Idempotent: if the
+// record was removed concurrently, the patch silently re-creates it.
+func (s *Service) patchRecord(id string, inst *provisionerv1.Instance) error {
+	return s.store.Update(func(f *state.File) error {
+		f.Instances[id] = inst
+		return nil
+	})
+}
+
+// finalizeActive merges provider response fields with the bookkeeping
+// (id, provider name, spec snapshot, original created_at) that the
+// service is responsible for. Callers pass the original created_at
+// from the pending record so the active record carries the same
+// timestamp the operator first saw.
+func (s *Service) finalizeActive(inst *provisionerv1.Instance, spec *provisionerv1.Spec, providerName string, createdAt *timestamppb.Timestamp) *provisionerv1.Instance {
+	if inst.GetState() == provisionerv1.InstanceState_INSTANCE_STATE_UNSPECIFIED {
+		inst.State = provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE
+	}
+	if inst.ActivatedAt == nil {
+		inst.ActivatedAt = timestamppb.New(s.clock())
+	}
+	if createdAt != nil {
+		inst.CreatedAt = createdAt
+	} else if inst.CreatedAt == nil {
+		inst.CreatedAt = timestamppb.New(s.clock())
+	}
+	inst.Id = spec.GetId()
+	inst.Provider = providerName
+	if inst.Spec == nil {
+		inst.Spec = spec
+	}
+	return inst
+}
+
+// newPendingInstance constructs the record we write before calling
+// Spawn. created_at carries forward to the active record.
+func newPendingInstance(spec *provisionerv1.Spec, providerName string, now time.Time) *provisionerv1.Instance {
+	return &provisionerv1.Instance{
+		Id:        spec.GetId(),
+		Provider:  providerName,
+		Spec:      spec,
+		Region:    spec.GetRegion(),
+		State:     provisionerv1.InstanceState_INSTANCE_STATE_PENDING,
+		CreatedAt: timestamppb.New(now),
+	}
+}
+
+// withSystemTags returns a clone of spec with iplane-id and
+// iplane-operator stamped into Tags. The adapter passes the resulting
+// spec to its provider SDK so the stamped tags land on the provider
+// instance for later List filtering.
+func withSystemTags(spec *provisionerv1.Spec, operatorID string) *provisionerv1.Spec {
+	cloned := proto.Clone(spec).(*provisionerv1.Spec)
+	if cloned.Tags == nil {
+		cloned.Tags = make(map[string]string)
+	}
+	cloned.Tags[TagID] = spec.GetId()
+	cloned.Tags[TagOperator] = operatorID
+	return cloned
+}
+
+// validateGPUSpec enforces the class/SKU mutual exclusion. Default
+// count=0 is treated as 1 (proto3 zero-value means "unset"); a Spawn
+// adapter is free to default differently if it wants.
+func validateGPUSpec(g *provisionerv1.GpuSpec) error {
+	if g == nil {
+		return errors.New("gpu spec is required")
+	}
+	if g.GetClass() == "" && g.GetSku() == "" {
+		return errors.New("gpu: one of class or sku is required")
+	}
+	if g.GetClass() != "" && g.GetSku() != "" {
+		return errors.New("gpu: class and sku are mutually exclusive")
+	}
+	return nil
+}
+
+// isActiveLikeProviderState maps a provider's literal status string to
+// "this instance counts as active for idempotency adoption." Each
+// adapter ships its own vocabulary; this helper is the central
+// registry. Local always returns empty from List, so it never reaches
+// this function -- only RunPod (phase 1.3) and later providers do.
+func isActiveLikeProviderState(provider, providerState string) bool {
+	switch provider {
+	case ProviderRunPod:
+		switch strings.ToLower(providerState) {
+		case "running", "ready":
+			return true
+		}
+	}
+	return false
+}
+
+// refToInstance synthesizes a sparse Instance from a List result. Used
+// when the SOURCE_REMOTE caller asked for "show me what the provider
+// knows" without prior local state.
+func refToInstance(ref *provisionerv1.InstanceRef, providerName string) *provisionerv1.Instance {
+	tags := ref.GetTags()
+	id := tags[TagID] // may be empty for non-iplane-created instances
+	return &provisionerv1.Instance{
+		Id:            id,
+		ProviderId:    ref.GetProviderId(),
+		Provider:      providerName,
+		HourlyRateUsd: ref.GetHourlyRateUsd(),
+		State:         provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE,
+		CreatedAt:     ref.GetCreatedAt(),
+	}
+}
+
+// Compile-time check that Service implements the generated handler.
+var _ provisionerv1connect.ProvisionerServiceHandler = (*Service)(nil)
