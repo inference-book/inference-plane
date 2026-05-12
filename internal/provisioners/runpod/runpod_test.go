@@ -55,11 +55,19 @@ func newFake(t *testing.T, respond func(method, path string, body []byte) (int, 
 }
 
 func okSpec() *provisionerv1.Spec {
+	// The Service is responsible for expanding class shorthand into
+	// constraints before the adapter sees the spec; in tests we set
+	// the expanded constraints directly so the adapter call site
+	// gets exercised at face value.
 	return &provisionerv1.Spec{
 		Id:       "my-pod",
 		Provider: provisioners.ProviderRunPod,
 		Region:   "US-CA-1",
-		Gpu:      &provisionerv1.GpuSpec{Class: provisioners.GPUClassSmall},
+		Requirements: &provisionerv1.ResourceRequirements{
+			MinVramGb: 24,
+			MinDiskGb: 20,
+			MinRamGb:  16,
+		},
 	}
 }
 
@@ -146,27 +154,34 @@ func TestSpawn_PassesFullSKUFallbackList(t *testing.T) {
 		t.Errorf("unexpected request %s %s", method, path)
 		return 500, "{}"
 	})
+	// large-class constraints expanded: ≥80 GB VRAM, ≥60 GB disk, ≥64 GB RAM.
 	spec := okSpec()
-	spec.Gpu.Class = provisioners.GPUClassLarge
+	spec.Requirements = &provisionerv1.ResourceRequirements{
+		MinVramGb: 80,
+		MinDiskGb: 60,
+		MinRamGb:  64,
+	}
 	if _, err := p.Spawn(context.Background(), spec); err != nil {
 		t.Fatalf("Spawn: %v", err)
 	}
 	ids, _ := sentBody["gpuTypeIds"].([]any)
 	if len(ids) < 2 {
-		t.Errorf("gpuTypeIds should carry the full class fallback list, got %v", ids)
+		t.Errorf("gpuTypeIds should carry every SKU satisfying the constraint, got %v", ids)
 	}
 }
 
-func TestSpawn_UnknownClass(t *testing.T) {
+func TestSpawn_NoMatchingSKU(t *testing.T) {
 	_, p := newFake(t, func(method, path string, body []byte) (int, string) {
 		t.Error("provider should reject before HTTP")
 		return 500, "{}"
 	})
+	// Asking for more VRAM than any SKU in the runpod catalog provides
+	// (no GPU in the table has > 96 GB VRAM).
 	spec := okSpec()
-	spec.Gpu.Class = "ginormous"
+	spec.Requirements = &provisionerv1.ResourceRequirements{MinVramGb: 200}
 	_, err := p.Spawn(context.Background(), spec)
 	if err == nil {
-		t.Fatal("Spawn should reject unknown class before HTTP")
+		t.Fatal("Spawn should reject when no SKU satisfies the constraint")
 	}
 	var pe *provisioners.ProviderError
 	if !errors.As(err, &pe) {
@@ -188,7 +203,7 @@ func TestSpawn_SkuOverridesClass(t *testing.T) {
 		return 500, "{}"
 	})
 	spec := okSpec()
-	spec.Gpu = &provisionerv1.GpuSpec{Sku: "NVIDIA H100 NVL"}
+	spec.Requirements = &provisionerv1.ResourceRequirements{Sku: "NVIDIA H100 NVL"}
 	if _, err := p.Spawn(context.Background(), spec); err != nil {
 		t.Fatalf("Spawn: %v", err)
 	}
@@ -422,26 +437,32 @@ func TestIsActiveProviderState(t *testing.T) {
 	}
 }
 
-func TestResolveSKU(t *testing.T) {
+func TestMatchSKUs(t *testing.T) {
+	// VRAM constraints should narrow to the SKUs that satisfy them,
+	// cheapest first.
 	cases := []struct {
-		class   string
-		wantSKU string
-		wantErr bool
+		name     string
+		reqs     *provisionerv1.ResourceRequirements
+		wantFirst string // expected first SKU (cheapest matching)
+		wantNonEmpty bool
 	}{
-		{provisioners.GPUClassSmall, "NVIDIA GeForce RTX 4090", false},
-		{provisioners.GPUClassMedium, "NVIDIA RTX A6000", false},
-		{provisioners.GPUClassLarge, "NVIDIA A100 80GB PCIe", false},
-		{provisioners.GPUClassXLarge, "NVIDIA H100 80GB HBM3", false},
-		{"colossal", "", true},
-		{"", "", true},
+		{"24GB VRAM", &provisionerv1.ResourceRequirements{MinVramGb: 24}, "NVIDIA GeForce RTX 4090", true},
+		{"80GB VRAM", &provisionerv1.ResourceRequirements{MinVramGb: 80}, "NVIDIA A100 80GB PCIe", true},
+		{"96GB VRAM", &provisionerv1.ResourceRequirements{MinVramGb: 96}, "", false},
+		{"40GB+128RAM", &provisionerv1.ResourceRequirements{MinVramGb: 40, MinRamGb: 128}, "NVIDIA H100 80GB HBM3", true},
 	}
 	for _, c := range cases {
-		got, err := resolveSKU(c.class)
-		if (err != nil) != c.wantErr {
-			t.Errorf("resolveSKU(%q) err=%v wantErr=%v", c.class, err, c.wantErr)
+		got := MatchSKUs(c.reqs)
+		if c.wantNonEmpty && len(got) == 0 {
+			t.Errorf("%s: got empty, want at least one match", c.name)
+			continue
 		}
-		if got != c.wantSKU {
-			t.Errorf("resolveSKU(%q) = %q, want %q", c.class, got, c.wantSKU)
+		if !c.wantNonEmpty && len(got) != 0 {
+			t.Errorf("%s: got %v, want empty", c.name, got)
+			continue
+		}
+		if c.wantNonEmpty && got[0] != c.wantFirst {
+			t.Errorf("%s: first SKU = %q, want %q (cheapest matching)", c.name, got[0], c.wantFirst)
 		}
 	}
 }

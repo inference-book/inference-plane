@@ -8,8 +8,9 @@ import "google/protobuf/timestamp.proto";
 // the spec is decided before any provider call happens.
 //
 // Locked by docs/design/0001-provisioner.md. Read that for the rationale
-// behind every field (especially id, which is mandatory and tenant-globally
-// unique, and the gpu class-or-sku choice).
+// behind every field -- especially id (mandatory and tenant-globally
+// unique) and requirements (constraints-first, with class as shorthand
+// and sku as escape hatch).
 message Spec {
   // Operator-supplied identifier. Required. Tenant-globally unique
   // across all providers. The service rejects ids starting with the
@@ -22,8 +23,9 @@ message Spec {
   // Provider-specific region identifier. Required.
   string region = 3;
 
-  // What hardware the operator wants.
-  GpuSpec gpu = 4;
+  // What the operator needs to run their workload. Numeric constraints
+  // are the canonical axis; class is shorthand; sku is the escape hatch.
+  ResourceRequirements requirements = 4;
 
   // Docker-capable base image ref the provider should boot. Phase 2's
   // deploy primitive docker-runs the engine container on top. Empty
@@ -36,23 +38,75 @@ message Spec {
   map<string, string> tags = 6;
 }
 
-// GpuSpec is how the operator describes the hardware they want. class
-// is the primary surface (portable across providers); sku is the escape
-// hatch for cases where class does not capture the requirement (specific
-// NVLink topology, particular generation). The two are mutually
-// exclusive; the service rejects specs that set both.
-message GpuSpec {
-  // small | medium | large | xlarge -- maps to the chapter taxonomy.
-  string class = 1;
-  // Provider-specific override.
-  string sku = 2;
-  // Default 1.
-  int32 count = 3;
+// ResourceRequirements is what the operator needs to run their workload.
+// Three layers, from most-honest to most-convenient:
+//
+//   1. Numeric constraints (min_vram_gb, min_disk_gb, min_ram_gb) -- the
+//      canonical axis. What actually matters when deploying a model
+//      (does {weights + KV cache + activations + overhead} fit in VRAM?).
+//      Provider-agnostic by construction.
+//
+//   2. Class shorthand (class = "small" | "medium" | "large" | "xlarge")
+//      -- syntactic sugar that the service expands into typical
+//      constraint defaults at validation time. Operators who do not
+//      want to spell out every constraint use this; the chapter's
+//      act-3 demo uses this. Explicit constraints alongside class
+//      refine the defaults (class sets floors, constraints can raise).
+//
+//   3. SKU override (sku) -- the escape hatch when constraints and
+//      class do not capture what the operator needs (specific NVLink
+//      topology, particular generation, exact provider SKU). Skips
+//      the resolver entirely; passed straight to the provider.
+//
+// Per-provider SKU resolvers (b in the (a) constraints / (b) resolver /
+// (c) executor model) consume the constraints and emit an ordered list
+// of matching SKU identifiers, cheapest first, for the provider's
+// scheduler.
+message ResourceRequirements {
+  // Constraints below describe ONE instance (one provider machine).
+  // gpu_count > 1 means N GPUs co-located on that single machine,
+  // used together (typical for tensor / pipeline parallelism). Fleets
+  // of N machines each with M GPUs are not expressed here -- they
+  // come from a higher layer composing N Spawn calls (v0.3's
+  // ClusterManager, see docs/design/0001-provisioner.md
+  // "Per-instance, not per-cluster").
+  //
+  // The "scope" of each constraint matches how the underlying resource
+  // physically exists on the machine:
+  //
+  //   - VRAM is PER-GPU (each card has dedicated memory).
+  //   - System RAM is PER-INSTANCE (one DDR pool, shared by CPU + GPUs).
+  //   - Disk is PER-INSTANCE (one volume).
+  //
+  // So min_vram_gb=80, gpu_count=2 means "2 GPUs each with at least
+  // 80 GB VRAM" (160 GB VRAM total on the machine). min_ram_gb=512,
+  // gpu_count=4 means "one instance with at least 512 GB total system
+  // RAM across all 4 GPUs."
+  //
+  // Provider adapters convert at the wire boundary -- RunPod's
+  // minRAMPerGPU field is per-GPU, so the adapter divides our total
+  // min_ram_gb by gpu_count before sending the request.
+
+  // Minimum VRAM in GB, per GPU. Required (or set via class shorthand).
+  int32 min_vram_gb = 1;
+  // Minimum container disk in GB, per instance. 0 = use provider default.
+  int32 min_disk_gb = 2;
+  // Minimum system RAM in GB, per instance. 0 = use provider default.
+  int32 min_ram_gb = 3;
+  // GPU count on the instance. 0 means 1.
+  int32 gpu_count = 4;
+
+  // Class shorthand. Expanded server-side into constraint defaults.
+  string class = 5;
+
+  // Exact-SKU escape hatch. When set, skips constraint resolution and
+  // is passed verbatim to the provider. Mutually exclusive with class
+  // (and constraints are ignored -- the SKU is the answer).
+  string sku = 6;
 }
 
-// GpuInfo describes what was actually scheduled. Distinct from GpuSpec
-// because the operator asked for a class but the provider answers with
-// a concrete SKU and observed VRAM.
+// GpuInfo describes what was actually scheduled. Provider answers with
+// a concrete SKU and observed VRAM after the spawn.
 message GpuInfo {
   string class = 1;
   string sku = 2;

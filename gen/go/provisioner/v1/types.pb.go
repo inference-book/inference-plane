@@ -94,8 +94,9 @@ func (InstanceState) EnumDescriptor() ([]byte, []int) {
 // the spec is decided before any provider call happens.
 //
 // Locked by docs/design/0001-provisioner.md. Read that for the rationale
-// behind every field (especially id, which is mandatory and tenant-globally
-// unique, and the gpu class-or-sku choice).
+// behind every field -- especially id (mandatory and tenant-globally
+// unique) and requirements (constraints-first, with class as shorthand
+// and sku as escape hatch).
 type Spec struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Operator-supplied identifier. Required. Tenant-globally unique
@@ -106,8 +107,9 @@ type Spec struct {
 	Provider string `protobuf:"bytes,2,opt,name=provider,proto3" json:"provider,omitempty"`
 	// Provider-specific region identifier. Required.
 	Region string `protobuf:"bytes,3,opt,name=region,proto3" json:"region,omitempty"`
-	// What hardware the operator wants.
-	Gpu *GpuSpec `protobuf:"bytes,4,opt,name=gpu,proto3" json:"gpu,omitempty"`
+	// What the operator needs to run their workload. Numeric constraints
+	// are the canonical axis; class is shorthand; sku is the escape hatch.
+	Requirements *ResourceRequirements `protobuf:"bytes,4,opt,name=requirements,proto3" json:"requirements,omitempty"`
 	// Docker-capable base image ref the provider should boot. Phase 2's
 	// deploy primitive docker-runs the engine container on top. Empty
 	// means "provider default."
@@ -171,9 +173,9 @@ func (x *Spec) GetRegion() string {
 	return ""
 }
 
-func (x *Spec) GetGpu() *GpuSpec {
+func (x *Spec) GetRequirements() *ResourceRequirements {
 	if x != nil {
-		return x.Gpu
+		return x.Requirements
 	}
 	return nil
 }
@@ -192,37 +194,64 @@ func (x *Spec) GetTags() map[string]string {
 	return nil
 }
 
-// GpuSpec is how the operator describes the hardware they want. class
-// is the primary surface (portable across providers); sku is the escape
-// hatch for cases where class does not capture the requirement (specific
-// NVLink topology, particular generation). The two are mutually
-// exclusive; the service rejects specs that set both.
-type GpuSpec struct {
+// ResourceRequirements is what the operator needs to run their workload.
+// Three layers, from most-honest to most-convenient:
+//
+//  1. Numeric constraints (min_vram_gb, min_disk_gb, min_ram_gb) -- the
+//     canonical axis. What actually matters when deploying a model
+//     (does {weights + KV cache + activations + overhead} fit in VRAM?).
+//     Provider-agnostic by construction.
+//
+//  2. Class shorthand (class = "small" | "medium" | "large" | "xlarge")
+//     -- syntactic sugar that the service expands into typical
+//     constraint defaults at validation time. Operators who do not
+//     want to spell out every constraint use this; the chapter's
+//     act-3 demo uses this. Explicit constraints alongside class
+//     refine the defaults (class sets floors, constraints can raise).
+//
+//  3. SKU override (sku) -- the escape hatch when constraints and
+//     class do not capture what the operator needs (specific NVLink
+//     topology, particular generation, exact provider SKU). Skips
+//     the resolver entirely; passed straight to the provider.
+//
+// Per-provider SKU resolvers (b in the (a) constraints / (b) resolver /
+// (c) executor model) consume the constraints and emit an ordered list
+// of matching SKU identifiers, cheapest first, for the provider's
+// scheduler.
+type ResourceRequirements struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// small | medium | large | xlarge -- maps to the chapter taxonomy.
-	Class string `protobuf:"bytes,1,opt,name=class,proto3" json:"class,omitempty"`
-	// Provider-specific override.
-	Sku string `protobuf:"bytes,2,opt,name=sku,proto3" json:"sku,omitempty"`
-	// Default 1.
-	Count         int32 `protobuf:"varint,3,opt,name=count,proto3" json:"count,omitempty"`
+	// Minimum VRAM in GB, per GPU. Required (or set via class shorthand).
+	MinVramGb int32 `protobuf:"varint,1,opt,name=min_vram_gb,json=minVramGb,proto3" json:"min_vram_gb,omitempty"`
+	// Minimum container disk in GB, per instance. 0 = use provider default.
+	MinDiskGb int32 `protobuf:"varint,2,opt,name=min_disk_gb,json=minDiskGb,proto3" json:"min_disk_gb,omitempty"`
+	// Minimum total system RAM in GB, per instance. 0 = use provider default.
+	MinRamGb int32 `protobuf:"varint,3,opt,name=min_ram_gb,json=minRamGb,proto3" json:"min_ram_gb,omitempty"`
+	// GPU count on the instance. 0 means 1.
+	GpuCount int32 `protobuf:"varint,4,opt,name=gpu_count,json=gpuCount,proto3" json:"gpu_count,omitempty"`
+	// Class shorthand. Expanded server-side into constraint defaults.
+	Class string `protobuf:"bytes,5,opt,name=class,proto3" json:"class,omitempty"`
+	// Exact-SKU escape hatch. When set, skips constraint resolution and
+	// is passed verbatim to the provider. Mutually exclusive with class
+	// (and constraints are ignored -- the SKU is the answer).
+	Sku           string `protobuf:"bytes,6,opt,name=sku,proto3" json:"sku,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *GpuSpec) Reset() {
-	*x = GpuSpec{}
+func (x *ResourceRequirements) Reset() {
+	*x = ResourceRequirements{}
 	mi := &file_provisioner_v1_types_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *GpuSpec) String() string {
+func (x *ResourceRequirements) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*GpuSpec) ProtoMessage() {}
+func (*ResourceRequirements) ProtoMessage() {}
 
-func (x *GpuSpec) ProtoReflect() protoreflect.Message {
+func (x *ResourceRequirements) ProtoReflect() protoreflect.Message {
 	mi := &file_provisioner_v1_types_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -234,35 +263,55 @@ func (x *GpuSpec) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use GpuSpec.ProtoReflect.Descriptor instead.
-func (*GpuSpec) Descriptor() ([]byte, []int) {
+// Deprecated: Use ResourceRequirements.ProtoReflect.Descriptor instead.
+func (*ResourceRequirements) Descriptor() ([]byte, []int) {
 	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{1}
 }
 
-func (x *GpuSpec) GetClass() string {
+func (x *ResourceRequirements) GetMinVramGb() int32 {
+	if x != nil {
+		return x.MinVramGb
+	}
+	return 0
+}
+
+func (x *ResourceRequirements) GetMinDiskGb() int32 {
+	if x != nil {
+		return x.MinDiskGb
+	}
+	return 0
+}
+
+func (x *ResourceRequirements) GetMinRamGb() int32 {
+	if x != nil {
+		return x.MinRamGb
+	}
+	return 0
+}
+
+func (x *ResourceRequirements) GetGpuCount() int32 {
+	if x != nil {
+		return x.GpuCount
+	}
+	return 0
+}
+
+func (x *ResourceRequirements) GetClass() string {
 	if x != nil {
 		return x.Class
 	}
 	return ""
 }
 
-func (x *GpuSpec) GetSku() string {
+func (x *ResourceRequirements) GetSku() string {
 	if x != nil {
 		return x.Sku
 	}
 	return ""
 }
 
-func (x *GpuSpec) GetCount() int32 {
-	if x != nil {
-		return x.Count
-	}
-	return 0
-}
-
-// GpuInfo describes what was actually scheduled. Distinct from GpuSpec
-// because the operator asked for a class but the provider answers with
-// a concrete SKU and observed VRAM.
+// GpuInfo describes what was actually scheduled. Provider answers with
+// a concrete SKU and observed VRAM after the spawn.
 type GpuInfo struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Class         string                 `protobuf:"bytes,1,opt,name=class,proto3" json:"class,omitempty"`
@@ -663,22 +712,26 @@ var File_provisioner_v1_types_proto protoreflect.FileDescriptor
 
 const file_provisioner_v1_types_proto_rawDesc = "" +
 	"\n" +
-	"\x1aprovisioner/v1/types.proto\x12\x0eprovisioner.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\x81\x02\n" +
+	"\x1aprovisioner/v1/types.proto\x12\x0eprovisioner.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xa0\x02\n" +
 	"\x04Spec\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1a\n" +
 	"\bprovider\x18\x02 \x01(\tR\bprovider\x12\x16\n" +
-	"\x06region\x18\x03 \x01(\tR\x06region\x12)\n" +
-	"\x03gpu\x18\x04 \x01(\v2\x17.provisioner.v1.GpuSpecR\x03gpu\x12\x1d\n" +
+	"\x06region\x18\x03 \x01(\tR\x06region\x12H\n" +
+	"\frequirements\x18\x04 \x01(\v2$.provisioner.v1.ResourceRequirementsR\frequirements\x12\x1d\n" +
 	"\n" +
 	"base_image\x18\x05 \x01(\tR\tbaseImage\x122\n" +
 	"\x04tags\x18\x06 \x03(\v2\x1e.provisioner.v1.Spec.TagsEntryR\x04tags\x1a7\n" +
 	"\tTagsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"G\n" +
-	"\aGpuSpec\x12\x14\n" +
-	"\x05class\x18\x01 \x01(\tR\x05class\x12\x10\n" +
-	"\x03sku\x18\x02 \x01(\tR\x03sku\x12\x14\n" +
-	"\x05count\x18\x03 \x01(\x05R\x05count\"`\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xb9\x01\n" +
+	"\x14ResourceRequirements\x12\x1e\n" +
+	"\vmin_vram_gb\x18\x01 \x01(\x05R\tminVramGb\x12\x1e\n" +
+	"\vmin_disk_gb\x18\x02 \x01(\x05R\tminDiskGb\x12\x1c\n" +
+	"\n" +
+	"min_ram_gb\x18\x03 \x01(\x05R\bminRamGb\x12\x1b\n" +
+	"\tgpu_count\x18\x04 \x01(\x05R\bgpuCount\x12\x14\n" +
+	"\x05class\x18\x05 \x01(\tR\x05class\x12\x10\n" +
+	"\x03sku\x18\x06 \x01(\tR\x03sku\"`\n" +
 	"\aGpuInfo\x12\x14\n" +
 	"\x05class\x18\x01 \x01(\tR\x05class\x12\x10\n" +
 	"\x03sku\x18\x02 \x01(\tR\x03sku\x12\x14\n" +
@@ -744,7 +797,7 @@ var file_provisioner_v1_types_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
 var file_provisioner_v1_types_proto_goTypes = []any{
 	(InstanceState)(0),            // 0: provisioner.v1.InstanceState
 	(*Spec)(nil),                  // 1: provisioner.v1.Spec
-	(*GpuSpec)(nil),               // 2: provisioner.v1.GpuSpec
+	(*ResourceRequirements)(nil),  // 2: provisioner.v1.ResourceRequirements
 	(*GpuInfo)(nil),               // 3: provisioner.v1.GpuInfo
 	(*SshTarget)(nil),             // 4: provisioner.v1.SshTarget
 	(*Instance)(nil),              // 5: provisioner.v1.Instance
@@ -754,7 +807,7 @@ var file_provisioner_v1_types_proto_goTypes = []any{
 	(*timestamppb.Timestamp)(nil), // 9: google.protobuf.Timestamp
 }
 var file_provisioner_v1_types_proto_depIdxs = []int32{
-	2,  // 0: provisioner.v1.Spec.gpu:type_name -> provisioner.v1.GpuSpec
+	2,  // 0: provisioner.v1.Spec.requirements:type_name -> provisioner.v1.ResourceRequirements
 	7,  // 1: provisioner.v1.Spec.tags:type_name -> provisioner.v1.Spec.TagsEntry
 	1,  // 2: provisioner.v1.Instance.spec:type_name -> provisioner.v1.Spec
 	3,  // 3: provisioner.v1.Instance.gpu:type_name -> provisioner.v1.GpuInfo
