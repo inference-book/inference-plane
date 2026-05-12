@@ -96,32 +96,41 @@ func (p *Provider) Spawn(ctx context.Context, spec *provisionerv1.Spec) (*provis
 		return nil, provisioners.NewProviderError(p.Name(), "spawn", fmt.Errorf("spec is nil"), 0)
 	}
 
-	// Resolve class -> SKUs. Operator-supplied --gpu-sku wins; otherwise
-	// we send the full class fallback list (RunPod's gpuTypeIds is plural
-	// for exactly this case -- if the first SKU is unavailable, the
-	// scheduler tries the next).
+	// Resolve requirements -> ordered SKU list.
+	//
+	//   - Operator-supplied --gpu-sku is the escape hatch: pass through.
+	//   - Otherwise, the service already expanded any --gpu-class
+	//     shorthand into min_vram_gb / min_disk_gb / min_ram_gb on the
+	//     ResourceRequirements before dispatching here. We ask the
+	//     resolver (skus.go MatchSKUs) for the gpuTypeIds satisfying
+	//     those constraints, cheapest first.
+	reqs := spec.GetRequirements()
+	if reqs == nil {
+		return nil, provisioners.NewProviderError(p.Name(), "spawn",
+			fmt.Errorf("requirements is required"), 0)
+	}
 	var gpuTypeIDs []string
-	resolvedClass := spec.GetGpu().GetClass()
-	resolvedSKU := spec.GetGpu().GetSku()
+	resolvedSKU := reqs.GetSku()
+	resolvedClass := reqs.GetClass()
 	switch {
 	case resolvedSKU != "":
 		gpuTypeIDs = []string{resolvedSKU}
 		if resolvedClass == "" {
 			resolvedClass = classifySKU(resolvedSKU)
 		}
-	case resolvedClass != "":
-		skus, ok := skusByClass[resolvedClass]
-		if !ok || len(skus) == 0 {
-			return nil, provisioners.NewProviderError(p.Name(), "spawn",
-				fmt.Errorf("no SKU mapping for class %q (known: %s)", resolvedClass, strings.Join(knownClasses(), ", ")), 0)
-		}
-		gpuTypeIDs = append([]string(nil), skus...)
-		resolvedSKU = skus[0]
 	default:
-		return nil, provisioners.NewProviderError(p.Name(), "spawn",
-			fmt.Errorf("gpu.class or gpu.sku is required"), 0)
+		gpuTypeIDs = MatchSKUs(reqs)
+		if len(gpuTypeIDs) == 0 {
+			return nil, provisioners.NewProviderError(p.Name(), "spawn",
+				fmt.Errorf("no SKU in the runpod catalog satisfies min_vram_gb=%d min_disk_gb=%d min_ram_gb=%d (try a different class or a lower constraint)",
+					reqs.GetMinVramGb(), reqs.GetMinDiskGb(), reqs.GetMinRamGb()), 0)
+		}
+		resolvedSKU = gpuTypeIDs[0]
+		if resolvedClass == "" {
+			resolvedClass = classifySKU(resolvedSKU)
+		}
 	}
-	gpuCount := int(spec.GetGpu().GetCount())
+	gpuCount := int(reqs.GetGpuCount())
 	if gpuCount <= 0 {
 		gpuCount = 1
 	}
@@ -131,15 +140,33 @@ func (p *Provider) Spawn(ctx context.Context, spec *provisionerv1.Spec) (*provis
 		image = defaultBaseImage
 	}
 
+	// Disk is per-instance in our model; RunPod's containerDiskInGb is
+	// also per-instance, so direct mapping. Use the operator's
+	// min_disk_gb if larger than our default.
+	containerDisk := defaultContainerDiskGB
+	if d := int(reqs.GetMinDiskGb()); d > containerDisk {
+		containerDisk = d
+	}
+
+	// System RAM is per-instance in our model; RunPod's minRAMPerGPU is
+	// per-GPU. Convert at the wire boundary: total/N (with a ceiling to
+	// round up so we never under-request -- "I asked for 65 GB total on
+	// a 2-GPU pod" should send minRAMPerGPU=33, not 32).
+	minRAMPerGPU := 0
+	if r := int(reqs.GetMinRamGb()); r > 0 {
+		minRAMPerGPU = (r + gpuCount - 1) / gpuCount
+	}
+
 	createBody := createPodRequest{
 		Name:              podNamePrefix + spec.GetId(),
 		ImageName:         image,
 		GPUTypeIDs:        gpuTypeIDs,
 		GPUTypePriority:   defaultGPUPriority,
 		GPUCount:          gpuCount,
+		MinRAMPerGPU:      minRAMPerGPU,
 		CloudType:         defaultCloudType,
 		ComputeType:       defaultComputeType,
-		ContainerDiskInGB: defaultContainerDiskGB,
+		ContainerDiskInGB: containerDisk,
 		VolumeInGB:        defaultVolumeGB,
 		Ports:             defaultPortsList,
 		DataCenterIDs:     []string{spec.GetRegion()}, // best-effort region pin
@@ -325,9 +352,10 @@ func specFromPod(pod *podBody, tags map[string]string) *provisionerv1.Spec {
 		Region:    pod.dataCenter(),
 		BaseImage: pod.Image,
 		Tags:      tags,
-		Gpu: &provisionerv1.GpuSpec{
-			Sku:   pod.gpuSKU(),
-			Count: int32(pod.gpuCountInt()),
+		Requirements: &provisionerv1.ResourceRequirements{
+			Sku:      pod.gpuSKU(),
+			GpuCount: int32(pod.gpuCountInt()),
+			MinVramGb: int32(pod.gpuVRAMGB()),
 		},
 	}
 }
@@ -386,6 +414,7 @@ type createPodRequest struct {
 	GPUTypeIDs        []string `json:"gpuTypeIds,omitempty"`
 	GPUTypePriority   string   `json:"gpuTypePriority,omitempty"`
 	GPUCount          int      `json:"gpuCount,omitempty"`
+	MinRAMPerGPU      int      `json:"minRAMPerGPU,omitempty"` // RunPod expresses RAM per-GPU; we convert from per-instance.
 	CloudType         string   `json:"cloudType,omitempty"`
 	ComputeType       string   `json:"computeType,omitempty"`
 	ContainerDiskInGB int      `json:"containerDiskInGb,omitempty"`

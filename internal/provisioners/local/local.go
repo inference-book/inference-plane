@@ -63,12 +63,21 @@ func (p *Provider) Name() string { return provisioners.ProviderLocal }
 // Spawn returns an Instance describing the laptop. No side effect --
 // the laptop already exists. The returned record is State=ACTIVE
 // immediately because there is no asynchronous provisioning step.
+//
+// VRAM constraint check. If spec.requirements.min_vram_gb exceeds the
+// detected GPU's VRAM (or if no GPU was detected at all), Spawn errors
+// rather than handing back a record the deploy primitive cannot
+// actually use. This is the (b) resolver step for the local provider:
+// trivial because there is exactly one SKU (the laptop).
 func (p *Provider) Spawn(ctx context.Context, spec *provisionerv1.Spec) (*provisionerv1.Instance, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, provisioners.NewProviderError(p.Name(), "spawn", err, 0)
 	}
 	if spec == nil {
 		return nil, provisioners.NewProviderError(p.Name(), "spawn", fmt.Errorf("spec is nil"), 0)
+	}
+	if err := p.checkConstraints(spec.GetRequirements()); err != nil {
+		return nil, provisioners.NewProviderError(p.Name(), "spawn", err, 0)
 	}
 	now := timestamppb.New(p.clock())
 	return &provisionerv1.Instance{
@@ -84,6 +93,23 @@ func (p *Provider) Spawn(ctx context.Context, spec *provisionerv1.Spec) (*provis
 		ActivatedAt:   now,
 		// Ssh intentionally empty: cp and dp are on the same machine.
 	}, nil
+}
+
+// checkConstraints rejects requirements the laptop cannot satisfy.
+// Only min_vram_gb is enforced -- min_disk_gb and min_ram_gb are
+// best-effort on the laptop (we don't know how much free disk/RAM
+// the operator has at a given moment, and the deploy primitive will
+// fail loudly anyway if there's not enough). VRAM is the
+// load-bearing constraint for engine viability.
+func (p *Provider) checkConstraints(reqs *provisionerv1.ResourceRequirements) error {
+	if reqs == nil {
+		return nil
+	}
+	if v := int(reqs.GetMinVramGb()); v > 0 && v > p.detected.vramGB {
+		return fmt.Errorf("min_vram_gb=%d exceeds detected GPU (%s, %d GB) -- pick a smaller class or move to provider=runpod",
+			v, p.detected.sku, p.detected.vramGB)
+	}
+	return nil
 }
 
 // Terminate is a no-op: there is no provider-side process to stop. The

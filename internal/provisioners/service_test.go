@@ -81,7 +81,10 @@ func okSpec() *provisionerv1.Spec {
 		Id:       "my-pod",
 		Provider: "mock",
 		Region:   "us-ca-1",
-		Gpu:      &provisionerv1.GpuSpec{Class: provisioners.GPUClassSmall, Count: 1},
+		Requirements: &provisionerv1.ResourceRequirements{
+			Class:    provisioners.GPUClassSmall,
+			GpuCount: 1,
+		},
 	}
 }
 
@@ -163,15 +166,43 @@ func TestCreateInstance_InvalidID(t *testing.T) {
 	}
 }
 
-func TestCreateInstance_GPUSpecMutex(t *testing.T) {
+func TestCreateInstance_RequirementsClassSkuMutex(t *testing.T) {
 	mock := &mockProvider{name: "mock"}
 	svc, _ := newSvc(t, mock)
 
 	spec := okSpec()
-	spec.Gpu = &provisionerv1.GpuSpec{Class: "small", Sku: "RTX 4090"}
+	spec.Requirements = &provisionerv1.ResourceRequirements{Class: "small", Sku: "RTX 4090"}
 	_, err := svc.CreateInstance(context.Background(), connect.NewRequest(&provisionerv1.CreateInstanceRequest{Spec: spec}))
 	if err == nil {
 		t.Error("specifying both class and sku should be rejected")
+	}
+}
+
+func TestCreateInstance_ClassShorthandExpandsToConstraints(t *testing.T) {
+	// When the operator passes class=small without any explicit
+	// numeric constraints, the service should fill them in from the
+	// class defaults before dispatching to the provider. We observe
+	// this by capturing the spec the provider sees.
+	var observed *provisionerv1.Spec
+	mock := &mockProvider{
+		name: "mock",
+		spawn: func(ctx context.Context, spec *provisionerv1.Spec) (*provisionerv1.Instance, error) {
+			observed = spec
+			return &provisionerv1.Instance{Id: spec.GetId(), ProviderId: "mock:" + spec.GetId(), Provider: "mock", Spec: spec, State: provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE}, nil
+		},
+	}
+	svc, _ := newSvc(t, mock)
+	if _, err := svc.CreateInstance(context.Background(), connect.NewRequest(&provisionerv1.CreateInstanceRequest{Spec: okSpec()})); err != nil {
+		t.Fatalf("CreateInstance: %v", err)
+	}
+	if observed.GetRequirements().GetMinVramGb() != 24 {
+		t.Errorf("class=small should expand to min_vram_gb=24, got %d", observed.GetRequirements().GetMinVramGb())
+	}
+	if observed.GetRequirements().GetMinDiskGb() != 20 {
+		t.Errorf("class=small should expand to min_disk_gb=20, got %d", observed.GetRequirements().GetMinDiskGb())
+	}
+	if observed.GetRequirements().GetMinRamGb() != 16 {
+		t.Errorf("class=small should expand to min_ram_gb=16, got %d", observed.GetRequirements().GetMinRamGb())
 	}
 }
 

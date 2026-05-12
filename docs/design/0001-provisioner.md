@@ -295,20 +295,33 @@ The slower bring-up is an explicit trade. The base image ref is a field on `Spec
 
 What this means for the chapter narrative: act 2 (the manual path) gets the SSH + docker dance honestly, and act 3 (the iplane move) shows a two-line bring-up that hides it. The portability argument is part of act 4 (design choices). Without committing to the Docker-base shape now, act 4 would have to back-explain the RunPod-specific path in v0.2.
 
-### GPU spec language
+### Resource requirements
 
-Primary surface: `--gpu-class small|medium|large|xlarge`. Maps to the chapter taxonomy:
+Revised during phase 1.4 review. The original design made class (`small|medium|large|xlarge`) the primary surface and SKU the escape hatch. Re-examination during phase 1.4 surfaced that class is the *output* of evaluating constraints against available SKUs, not the *input* the operator naturally has. When deploying a model, what matters is "weights + KV cache + activations + 15% overhead fit in VRAM," which is a numeric constraint. Asking the operator to translate "I need ≥80 GB VRAM" into "I want class large" introduces a mental hop that's error-prone (what does 'large' mean again?) and ages badly (GPU generations rotate, class definitions need maintenance).
 
-- `small`: 24 GB consumer (RTX 4090, RTX 5090). Ch 6 default.
-- `medium`: 40 – 48 GB (A6000, A100 40 GB). Used by Ch 9 (30B class).
-- `large`: 80 GB (A100 80 GB, H100 80 GB). Used by Ch 12 (70B class).
-- `xlarge`: 96 GB+ (H100 96 GB, H200, B100/B200 as they ship). Used by Ch 13 (400B class, multi-host).
+The revised model splits the problem in three (the (a)/(b)/(c) layering surfaced in review):
 
-Escape hatch: `--gpu-sku <provider-sku>`. Sets `Spec.GPU.SKU` directly, bypassing the class table. The two flags are mutually exclusive; supplying both is a CLI error.
+- **(a) Constraints.** What the operator needs to run their workload, provider-agnostic. Numeric: `min_vram_gb`, `min_disk_gb`, `min_ram_gb`, `gpu_count`. These match how the book's chapter 4 VRAM math flows (compute required VRAM → ask for at least that).
+- **(b) Resolver.** Per-provider function `MatchSKUs(constraints) → []sku`, ordered cheapest first. Lives in the adapter package alongside the provider's SKU catalog. v0.3's routing layer composes these across providers for "cheapest match across runpod and lambda."
+- **(c) Executor.** The existing Provisioner + Service layers, unchanged except that `Spawn` consumes a resolved SKU list from (b) instead of class+sku directly.
 
-Each provider ships a class→[SKU] table in its package (`internal/provisioners/runpod/skus.go`, `…/local/detect.go`). When a class has no SKU mapping on a provider, `Spawn` returns a `ProviderError` listing the available classes for that provider. We do not silently degrade to a different class; the operator has to make the choice explicit.
+Class becomes convenience shorthand for common cases, not the canonical axis. The service expands `--gpu-class small` into a typical constraint set (`min_vram_gb >= 24`, `min_disk_gb >= 20`, `min_ram_gb >= 16`) once, in `validateAndExpandRequirements`, before dispatching to the provider. The class-defaults table is central so the same shorthand means the same thing across providers. Operators who supply both class and an explicit constraint get the larger of the two for each axis — class is a floor, explicit refinement raises it.
 
-The reason this lives at the *class* level and not the SKU level on the primary surface: the book teaches one taxonomy, not N provider vocabularies. The chapter on 70B deployment talks about "large" instances; the operator may run that chapter on RunPod, Lambda, or local without re-learning what to type. The SKU escape hatch absorbs the cases the taxonomy does not cover and keeps the abstraction honest.
+The SKU escape hatch survives unchanged: `--gpu-sku NVIDIA H100 NVL` skips the resolver entirely and passes verbatim to the provider. Class and SKU stay mutually exclusive.
+
+**Scope semantics** matter and are not obvious from the field names alone, so the proto comments spell them out:
+
+- **VRAM is per-GPU** (each card's memory is physically separate). `min_vram_gb=80, gpu_count=2` means "2 GPUs each with ≥80 GB VRAM" (160 GB total on the machine).
+- **System RAM is per-instance** (one DDR pool, shared by CPU + GPUs via PCIe). `min_ram_gb=512, gpu_count=4` means "one machine with ≥512 GB total RAM across all 4 GPUs."
+- **Disk is per-instance** (one container disk per pod).
+
+Provider adapters convert at the wire boundary. RunPod's `minRAMPerGPU` is per-GPU, so the adapter divides our total `min_ram_gb` by `gpu_count` (with ceiling, so a 65 GB total on a 2-GPU pod sends `minRAMPerGPU=33`, not 32). Other providers that express RAM as total system memory get a direct pass-through.
+
+**What this lets us drop:** the per-provider class→SKU table is no longer the canonical mapping. Each adapter now ships an SKU catalog (`SKUSpec{VRAMGb, DefaultSystemRAMGb, DefaultDiskGb, PriceUSDPerHour}`) and the resolver walks it. New SKUs slot in by appending to the catalog; no per-class taxonomy refresh required.
+
+**Local provider** validates `min_vram_gb` against the detected laptop GPU. If the operator asks for `min_vram_gb=80` on a 24 GB laptop, Spawn errors with a clear "min_vram_gb=80 exceeds detected GPU" message rather than silently lying.
+
+What we didn't bake in: live pricing fetch. RunPod's API exposes current SKU prices but adding live fetch (with TTL cache, stale fallback, flock) materially expands phase 1.4 scope. The catalog prices in `runpod/skus.go` are hand-curated estimates; the actual rate is read from the provider's response and recorded in the iplane state file. Live fetch becomes interesting in v0.2 when Lambda Labs lands and the cache pattern serves multiple providers; tracked as a follow-up issue.
 
 ### Region selection
 
@@ -325,7 +338,7 @@ Forcing operator choice now means we do not teach a v0.1 auto-region rule that v
 | Provisioner / deploy split on RunPod               | Generic Docker base in phase 1; `docker run` over SSH in phase 2. Portability over speed. |
 | State-file hygiene                                 | Two-phase write: `pending` → `active` (Spawn), `terminating` → `terminated` (Destroy). |
 | Cost guardrail                                     | $1/hr default, `--yes-i-know` override. Exit code 2 distinct from generic failure.   |
-| GPU spec language                                  | `--gpu-class` primary, `--gpu-sku` escape hatch. Mutually exclusive.                |
+| GPU spec language (revised during 1.4 review)      | Constraints are primary (`min_vram_gb`, `min_disk_gb`, `min_ram_gb`, `gpu_count`); class is convenience shorthand expanded into constraints by the service; `sku` stays the escape hatch. VRAM is per-GPU; system RAM and disk are per-instance. Adapters convert to provider-native units at the wire boundary. |
 | Region selection                                   | Required field. Auto-region deferred to v0.2 alongside ModelStore caching.          |
 | State-file schema forward-compat                   | `schema_version`, `backend`, `operator_id` top-level; `provider_data` as raw JSON.   |
 | Identity model (added during 1.1 review)           | One field `Spec.ID`, mandatory, operator-supplied, tenant-globally unique. Positional on the CLI. `iplane-` prefix reserved. |

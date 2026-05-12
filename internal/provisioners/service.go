@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"connectrpc.com/connect"
@@ -84,7 +85,7 @@ func (s *Service) CreateInstance(ctx context.Context, req *connect.Request[provi
 	if err := ValidateID(spec.GetId()); err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
-	if err := validateGPUSpec(spec.GetGpu()); err != nil {
+	if err := validateAndExpandRequirements(spec); err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
 	if spec.GetRegion() == "" {
@@ -450,20 +451,82 @@ func withSystemTags(spec *provisionerv1.Spec, operatorID string) *provisionerv1.
 	return cloned
 }
 
-// validateGPUSpec enforces the class/SKU mutual exclusion. Default
-// count=0 is treated as 1 (proto3 zero-value means "unset"); a Spawn
-// adapter is free to default differently if it wants.
-func validateGPUSpec(g *provisionerv1.GpuSpec) error {
-	if g == nil {
-		return errors.New("gpu spec is required")
+// validateAndExpandRequirements normalizes a Spec's ResourceRequirements
+// before the adapter sees it. Two responsibilities:
+//
+//  1. Validate: the operator supplied something the resolver can act on
+//     -- an explicit sku, an explicit min_vram_gb, or a class shorthand.
+//     sku and class are mutually exclusive (sku is the escape hatch;
+//     class implies constraint resolution).
+//
+//  2. Expand: when class is set, fill in any unset numeric constraints
+//     from the class defaults. Class sets floors -- if the operator
+//     ALSO supplied a larger min_vram_gb, the explicit value wins.
+//     This is what makes "--gpu-class small --vram-min 32" work: class
+//     gives you small-shaped disk/ram defaults, the explicit constraint
+//     refines vram up.
+//
+// classDefaults lives in the runpod package today (per-provider). For
+// v0.1 with one constraint-resolving provider this is fine; v0.2 with
+// Lambda Labs will pull the table into a shared catalog package.
+func validateAndExpandRequirements(spec *provisionerv1.Spec) error {
+	reqs := spec.GetRequirements()
+	if reqs == nil {
+		return errors.New("requirements is required")
 	}
-	if g.GetClass() == "" && g.GetSku() == "" {
-		return errors.New("gpu: one of class or sku is required")
+	if reqs.GetSku() != "" && reqs.GetClass() != "" {
+		return errors.New("requirements: class and sku are mutually exclusive")
 	}
-	if g.GetClass() != "" && g.GetSku() != "" {
-		return errors.New("gpu: class and sku are mutually exclusive")
+	if reqs.GetSku() == "" && reqs.GetClass() == "" && reqs.GetMinVramGb() == 0 {
+		return errors.New("requirements: one of class, sku, or min_vram_gb is required")
+	}
+
+	// Expand class shorthand. If the operator passed --gpu-class small
+	// and nothing else, after this block min_vram_gb / min_disk_gb /
+	// min_ram_gb are filled in. If the operator passed both class AND
+	// an explicit constraint, the larger wins (we treat class as a
+	// floor, explicit refinement as an override-up).
+	if reqs.GetClass() != "" {
+		defaults, ok := classDefaults[reqs.GetClass()]
+		if !ok {
+			return fmt.Errorf("requirements: unknown class %q (known: %s)",
+				reqs.GetClass(), strings.Join(knownClassesList(), ", "))
+		}
+		if reqs.MinVramGb < defaults.MinVRAMGb {
+			reqs.MinVramGb = defaults.MinVRAMGb
+		}
+		if reqs.MinDiskGb < defaults.MinDiskGb {
+			reqs.MinDiskGb = defaults.MinDiskGb
+		}
+		if reqs.MinRamGb < defaults.MinRAMGb {
+			reqs.MinRamGb = defaults.MinRAMGb
+		}
 	}
 	return nil
+}
+
+// ClassDefaults captures the constraint floors a class shorthand
+// expands into. The service holds this rather than each provider so
+// the same shorthand means the same thing across providers.
+type ClassDefaults struct {
+	MinVRAMGb int32
+	MinDiskGb int32
+	MinRAMGb  int32
+}
+
+// classDefaults is the central class -> constraint-floors table.
+// Operators reach the same numeric requirements regardless of provider;
+// per-provider SKU resolvers (e.g., runpod.MatchSKUs) consume the
+// resulting constraints.
+var classDefaults = map[string]ClassDefaults{
+	GPUClassSmall:  {MinVRAMGb: 24, MinDiskGb: 20, MinRAMGb: 16},
+	GPUClassMedium: {MinVRAMGb: 40, MinDiskGb: 40, MinRAMGb: 32},
+	GPUClassLarge:  {MinVRAMGb: 80, MinDiskGb: 60, MinRAMGb: 64},
+	GPUClassXLarge: {MinVRAMGb: 96, MinDiskGb: 100, MinRAMGb: 128},
+}
+
+func knownClassesList() []string {
+	return []string{GPUClassSmall, GPUClassMedium, GPUClassLarge, GPUClassXLarge}
 }
 
 // ActiveStateChecker is an optional capability adapters can implement

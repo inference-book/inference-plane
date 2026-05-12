@@ -3,6 +3,7 @@ package local
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/inference-book/inference-plane/internal/provisioners"
@@ -14,7 +15,10 @@ func newSpec() *provisionerv1.Spec {
 		Id:       "my-pod",
 		Provider: provisioners.ProviderLocal,
 		Region:   "laptop",
-		Gpu:      &provisionerv1.GpuSpec{Class: provisioners.GPUClassSmall, Count: 1},
+		Requirements: &provisionerv1.ResourceRequirements{
+			Class:    provisioners.GPUClassSmall,
+			GpuCount: 1,
+		},
 	}
 }
 
@@ -129,6 +133,21 @@ func TestClassifyByVRAM(t *testing.T) {
 		if got := classifyByVRAM(c.vramGB); got != c.want {
 			t.Errorf("classifyByVRAM(%d) = %q, want %q", c.vramGB, got, c.want)
 		}
+	}
+}
+
+func TestProvider_Spawn_VRAMConstraintExceedsLaptop(t *testing.T) {
+	// Cannot run on a real laptop with > 256 GB unified memory --
+	// pick a value out of bounds for every plausible dev machine.
+	p := New()
+	spec := newSpec()
+	spec.Requirements = &provisionerv1.ResourceRequirements{MinVramGb: 1000}
+	_, err := p.Spawn(context.Background(), spec)
+	if err == nil {
+		t.Fatal("Spawn should reject min_vram_gb above detected hardware")
+	}
+	if !strings.Contains(err.Error(), "min_vram_gb") {
+		t.Errorf("error should mention min_vram_gb, got %q", err.Error())
 	}
 }
 
