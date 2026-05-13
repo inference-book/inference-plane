@@ -46,13 +46,17 @@ func TestRunPod_SpawnAndTerminate(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 
+	stamp := shortStamp()
 	spec := &provisionerv1.Spec{
-		Id:       "iplane-smoke-" + shortStamp(),
+		Id:       "smoke-" + stamp,
 		Provider: provisioners.ProviderRunPod,
 		Region:   region,
-		Gpu:      &provisionerv1.GpuSpec{Sku: sku},
+		Requirements: &provisionerv1.ResourceRequirements{
+			Sku:      sku,
+			GpuCount: 1,
+		},
 		Tags: map[string]string{
-			provisioners.TagID:       "iplane-smoke-" + shortStamp(),
+			provisioners.TagID:       "smoke-" + stamp,
 			provisioners.TagOperator: "default",
 			"purpose":                "iplane-runpod-smoke-test",
 		},
