@@ -40,26 +40,42 @@ type SKUSpec struct {
 // resolver re-sorts the matching subset by price before emitting the
 // final list.
 //
-// Adding a SKU: append to this slice. Do not reuse memoryInGb-1
-// "almost large" tiers (e.g., L40S at 48GB) without thinking about
-// which class they should expand into; the constraint check is
-// authoritative and a class-table refresh is optional.
+// Each GpuTypeID must be an exact enum value in RunPod's REST schema
+// (the validator on POST /pods rejects anything outside its enum).
+// Confirm current values against:
+//
+//	curl -X GET https://rest.runpod.io/v1/gpus -H "Authorization: Bearer $RUNPOD_API_KEY"
+//
+// RunPod periodically retires SKUs (e.g., the A100 40GB PCIe was
+// dropped from the enum sometime before 2026-05) and adds new ones
+// (B200, H200 variants, Blackwell PRO 6000 line). A wrong entry here
+// surfaces as a 400 schema validation rejection with the full enum
+// list in the problems field, which is enough to update the catalog.
 var skus = []SKUSpec{
-	// Consumer / small
+	// Small (>=24 GB VRAM): consumer + entry datacenter.
 	{GpuTypeID: "NVIDIA GeForce RTX 4090", VRAMGb: 24, DefaultSystemRAMGb: 16, DefaultDiskGb: 20, PriceUSDPerHour: 0.39},
+	{GpuTypeID: "NVIDIA RTX A5000", VRAMGb: 24, DefaultSystemRAMGb: 24, DefaultDiskGb: 20, PriceUSDPerHour: 0.36},
+	{GpuTypeID: "NVIDIA L4", VRAMGb: 24, DefaultSystemRAMGb: 24, DefaultDiskGb: 20, PriceUSDPerHour: 0.43},
+	{GpuTypeID: "NVIDIA A30", VRAMGb: 24, DefaultSystemRAMGb: 32, DefaultDiskGb: 20, PriceUSDPerHour: 0.45},
 	{GpuTypeID: "NVIDIA GeForce RTX 5090", VRAMGb: 32, DefaultSystemRAMGb: 24, DefaultDiskGb: 20, PriceUSDPerHour: 0.69},
 
-	// Workstation / medium
+	// Medium (>=40 GB VRAM): workstation / mid-datacenter.
+	{GpuTypeID: "NVIDIA A40", VRAMGb: 48, DefaultSystemRAMGb: 32, DefaultDiskGb: 40, PriceUSDPerHour: 0.39},
+	{GpuTypeID: "NVIDIA L40", VRAMGb: 48, DefaultSystemRAMGb: 32, DefaultDiskGb: 40, PriceUSDPerHour: 0.69},
+	{GpuTypeID: "NVIDIA L40S", VRAMGb: 48, DefaultSystemRAMGb: 32, DefaultDiskGb: 40, PriceUSDPerHour: 0.79},
 	{GpuTypeID: "NVIDIA RTX A6000", VRAMGb: 48, DefaultSystemRAMGb: 32, DefaultDiskGb: 40, PriceUSDPerHour: 0.79},
-	{GpuTypeID: "NVIDIA A100 40GB PCIe", VRAMGb: 40, DefaultSystemRAMGb: 48, DefaultDiskGb: 40, PriceUSDPerHour: 1.19},
+	{GpuTypeID: "NVIDIA RTX 6000 Ada Generation", VRAMGb: 48, DefaultSystemRAMGb: 48, DefaultDiskGb: 40, PriceUSDPerHour: 0.99},
 
-	// Data-center / large
+	// Large (>=80 GB VRAM): 70B-class inference territory.
 	{GpuTypeID: "NVIDIA A100 80GB PCIe", VRAMGb: 80, DefaultSystemRAMGb: 96, DefaultDiskGb: 60, PriceUSDPerHour: 1.69},
 	{GpuTypeID: "NVIDIA A100-SXM4-80GB", VRAMGb: 80, DefaultSystemRAMGb: 96, DefaultDiskGb: 60, PriceUSDPerHour: 1.79},
+	{GpuTypeID: "NVIDIA H100 PCIe", VRAMGb: 80, DefaultSystemRAMGb: 128, DefaultDiskGb: 60, PriceUSDPerHour: 2.39},
 	{GpuTypeID: "NVIDIA H100 80GB HBM3", VRAMGb: 80, DefaultSystemRAMGb: 128, DefaultDiskGb: 60, PriceUSDPerHour: 2.49},
 
-	// XL / frontier
+	// XL (>=94 GB VRAM): frontier / 400B-class multi-host.
 	{GpuTypeID: "NVIDIA H100 NVL", VRAMGb: 94, DefaultSystemRAMGb: 128, DefaultDiskGb: 100, PriceUSDPerHour: 2.99},
+	{GpuTypeID: "NVIDIA H200", VRAMGb: 141, DefaultSystemRAMGb: 192, DefaultDiskGb: 100, PriceUSDPerHour: 3.99},
+	{GpuTypeID: "NVIDIA B200", VRAMGb: 192, DefaultSystemRAMGb: 256, DefaultDiskGb: 100, PriceUSDPerHour: 5.99},
 }
 
 // Class-to-constraint-defaults lives in the service layer
@@ -68,10 +84,34 @@ var skus = []SKUSpec{
 // numeric requirements on RunPod, Lambda, AWS, anywhere. The runpod
 // adapter only sees expanded constraints.
 
+// MaxSKUsPerRequest caps the number of gpuTypeIds we send to RunPod on
+// a single create. Two reasons to cap:
+//
+//   - Class shorthand has no upper bound today (class=small expands to
+//     min_vram_gb=24 with no max). Without a cap, every SKU with
+//     VRAM>=24 enters the candidate list -- including B200 at 192 GB.
+//     An operator who asked for "small" should not silently land on a
+//     frontier GPU because the cheap tier is exhausted; the price would
+//     be 10x higher than expected.
+//
+//   - Some RunPod accounts are restricted from provisioning specific
+//     SKUs (B200, H200, H100 NVL typically require approval). Including
+//     restricted SKUs in gpuTypeIds can trigger account-level 401s
+//     across the whole request rather than RunPod just skipping the
+//     restricted entries.
+//
+// Capping at top-5 cheapest preserves real fallback (RunPod will try
+// each in order if the cheapest is unavailable) without exposing the
+// caller to large price-tier jumps. Operators who want a strict ceiling
+// pass --gpu-sku for an explicit single-SKU request; a future
+// max_vram_gb constraint would let class shorthand carry a real upper
+// bound (see ROADMAP for the eventual fix).
+const MaxSKUsPerRequest = 5
+
 // MatchSKUs is the per-provider resolver in the (a) constraints /
 // (b) resolver / (c) executor model. Given a ResourceRequirements,
 // it returns the ordered list of gpuTypeIds that satisfy every
-// numeric constraint, cheapest first.
+// numeric constraint, cheapest first, capped at MaxSKUsPerRequest.
 //
 // The returned slice is the gpuTypeIds value the Spawn call passes
 // to RunPod's POST /pods -- RunPod tries them in order (with
@@ -100,6 +140,9 @@ func MatchSKUs(reqs *provisionerv1.ResourceRequirements) []string {
 	sort.SliceStable(matches, func(i, j int) bool {
 		return matches[i].PriceUSDPerHour < matches[j].PriceUSDPerHour
 	})
+	if len(matches) > MaxSKUsPerRequest {
+		matches = matches[:MaxSKUsPerRequest]
+	}
 	out := make([]string, len(matches))
 	for i, m := range matches {
 		out[i] = m.GpuTypeID

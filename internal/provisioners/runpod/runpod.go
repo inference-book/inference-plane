@@ -43,6 +43,7 @@ import (
 
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
 	"github.com/inference-book/inference-plane/internal/provisioners"
+	skhttp "github.com/panyam/servicekit/http"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -172,9 +173,13 @@ func (p *Provider) Spawn(ctx context.Context, spec *provisionerv1.Spec) (*provis
 		DataCenterIDs:     []string{spec.GetRegion()}, // best-effort region pin
 	}
 
-	var created createPodResponse
-	if err := p.client.do(ctx, "spawn", "POST", "/pods", nil, createBody, &created); err != nil {
-		return nil, err
+	req, err := p.client.newReq("POST", "/pods", nil, createBody)
+	if err != nil {
+		return nil, provisioners.NewProviderError(p.Name(), "spawn", err, 0)
+	}
+	created, err := skhttp.Call[createPodResponse](ctx, req, p.client.callOpts()...)
+	if err != nil {
+		return nil, wrapErr("spawn", err)
 	}
 	if created.ID == "" {
 		return nil, provisioners.NewProviderError(p.Name(), "spawn",
@@ -183,8 +188,12 @@ func (p *Provider) Spawn(ctx context.Context, spec *provisionerv1.Spec) (*provis
 
 	// Follow-up GET to fetch the full record. We use the freshly-returned
 	// pod id, so a 404 here is genuinely surprising; surface as-is.
-	var pod podBody
-	if err := p.client.do(ctx, "spawn", "GET", "/pods/"+created.ID, nil, nil, &pod); err != nil {
+	getReq, err := p.client.newReq("GET", "/pods/"+created.ID, nil, nil)
+	if err != nil {
+		return p.instanceFromCreate(spec, &created, resolvedClass, resolvedSKU, gpuCount), nil
+	}
+	pod, err := skhttp.Call[podBody](ctx, getReq, p.client.callOpts()...)
+	if err != nil {
 		// Spawn succeeded but follow-up failed. The pod exists; return a
 		// best-effort Instance from what we know so the Service can
 		// record it in state. Later Describe / List will fill the gaps.
@@ -201,12 +210,16 @@ func (p *Provider) Terminate(ctx context.Context, providerID string) error {
 	if providerID == "" {
 		return provisioners.NewProviderError(p.Name(), "terminate", fmt.Errorf("providerID is empty"), 0)
 	}
-	err := p.client.do(ctx, "terminate", "DELETE", "/pods/"+providerID, nil, nil, nil)
+	req, err := p.client.newReq("DELETE", "/pods/"+providerID, nil, nil)
 	if err != nil {
-		if isWrappedNotFound(err) {
+		return provisioners.NewProviderError(p.Name(), "terminate", err, 0)
+	}
+	if err := skhttp.CallVoid(ctx, req, p.client.callOpts()...); err != nil {
+		wrapped := wrapErr("terminate", err)
+		if isWrappedNotFound(wrapped) {
 			return nil
 		}
-		return err
+		return wrapped
 	}
 	return nil
 }
@@ -217,9 +230,13 @@ func (p *Provider) Describe(ctx context.Context, providerID string) (*provisione
 	if providerID == "" {
 		return nil, provisioners.NewProviderError(p.Name(), "describe", fmt.Errorf("providerID is empty"), 0)
 	}
-	var pod podBody
-	if err := p.client.do(ctx, "describe", "GET", "/pods/"+providerID, nil, nil, &pod); err != nil {
-		return nil, err
+	req, err := p.client.newReq("GET", "/pods/"+providerID, nil, nil)
+	if err != nil {
+		return nil, provisioners.NewProviderError(p.Name(), "describe", err, 0)
+	}
+	pod, err := skhttp.Call[podBody](ctx, req, p.client.callOpts()...)
+	if err != nil {
+		return nil, wrapErr("describe", err)
 	}
 	tags := map[string]string{}
 	if name := strings.TrimPrefix(pod.Name, podNamePrefix); name != pod.Name && name != "" {
@@ -227,6 +244,8 @@ func (p *Provider) Describe(ctx context.Context, providerID string) (*provisione
 	}
 	return p.podToInstance(&pod, specFromPod(&pod, tags), classifySKU(pod.gpuSKU()), pod.gpuSKU(), pod.gpuCountInt()), nil
 }
+
+
 
 // List calls GET /pods. When the filter includes iplane-id, we add
 // ?name=iplane-<id> for server-side filtering. Other filter keys
@@ -241,9 +260,13 @@ func (p *Provider) List(ctx context.Context, filter map[string]string) ([]*provi
 		q.Set("name", podNamePrefix+id)
 	}
 
-	var pods []podBody
-	if err := p.client.do(ctx, "list", "GET", "/pods", q, nil, &pods); err != nil {
-		return nil, err
+	req, err := p.client.newReq("GET", "/pods", q, nil)
+	if err != nil {
+		return nil, provisioners.NewProviderError(p.Name(), "list", err, 0)
+	}
+	pods, err := skhttp.Call[[]podBody](ctx, req, p.client.callOpts()...)
+	if err != nil {
+		return nil, wrapErr("list", err)
 	}
 
 	refs := make([]*provisionerv1.InstanceRef, 0, len(pods))

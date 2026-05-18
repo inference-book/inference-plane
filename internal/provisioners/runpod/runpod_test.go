@@ -114,8 +114,8 @@ func TestSpawn_HappyPath(t *testing.T) {
 	if inst.GetHourlyRateUsd() != 0.39 {
 		t.Errorf("HourlyRateUsd = %v, want 0.39", inst.GetHourlyRateUsd())
 	}
-	if inst.GetGpu().GetSku() != "NVIDIA GeForce RTX 4090" {
-		t.Errorf("Sku = %q, want resolved from class small", inst.GetGpu().GetSku())
+	if inst.GetGpu().GetSku() != "NVIDIA RTX A5000" {
+		t.Errorf("Sku = %q, want cheapest 24GB SKU (A5000)", inst.GetGpu().GetSku())
 	}
 	if inst.GetGpu().GetVramGb() != 24 {
 		t.Errorf("VramGb = %d, want 24", inst.GetGpu().GetVramGb())
@@ -128,8 +128,8 @@ func TestSpawn_HappyPath(t *testing.T) {
 		t.Errorf("POST body name = %q, want iplane-my-pod", name)
 	}
 	ids, _ := sentBody["gpuTypeIds"].([]any)
-	if len(ids) == 0 || ids[0] != "NVIDIA GeForce RTX 4090" {
-		t.Errorf("POST body gpuTypeIds = %v, want [NVIDIA GeForce RTX 4090, ...]", ids)
+	if len(ids) == 0 || ids[0] != "NVIDIA RTX A5000" {
+		t.Errorf("POST body gpuTypeIds = %v, want [NVIDIA RTX A5000, ...] (cheapest 24GB SKU first)", ids)
 	}
 	dcs, _ := sentBody["dataCenterIds"].([]any)
 	if len(dcs) == 0 || dcs[0] != "US-CA-1" {
@@ -277,7 +277,7 @@ func TestSpawn_FollowupFailure_FallsBackToMinimalInstance(t *testing.T) {
 	if inst.GetProviderId() != "rp-7c8e" {
 		t.Errorf("ProviderId = %q, want rp-7c8e", inst.GetProviderId())
 	}
-	if inst.GetGpu().GetSku() != "NVIDIA GeForce RTX 4090" {
+	if inst.GetGpu().GetSku() != "NVIDIA RTX A5000" {
 		t.Errorf("fallback should carry the resolved SKU; got %q", inst.GetGpu().GetSku())
 	}
 }
@@ -446,10 +446,10 @@ func TestMatchSKUs(t *testing.T) {
 		wantFirst string // expected first SKU (cheapest matching)
 		wantNonEmpty bool
 	}{
-		{"24GB VRAM", &provisionerv1.ResourceRequirements{MinVramGb: 24}, "NVIDIA GeForce RTX 4090", true},
+		{"24GB VRAM", &provisionerv1.ResourceRequirements{MinVramGb: 24}, "NVIDIA RTX A5000", true},
 		{"80GB VRAM", &provisionerv1.ResourceRequirements{MinVramGb: 80}, "NVIDIA A100 80GB PCIe", true},
-		{"96GB VRAM", &provisionerv1.ResourceRequirements{MinVramGb: 96}, "", false},
-		{"40GB+128RAM", &provisionerv1.ResourceRequirements{MinVramGb: 40, MinRamGb: 128}, "NVIDIA H100 80GB HBM3", true},
+		{"200GB VRAM (above all SKUs)", &provisionerv1.ResourceRequirements{MinVramGb: 200}, "", false},
+		{"40GB+128RAM (H100 PCIe is cheapest with 128 GB system RAM)", &provisionerv1.ResourceRequirements{MinVramGb: 40, MinRamGb: 128}, "NVIDIA H100 PCIe", true},
 	}
 	for _, c := range cases {
 		got := MatchSKUs(c.reqs)
@@ -463,6 +463,69 @@ func TestMatchSKUs(t *testing.T) {
 		}
 		if c.wantNonEmpty && got[0] != c.wantFirst {
 			t.Errorf("%s: first SKU = %q, want %q (cheapest matching)", c.name, got[0], c.wantFirst)
+		}
+	}
+}
+
+func TestMatchSKUs_CappedAtMaxSKUsPerRequest(t *testing.T) {
+	// class=small expands to min_vram_gb=24, which matches >10 SKUs in
+	// the catalog. The cap prevents us from sending the full list to
+	// RunPod (which would include B200, H200, H100 NVL etc. and risk
+	// account-level 401s plus silent price-tier upgrades).
+	got := MatchSKUs(&provisionerv1.ResourceRequirements{MinVramGb: 24})
+	if len(got) > MaxSKUsPerRequest {
+		t.Errorf("got %d SKUs (%v), want <= %d (cap)", len(got), got, MaxSKUsPerRequest)
+	}
+	// The cap should keep the cheapest matches; B200 at $5.99/hr should
+	// not be in the list when class=small.
+	for _, sku := range got {
+		if sku == "NVIDIA B200" || sku == "NVIDIA H200" {
+			t.Errorf("class=small returned frontier SKU %q in the gpuTypeIds list; cap should keep only cheap matches", sku)
+		}
+	}
+}
+
+func TestParseErrorMessage(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "array form with problems prefers problems",
+			body: `[{"error":"generic envelope","problems":["At /pods/properties/dataCenterIds/items/enum: value must be one of 'US-WA-1', ..."]}]`,
+			want: "At /pods/properties/dataCenterIds/items/enum: value must be one of 'US-WA-1', ...",
+		},
+		{
+			name: "array form without problems falls back to error",
+			body: `[{"error":"Pod not found"}]`,
+			want: "Pod not found",
+		},
+		{
+			name: "single-object form",
+			body: `{"error":"invalid api key"}`,
+			want: "invalid api key",
+		},
+		{
+			name: "single-object message variant",
+			body: `{"message":"rate limited"}`,
+			want: "rate limited",
+		},
+		{
+			name: "multiple problems joined",
+			body: `[{"problems":["field A wrong","field B missing"]}]`,
+			want: "field A wrong; field B missing",
+		},
+		{
+			name: "unrecognized shape returns raw body",
+			body: `<html>500 Internal Server Error</html>`,
+			want: "<html>500 Internal Server Error</html>",
+		},
+	}
+	for _, c := range cases {
+		got := parseErrorMessage([]byte(c.body))
+		if got != c.want {
+			t.Errorf("%s:\n  body: %s\n  got:  %q\n  want: %q", c.name, c.body, got, c.want)
 		}
 	}
 }

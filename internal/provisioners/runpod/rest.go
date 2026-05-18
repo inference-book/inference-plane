@@ -1,38 +1,29 @@
 package runpod
 
 import (
-	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
-	"time"
 
 	"github.com/inference-book/inference-plane/internal/provisioners"
+	skhttp "github.com/panyam/servicekit/http"
 )
 
-// Default endpoint and HTTP timeout for the RunPod REST API. The
-// endpoint is overrideable via WithBaseURL (httptest in unit tests,
-// staging in integration tests).
-const (
-	DefaultBaseURL     = "https://rest.runpod.io/v1"
-	defaultHTTPTimeout = 30 * time.Second
-)
+// Default endpoint for the RunPod REST API. Overrideable via WithBaseURL
+// (httptest in unit tests, staging in integration tests).
+const DefaultBaseURL = "https://rest.runpod.io/v1"
 
-// Client is a minimal HTTP client targeted at RunPod's REST endpoint.
-// Not a general-purpose REST client -- it knows how to attach RunPod's
-// bearer auth and wraps every failure in *provisioners.ProviderError
-// so callers can errors.As to the cause and surface the original
-// RunPod message (the design doc forbids normalizing provider errors
-// into iplane-canonical codes).
+// Client carries the bits every RunPod request needs (base URL, bearer
+// token) plus an optional custom *http.Client for tests. The actual
+// HTTP send / read / decode lives in servicekit's http.Call / CallVoid.
+// We keep this struct thin: build the request, hand it to servicekit.
 type Client struct {
-	httpClient *http.Client
 	baseURL    string
 	apiKey     string
+	httpClient *http.Client // when nil, servicekit's DefaultHttpClient is used
 }
 
 // ClientOption configures the Client at construction time.
@@ -44,21 +35,18 @@ func WithHTTPClient(c *http.Client) ClientOption {
 	return func(cl *Client) { cl.httpClient = c }
 }
 
-// WithBaseURL points the client at a different endpoint. Tests pass
-// the httptest.Server URL; integration tests can point at staging.
-// The supplied URL is used verbatim -- the caller is responsible for
-// including the API version path segment if any.
+// WithBaseURL points the client at a different endpoint. Tests pass the
+// httptest.Server URL; staging tests point at a staging endpoint.
 func WithBaseURL(u string) ClientOption {
 	return func(cl *Client) { cl.baseURL = strings.TrimRight(u, "/") }
 }
 
 // NewClient builds a RunPod REST client. apiKey is the operator's
-// RUNPOD_API_KEY value, attached as a bearer token on every request.
+// RUNPOD_API_KEY, attached as a bearer token on every request.
 func NewClient(apiKey string, opts ...ClientOption) *Client {
 	c := &Client{
-		httpClient: &http.Client{Timeout: defaultHTTPTimeout},
-		baseURL:    DefaultBaseURL,
-		apiKey:     apiKey,
+		baseURL: DefaultBaseURL,
+		apiKey:  apiKey,
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -66,100 +54,113 @@ func NewClient(apiKey string, opts ...ClientOption) *Client {
 	return c
 }
 
-// errorBody is the shape RunPod returns for 4xx/5xx responses. The
-// `error` field is the actionable message; we preserve it verbatim
-// in the wrapped ProviderError so the operator sees what RunPod said
-// rather than a rewritten iplane phrasing.
-type errorBody struct {
-	Error   string `json:"error"`
-	Message string `json:"message"`
-}
-
-// do is the underlying request helper. op is the iplane operation
-// label ("spawn", "terminate", etc.) used for error wrapping. method
-// is the HTTP verb; path is the API path AFTER the base URL (e.g.,
-// "/pods"). body is JSON-encoded if non-nil; dest is decoded from the
-// response body if non-nil. query is appended as a URL query string.
-func (c *Client) do(ctx context.Context, op, method, path string, query url.Values, body, dest any) error {
+// newReq builds a JSON-shaped request with bearer auth attached. The
+// caller passes it to servicekit's Call/CallVoid, which adds the
+// context and performs the round trip.
+func (c *Client) newReq(method, path string, query url.Values, body any) (*http.Request, error) {
 	endpoint, err := url.JoinPath(c.baseURL, path)
 	if err != nil {
-		return provisioners.NewProviderError(provisioners.ProviderRunPod, op, fmt.Errorf("build url: %w", err), 0)
+		return nil, fmt.Errorf("build url: %w", err)
 	}
 	if len(query) > 0 {
 		endpoint = endpoint + "?" + query.Encode()
 	}
-
-	var reqBody io.Reader
+	var bodyBytes []byte
 	if body != nil {
-		raw, err := json.Marshal(body)
+		bodyBytes, err = json.Marshal(body)
 		if err != nil {
-			return provisioners.NewProviderError(provisioners.ProviderRunPod, op, fmt.Errorf("encode request body: %w", err), 0)
+			return nil, fmt.Errorf("encode request body: %w", err)
 		}
-		reqBody = bytes.NewReader(raw)
 	}
-
-	req, err := http.NewRequestWithContext(ctx, method, endpoint, reqBody)
+	req, err := skhttp.NewBytesRequest(method, endpoint, bodyBytes)
 	if err != nil {
-		return provisioners.NewProviderError(provisioners.ProviderRunPod, op, err, 0)
+		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
 	req.Header.Set("Accept", "application/json")
+	return req, nil
+}
 
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return provisioners.NewProviderError(provisioners.ProviderRunPod, op, err, 0)
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return provisioners.NewProviderError(provisioners.ProviderRunPod, op, fmt.Errorf("read response: %w", err), resp.StatusCode)
-	}
-
-	switch {
-	case resp.StatusCode == http.StatusNotFound:
-		return provisioners.NewProviderError(provisioners.ProviderRunPod, op,
-			fmt.Errorf("%s: %w", parseErrorMessage(respBody), provisioners.ErrNotFound), resp.StatusCode)
-	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
-		return provisioners.NewProviderError(provisioners.ProviderRunPod, op,
-			fmt.Errorf("auth failed: %s", parseErrorMessage(respBody)), resp.StatusCode)
-	case resp.StatusCode >= 400:
-		return provisioners.NewProviderError(provisioners.ProviderRunPod, op,
-			errors.New(parseErrorMessage(respBody)), resp.StatusCode)
-	}
-
-	if dest != nil && len(respBody) > 0 {
-		if err := json.Unmarshal(respBody, dest); err != nil {
-			return provisioners.NewProviderError(provisioners.ProviderRunPod, op,
-				fmt.Errorf("decode response: %w (body=%s)", err, truncate(respBody, 200)), resp.StatusCode)
-		}
+// callOpts returns the servicekit options to apply. Tests inject a
+// custom *http.Client; production lets servicekit's secure default
+// apply (TLS verification on).
+func (c *Client) callOpts() []skhttp.CallOption {
+	if c.httpClient != nil {
+		return []skhttp.CallOption{skhttp.WithClient(c.httpClient)}
 	}
 	return nil
 }
 
+// wrapErr translates a servicekit HTTPError into a *provisioners.ProviderError
+// with RunPod's array-shaped error body parsed. Preserves the raw body via
+// the wrapped cause so the original message reaches the operator.
+func wrapErr(op string, err error) error {
+	if err == nil {
+		return nil
+	}
+	var httpErr *skhttp.HTTPError
+	if errors.As(err, &httpErr) {
+		msg := parseErrorMessage(httpErr.Body)
+		cause := errors.New(msg)
+		switch httpErr.Code {
+		case http.StatusNotFound:
+			cause = fmt.Errorf("%s: %w", msg, provisioners.ErrNotFound)
+		case http.StatusUnauthorized, http.StatusForbidden:
+			cause = fmt.Errorf("auth failed: %s", msg)
+		}
+		return provisioners.NewProviderError(provisioners.ProviderRunPod, op, cause, httpErr.Code)
+	}
+	return provisioners.NewProviderError(provisioners.ProviderRunPod, op, err, 0)
+}
+
+// errorBody is the single-object form of RunPod's error response. The
+// array form is handled in parseErrorMessage. `problems` is RunPod's
+// per-field validation list (set on 4xx schema rejections); it carries
+// the actually-actionable signal while `error` is the generic envelope.
+type errorBody struct {
+	Error    string   `json:"error"`
+	Message  string   `json:"message"`
+	Problems []string `json:"problems,omitempty"`
+}
+
 // parseErrorMessage extracts a useful message from RunPod's error
 // response shape. RunPod is inconsistent across endpoints -- some
-// return `{"error": "..."}`, some `{"message": "..."}`, some plain
-// text. We try the common shapes, fall back to the raw body.
+// return `{"error": "..."}`, some `{"message": "..."}`, some return
+// an array `[{"error": "...", "problems": [...]}]`, some plain text.
+// `problems` (when present) carries the actionable per-field validator
+// output; we prefer it over the generic envelope. Errors are the
+// operator's actionable signal -- never truncate them.
 func parseErrorMessage(body []byte) string {
-	var e errorBody
-	if err := json.Unmarshal(body, &e); err == nil {
+	render := func(e errorBody) string {
+		if len(e.Problems) > 0 {
+			return strings.Join(e.Problems, "; ")
+		}
 		if e.Error != "" {
 			return e.Error
 		}
-		if e.Message != "" {
-			return e.Message
+		return e.Message
+	}
+
+	// Single-object form: {"error": "..."} or {"message": "..."}.
+	var single errorBody
+	if err := json.Unmarshal(body, &single); err == nil {
+		if msg := render(single); msg != "" {
+			return msg
 		}
 	}
-	return truncate(body, 200)
-}
-
-func truncate(b []byte, n int) string {
-	if len(b) <= n {
-		return string(b)
+	// Array form: [{"error": "...", "problems": [...]}, ...]. RunPod's
+	// OpenAPI validator uses this for schema rejections.
+	var arr []errorBody
+	if err := json.Unmarshal(body, &arr); err == nil && len(arr) > 0 {
+		parts := make([]string, 0, len(arr))
+		for _, e := range arr {
+			if msg := render(e); msg != "" {
+				parts = append(parts, msg)
+			}
+		}
+		if len(parts) > 0 {
+			return strings.Join(parts, "; ")
+		}
 	}
-	return string(b[:n]) + "..."
+	return string(body)
 }
