@@ -133,11 +133,13 @@ func TestSpawn_HappyPath(t *testing.T) {
 	}
 	dcs, _ := sentBody["dataCenterIds"].([]any)
 	if len(dcs) == 0 || dcs[0] != "US-CA-1" {
-		t.Errorf("POST body dataCenterIds = %v, want [US-CA-1]", dcs)
+		t.Errorf("POST body dataCenterIds = %v, want [US-CA-1] (spec set region=US-CA-1)", dcs)
 	}
-	cloud, _ := sentBody["cloudType"].(string)
-	if cloud != "SECURE" {
-		t.Errorf("POST body cloudType = %q, want SECURE", cloud)
+	// cloudType is deliberately not pinned by default; an unset value
+	// lets RunPod schedule on whichever of SECURE/COMMUNITY has capacity
+	// for the requested gpuTypeIds. See runpod.go's defaults block.
+	if cloud, ok := sentBody["cloudType"]; ok {
+		t.Errorf("POST body cloudType = %v, want field absent (unpinned)", cloud)
 	}
 }
 

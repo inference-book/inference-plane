@@ -106,11 +106,11 @@ func (s *Store) Read() (*File, error) {
 // If fn returns a non-nil error, the file is NOT written; the error
 // propagates to the caller and the on-disk state is unchanged.
 func (s *Store) Update(fn func(*File) error) error {
-	lockFD, err := s.lock()
+	lockFile, err := s.lock()
 	if err != nil {
 		return err
 	}
-	defer s.unlock(lockFD)
+	defer s.unlock(lockFile)
 
 	file, err := s.readFromDisk()
 	if err != nil {
@@ -122,30 +122,36 @@ func (s *Store) Update(fn func(*File) error) error {
 	return s.writeToDisk(file)
 }
 
-// lock acquires the exclusive directory flock. Returns the underlying
-// file descriptor so unlock can release it. The flock is held against
+// lock acquires the exclusive directory flock. Returns the *os.File so
+// the caller can keep it referenced for the duration of the locked
+// section -- the runtime's *os.File finalizer would otherwise close
+// the underlying FD as soon as the value becomes unreachable, and
+// closing the FD releases the flock. (Worse: the FD slot can then be
+// reused by the OS for an unrelated socket, and unlock's Close()
+// would tear down whatever now lives there.) The flock is held against
 // a sentinel file (.lock) inside the dir rather than against state.json
 // itself because state.json is rewritten on every Update via temp +
 // rename, which would drop any lock held on it.
-func (s *Store) lock() (int, error) {
+func (s *Store) lock() (*os.File, error) {
 	lockPath := filepath.Join(s.dir, ".lock")
 	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
-		return -1, fmt.Errorf("open lock file %q: %w", lockPath, err)
+		return nil, fmt.Errorf("open lock file %q: %w", lockPath, err)
 	}
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
 		f.Close()
-		return -1, fmt.Errorf("flock %q: %w", lockPath, err)
+		return nil, fmt.Errorf("flock %q: %w", lockPath, err)
 	}
-	// We deliberately do not close f here; the lock is released by
-	// unlock(), which closes the fd.
-	return int(f.Fd()), nil
+	return f, nil
 }
 
-func (s *Store) unlock(fd int) {
+func (s *Store) unlock(f *os.File) {
+	if f == nil {
+		return
+	}
 	// LOCK_UN on close is automatic, but explicit is clearer.
-	_ = syscall.Flock(fd, syscall.LOCK_UN)
-	_ = syscall.Close(fd)
+	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	_ = f.Close()
 }
 
 func (s *Store) readFromDisk() (*File, error) {
