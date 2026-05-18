@@ -75,9 +75,6 @@ func runInstanceCreate(cmd *cobra.Command, args []string) error {
 	if err := checkProviderAvailable(createProvider); err != nil {
 		return err
 	}
-	if createDryRun {
-		return fmt.Errorf("--dry-run is not wired yet (lands in a later commit on this branch)")
-	}
 
 	client, err := buildClient()
 	if err != nil {
@@ -97,6 +94,12 @@ func runInstanceCreate(cmd *cobra.Command, args []string) error {
 			Class:     createClass,
 			Sku:       createSKU,
 		},
+	}
+
+	if createDryRun {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		return dryRunCreate(ctx, cmd.OutOrStdout(), client, spec)
 	}
 
 	// 3-minute timeout covers RunPod's slowest p99 spawn and a generous

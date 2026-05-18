@@ -394,6 +394,110 @@ func TestDescribe_OutputJSON(t *testing.T) {
 	}
 }
 
+func TestCreate_DryRun_FreshID(t *testing.T) {
+	env := newTestEnv(t, "mock")
+	out, err := runCmd(t, env,
+		"create", "my-pod", "--provider", "mock", "--class", "small", "--dry-run",
+	)
+	if err != nil {
+		t.Fatalf("dry-run create: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "[dry-run] would create") {
+		t.Errorf("missing would-create line; got:\n%s", out)
+	}
+	if !strings.Contains(out, "vram>=24GB") {
+		t.Errorf("constraints line missing expanded vram floor; got:\n%s", out)
+	}
+	if !strings.Contains(out, "no provider calls made, no state file changes") {
+		t.Errorf("missing tail summary; got:\n%s", out)
+	}
+	// Load-bearing assertions: zero provider calls AND state file empty.
+	if got := env.provider.spawnCalls.Load(); got != 0 {
+		t.Errorf("Spawn call count = %d, want 0 under --dry-run", got)
+	}
+	listOut, _ := runCmd(t, env, "list")
+	if !strings.Contains(listOut, "(no instances)") {
+		t.Errorf("state file was modified by dry-run; list reports:\n%s", listOut)
+	}
+}
+
+func TestCreate_DryRun_IdempotentPath(t *testing.T) {
+	env := newTestEnv(t, "mock")
+	if _, err := runCmd(t, env,
+		"create", "my-pod", "--provider", "mock", "--class", "small",
+	); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	spawnsBefore := env.provider.spawnCalls.Load()
+
+	out, err := runCmd(t, env,
+		"create", "my-pod", "--provider", "mock", "--class", "small", "--dry-run",
+	)
+	if err != nil {
+		t.Fatalf("dry-run on existing record: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "[dry-run] would no-op") {
+		t.Errorf("idempotent dry-run should say 'would no-op'; got:\n%s", out)
+	}
+	if !strings.Contains(out, "already exists") {
+		t.Errorf("missing 'already exists' note; got:\n%s", out)
+	}
+	if got := env.provider.spawnCalls.Load(); got != spawnsBefore {
+		t.Errorf("Spawn count went from %d to %d during dry-run", spawnsBefore, got)
+	}
+}
+
+func TestCreate_DryRun_InvalidSpecRejected(t *testing.T) {
+	env := newTestEnv(t, "mock")
+	out, err := runCmd(t, env,
+		"create", "my-pod", "--provider", "mock", "--dry-run",
+		// No --class, no --sku, no --min-vram-gb -> ValidateAndExpandRequirements rejects.
+	)
+	if err == nil {
+		t.Fatalf("dry-run with under-specified spec should fail; got:\n%s", out)
+	}
+	if !strings.Contains(err.Error(), "requirements") {
+		t.Errorf("error %q does not mention requirements", err)
+	}
+}
+
+func TestDestroy_DryRun(t *testing.T) {
+	env := newTestEnv(t, "mock")
+	if _, err := runCmd(t, env,
+		"create", "my-pod", "--provider", "mock", "--class", "small",
+	); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	termsBefore := env.provider.termCalls.Load()
+
+	out, err := runCmd(t, env, "destroy", "my-pod", "--dry-run")
+	if err != nil {
+		t.Fatalf("dry-run destroy: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "[dry-run] would destroy") {
+		t.Errorf("missing would-destroy line; got:\n%s", out)
+	}
+	if got := env.provider.termCalls.Load(); got != termsBefore {
+		t.Errorf("Terminate count went from %d to %d during dry-run", termsBefore, got)
+	}
+	// Record must still be ACTIVE -- dry-run does not touch state.
+	describeOut, _ := runCmd(t, env, "describe", "my-pod")
+	if !strings.Contains(describeOut, "state:         ACTIVE") {
+		t.Errorf("dry-run destroy mutated state; describe shows:\n%s", describeOut)
+	}
+}
+
+func TestDestroy_DryRun_NotFound(t *testing.T) {
+	env := newTestEnv(t, "mock")
+	out, err := runCmd(t, env, "destroy", "does-not-exist", "--dry-run")
+	if err == nil {
+		t.Fatalf("dry-run destroy of missing id should fail; got:\n%s", out)
+	}
+	if !strings.Contains(err.Error(), `no instance with id "does-not-exist"`) {
+		t.Errorf("error %q should name the missing id", err)
+	}
+}
+
 func TestUnknownProvider_PreCheck(t *testing.T) {
 	// checkProviderAvailable runs before any client construction. With
 	// --service-url unset, an unknown provider hits the local check.

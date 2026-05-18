@@ -34,13 +34,15 @@ TERMINATING.`,
 
 func runInstanceDestroy(cmd *cobra.Command, args []string) error {
 	id := args[0]
-	if destroyDryRun {
-		return fmt.Errorf("--dry-run is not wired yet (lands in a later commit on this branch)")
-	}
-
 	client, err := buildClient()
 	if err != nil {
 		return err
+	}
+
+	if destroyDryRun {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		return dryRunDestroy(ctx, cmd.OutOrStdout(), client, id)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
