@@ -1,7 +1,15 @@
 package cmd
 
 import (
+	"context"
+	"fmt"
+	"text/tabwriter"
+	"time"
+
+	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
+
+	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
 )
 
 var (
@@ -28,9 +36,75 @@ as different questions worth asking separately:
 
 --remote requires --provider (we don't enumerate all configured
 providers silently; see design doc line 99 -- v0.1 punts that to v0.3).`,
-	RunE: func(cmd *cobra.Command, args []string) error {
-		return cmd.Help() // wired in commit 3
-	},
+	RunE: runInstanceList,
+}
+
+func runInstanceList(cmd *cobra.Command, args []string) error {
+	if listRemote && listProvider == "" {
+		return fmt.Errorf("--remote requires --provider (we do not enumerate every configured adapter silently; see design doc line 99)")
+	}
+	if listProvider != "" {
+		if err := checkProviderAvailable(listProvider); err != nil {
+			return err
+		}
+	}
+
+	client, err := buildClient()
+	if err != nil {
+		return err
+	}
+
+	source := provisionerv1.Source_SOURCE_LOCAL
+	if listRemote {
+		source = provisionerv1.Source_SOURCE_REMOTE
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	resp, err := client.ListInstances(ctx, connect.NewRequest(&provisionerv1.ListInstancesRequest{
+		Source:   source,
+		Provider: listProvider,
+	}))
+	if err != nil {
+		return fmt.Errorf("list: %w", err)
+	}
+
+	return renderInstanceTable(cmd, resp.Msg.GetInstances())
+}
+
+// renderInstanceTable prints a tabwriter-aligned summary suitable for
+// the human eye-test in the acceptance criteria. Per-row columns are
+// the operator-facing fields: iplane id, provider, state, sku, rate,
+// region. Full detail comes from `iplane instance describe`.
+func renderInstanceTable(cmd *cobra.Command, instances []*provisionerv1.Instance) error {
+	out := cmd.OutOrStdout()
+	if len(instances) == 0 {
+		fmt.Fprintln(out, "(no instances)")
+		return nil
+	}
+	w := tabwriter.NewWriter(out, 0, 2, 2, ' ', 0)
+	fmt.Fprintln(w, "ID\tPROVIDER\tSTATE\tSKU\tRATE\tREGION")
+	for _, inst := range instances {
+		rate := fmt.Sprintf("$%.4f/hr", inst.GetHourlyRateUsd())
+		region := inst.GetRegion()
+		if region == "" {
+			region = "-"
+		}
+		sku := inst.GetGpu().GetSku()
+		if sku == "" {
+			sku = "-"
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
+			inst.GetId(),
+			inst.GetProvider(),
+			instanceStateLabel(inst.GetState()),
+			sku,
+			rate,
+			region,
+		)
+	}
+	return w.Flush()
 }
 
 func init() {

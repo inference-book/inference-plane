@@ -1,7 +1,14 @@
 package cmd
 
 import (
+	"context"
+	"fmt"
+	"time"
+
+	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
+
+	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
 )
 
 var (
@@ -22,9 +29,34 @@ same).
 --force skips the provider Terminate call. Use only when the provider
 has confirmed the instance is gone and the local record is stuck in
 TERMINATING.`,
-	RunE: func(cmd *cobra.Command, args []string) error {
-		return cmd.Help() // wired in commit 3
-	},
+	RunE: runInstanceDestroy,
+}
+
+func runInstanceDestroy(cmd *cobra.Command, args []string) error {
+	id := args[0]
+	if destroyDryRun {
+		return fmt.Errorf("--dry-run is not wired yet (lands in a later commit on this branch)")
+	}
+
+	client, err := buildClient()
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	resp, err := client.DestroyInstance(ctx, connect.NewRequest(&provisionerv1.DestroyInstanceRequest{
+		Id:    id,
+		Force: destroyForce,
+	}))
+	if err != nil {
+		return fmt.Errorf("destroy %q: %w", id, err)
+	}
+	inst := resp.Msg.GetInstance()
+	fmt.Fprintf(cmd.OutOrStdout(), "Destroyed instance %q (final state: %s)\n",
+		inst.GetId(), instanceStateLabel(inst.GetState()))
+	return nil
 }
 
 func init() {
