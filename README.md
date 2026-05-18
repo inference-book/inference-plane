@@ -63,6 +63,7 @@ See `Makefile` for the full target list, or run `make help`.
 ```
 cmd/iplane/           single binary with subcommands:
                         iplane serve      run the control plane
+                        iplane instance   create / list / describe / destroy GPU instances
                         iplane load       fire synthetic traffic
                         iplane gen-names  regenerate OTel name vocabulary
 protos/               buf-managed proto sources

@@ -44,11 +44,15 @@ Single binary `iplane` with cobra subcommands. The Docker image
 | Subcommand           | Purpose                                                |
 | -------------------- | ------------------------------------------------------ |
 | `iplane serve`       | Run the control plane (gRPC + HTTP)                    |
+| `iplane instance`    | Create / list / describe / destroy GPU instances (in-process state file OR `--service-url <remote>`) |
 | `iplane load`        | Fire synthetic OpenAI traffic                          |
 | `iplane gen-names`   | Regenerate Go consts + book LaTeX from `metric-names.yaml` |
 
 `--config <path>` is a persistent flag. Each subcommand has its own
-flags; `iplane <cmd> --help` for the full list.
+flags; `iplane <cmd> --help` for the full list. State-changing
+subcommands (`instance create`, `instance destroy`) accept `--dry-run`
+to preview the action without provider calls or state-file writes —
+see [docs/cli-dry-run.md](docs/cli-dry-run.md) for the pattern.
 
 ## Env vars
 
