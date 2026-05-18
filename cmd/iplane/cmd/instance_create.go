@@ -1,7 +1,14 @@
 package cmd
 
 import (
+	"context"
+	"fmt"
+	"time"
+
+	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
+
+	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
 )
 
 // Flags scoped to `iplane instance create`. The constraints-first
@@ -54,9 +61,93 @@ and bypasses constraints entirely.`,
 
   # Preview without provisioning
   iplane instance create my-pod --provider runpod --class small --dry-run`,
-	RunE: func(cmd *cobra.Command, args []string) error {
-		return cmd.Help() // wired in commit 2
-	},
+	RunE: runInstanceCreate,
+}
+
+// runInstanceCreate is the createCmd's RunE. Builds a Spec proto from
+// the parsed flags, dispatches to the configured client (in-process
+// Service or remote gRPC), and prints the resulting Instance.
+//
+// --dry-run is honored in a later commit; for now it errors out so
+// operators don't get a silent real provision.
+func runInstanceCreate(cmd *cobra.Command, args []string) error {
+	id := args[0]
+	if err := checkProviderAvailable(createProvider); err != nil {
+		return err
+	}
+	if createDryRun {
+		return fmt.Errorf("--dry-run is not wired yet (lands in a later commit on this branch)")
+	}
+
+	client, err := buildClient()
+	if err != nil {
+		return err
+	}
+
+	spec := &provisionerv1.Spec{
+		Id:        id,
+		Provider:  createProvider,
+		Region:    createRegion,
+		BaseImage: createBaseImage,
+		Requirements: &provisionerv1.ResourceRequirements{
+			MinVramGb: createMinVRAM,
+			MinDiskGb: createMinDisk,
+			MinRamGb:  createMinRAM,
+			GpuCount:  createGPUCount,
+			Class:     createClass,
+			Sku:       createSKU,
+		},
+	}
+
+	// 3-minute timeout covers RunPod's slowest p99 spawn and a generous
+	// buffer for local. Operators with stranger needs can wrap in their
+	// own shell-level timeout.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	resp, err := client.CreateInstance(ctx, connect.NewRequest(&provisionerv1.CreateInstanceRequest{Spec: spec}))
+	if err != nil {
+		return fmt.Errorf("create %q: %w", id, err)
+	}
+
+	return renderCreateResult(cmd, resp.Msg)
+}
+
+// renderCreateResult is the per-verb render hook. Output formatting
+// (table vs json) gets factored into output.go in a later commit; for
+// now print a simple block humans can read.
+func renderCreateResult(cmd *cobra.Command, resp *provisionerv1.CreateInstanceResponse) error {
+	inst := resp.GetInstance()
+	out := cmd.OutOrStdout()
+	verb := "Created"
+	if resp.GetAlreadyExisted() {
+		verb = "Found existing"
+	}
+	fmt.Fprintf(out, "%s instance %q\n", verb, inst.GetId())
+	fmt.Fprintf(out, "  provider:     %s\n", inst.GetProvider())
+	fmt.Fprintf(out, "  provider id:  %s\n", inst.GetProviderId())
+	fmt.Fprintf(out, "  state:        %s\n", instanceStateLabel(inst.GetState()))
+	if sku := inst.GetGpu().GetSku(); sku != "" {
+		fmt.Fprintf(out, "  sku:          %s\n", sku)
+	}
+	if rate := inst.GetHourlyRateUsd(); rate > 0 {
+		fmt.Fprintf(out, "  hourly rate:  $%.4f/hr\n", rate)
+	}
+	if region := inst.GetRegion(); region != "" {
+		fmt.Fprintf(out, "  region:       %s\n", region)
+	}
+	return nil
+}
+
+// instanceStateLabel strips the protobuf enum prefix so humans see
+// "ACTIVE" rather than "INSTANCE_STATE_ACTIVE".
+func instanceStateLabel(s provisionerv1.InstanceState) string {
+	const prefix = "INSTANCE_STATE_"
+	name := s.String()
+	if len(name) > len(prefix) && name[:len(prefix)] == prefix {
+		return name[len(prefix):]
+	}
+	return name
 }
 
 func init() {
