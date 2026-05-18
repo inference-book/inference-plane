@@ -53,8 +53,12 @@ func runInstanceDestroy(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("destroy %q: %w", id, err)
 	}
+	out := cmd.OutOrStdout()
+	if instanceOutput == outputJSON {
+		return writeProtoJSON(out, resp.Msg)
+	}
 	inst := resp.Msg.GetInstance()
-	fmt.Fprintf(cmd.OutOrStdout(), "Destroyed instance %q (final state: %s)\n",
+	fmt.Fprintf(out, "Destroyed instance %q (final state: %s)\n",
 		inst.GetId(), instanceStateLabel(inst.GetState()))
 	return nil
 }

@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -303,6 +304,93 @@ func TestDestroy_NotFound(t *testing.T) {
 	out, err := runCmd(t, env, "destroy", "does-not-exist")
 	if err == nil {
 		t.Fatalf("destroy of missing id should fail; got:\n%s", out)
+	}
+}
+
+func TestCreate_OutputJSON(t *testing.T) {
+	env := newTestEnv(t, "mock")
+	out, err := runCmd(t, env,
+		"create", "my-pod", "--provider", "mock", "--class", "small",
+		"--output", "json",
+	)
+	if err != nil {
+		t.Fatalf("create --output json: %v\n%s", err, out)
+	}
+	// Must parse as JSON and carry the proto-name fields the state
+	// file uses (provider_id, hourly_rate_usd, etc.) -- not the
+	// camelCase variants. The contract is: `iplane ... --output json
+	// | jq` works without translation.
+	var resp struct {
+		Instance struct {
+			ID         string `json:"id"`
+			ProviderID string `json:"provider_id"`
+			State      string `json:"state"`
+		} `json:"instance"`
+		AlreadyExisted bool `json:"already_existed"`
+	}
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		t.Fatalf("output is not valid JSON: %v\n%s", err, out)
+	}
+	if resp.Instance.ID != "my-pod" {
+		t.Errorf("instance.id = %q, want my-pod", resp.Instance.ID)
+	}
+	if resp.Instance.ProviderID == "" {
+		t.Errorf("instance.provider_id is empty in JSON output")
+	}
+	if resp.Instance.State != "INSTANCE_STATE_ACTIVE" {
+		t.Errorf("instance.state = %q, want INSTANCE_STATE_ACTIVE", resp.Instance.State)
+	}
+}
+
+func TestList_OutputJSON(t *testing.T) {
+	env := newTestEnv(t, "mock")
+	if _, err := runCmd(t, env,
+		"create", "alpha", "--provider", "mock", "--class", "small",
+	); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	out, err := runCmd(t, env, "list", "--output", "json")
+	if err != nil {
+		t.Fatalf("list --output json: %v\n%s", err, out)
+	}
+	var resp struct {
+		Instances []struct {
+			ID string `json:"id"`
+		} `json:"instances"`
+	}
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		t.Fatalf("output is not valid JSON: %v\n%s", err, out)
+	}
+	if len(resp.Instances) != 1 || resp.Instances[0].ID != "alpha" {
+		t.Errorf("instances = %+v, want one entry with id=alpha", resp.Instances)
+	}
+}
+
+func TestDescribe_OutputJSON(t *testing.T) {
+	env := newTestEnv(t, "mock")
+	if _, err := runCmd(t, env,
+		"create", "my-pod", "--provider", "mock", "--class", "small",
+	); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	out, err := runCmd(t, env, "describe", "my-pod", "--output", "json")
+	if err != nil {
+		t.Fatalf("describe --output json: %v\n%s", err, out)
+	}
+	// The describe response wraps a single Instance at the top level
+	// (no envelope), matching the protojson encoding of
+	// DescribeInstanceResponse.
+	var inst struct {
+		ID  string `json:"id"`
+		GPU struct {
+			Sku string `json:"sku"`
+		} `json:"gpu"`
+	}
+	if err := json.Unmarshal([]byte(out), &inst); err != nil {
+		t.Fatalf("output is not valid JSON: %v\n%s", err, out)
+	}
+	if inst.ID != "my-pod" || inst.GPU.Sku != "mock-sku" {
+		t.Errorf("decoded instance = %+v", inst)
 	}
 }
 

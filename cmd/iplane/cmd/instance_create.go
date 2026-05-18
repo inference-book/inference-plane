@@ -113,12 +113,16 @@ func runInstanceCreate(cmd *cobra.Command, args []string) error {
 	return renderCreateResult(cmd, resp.Msg)
 }
 
-// renderCreateResult is the per-verb render hook. Output formatting
-// (table vs json) gets factored into output.go in a later commit; for
-// now print a simple block humans can read.
+// renderCreateResult prints the create response. JSON mode emits the
+// full CreateInstanceResponse (including already_existed); table mode
+// prints a "Created" / "Found existing" header plus the standard
+// instance block from output.go.
 func renderCreateResult(cmd *cobra.Command, resp *provisionerv1.CreateInstanceResponse) error {
-	inst := resp.GetInstance()
 	out := cmd.OutOrStdout()
+	if instanceOutput == outputJSON {
+		return writeProtoJSON(out, resp)
+	}
+	inst := resp.GetInstance()
 	verb := "Created"
 	if resp.GetAlreadyExisted() {
 		verb = "Found existing"
@@ -137,17 +141,6 @@ func renderCreateResult(cmd *cobra.Command, resp *provisionerv1.CreateInstanceRe
 		fmt.Fprintf(out, "  region:       %s\n", region)
 	}
 	return nil
-}
-
-// instanceStateLabel strips the protobuf enum prefix so humans see
-// "ACTIVE" rather than "INSTANCE_STATE_ACTIVE".
-func instanceStateLabel(s provisionerv1.InstanceState) string {
-	const prefix = "INSTANCE_STATE_"
-	name := s.String()
-	if len(name) > len(prefix) && name[:len(prefix)] == prefix {
-		return name[len(prefix):]
-	}
-	return name
 }
 
 func init() {

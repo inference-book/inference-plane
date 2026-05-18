@@ -3,7 +3,6 @@ package cmd
 import (
 	"context"
 	"fmt"
-	"text/tabwriter"
 	"time"
 
 	"connectrpc.com/connect"
@@ -70,41 +69,7 @@ func runInstanceList(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("list: %w", err)
 	}
 
-	return renderInstanceTable(cmd, resp.Msg.GetInstances())
-}
-
-// renderInstanceTable prints a tabwriter-aligned summary suitable for
-// the human eye-test in the acceptance criteria. Per-row columns are
-// the operator-facing fields: iplane id, provider, state, sku, rate,
-// region. Full detail comes from `iplane instance describe`.
-func renderInstanceTable(cmd *cobra.Command, instances []*provisionerv1.Instance) error {
-	out := cmd.OutOrStdout()
-	if len(instances) == 0 {
-		fmt.Fprintln(out, "(no instances)")
-		return nil
-	}
-	w := tabwriter.NewWriter(out, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(w, "ID\tPROVIDER\tSTATE\tSKU\tRATE\tREGION")
-	for _, inst := range instances {
-		rate := fmt.Sprintf("$%.4f/hr", inst.GetHourlyRateUsd())
-		region := inst.GetRegion()
-		if region == "" {
-			region = "-"
-		}
-		sku := inst.GetGpu().GetSku()
-		if sku == "" {
-			sku = "-"
-		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
-			inst.GetId(),
-			inst.GetProvider(),
-			instanceStateLabel(inst.GetState()),
-			sku,
-			rate,
-			region,
-		)
-	}
-	return w.Flush()
+	return renderInstances(cmd.OutOrStdout(), instanceOutput, resp.Msg.GetInstances())
 }
 
 func init() {
