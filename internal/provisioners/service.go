@@ -88,9 +88,10 @@ func (s *Service) CreateInstance(ctx context.Context, req *connect.Request[provi
 	if err := validateAndExpandRequirements(spec); err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
-	if spec.GetRegion() == "" {
-		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("region is required"))
-	}
+	// Region is intentionally not validated here: semantics vary by
+	// provider (RunPod treats empty as "schedule anywhere", Local
+	// ignores it entirely, future cloud adapters may require it).
+	// Each Provider.Spawn validates as needed.
 	provider, ok := s.providers[spec.GetProvider()]
 	if !ok {
 		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("unknown provider %q", spec.GetProvider()))

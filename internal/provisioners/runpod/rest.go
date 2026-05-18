@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 
 	"github.com/inference-book/inference-plane/internal/provisioners"
@@ -43,6 +44,12 @@ func WithBaseURL(u string) ClientOption {
 
 // NewClient builds a RunPod REST client. apiKey is the operator's
 // RUNPOD_API_KEY, attached as a bearer token on every request.
+//
+// When IPLANE_RUNPOD_DEBUG is set, the underlying http.Client is wrapped
+// with a debugTransport that prints the request/response bytes to stderr
+// (sans Authorization header). The wrap is non-destructive -- we clone
+// any caller-supplied *http.Client so re-use elsewhere keeps its
+// original transport.
 func NewClient(apiKey string, opts ...ClientOption) *Client {
 	c := &Client{
 		baseURL: DefaultBaseURL,
@@ -50,6 +57,15 @@ func NewClient(apiKey string, opts ...ClientOption) *Client {
 	}
 	for _, opt := range opts {
 		opt(c)
+	}
+	if os.Getenv(EnvHTTPDebug) != "" {
+		base := c.httpClient
+		if base == nil {
+			base = http.DefaultClient
+		}
+		cloned := *base
+		cloned.Transport = newDebugTransport(cloned.Transport)
+		c.httpClient = &cloned
 	}
 	return c
 }

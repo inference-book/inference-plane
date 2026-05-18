@@ -50,11 +50,19 @@ import (
 // Defaults for fields that v0.1 does not expose on Spec. Phase 1.4's
 // CLI may eventually expose some of these (--container-disk, etc.);
 // for now they are hardcoded.
+//
+// cloudType is deliberately unset. RunPod's two cloud types are SECURE
+// (T1/T2 datacenters; A100s, H100s, datacenter cards) and COMMUNITY
+// (T3/T4 community hosts; cheap consumer cards like RTX 4090 and
+// A5000). Pinning either side silently filters out half the catalog --
+// an operator who asked for class=small under SECURE gets a "no pods
+// available" because the cheap SKUs live in COMMUNITY. Leaving
+// cloudType empty lets RunPod schedule on whichever has capacity for
+// the requested gpuTypeIds.
 const (
 	defaultBaseImage       = "runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04"
 	defaultContainerDiskGB = 20
 	defaultVolumeGB        = 0
-	defaultCloudType       = "SECURE"
 	defaultComputeType     = "GPU"
 	defaultGPUPriority     = "availability" // try SKUs in availability order; "custom" for strict priority
 	podNamePrefix          = "iplane-"
@@ -158,6 +166,17 @@ func (p *Provider) Spawn(ctx context.Context, spec *provisionerv1.Spec) (*provis
 		minRAMPerGPU = (r + gpuCount - 1) / gpuCount
 	}
 
+	// Region is a best-effort pin: send dataCenterIds only when the
+	// operator actually asked for a region. The demo defaults region to
+	// "US-WA-1" for runpod, but pinning a single datacenter when an
+	// operator just wants "any cheap GPU" turns "no capacity in this DC"
+	// into "no capacity at all". Empty region = no pin = RunPod
+	// schedules wherever capacity exists.
+	var dataCenterIDs []string
+	if r := strings.TrimSpace(spec.GetRegion()); r != "" {
+		dataCenterIDs = []string{r}
+	}
+
 	createBody := createPodRequest{
 		Name:              podNamePrefix + spec.GetId(),
 		ImageName:         image,
@@ -165,12 +184,11 @@ func (p *Provider) Spawn(ctx context.Context, spec *provisionerv1.Spec) (*provis
 		GPUTypePriority:   defaultGPUPriority,
 		GPUCount:          gpuCount,
 		MinRAMPerGPU:      minRAMPerGPU,
-		CloudType:         defaultCloudType,
 		ComputeType:       defaultComputeType,
 		ContainerDiskInGB: containerDisk,
 		VolumeInGB:        defaultVolumeGB,
 		Ports:             defaultPortsList,
-		DataCenterIDs:     []string{spec.GetRegion()}, // best-effort region pin
+		DataCenterIDs:     dataCenterIDs,
 	}
 
 	req, err := p.client.newReq("POST", "/pods", nil, createBody)

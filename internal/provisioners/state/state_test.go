@@ -3,6 +3,7 @@ package state
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -189,6 +190,73 @@ func TestRead_ForwardCompat_UnknownFieldsTolerated(t *testing.T) {
 	}
 	if inst, ok := f.Instances["my-pod"]; !ok || inst.GetState() != provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE {
 		t.Errorf("instance not parsed correctly: %+v", inst)
+	}
+}
+
+// TestLock_FDSurvivesGC is the regression test for the flock GC bug.
+//
+// The original lock() returned an int (the raw file descriptor) and let
+// the *os.File go out of scope. Go's runtime registers a finalizer on
+// every *os.File that closes the underlying FD when the value becomes
+// unreachable. Closing the FD silently released the flock AND -- worse
+// -- handed the FD slot back to the OS, which could reuse it for a
+// completely unrelated socket (a gRPC stream, say). unlock's later
+// syscall.Close on the same numeric FD would then tear down whatever
+// now lived there, manifesting as "unexpected EOF" on the gRPC client.
+//
+// The fix is to return *os.File from lock() so the caller's stack
+// holds a reference for the entire locked section. This test guards
+// against anyone "simplifying" the signature back to int.
+func TestLock_FDSurvivesGC(t *testing.T) {
+	s := newStore(t)
+	f, err := s.lock()
+	if err != nil {
+		t.Fatalf("lock: %v", err)
+	}
+	defer s.unlock(f)
+
+	// Force several GC cycles. If lock() ever stops keeping the
+	// *os.File reachable, the finalizer would close the FD here.
+	for i := 0; i < 16; i++ {
+		runtime.GC()
+	}
+
+	// Proof: the FD is still ours. A closed-then-recycled FD would
+	// either fail this write or write to something unrelated.
+	if _, err := f.Write([]byte("alive\n")); err != nil {
+		t.Fatalf("lock FD died across GC -- finalizer must have closed it: %v", err)
+	}
+}
+
+// TestUpdate_SurvivesGCPressure exercises the public Update entry point
+// under GC pressure. A regression in lock()'s lifetime management would
+// surface as a stray Close on a recycled FD; with the fix in place,
+// every Update returns clean and the stored values are consistent.
+func TestUpdate_SurvivesGCPressure(t *testing.T) {
+	s := newStore(t)
+	for i := 0; i < 32; i++ {
+		err := s.Update(func(f *File) error {
+			// Force GC inside the locked section. If lock's *os.File
+			// were collectable here, this is exactly when the
+			// finalizer would fire and close the lock FD.
+			runtime.GC()
+			runtime.GC()
+			f.Instances["k-"+itoa(i)] = &provisionerv1.Instance{
+				Id:    "k-" + itoa(i),
+				State: provisionerv1.InstanceState_INSTANCE_STATE_PENDING,
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("Update #%d: %v", i, err)
+		}
+	}
+	out, err := s.Read()
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if got := len(out.Instances); got != 32 {
+		t.Errorf("instance count = %d, want 32", got)
 	}
 }
 

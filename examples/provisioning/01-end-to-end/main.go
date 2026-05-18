@@ -101,7 +101,7 @@ func serve() {
 func runDemo() {
 	url := flag.String("url", "http://localhost:9091", "provisioner service URL")
 	provider := flag.String("provider", provisioners.ProviderLocal, "provider to use (local | runpod)")
-	region := flag.String("region", "", "region (default: laptop for local, US-WA-1 for runpod)")
+	region := flag.String("region", "", "region (default: laptop for local, unpinned for runpod -- pass an explicit datacenter like US-WA-1 to pin)")
 	// demokit's built-in FilterArgs only strips --tui / --non-interactive
 	// / --doc / --from. Explicitly strip the other built-ins so stdlib
 	// flag.Parse doesn't choke when callers pass them.
@@ -115,7 +115,11 @@ func runDemo() {
 	if *region == "" {
 		switch *provider {
 		case provisioners.ProviderRunPod:
-			*region = "US-WA-1"
+			// Leave empty -- the adapter will not pin dataCenterIds, so
+			// RunPod schedules wherever capacity exists for the
+			// requested gpuTypeIds. Operators who want to pin a specific
+			// datacenter (latency-sensitive workloads, data-residency)
+			// pass --region US-WA-1 explicitly.
 		default:
 			*region = "laptop"
 		}
@@ -183,7 +187,7 @@ func runDemo() {
 		"The provisioner Service is a connect-rpc handler. This demo connects via a generated ProvisionerServiceClient -- the same client the CLI (phase 1.4) will use.",
 		fmt.Sprintf("Target URL:  %s", *url),
 		fmt.Sprintf("Provider:    %s", *provider),
-		fmt.Sprintf("Region:      %s", *region),
+		fmt.Sprintf("Region:      %s", regionLabel(*region)),
 		fmt.Sprintf("Spawning id: %s with class=small (cheapest matching SKU)", demoID),
 		"All operations idempotent; defer-terminates on exit or Ctrl-C.",
 	)
@@ -355,4 +359,13 @@ func runDemo() {
 	}
 
 	demo.Execute()
+}
+
+// regionLabel renders empty region as "(unpinned)" for the Setup block.
+// An empty value here is meaningful -- the runpod default -- not a bug.
+func regionLabel(r string) string {
+	if r == "" {
+		return "(unpinned)"
+	}
+	return r
 }
