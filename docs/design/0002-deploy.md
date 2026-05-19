@@ -304,13 +304,14 @@ Captured here so the architecture's intentional gaps are obvious:
 - **Multi-container deployments per record** (sidecar logging, etc.): v0.3.
 - **Per-deployment secrets**: v0.3 secret store. v0.1 passes secrets via `--env KEY=VAL` (operator's responsibility).
 - **Encryption-at-rest for SSH private keys beyond filesystem perms**: tracked oneauth gap (asymmetric in `EncryptedKeyStorage` currently HMAC-only). Not v0.1-blocking.
-- **Rotation of operator SSH keys**: oneauth's `KidStore` rotation is in-memory only; persisted rotation is another tracked oneauth gap.
+- **Rotation of operator SSH keys**: machinery is there (`FSKidStore` persists kid→key with grace-period expiry), but iplane v0.1 doesn't wire it. v0.2+ adds the rotation policy + CLI verbs.
 
-## Followup oneauth issues (file before Phase 2 impl)
+## Followup oneauth issues (optional, none v0.1-blocking)
 
 1. **Asymmetric encryption support in `EncryptedKeyStorage`** — `keys/encrypted.go:70` only encrypts when `isHMACAlgorithm(rec.Algorithm)`. Asymmetric private keys (Ed25519, RSA PEMs) pass through plaintext. v0.1 iplane doesn't block on this (filesystem perms suffice), but production SaaS consumers will want it.
-2. **Persisted rotation / multi-key per ClientID** — `KidStore` grace-period rotation lives in-memory only; `FSKeyStore` is one-key-per-ClientID with no historical retention. Not v0.1-blocking; v0.2+ may want this when SSH key rotation lands.
-3. **Re-export `NewFSKeyStore` from `keys/`** — minor convenience so consumers don't need to import `stores/fs` for the common single-binary case. One-line PR.
+2. **Re-export `NewFSKeyStore` + `NewFSKidStore` from `keys/`** — minor convenience so consumers don't need to import `stores/fs` for the common single-binary case. One-line PR.
+
+(An earlier draft of this doc listed "persisted KidStore rotation" as a gap — that was based on a stale agent survey. `FSKidStore` already lives at `stores/fs/fskidstore.go` and satisfies `keys.KidStorage` with file-per-kid + expiry.)
 
 ## Notes for the chapter draft
 
