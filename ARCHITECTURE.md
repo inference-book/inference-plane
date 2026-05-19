@@ -69,6 +69,9 @@ The gRPC server is the source of truth for the API. The HTTP surface dials the g
 | `internal/services/` | gRPC service implementations satisfying the `inferencev1.InferenceServiceServer` and `HealthServiceServer` interfaces. The custom `backend.generate` span lives here. |
 | `internal/telemetry/`| OTel SDK init (tracer + meter + OTLP/gRPC exporters); generated `names.go` for metric/attribute/label vocabulary. |
 | `internal/web/server/`| HTTP layer: connect adapters wrapping a gRPC client, plus grpc-gateway with OpenAI-shaped marshaler and error handler. |
+| `internal/provisioners/` | Provisioner Service + state-file store + local + runpod adapters. The v0.1 control surface for acquiring/releasing GPU instances. See `docs/design/0001-provisioner.md`. |
+| `cmd/iplane/cmd/`    | Cobra subcommands. `instance.go` wires the `iplane instance {create,list,describe,destroy}` group with two transports (in-process Service or `--service-url` remote gRPC client). `dryrun.go` is the CLI-layer `--dry-run` helper. |
+| `examples/provisioning/` | Runnable demokit walkthroughs of the lifecycle: `01-end-to-end/` drives the gRPC client, `02-cli-end-to-end/` drives the `iplane` binary. |
 | `deploy/`            | docker-compose + observability configs (OTel collector, Tempo, Loki, Mimir, Grafana provisioning). |
 | `tests/smoke/`       | Go integration tests with `//go:build smoke` tag. Decode responses into the same `backends` types the production code uses. |
 | `metric-names.yaml`  | Canonical OTel name vocabulary (paired with book). |
@@ -83,6 +86,19 @@ The project distinguishes two tiers of name management:
 2. **Manual + drift-check tier** (small bounded sets): version strings, model IDs, engine version, branch names. Source: `pinned-versions.env` + book's `pinned-versions.tex`. `make check-pins` is a CI gate.
 
 See [CLAUDE.md](CLAUDE.md) for the commands.
+
+## Provisioner subsystem (v0.1)
+
+Two surfaces share one Service. The Service is the source of truth for the failure-mode contract (idempotency on `(operator, id)`, state-file hygiene, list self-heal, terminate idempotency):
+
+- **In-process**: `iplane instance ...` opens `~/.iplane/state.json` under flock, instantiates `local` + `runpod` adapters, calls `Service` methods directly. Self-contained one-shot CLI.
+- **Remote**: `--service-url <url>` (or `IPLANE_SERVICE_URL`) dials a running `iplane serve` via the generated `provisionerv1connect.ProvisionerServiceClient`. Server owns state; local file untouched.
+
+Both modes go through the same `provisionerClient` interface in `cmd/iplane/cmd/instance.go` — `*provisioners.Service` and the gRPC client have identical signatures, so the in-process branch is a direct assignment, not an adapter.
+
+State file at `~/.iplane/state.json` is the v0.1 persistence tier (deliberately minimal — see [docs/design/0001-provisioner.md](docs/design/0001-provisioner.md) "State file" for why JSON rather than SQLite for v0.1). v1.0's multi-operator backend will swap in a remote store behind the same interface.
+
+`--dry-run` lives in the CLI layer per the design doc — Provisioner interface gains no dry-run method. See [docs/cli-dry-run.md](docs/cli-dry-run.md) for the pattern phases 2-5 should follow.
 
 ## Observability
 
