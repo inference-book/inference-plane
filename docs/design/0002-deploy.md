@@ -194,7 +194,7 @@ The executor runs **in the same process** as the Service (in-process mode) or as
 
 **Operator-invisible.** Chapter 6 narrative shows zero ssh-keygen, zero `~/.ssh/`, zero `--ssh-key` flag. The key dance happens internally on first `iplane instance create runpod ...`.
 
-**Storage**: oneauth's `FSKeyStore` (`stores/fs/fskeystore.go`) at `~/.iplane/keys/signing_keys/<safeID>.json`. One file per key, 0600 perms (matches the runpodctl + ssh-keygen pattern). Storage path is configurable via `--keys-dir`; default sits under the existing iplane state directory.
+**Storage**: oneauth's `FSKeyStore` (`stores/fs/fskeystore.go`) at `~/.iplane/keys/signing_keys/<safeID>.json`. One file per key, 0600 perms (matches the runpodctl + ssh-keygen pattern). Storage path is configurable via `--keys-dir`; default sits under the existing iplane state directory. Pinned at `github.com/panyam/oneauth v0.0.83` (the tag that introduced persistent `FSKidStore` for the rotation path we don't wire in v0.1 but want machinery-ready).
 
 **Encryption at rest**: deferred to filesystem perms for v0.1 (same trust model as `~/.ssh/id_rsa`). oneauth's `EncryptedKeyStorage` currently only wraps HMAC algorithms (`keys/encrypted.go:70`); asymmetric pass-through is a tracked oneauth gap (see Open questions below) that doesn't block Phase 2.
 
