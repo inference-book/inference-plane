@@ -160,16 +160,15 @@ func main() {
 		Arrow("CLI", "State", "patch to ACTIVE").
 		VerbatimVariants("Three ways to ask for the same shape",
 			demokit.MakeVariant("class shorthand", "bash",
-				fmt.Sprintf("iplane instance create %s --provider %s --class small", demoID, *provider)).Default(),
+				fmt.Sprintf("iplane instance create %s %s --class small", *provider, demoID)).Default(),
 			demokit.MakeVariant("numeric constraints", "bash",
-				fmt.Sprintf("iplane instance create %s --provider %s --min-vram-gb 24 --min-ram-gb 16 --min-disk-gb 20", demoID, *provider)),
+				fmt.Sprintf("iplane instance create %s %s --min-vram-gb 24 --min-ram-gb 16 --min-disk-gb 20", *provider, demoID)),
 			demokit.MakeVariant("exact SKU (escape hatch)", "bash",
-				fmt.Sprintf("iplane instance create %s --provider %s --sku \"NVIDIA RTX A5000\"", demoID, *provider)),
+				fmt.Sprintf("iplane instance create %s %s --sku \"NVIDIA RTX A5000\"", *provider, demoID)),
 		).
 		Run(func(ctx demokit.StepContext) *demokit.StepResult {
 			out, err := runIplane(iplane, *stateDir,
-				"instance", "create", demoID,
-				"--provider", *provider,
+				"instance", "create", *provider, demoID,
 				"--class", "small",
 			)
 			if err != nil {
@@ -204,11 +203,10 @@ func main() {
 		Note("Same id; the Service hits its state-file cache, finds an ACTIVE record, returns it. Zero provider calls. Safe to rerun a CLI command without leaking duplicates.").
 		Arrow("Operator", "CLI", "create "+demoID+" (rerun)").
 		Arrow("CLI", "State", "read; ACTIVE match found").
-		Shell(fmt.Sprintf("iplane instance create %s --provider %s --class small", demoID, *provider)).
+		Shell(fmt.Sprintf("iplane instance create %s %s --class small", *provider, demoID)).
 		Run(func(ctx demokit.StepContext) *demokit.StepResult {
 			out, err := runIplane(iplane, *stateDir,
-				"instance", "create", demoID,
-				"--provider", *provider,
+				"instance", "create", *provider, demoID,
 				"--class", "small",
 			)
 			if err != nil {

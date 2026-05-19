@@ -59,6 +59,7 @@ Every dry-run line should be **unambiguous** about which path the real
 run would take. The patterns we use today:
 
 ```
+$ iplane instance create runpod my-pod --class small --dry-run
 [dry-run] would create "my-pod" on runpod
 [dry-run]   region:     (unpinned -- runpod schedules wherever capacity exists)
 [dry-run]   constraints: vram>=24GB, ram>=16GB, disk>=20GB, gpus=1

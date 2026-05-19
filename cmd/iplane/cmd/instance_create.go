@@ -16,8 +16,13 @@ import (
 // exposes both the class shorthand and the underlying numeric knobs;
 // operators reach for class when they want sane defaults and reach
 // for the numeric flags when they know exactly what they need.
+//
+// provider and id are POSITIONAL, not flags. provider is the
+// fundamental axis of creation -- where to spawn -- and ids are
+// tenant-globally unique so describe / destroy / list look up by id
+// alone. Mirrors `docker run <image>`: the most load-bearing argument
+// is positional, refinements are flags.
 var (
-	createProvider  string
 	createRegion    string
 	createClass     string
 	createSKU       string
@@ -30,15 +35,21 @@ var (
 )
 
 var instanceCreateCmd = &cobra.Command{
-	Use:   "create <id>",
+	Use:   "create <provider> <id>",
 	Short: "Create a GPU instance",
-	Args:  cobra.ExactArgs(1),
-	Long: `Create a new GPU instance under the given iplane id.
+	Args:  cobra.ExactArgs(2),
+	Long: `Create a new GPU instance on the named provider under the given iplane id.
 
-The id is operator-supplied and tenant-globally unique across providers.
+provider is positional and required. v0.1 supports:
+
+  local    The operator's laptop. Zero cost, no API key.
+  runpod   A real RunPod pod. Requires RUNPOD_API_KEY.
+
+id is operator-supplied and tenant-globally unique across providers.
 Idempotent: re-running with the same id returns the existing record
 without contacting the provider (see the failure-mode contract in the
-design doc).
+design doc). describe / destroy / list look up by id alone -- the
+provider does not need to be respecified after create.
 
 Resource shape can be expressed three ways, from most-convenient to
 most-precise:
@@ -51,28 +62,27 @@ class and explicit constraints compose -- class sets floors, the
 numeric flags can raise them. sku is mutually exclusive with class
 and bypasses constraints entirely.`,
 	Example: `  # Class shorthand against local (zero-cost dev path)
-  iplane instance create my-pod --provider local --class small
+  iplane instance create local my-pod --class small
 
   # Class shorthand against RunPod (real pod, ~$0.36/hr)
-  iplane instance create my-pod --provider runpod --class small --region US-WA-1
+  iplane instance create runpod my-pod --class small --region US-WA-1
 
   # Constraints-first: need 80GB VRAM
-  iplane instance create big-pod --provider runpod --min-vram-gb 80
+  iplane instance create runpod big-pod --min-vram-gb 80
 
   # Preview without provisioning
-  iplane instance create my-pod --provider runpod --class small --dry-run`,
+  iplane instance create runpod my-pod --class small --dry-run`,
 	RunE: runInstanceCreate,
 }
 
 // runInstanceCreate is the createCmd's RunE. Builds a Spec proto from
-// the parsed flags, dispatches to the configured client (in-process
-// Service or remote gRPC), and prints the resulting Instance.
-//
-// --dry-run is honored in a later commit; for now it errors out so
-// operators don't get a silent real provision.
+// the parsed args + flags, dispatches to the configured client
+// (in-process Service or remote gRPC), and prints the resulting
+// Instance. Args order is <provider> <id>.
 func runInstanceCreate(cmd *cobra.Command, args []string) error {
-	id := args[0]
-	if err := checkProviderAvailable(createProvider); err != nil {
+	provider := args[0]
+	id := args[1]
+	if err := checkProviderAvailable(provider); err != nil {
 		return err
 	}
 
@@ -83,7 +93,7 @@ func runInstanceCreate(cmd *cobra.Command, args []string) error {
 
 	spec := &provisionerv1.Spec{
 		Id:        id,
-		Provider:  createProvider,
+		Provider:  provider,
 		Region:    createRegion,
 		BaseImage: createBaseImage,
 		Requirements: &provisionerv1.ResourceRequirements{
@@ -150,7 +160,6 @@ func init() {
 	instanceCmd.AddCommand(instanceCreateCmd)
 
 	f := instanceCreateCmd.Flags()
-	f.StringVar(&createProvider, "provider", "", `provider adapter (local | runpod)`)
 	f.StringVar(&createRegion, "region", "", `provider region (optional; runpod schedules anywhere if empty)`)
 	f.StringVar(&createClass, "class", "", `gpu class shorthand: small | medium | large | xlarge`)
 	f.StringVar(&createSKU, "sku", "", `exact provider sku id (bypasses constraint resolver)`)
@@ -160,6 +169,4 @@ func init() {
 	f.Int32Var(&createMinDisk, "min-disk-gb", 0, `minimum container disk, in GB`)
 	f.StringVar(&createBaseImage, "base-image", "", `docker-capable base image (provider default if empty)`)
 	f.BoolVar(&createDryRun, "dry-run", false, `print the planned action and exit without provider calls`)
-
-	_ = instanceCreateCmd.MarkFlagRequired("provider")
 }

@@ -7,7 +7,7 @@ Walk through the v0.1 provisioner lifecycle from the operator's terminal -- the 
 ### Setup
 
 This walkthrough drives the iplane binary directly -- no separate `iplane serve` running. The CLI opens the state file under flock, instantiates provider adapters in-process, and prints the result.
-Binary:    /var/folders/d9/05hxl2g557ddtw7bmg33_lndn40p3p/T/iplane-cli-example-4054435805/iplane
+Binary:    /var/folders/d9/05hxl2g557ddtw7bmg33_lndn40p3p/T/iplane-cli-example-3975075282/iplane
 Provider:  local
 State dir: /tmp/iplane-cli-example
 Demo id:   cli-demo (class=small)
@@ -32,7 +32,7 @@ class=small expands server-side to min_vram_gb=24 / min_disk_gb=20 / min_ram_gb=
 #### Three ways to ask for the same shape
 
 ```bash
-iplane instance create cli-demo --provider local --class small
+iplane instance create local cli-demo --class small
 ```
 
 ```
@@ -62,8 +62,8 @@ iplane instance describe cli-demo
   gpu count:     1
   vram (GB):     48
   hourly rate:   $0.0000/hr
-  created at:    2026-05-18T09:17:16Z
-  activated at:  2026-05-18T09:17:16Z
+  created at:    2026-05-19T17:36:19Z
+  activated at:  2026-05-19T17:36:19Z
 ```
 
 ### 4. Idempotent re-create
@@ -71,7 +71,7 @@ iplane instance describe cli-demo
 Same id; the Service hits its state-file cache, finds an ACTIVE record, returns it. Zero provider calls. Safe to rerun a CLI command without leaking duplicates.
 
 ```bash
-iplane instance create cli-demo --provider local --class small
+iplane instance create local cli-demo --class small
 ```
 
 ```

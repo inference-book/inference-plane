@@ -40,7 +40,7 @@ Each step renders both as a sequence-diagram edge and as the literal shell comma
 | Step | What the operator types | What happens under the hood |
 |---|---|---|
 | Check the CLI is wired | `iplane instance list` | opens state file, prints `(no instances)` |
-| Create with `--class small` | `iplane instance create <id> --provider … --class small` | Service expands constraints → resolver picks SKU → state file PENDING → provider Spawn → state file ACTIVE |
+| Create with `--class small` | `iplane instance create <provider> <id> --class small` | Service expands constraints → resolver picks SKU → state file PENDING → provider Spawn → state file ACTIVE |
 | Describe | `iplane instance describe <id>` | reads from state file, renders the full record |
 | Idempotent re-create | same `iplane instance create …` | zero provider calls; state file already has ACTIVE record; output says "Found existing" |
 | List (state-file source) | `iplane instance list` | all local records as a tabwriter summary |

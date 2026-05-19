@@ -127,15 +127,15 @@ func runCmd(t *testing.T, env *testEnv, args ...string) (string, error) {
 }
 
 // resetInstanceFlags clears the package-level flag state cobra wrote
-// on a previous Execute. Without this, --provider from test A leaks
-// into test B and we get spurious successes / failures.
+// on a previous Execute. Without this, flags from test A leak into
+// test B and we get spurious successes / failures. Positional args
+// (provider, id) are not package-level state, so no reset needed.
 func resetInstanceFlags() {
 	instanceServiceURL = ""
 	instanceStateDir = ""
 	instanceOperatorID = "default"
 	instanceOutput = "table"
 
-	createProvider = ""
 	createRegion = ""
 	createClass = ""
 	createSKU = ""
@@ -159,8 +159,7 @@ func TestCreate_HappyPath(t *testing.T) {
 	env := newTestEnv(t, "mock")
 
 	out, err := runCmd(t, env,
-		"create", "my-pod",
-		"--provider", "mock",
+		"create", "mock", "my-pod",
 		"--class", "small",
 	)
 	if err != nil {
@@ -181,15 +180,13 @@ func TestCreate_Idempotent(t *testing.T) {
 	env := newTestEnv(t, "mock")
 
 	if _, err := runCmd(t, env,
-		"create", "my-pod",
-		"--provider", "mock",
+		"create", "mock", "my-pod",
 		"--class", "small",
 	); err != nil {
 		t.Fatalf("first create: %v", err)
 	}
 	out, err := runCmd(t, env,
-		"create", "my-pod",
-		"--provider", "mock",
+		"create", "mock", "my-pod",
 		"--class", "small",
 	)
 	if err != nil {
@@ -206,8 +203,7 @@ func TestCreate_Idempotent(t *testing.T) {
 func TestCreate_RejectsReservedPrefix(t *testing.T) {
 	env := newTestEnv(t, "mock")
 	out, err := runCmd(t, env,
-		"create", "iplane-reserved",
-		"--provider", "mock",
+		"create", "mock", "iplane-reserved",
 		"--class", "small",
 	)
 	if err == nil {
@@ -218,12 +214,12 @@ func TestCreate_RejectsReservedPrefix(t *testing.T) {
 func TestList_LocalSource(t *testing.T) {
 	env := newTestEnv(t, "mock")
 	if _, err := runCmd(t, env,
-		"create", "alpha", "--provider", "mock", "--class", "small",
+		"create", "mock", "alpha", "--class", "small",
 	); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	if _, err := runCmd(t, env,
-		"create", "beta", "--provider", "mock", "--class", "medium",
+		"create", "mock", "beta", "--class", "medium",
 	); err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -260,7 +256,7 @@ func TestList_RemoteRequiresProvider(t *testing.T) {
 func TestDescribe_HappyPath(t *testing.T) {
 	env := newTestEnv(t, "mock")
 	if _, err := runCmd(t, env,
-		"create", "my-pod", "--provider", "mock", "--class", "small",
+		"create", "mock", "my-pod", "--class", "small",
 	); err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -283,7 +279,7 @@ func TestDescribe_HappyPath(t *testing.T) {
 func TestDestroy_HappyPath(t *testing.T) {
 	env := newTestEnv(t, "mock")
 	if _, err := runCmd(t, env,
-		"create", "my-pod", "--provider", "mock", "--class", "small",
+		"create", "mock", "my-pod", "--class", "small",
 	); err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -310,7 +306,7 @@ func TestDestroy_NotFound(t *testing.T) {
 func TestCreate_OutputJSON(t *testing.T) {
 	env := newTestEnv(t, "mock")
 	out, err := runCmd(t, env,
-		"create", "my-pod", "--provider", "mock", "--class", "small",
+		"create", "mock", "my-pod", "--class", "small",
 		"--output", "json",
 	)
 	if err != nil {
@@ -345,7 +341,7 @@ func TestCreate_OutputJSON(t *testing.T) {
 func TestList_OutputJSON(t *testing.T) {
 	env := newTestEnv(t, "mock")
 	if _, err := runCmd(t, env,
-		"create", "alpha", "--provider", "mock", "--class", "small",
+		"create", "mock", "alpha", "--class", "small",
 	); err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -369,7 +365,7 @@ func TestList_OutputJSON(t *testing.T) {
 func TestDescribe_OutputJSON(t *testing.T) {
 	env := newTestEnv(t, "mock")
 	if _, err := runCmd(t, env,
-		"create", "my-pod", "--provider", "mock", "--class", "small",
+		"create", "mock", "my-pod", "--class", "small",
 	); err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -397,7 +393,7 @@ func TestDescribe_OutputJSON(t *testing.T) {
 func TestCreate_DryRun_FreshID(t *testing.T) {
 	env := newTestEnv(t, "mock")
 	out, err := runCmd(t, env,
-		"create", "my-pod", "--provider", "mock", "--class", "small", "--dry-run",
+		"create", "mock", "my-pod", "--class", "small", "--dry-run",
 	)
 	if err != nil {
 		t.Fatalf("dry-run create: %v\n%s", err, out)
@@ -424,14 +420,14 @@ func TestCreate_DryRun_FreshID(t *testing.T) {
 func TestCreate_DryRun_IdempotentPath(t *testing.T) {
 	env := newTestEnv(t, "mock")
 	if _, err := runCmd(t, env,
-		"create", "my-pod", "--provider", "mock", "--class", "small",
+		"create", "mock", "my-pod", "--class", "small",
 	); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	spawnsBefore := env.provider.spawnCalls.Load()
 
 	out, err := runCmd(t, env,
-		"create", "my-pod", "--provider", "mock", "--class", "small", "--dry-run",
+		"create", "mock", "my-pod", "--class", "small", "--dry-run",
 	)
 	if err != nil {
 		t.Fatalf("dry-run on existing record: %v\n%s", err, out)
@@ -450,7 +446,7 @@ func TestCreate_DryRun_IdempotentPath(t *testing.T) {
 func TestCreate_DryRun_InvalidSpecRejected(t *testing.T) {
 	env := newTestEnv(t, "mock")
 	out, err := runCmd(t, env,
-		"create", "my-pod", "--provider", "mock", "--dry-run",
+		"create", "mock", "my-pod", "--dry-run",
 		// No --class, no --sku, no --min-vram-gb -> ValidateAndExpandRequirements rejects.
 	)
 	if err == nil {
@@ -464,7 +460,7 @@ func TestCreate_DryRun_InvalidSpecRejected(t *testing.T) {
 func TestDestroy_DryRun(t *testing.T) {
 	env := newTestEnv(t, "mock")
 	if _, err := runCmd(t, env,
-		"create", "my-pod", "--provider", "mock", "--class", "small",
+		"create", "mock", "my-pod", "--class", "small",
 	); err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -502,8 +498,8 @@ func TestUnknownProvider_PreCheck(t *testing.T) {
 	// checkProviderAvailable runs before any client construction. With
 	// --service-url unset, an unknown provider hits the local check.
 	resetInstanceFlags()
-	rootCmd.SetArgs([]string{"instance", "create", "my-pod",
-		"--provider", "bogus", "--class", "small",
+	rootCmd.SetArgs([]string{"instance", "create", "bogus", "my-pod",
+		"--class", "small",
 		"--state-dir", t.TempDir()})
 	var buf bytes.Buffer
 	rootCmd.SetOut(&buf)
