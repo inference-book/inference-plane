@@ -5,8 +5,8 @@ go 1.26.2
 require (
 	connectrpc.com/connect v1.19.2
 	github.com/go-viper/mapstructure/v2 v2.4.0
-	github.com/panyam/demokit v0.0.16
-	github.com/panyam/servicekit v0.1.0
+	github.com/panyam/demokit v0.0.19
+	github.com/panyam/servicekit v0.1.1
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/viper v1.21.0
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.68.0
@@ -47,7 +47,7 @@ require (
 	github.com/lucasb-eyer/go-colorful v1.4.0 // indirect
 	github.com/mattn/go-runewidth v0.0.23 // indirect
 	github.com/muesli/cancelreader v0.2.2 // indirect
-	github.com/panyam/gocurrent v0.1.0 // indirect
+	github.com/panyam/gocurrent v0.1.1 // indirect
 	github.com/panyam/goutils v0.1.13 // indirect
 	github.com/pelletier/go-toml/v2 v2.2.4 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect

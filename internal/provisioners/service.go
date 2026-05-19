@@ -85,7 +85,7 @@ func (s *Service) CreateInstance(ctx context.Context, req *connect.Request[provi
 	if err := ValidateID(spec.GetId()); err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
-	if err := validateAndExpandRequirements(spec); err != nil {
+	if err := ValidateAndExpandRequirements(spec); err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
 	// Region is intentionally not validated here: semantics vary by
@@ -452,7 +452,7 @@ func withSystemTags(spec *provisionerv1.Spec, operatorID string) *provisionerv1.
 	return cloned
 }
 
-// validateAndExpandRequirements normalizes a Spec's ResourceRequirements
+// ValidateAndExpandRequirements normalizes a Spec's ResourceRequirements
 // before the adapter sees it. Two responsibilities:
 //
 //  1. Validate: the operator supplied something the resolver can act on
@@ -470,7 +470,7 @@ func withSystemTags(spec *provisionerv1.Spec, operatorID string) *provisionerv1.
 // classDefaults lives in the runpod package today (per-provider). For
 // v0.1 with one constraint-resolving provider this is fine; v0.2 with
 // Lambda Labs will pull the table into a shared catalog package.
-func validateAndExpandRequirements(spec *provisionerv1.Spec) error {
+func ValidateAndExpandRequirements(spec *provisionerv1.Spec) error {
 	reqs := spec.GetRequirements()
 	if reqs == nil {
 		return errors.New("requirements is required")
