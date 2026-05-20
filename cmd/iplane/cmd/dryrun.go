@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
 	"github.com/inference-book/inference-plane/internal/provisioners"
@@ -44,13 +46,13 @@ func dryRunCreate(ctx context.Context, w io.Writer, client provisionerClient, sp
 	// fall through to "would create."
 	descCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	resp, err := client.DescribeInstance(descCtx, connect.NewRequest(&provisionerv1.DescribeInstanceRequest{
+	resp, err := client.DescribeInstance(descCtx, &provisionerv1.DescribeInstanceRequest{
 		Id:     spec.GetId(),
 		Source: provisionerv1.Source_SOURCE_LOCAL,
-	}))
+	})
 	switch {
 	case err == nil:
-		inst := resp.Msg.GetInstance()
+		inst := resp.GetInstance()
 		switch inst.GetState() {
 		case provisionerv1.InstanceState_INSTANCE_STATE_PENDING,
 			provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE:
@@ -93,17 +95,17 @@ func dryRunDestroy(ctx context.Context, w io.Writer, client provisionerClient, i
 	}
 	descCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	resp, err := client.DescribeInstance(descCtx, connect.NewRequest(&provisionerv1.DescribeInstanceRequest{
+	resp, err := client.DescribeInstance(descCtx, &provisionerv1.DescribeInstanceRequest{
 		Id:     id,
 		Source: provisionerv1.Source_SOURCE_LOCAL,
-	}))
+	})
 	if err != nil {
 		if isNotFound(err) {
 			return fmt.Errorf("no instance with id %q (nothing to destroy)", id)
 		}
 		return fmt.Errorf("dry-run lookup of %q: %w", id, err)
 	}
-	inst := resp.Msg.GetInstance()
+	inst := resp.GetInstance()
 	switch inst.GetState() {
 	case provisionerv1.InstanceState_INSTANCE_STATE_TERMINATED:
 		fmt.Fprintf(w, "[dry-run] would no-op: %q is already TERMINATED.\n", id)
@@ -148,9 +150,18 @@ func maxInt32(a, b int32) int32 {
 	return b
 }
 
-// isNotFound matches the wrapped ErrNotFound that the Service returns
-// when a record is missing (both transports). Pulled out so create
-// and destroy dry-run share the same matcher.
+// isNotFound matches a NotFound error across both transports. The CLI
+// reaches the Service two ways and each wraps the underlying error
+// differently:
+//
+//   - In-process: Service returns status.Error(codes.NotFound, ...);
+//     reachable via status.Code(err) == codes.NotFound.
+//   - Remote: connect-rpc client wraps it as *connect.Error with
+//     CodeNotFound; reachable via errors.As + ce.Code() check.
+//
+// Also handles errors.Is(err, provisioners.ErrNotFound) for callers
+// that might pass a raw provider error through (defensive; should not
+// reach here from the Service path).
 func isNotFound(err error) bool {
 	if err == nil {
 		return false
@@ -158,8 +169,9 @@ func isNotFound(err error) bool {
 	if errors.Is(err, provisioners.ErrNotFound) {
 		return true
 	}
-	// Connect transport wraps the cause inside a connect.Error; check
-	// the code as well.
+	if status.Code(err) == codes.NotFound {
+		return true
+	}
 	var ce *connect.Error
 	if errors.As(err, &ce) && ce.Code() == connect.CodeNotFound {
 		return true

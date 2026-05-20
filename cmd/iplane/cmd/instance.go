@@ -27,17 +27,66 @@ var (
 	instanceServiceURL string // when set, forward to a running iplane serve
 )
 
-// provisionerClient is the common surface between in-process Service
-// and a gRPC ProvisionerServiceClient. The Service struct already
-// implements every method on this set (see internal/provisioners/
-// service.go's package doc lines 23-32), so the in-process path is a
-// direct assignment, not an adapter. Both modes return
-// *connect.Response[T] -- the calling code never branches on transport.
+// provisionerClient is the common surface every subcommand calls. The
+// shape matches the generated gRPC server interface
+// (provisionerv1.ProvisionerServiceServer) -- (ctx, *Req) → (*Resp,
+// error) -- so *provisioners.Service satisfies it directly with no
+// adapter. The remote path wraps a connect-rpc client to expose the
+// same shape.
+//
+// Keeping the interface gRPC-shaped (not connect-shaped) matches the
+// project convention: gRPC services own the API contract and return
+// status.Error(codes.X, ...); transport bindings (Connect handler in
+// the example, this CLI adapter) convert at their boundary. See
+// internal/services/inference.go + internal/web/server/connect.go
+// for the inference-plane equivalent.
 type provisionerClient interface {
-	CreateInstance(context.Context, *connect.Request[provisionerv1.CreateInstanceRequest]) (*connect.Response[provisionerv1.CreateInstanceResponse], error)
-	DestroyInstance(context.Context, *connect.Request[provisionerv1.DestroyInstanceRequest]) (*connect.Response[provisionerv1.DestroyInstanceResponse], error)
-	DescribeInstance(context.Context, *connect.Request[provisionerv1.DescribeInstanceRequest]) (*connect.Response[provisionerv1.DescribeInstanceResponse], error)
-	ListInstances(context.Context, *connect.Request[provisionerv1.ListInstancesRequest]) (*connect.Response[provisionerv1.ListInstancesResponse], error)
+	CreateInstance(context.Context, *provisionerv1.CreateInstanceRequest) (*provisionerv1.CreateInstanceResponse, error)
+	DestroyInstance(context.Context, *provisionerv1.DestroyInstanceRequest) (*provisionerv1.DestroyInstanceResponse, error)
+	DescribeInstance(context.Context, *provisionerv1.DescribeInstanceRequest) (*provisionerv1.DescribeInstanceResponse, error)
+	ListInstances(context.Context, *provisionerv1.ListInstancesRequest) (*provisionerv1.ListInstancesResponse, error)
+}
+
+// connectProvisionerClient adapts the generated connect-rpc client to
+// satisfy the gRPC-shape provisionerClient interface above. Wraps each
+// call: pack the request into a connect.Request envelope, unpack the
+// connect.Response.Msg on return. Errors flow through unchanged --
+// connect-rpc surfaces gRPC status codes via *connect.Error which the
+// caller can errors.As-extract if needed.
+type connectProvisionerClient struct {
+	c provisionerv1connect.ProvisionerServiceClient
+}
+
+func (a *connectProvisionerClient) CreateInstance(ctx context.Context, req *provisionerv1.CreateInstanceRequest) (*provisionerv1.CreateInstanceResponse, error) {
+	resp, err := a.c.CreateInstance(ctx, connect.NewRequest(req))
+	if err != nil {
+		return nil, err
+	}
+	return resp.Msg, nil
+}
+
+func (a *connectProvisionerClient) DestroyInstance(ctx context.Context, req *provisionerv1.DestroyInstanceRequest) (*provisionerv1.DestroyInstanceResponse, error) {
+	resp, err := a.c.DestroyInstance(ctx, connect.NewRequest(req))
+	if err != nil {
+		return nil, err
+	}
+	return resp.Msg, nil
+}
+
+func (a *connectProvisionerClient) DescribeInstance(ctx context.Context, req *provisionerv1.DescribeInstanceRequest) (*provisionerv1.DescribeInstanceResponse, error) {
+	resp, err := a.c.DescribeInstance(ctx, connect.NewRequest(req))
+	if err != nil {
+		return nil, err
+	}
+	return resp.Msg, nil
+}
+
+func (a *connectProvisionerClient) ListInstances(ctx context.Context, req *provisionerv1.ListInstancesRequest) (*provisionerv1.ListInstancesResponse, error) {
+	resp, err := a.c.ListInstances(ctx, connect.NewRequest(req))
+	if err != nil {
+		return nil, err
+	}
+	return resp.Msg, nil
 }
 
 // instanceCmd is the `iplane instance` cobra group. Subcommands attach
@@ -118,7 +167,9 @@ func resolveStateDir() (string, error) {
 // branching at the call site.
 func buildClient() (provisionerClient, error) {
 	if instanceServiceURL != "" {
-		return provisionerv1connect.NewProvisionerServiceClient(http.DefaultClient, instanceServiceURL), nil
+		return &connectProvisionerClient{
+			c: provisionerv1connect.NewProvisionerServiceClient(http.DefaultClient, instanceServiceURL),
+		}, nil
 	}
 
 	dir, err := resolveStateDir()
