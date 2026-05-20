@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"time"
 
-	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
 
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
@@ -48,18 +47,18 @@ func runInstanceDestroy(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	resp, err := client.DestroyInstance(ctx, connect.NewRequest(&provisionerv1.DestroyInstanceRequest{
+	resp, err := client.DestroyInstance(ctx, &provisionerv1.DestroyInstanceRequest{
 		Id:    id,
 		Force: destroyForce,
-	}))
+	})
 	if err != nil {
 		return fmt.Errorf("destroy %q: %w", id, err)
 	}
 	out := cmd.OutOrStdout()
 	if instanceOutput == outputJSON {
-		return writeProtoJSON(out, resp.Msg)
+		return writeProtoJSON(out, resp)
 	}
-	inst := resp.Msg.GetInstance()
+	inst := resp.GetInstance()
 	fmt.Fprintf(out, "Destroyed instance %q (final state: %s)\n",
 		inst.GetId(), instanceStateLabel(inst.GetState()))
 	return nil

@@ -77,7 +77,7 @@ func serve() {
 	svc := provisioners.New(providers, store, *operatorID)
 
 	mux := http.NewServeMux()
-	path, handler := provisionerv1connect.NewProvisionerServiceHandler(svc)
+	path, handler := provisionerv1connect.NewProvisionerServiceHandler(provisioners.NewConnectProvisionerAdapter(svc))
 	mux.Handle(path, handler)
 
 	fmt.Printf("iplane provisioner serving on %s\n", *addr)

@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"connectrpc.com/connect"
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
 	"github.com/inference-book/inference-plane/internal/provisioners"
 	"github.com/inference-book/inference-plane/internal/provisioners/state"
@@ -92,17 +91,17 @@ func TestCreateInstance_HappyPath(t *testing.T) {
 	mock := &mockProvider{name: "mock"}
 	svc, _ := newSvc(t, mock)
 
-	resp, err := svc.CreateInstance(context.Background(), connect.NewRequest(&provisionerv1.CreateInstanceRequest{Spec: okSpec()}))
+	resp, err := svc.CreateInstance(context.Background(), &provisionerv1.CreateInstanceRequest{Spec: okSpec()})
 	if err != nil {
 		t.Fatalf("CreateInstance: %v", err)
 	}
-	if resp.Msg.GetAlreadyExisted() {
+	if resp.GetAlreadyExisted() {
 		t.Error("AlreadyExisted should be false on first create")
 	}
 	if mock.spawnCalls != 1 {
 		t.Errorf("Spawn called %d times, want 1", mock.spawnCalls)
 	}
-	got := resp.Msg.GetInstance()
+	got := resp.GetInstance()
 	if got.GetState() != provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE {
 		t.Errorf("State = %v, want ACTIVE", got.GetState())
 	}
@@ -116,7 +115,7 @@ func TestCreateInstance_IdempotentOnActive(t *testing.T) {
 	svc, _ := newSvc(t, mock)
 
 	for range 3 {
-		_, err := svc.CreateInstance(context.Background(), connect.NewRequest(&provisionerv1.CreateInstanceRequest{Spec: okSpec()}))
+		_, err := svc.CreateInstance(context.Background(), &provisionerv1.CreateInstanceRequest{Spec: okSpec()})
 		if err != nil {
 			t.Fatalf("CreateInstance: %v", err)
 		}
@@ -124,8 +123,8 @@ func TestCreateInstance_IdempotentOnActive(t *testing.T) {
 	if mock.spawnCalls != 1 {
 		t.Errorf("Spawn called %d times, want 1 (subsequent creates should hit local-state idempotency)", mock.spawnCalls)
 	}
-	resp, _ := svc.CreateInstance(context.Background(), connect.NewRequest(&provisionerv1.CreateInstanceRequest{Spec: okSpec()}))
-	if !resp.Msg.GetAlreadyExisted() {
+	resp, _ := svc.CreateInstance(context.Background(), &provisionerv1.CreateInstanceRequest{Spec: okSpec()})
+	if !resp.GetAlreadyExisted() {
 		t.Error("AlreadyExisted should be true on repeat create")
 	}
 }
@@ -135,12 +134,12 @@ func TestCreateInstance_CrossProviderCollisionRejected(t *testing.T) {
 	mock2 := &mockProvider{name: "other"}
 	svc, _ := newSvc(t, mock1, mock2)
 
-	if _, err := svc.CreateInstance(context.Background(), connect.NewRequest(&provisionerv1.CreateInstanceRequest{Spec: okSpec()})); err != nil {
+	if _, err := svc.CreateInstance(context.Background(), &provisionerv1.CreateInstanceRequest{Spec: okSpec()}); err != nil {
 		t.Fatalf("first create: %v", err)
 	}
 	conflicting := okSpec()
 	conflicting.Provider = "other"
-	_, err := svc.CreateInstance(context.Background(), connect.NewRequest(&provisionerv1.CreateInstanceRequest{Spec: conflicting}))
+	_, err := svc.CreateInstance(context.Background(), &provisionerv1.CreateInstanceRequest{Spec: conflicting})
 	if err == nil {
 		t.Fatal("expected error when creating same id on different provider")
 	}
@@ -151,15 +150,15 @@ func TestCreateInstance_InvalidID(t *testing.T) {
 	svc, _ := newSvc(t, mock)
 
 	cases := []string{
-		"",                          // empty
-		"iplane-foo",                // reserved prefix
-		"With_Capitals",             // not DNS-safe
-		"-leading-hyphen",           // leading hyphen
+		"",                // empty
+		"iplane-foo",      // reserved prefix
+		"With_Capitals",   // not DNS-safe
+		"-leading-hyphen", // leading hyphen
 	}
 	for _, id := range cases {
 		spec := okSpec()
 		spec.Id = id
-		_, err := svc.CreateInstance(context.Background(), connect.NewRequest(&provisionerv1.CreateInstanceRequest{Spec: spec}))
+		_, err := svc.CreateInstance(context.Background(), &provisionerv1.CreateInstanceRequest{Spec: spec})
 		if err == nil {
 			t.Errorf("id %q should be rejected", id)
 		}
@@ -172,7 +171,7 @@ func TestCreateInstance_RequirementsClassSkuMutex(t *testing.T) {
 
 	spec := okSpec()
 	spec.Requirements = &provisionerv1.ResourceRequirements{Class: "small", Sku: "RTX 4090"}
-	_, err := svc.CreateInstance(context.Background(), connect.NewRequest(&provisionerv1.CreateInstanceRequest{Spec: spec}))
+	_, err := svc.CreateInstance(context.Background(), &provisionerv1.CreateInstanceRequest{Spec: spec})
 	if err == nil {
 		t.Error("specifying both class and sku should be rejected")
 	}
@@ -192,7 +191,7 @@ func TestCreateInstance_ClassShorthandExpandsToConstraints(t *testing.T) {
 		},
 	}
 	svc, _ := newSvc(t, mock)
-	if _, err := svc.CreateInstance(context.Background(), connect.NewRequest(&provisionerv1.CreateInstanceRequest{Spec: okSpec()})); err != nil {
+	if _, err := svc.CreateInstance(context.Background(), &provisionerv1.CreateInstanceRequest{Spec: okSpec()}); err != nil {
 		t.Fatalf("CreateInstance: %v", err)
 	}
 	if observed.GetRequirements().GetMinVramGb() != 24 {
@@ -214,14 +213,15 @@ func TestCreateInstance_SpawnFailure_RecordsFailedState(t *testing.T) {
 	}
 	svc, store := newSvc(t, mock)
 
-	_, err := svc.CreateInstance(context.Background(), connect.NewRequest(&provisionerv1.CreateInstanceRequest{Spec: okSpec()}))
+	_, err := svc.CreateInstance(context.Background(), &provisionerv1.CreateInstanceRequest{Spec: okSpec()})
 	if err == nil {
 		t.Fatal("expected error from Spawn failure")
 	}
-	var pe *provisioners.ProviderError
-	if !errors.As(err, &pe) {
-		t.Errorf("expected *ProviderError, got %T (%v)", err, err)
-	}
+	// The Service wraps Spawn errors as gRPC status (codes.Unknown
+	// preserves the message). The wrapped *ProviderError is no longer
+	// reachable through errors.As across the status boundary -- the
+	// state-file record + failure_reason are the load-bearing signal
+	// for operator-facing failure reporting.
 	f, _ := store.Read()
 	rec, ok := f.Instances["my-pod"]
 	if !ok {
@@ -246,7 +246,7 @@ func TestCreateInstance_TagsStampedOnSpawn(t *testing.T) {
 	}
 	svc, _ := newSvc(t, mock)
 
-	if _, err := svc.CreateInstance(context.Background(), connect.NewRequest(&provisionerv1.CreateInstanceRequest{Spec: okSpec()})); err != nil {
+	if _, err := svc.CreateInstance(context.Background(), &provisionerv1.CreateInstanceRequest{Spec: okSpec()}); err != nil {
 		t.Fatalf("CreateInstance: %v", err)
 	}
 	if observedSpec.GetTags()[provisioners.TagID] != "my-pod" {
@@ -261,15 +261,15 @@ func TestDestroyInstance_HappyPath(t *testing.T) {
 	mock := &mockProvider{name: "mock"}
 	svc, store := newSvc(t, mock)
 
-	if _, err := svc.CreateInstance(context.Background(), connect.NewRequest(&provisionerv1.CreateInstanceRequest{Spec: okSpec()})); err != nil {
+	if _, err := svc.CreateInstance(context.Background(), &provisionerv1.CreateInstanceRequest{Spec: okSpec()}); err != nil {
 		t.Fatalf("CreateInstance: %v", err)
 	}
-	resp, err := svc.DestroyInstance(context.Background(), connect.NewRequest(&provisionerv1.DestroyInstanceRequest{Id: "my-pod"}))
+	resp, err := svc.DestroyInstance(context.Background(), &provisionerv1.DestroyInstanceRequest{Id: "my-pod"})
 	if err != nil {
 		t.Fatalf("DestroyInstance: %v", err)
 	}
-	if resp.Msg.GetInstance().GetState() != provisionerv1.InstanceState_INSTANCE_STATE_TERMINATED {
-		t.Errorf("State = %v, want TERMINATED", resp.Msg.GetInstance().GetState())
+	if resp.GetInstance().GetState() != provisionerv1.InstanceState_INSTANCE_STATE_TERMINATED {
+		t.Errorf("State = %v, want TERMINATED", resp.GetInstance().GetState())
 	}
 	if mock.termCalls != 1 {
 		t.Errorf("Terminate called %d times, want 1", mock.termCalls)
@@ -282,7 +282,7 @@ func TestDestroyInstance_HappyPath(t *testing.T) {
 
 func TestDestroyInstance_NotFound(t *testing.T) {
 	svc, _ := newSvc(t, &mockProvider{name: "mock"})
-	_, err := svc.DestroyInstance(context.Background(), connect.NewRequest(&provisionerv1.DestroyInstanceRequest{Id: "ghost"}))
+	_, err := svc.DestroyInstance(context.Background(), &provisionerv1.DestroyInstanceRequest{Id: "ghost"})
 	if err == nil {
 		t.Fatal("DestroyInstance of unknown id should error")
 	}
@@ -292,10 +292,10 @@ func TestDestroyInstance_Force_SkipsProviderCall(t *testing.T) {
 	mock := &mockProvider{name: "mock"}
 	svc, _ := newSvc(t, mock)
 
-	if _, err := svc.CreateInstance(context.Background(), connect.NewRequest(&provisionerv1.CreateInstanceRequest{Spec: okSpec()})); err != nil {
+	if _, err := svc.CreateInstance(context.Background(), &provisionerv1.CreateInstanceRequest{Spec: okSpec()}); err != nil {
 		t.Fatalf("CreateInstance: %v", err)
 	}
-	_, err := svc.DestroyInstance(context.Background(), connect.NewRequest(&provisionerv1.DestroyInstanceRequest{Id: "my-pod", Force: true}))
+	_, err := svc.DestroyInstance(context.Background(), &provisionerv1.DestroyInstanceRequest{Id: "my-pod", Force: true})
 	if err != nil {
 		t.Fatalf("DestroyInstance: %v", err)
 	}
@@ -311,16 +311,16 @@ func TestListInstances_LocalReturnsRecords(t *testing.T) {
 	for _, id := range []string{"pod-a", "pod-b", "pod-c"} {
 		spec := okSpec()
 		spec.Id = id
-		if _, err := svc.CreateInstance(context.Background(), connect.NewRequest(&provisionerv1.CreateInstanceRequest{Spec: spec})); err != nil {
+		if _, err := svc.CreateInstance(context.Background(), &provisionerv1.CreateInstanceRequest{Spec: spec}); err != nil {
 			t.Fatalf("create %s: %v", id, err)
 		}
 	}
-	resp, err := svc.ListInstances(context.Background(), connect.NewRequest(&provisionerv1.ListInstancesRequest{}))
+	resp, err := svc.ListInstances(context.Background(), &provisionerv1.ListInstancesRequest{})
 	if err != nil {
 		t.Fatalf("ListInstances: %v", err)
 	}
-	if len(resp.Msg.GetInstances()) != 3 {
-		t.Errorf("got %d instances, want 3", len(resp.Msg.GetInstances()))
+	if len(resp.GetInstances()) != 3 {
+		t.Errorf("got %d instances, want 3", len(resp.GetInstances()))
 	}
 }
 
@@ -368,7 +368,7 @@ func TestListInstances_SelfHealsPending(t *testing.T) {
 	// returns false for "mock" -- so the self-heal path adopts via the
 	// pending->describe code path. Verify the test by reading state
 	// post-list and checking the result.
-	if _, err := svc.ListInstances(context.Background(), connect.NewRequest(&provisionerv1.ListInstancesRequest{})); err != nil {
+	if _, err := svc.ListInstances(context.Background(), &provisionerv1.ListInstancesRequest{}); err != nil {
 		t.Fatalf("ListInstances: %v", err)
 	}
 	f, _ := store.Read()

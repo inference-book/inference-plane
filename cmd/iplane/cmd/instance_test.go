@@ -100,7 +100,7 @@ func newTestEnv(t *testing.T, providerName string) *testEnv {
 	svc := provisioners.New([]provisioners.Provider{mp}, store, "default")
 
 	mux := http.NewServeMux()
-	path, handler := provisionerv1connect.NewProvisionerServiceHandler(svc)
+	path, handler := provisionerv1connect.NewProvisionerServiceHandler(provisioners.NewConnectProvisionerAdapter(svc))
 	mux.Handle(path, handler)
 	server := httptest.NewServer(mux)
 	t.Cleanup(server.Close)

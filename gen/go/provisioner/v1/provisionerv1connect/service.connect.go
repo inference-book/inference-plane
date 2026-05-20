@@ -23,6 +23,8 @@ const _ = connect.IsAtLeastVersion1_13_0
 const (
 	// ProvisionerServiceName is the fully-qualified name of the ProvisionerService service.
 	ProvisionerServiceName = "provisioner.v1.ProvisionerService"
+	// DeploymentServiceName is the fully-qualified name of the DeploymentService service.
+	DeploymentServiceName = "provisioner.v1.DeploymentService"
 )
 
 // These constants are the fully-qualified names of the RPCs defined in this package. They're
@@ -45,6 +47,21 @@ const (
 	// ProvisionerServiceListInstancesProcedure is the fully-qualified name of the ProvisionerService's
 	// ListInstances RPC.
 	ProvisionerServiceListInstancesProcedure = "/provisioner.v1.ProvisionerService/ListInstances"
+	// DeploymentServiceCreateDeploymentProcedure is the fully-qualified name of the DeploymentService's
+	// CreateDeployment RPC.
+	DeploymentServiceCreateDeploymentProcedure = "/provisioner.v1.DeploymentService/CreateDeployment"
+	// DeploymentServiceDescribeDeploymentProcedure is the fully-qualified name of the
+	// DeploymentService's DescribeDeployment RPC.
+	DeploymentServiceDescribeDeploymentProcedure = "/provisioner.v1.DeploymentService/DescribeDeployment"
+	// DeploymentServiceListDeploymentsProcedure is the fully-qualified name of the DeploymentService's
+	// ListDeployments RPC.
+	DeploymentServiceListDeploymentsProcedure = "/provisioner.v1.DeploymentService/ListDeployments"
+	// DeploymentServiceDestroyDeploymentProcedure is the fully-qualified name of the
+	// DeploymentService's DestroyDeployment RPC.
+	DeploymentServiceDestroyDeploymentProcedure = "/provisioner.v1.DeploymentService/DestroyDeployment"
+	// DeploymentServiceWatchDeploymentProcedure is the fully-qualified name of the DeploymentService's
+	// WatchDeployment RPC.
+	DeploymentServiceWatchDeploymentProcedure = "/provisioner.v1.DeploymentService/WatchDeployment"
 )
 
 // ProvisionerServiceClient is a client for the provisioner.v1.ProvisionerService service.
@@ -225,4 +242,220 @@ func (UnimplementedProvisionerServiceHandler) DescribeInstance(context.Context, 
 
 func (UnimplementedProvisionerServiceHandler) ListInstances(context.Context, *connect.Request[v1.ListInstancesRequest]) (*connect.Response[v1.ListInstancesResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("provisioner.v1.ProvisionerService.ListInstances is not implemented"))
+}
+
+// DeploymentServiceClient is a client for the provisioner.v1.DeploymentService service.
+type DeploymentServiceClient interface {
+	// CreateDeployment runs the full idempotency + state-hygiene contract.
+	// Re-running with the same id against a matching container is a no-op
+	// (already_existed=true). If the container drifted or is missing,
+	// the executor reconciles.
+	CreateDeployment(context.Context, *connect.Request[v1.CreateDeploymentRequest]) (*connect.Response[v1.CreateDeploymentResponse], error)
+	// DescribeDeployment returns the current view of one deployment. The
+	// record is the state-file view (the engine's live state is read via
+	// the executor's docker inspect when the operator queries via the CLI's
+	// status verb).
+	DescribeDeployment(context.Context, *connect.Request[v1.DescribeDeploymentRequest]) (*connect.Response[v1.DescribeDeploymentResponse], error)
+	// ListDeployments enumerates deployments. Optional filter by
+	// instance_id (all deployments on a given Instance) or state.
+	ListDeployments(context.Context, *connect.Request[v1.ListDeploymentsRequest]) (*connect.Response[v1.ListDeploymentsResponse], error)
+	// DestroyDeployment stops the container and patches the record to
+	// TERMINATED. Idempotent: destroying an already-terminated id is a
+	// no-op.
+	DestroyDeployment(context.Context, *connect.Request[v1.DestroyDeploymentRequest]) (*connect.Response[v1.DestroyDeploymentResponse], error)
+	// WatchDeployment streams state transitions for one deployment until
+	// a terminal state (TERMINATED or FAILED) is reached or the client
+	// disconnects. Events carry the from/to states + a free-form phase
+	// string + progress message. Clients who need the full Deployment
+	// record at any point call DescribeDeployment between events.
+	//
+	// Logs are NOT carried on this stream -- they are a separate concern
+	// (see the followup issue for `iplane deployment logs <id> [-f]`).
+	WatchDeployment(context.Context, *connect.Request[v1.WatchDeploymentRequest]) (*connect.ServerStreamForClient[v1.DeploymentStateChangedEvent], error)
+}
+
+// NewDeploymentServiceClient constructs a client for the provisioner.v1.DeploymentService service.
+// By default, it uses the Connect protocol with the binary Protobuf Codec, asks for gzipped
+// responses, and sends uncompressed requests. To use the gRPC or gRPC-Web protocols, supply the
+// connect.WithGRPC() or connect.WithGRPCWeb() options.
+//
+// The URL supplied here should be the base URL for the Connect or gRPC server (for example,
+// http://api.acme.com or https://acme.com/grpc).
+func NewDeploymentServiceClient(httpClient connect.HTTPClient, baseURL string, opts ...connect.ClientOption) DeploymentServiceClient {
+	baseURL = strings.TrimRight(baseURL, "/")
+	deploymentServiceMethods := v1.File_provisioner_v1_service_proto.Services().ByName("DeploymentService").Methods()
+	return &deploymentServiceClient{
+		createDeployment: connect.NewClient[v1.CreateDeploymentRequest, v1.CreateDeploymentResponse](
+			httpClient,
+			baseURL+DeploymentServiceCreateDeploymentProcedure,
+			connect.WithSchema(deploymentServiceMethods.ByName("CreateDeployment")),
+			connect.WithClientOptions(opts...),
+		),
+		describeDeployment: connect.NewClient[v1.DescribeDeploymentRequest, v1.DescribeDeploymentResponse](
+			httpClient,
+			baseURL+DeploymentServiceDescribeDeploymentProcedure,
+			connect.WithSchema(deploymentServiceMethods.ByName("DescribeDeployment")),
+			connect.WithClientOptions(opts...),
+		),
+		listDeployments: connect.NewClient[v1.ListDeploymentsRequest, v1.ListDeploymentsResponse](
+			httpClient,
+			baseURL+DeploymentServiceListDeploymentsProcedure,
+			connect.WithSchema(deploymentServiceMethods.ByName("ListDeployments")),
+			connect.WithClientOptions(opts...),
+		),
+		destroyDeployment: connect.NewClient[v1.DestroyDeploymentRequest, v1.DestroyDeploymentResponse](
+			httpClient,
+			baseURL+DeploymentServiceDestroyDeploymentProcedure,
+			connect.WithSchema(deploymentServiceMethods.ByName("DestroyDeployment")),
+			connect.WithClientOptions(opts...),
+		),
+		watchDeployment: connect.NewClient[v1.WatchDeploymentRequest, v1.DeploymentStateChangedEvent](
+			httpClient,
+			baseURL+DeploymentServiceWatchDeploymentProcedure,
+			connect.WithSchema(deploymentServiceMethods.ByName("WatchDeployment")),
+			connect.WithClientOptions(opts...),
+		),
+	}
+}
+
+// deploymentServiceClient implements DeploymentServiceClient.
+type deploymentServiceClient struct {
+	createDeployment   *connect.Client[v1.CreateDeploymentRequest, v1.CreateDeploymentResponse]
+	describeDeployment *connect.Client[v1.DescribeDeploymentRequest, v1.DescribeDeploymentResponse]
+	listDeployments    *connect.Client[v1.ListDeploymentsRequest, v1.ListDeploymentsResponse]
+	destroyDeployment  *connect.Client[v1.DestroyDeploymentRequest, v1.DestroyDeploymentResponse]
+	watchDeployment    *connect.Client[v1.WatchDeploymentRequest, v1.DeploymentStateChangedEvent]
+}
+
+// CreateDeployment calls provisioner.v1.DeploymentService.CreateDeployment.
+func (c *deploymentServiceClient) CreateDeployment(ctx context.Context, req *connect.Request[v1.CreateDeploymentRequest]) (*connect.Response[v1.CreateDeploymentResponse], error) {
+	return c.createDeployment.CallUnary(ctx, req)
+}
+
+// DescribeDeployment calls provisioner.v1.DeploymentService.DescribeDeployment.
+func (c *deploymentServiceClient) DescribeDeployment(ctx context.Context, req *connect.Request[v1.DescribeDeploymentRequest]) (*connect.Response[v1.DescribeDeploymentResponse], error) {
+	return c.describeDeployment.CallUnary(ctx, req)
+}
+
+// ListDeployments calls provisioner.v1.DeploymentService.ListDeployments.
+func (c *deploymentServiceClient) ListDeployments(ctx context.Context, req *connect.Request[v1.ListDeploymentsRequest]) (*connect.Response[v1.ListDeploymentsResponse], error) {
+	return c.listDeployments.CallUnary(ctx, req)
+}
+
+// DestroyDeployment calls provisioner.v1.DeploymentService.DestroyDeployment.
+func (c *deploymentServiceClient) DestroyDeployment(ctx context.Context, req *connect.Request[v1.DestroyDeploymentRequest]) (*connect.Response[v1.DestroyDeploymentResponse], error) {
+	return c.destroyDeployment.CallUnary(ctx, req)
+}
+
+// WatchDeployment calls provisioner.v1.DeploymentService.WatchDeployment.
+func (c *deploymentServiceClient) WatchDeployment(ctx context.Context, req *connect.Request[v1.WatchDeploymentRequest]) (*connect.ServerStreamForClient[v1.DeploymentStateChangedEvent], error) {
+	return c.watchDeployment.CallServerStream(ctx, req)
+}
+
+// DeploymentServiceHandler is an implementation of the provisioner.v1.DeploymentService service.
+type DeploymentServiceHandler interface {
+	// CreateDeployment runs the full idempotency + state-hygiene contract.
+	// Re-running with the same id against a matching container is a no-op
+	// (already_existed=true). If the container drifted or is missing,
+	// the executor reconciles.
+	CreateDeployment(context.Context, *connect.Request[v1.CreateDeploymentRequest]) (*connect.Response[v1.CreateDeploymentResponse], error)
+	// DescribeDeployment returns the current view of one deployment. The
+	// record is the state-file view (the engine's live state is read via
+	// the executor's docker inspect when the operator queries via the CLI's
+	// status verb).
+	DescribeDeployment(context.Context, *connect.Request[v1.DescribeDeploymentRequest]) (*connect.Response[v1.DescribeDeploymentResponse], error)
+	// ListDeployments enumerates deployments. Optional filter by
+	// instance_id (all deployments on a given Instance) or state.
+	ListDeployments(context.Context, *connect.Request[v1.ListDeploymentsRequest]) (*connect.Response[v1.ListDeploymentsResponse], error)
+	// DestroyDeployment stops the container and patches the record to
+	// TERMINATED. Idempotent: destroying an already-terminated id is a
+	// no-op.
+	DestroyDeployment(context.Context, *connect.Request[v1.DestroyDeploymentRequest]) (*connect.Response[v1.DestroyDeploymentResponse], error)
+	// WatchDeployment streams state transitions for one deployment until
+	// a terminal state (TERMINATED or FAILED) is reached or the client
+	// disconnects. Events carry the from/to states + a free-form phase
+	// string + progress message. Clients who need the full Deployment
+	// record at any point call DescribeDeployment between events.
+	//
+	// Logs are NOT carried on this stream -- they are a separate concern
+	// (see the followup issue for `iplane deployment logs <id> [-f]`).
+	WatchDeployment(context.Context, *connect.Request[v1.WatchDeploymentRequest], *connect.ServerStream[v1.DeploymentStateChangedEvent]) error
+}
+
+// NewDeploymentServiceHandler builds an HTTP handler from the service implementation. It returns
+// the path on which to mount the handler and the handler itself.
+//
+// By default, handlers support the Connect, gRPC, and gRPC-Web protocols with the binary Protobuf
+// and JSON codecs. They also support gzip compression.
+func NewDeploymentServiceHandler(svc DeploymentServiceHandler, opts ...connect.HandlerOption) (string, http.Handler) {
+	deploymentServiceMethods := v1.File_provisioner_v1_service_proto.Services().ByName("DeploymentService").Methods()
+	deploymentServiceCreateDeploymentHandler := connect.NewUnaryHandler(
+		DeploymentServiceCreateDeploymentProcedure,
+		svc.CreateDeployment,
+		connect.WithSchema(deploymentServiceMethods.ByName("CreateDeployment")),
+		connect.WithHandlerOptions(opts...),
+	)
+	deploymentServiceDescribeDeploymentHandler := connect.NewUnaryHandler(
+		DeploymentServiceDescribeDeploymentProcedure,
+		svc.DescribeDeployment,
+		connect.WithSchema(deploymentServiceMethods.ByName("DescribeDeployment")),
+		connect.WithHandlerOptions(opts...),
+	)
+	deploymentServiceListDeploymentsHandler := connect.NewUnaryHandler(
+		DeploymentServiceListDeploymentsProcedure,
+		svc.ListDeployments,
+		connect.WithSchema(deploymentServiceMethods.ByName("ListDeployments")),
+		connect.WithHandlerOptions(opts...),
+	)
+	deploymentServiceDestroyDeploymentHandler := connect.NewUnaryHandler(
+		DeploymentServiceDestroyDeploymentProcedure,
+		svc.DestroyDeployment,
+		connect.WithSchema(deploymentServiceMethods.ByName("DestroyDeployment")),
+		connect.WithHandlerOptions(opts...),
+	)
+	deploymentServiceWatchDeploymentHandler := connect.NewServerStreamHandler(
+		DeploymentServiceWatchDeploymentProcedure,
+		svc.WatchDeployment,
+		connect.WithSchema(deploymentServiceMethods.ByName("WatchDeployment")),
+		connect.WithHandlerOptions(opts...),
+	)
+	return "/provisioner.v1.DeploymentService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case DeploymentServiceCreateDeploymentProcedure:
+			deploymentServiceCreateDeploymentHandler.ServeHTTP(w, r)
+		case DeploymentServiceDescribeDeploymentProcedure:
+			deploymentServiceDescribeDeploymentHandler.ServeHTTP(w, r)
+		case DeploymentServiceListDeploymentsProcedure:
+			deploymentServiceListDeploymentsHandler.ServeHTTP(w, r)
+		case DeploymentServiceDestroyDeploymentProcedure:
+			deploymentServiceDestroyDeploymentHandler.ServeHTTP(w, r)
+		case DeploymentServiceWatchDeploymentProcedure:
+			deploymentServiceWatchDeploymentHandler.ServeHTTP(w, r)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+}
+
+// UnimplementedDeploymentServiceHandler returns CodeUnimplemented from all methods.
+type UnimplementedDeploymentServiceHandler struct{}
+
+func (UnimplementedDeploymentServiceHandler) CreateDeployment(context.Context, *connect.Request[v1.CreateDeploymentRequest]) (*connect.Response[v1.CreateDeploymentResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("provisioner.v1.DeploymentService.CreateDeployment is not implemented"))
+}
+
+func (UnimplementedDeploymentServiceHandler) DescribeDeployment(context.Context, *connect.Request[v1.DescribeDeploymentRequest]) (*connect.Response[v1.DescribeDeploymentResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("provisioner.v1.DeploymentService.DescribeDeployment is not implemented"))
+}
+
+func (UnimplementedDeploymentServiceHandler) ListDeployments(context.Context, *connect.Request[v1.ListDeploymentsRequest]) (*connect.Response[v1.ListDeploymentsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("provisioner.v1.DeploymentService.ListDeployments is not implemented"))
+}
+
+func (UnimplementedDeploymentServiceHandler) DestroyDeployment(context.Context, *connect.Request[v1.DestroyDeploymentRequest]) (*connect.Response[v1.DestroyDeploymentResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("provisioner.v1.DeploymentService.DestroyDeployment is not implemented"))
+}
+
+func (UnimplementedDeploymentServiceHandler) WatchDeployment(context.Context, *connect.Request[v1.WatchDeploymentRequest], *connect.ServerStream[v1.DeploymentStateChangedEvent]) error {
+	return connect.NewError(connect.CodeUnimplemented, errors.New("provisioner.v1.DeploymentService.WatchDeployment is not implemented"))
 }

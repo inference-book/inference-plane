@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"time"
 
-	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
 
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
@@ -118,12 +117,12 @@ func runInstanceCreate(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 
-	resp, err := client.CreateInstance(ctx, connect.NewRequest(&provisionerv1.CreateInstanceRequest{Spec: spec}))
+	resp, err := client.CreateInstance(ctx, &provisionerv1.CreateInstanceRequest{Spec: spec})
 	if err != nil {
 		return fmt.Errorf("create %q: %w", id, err)
 	}
 
-	return renderCreateResult(cmd, resp.Msg)
+	return renderCreateResult(cmd, resp)
 }
 
 // renderCreateResult prints the create response. JSON mode emits the

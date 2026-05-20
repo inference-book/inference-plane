@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"time"
 
-	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
 
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
@@ -61,15 +60,15 @@ func runInstanceList(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	resp, err := client.ListInstances(ctx, connect.NewRequest(&provisionerv1.ListInstancesRequest{
+	resp, err := client.ListInstances(ctx, &provisionerv1.ListInstancesRequest{
 		Source:   source,
 		Provider: listProvider,
-	}))
+	})
 	if err != nil {
 		return fmt.Errorf("list: %w", err)
 	}
 
-	return renderInstances(cmd.OutOrStdout(), instanceOutput, resp.Msg.GetInstances())
+	return renderInstances(cmd.OutOrStdout(), instanceOutput, resp.GetInstances())
 }
 
 func init() {

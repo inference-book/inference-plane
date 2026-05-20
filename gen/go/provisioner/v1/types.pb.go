@@ -90,6 +90,81 @@ func (InstanceState) EnumDescriptor() ([]byte, []int) {
 	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{0}
 }
 
+type DeploymentState int32
+
+const (
+	DeploymentState_DEPLOYMENT_STATE_UNSPECIFIED DeploymentState = 0
+	// Record written; executor has not started.
+	DeploymentState_DEPLOYMENT_STATE_PENDING DeploymentState = 1
+	// SSH + docker pull + docker run in progress.
+	DeploymentState_DEPLOYMENT_STATE_STARTING DeploymentState = 2
+	// Container started; engine loading model.
+	DeploymentState_DEPLOYMENT_STATE_CONFIGURING DeploymentState = 3
+	// Engine healthy; serving inference.
+	DeploymentState_DEPLOYMENT_STATE_RUNNING DeploymentState = 4
+	// Container alive but engine unhealthy.
+	DeploymentState_DEPLOYMENT_STATE_DEGRADED DeploymentState = 5
+	// Destroy in progress.
+	DeploymentState_DEPLOYMENT_STATE_TERMINATING DeploymentState = 6
+	// Terminal success.
+	DeploymentState_DEPLOYMENT_STATE_TERMINATED DeploymentState = 7
+	// Terminal failure (deploy or runtime).
+	DeploymentState_DEPLOYMENT_STATE_FAILED DeploymentState = 8
+)
+
+// Enum value maps for DeploymentState.
+var (
+	DeploymentState_name = map[int32]string{
+		0: "DEPLOYMENT_STATE_UNSPECIFIED",
+		1: "DEPLOYMENT_STATE_PENDING",
+		2: "DEPLOYMENT_STATE_STARTING",
+		3: "DEPLOYMENT_STATE_CONFIGURING",
+		4: "DEPLOYMENT_STATE_RUNNING",
+		5: "DEPLOYMENT_STATE_DEGRADED",
+		6: "DEPLOYMENT_STATE_TERMINATING",
+		7: "DEPLOYMENT_STATE_TERMINATED",
+		8: "DEPLOYMENT_STATE_FAILED",
+	}
+	DeploymentState_value = map[string]int32{
+		"DEPLOYMENT_STATE_UNSPECIFIED": 0,
+		"DEPLOYMENT_STATE_PENDING":     1,
+		"DEPLOYMENT_STATE_STARTING":    2,
+		"DEPLOYMENT_STATE_CONFIGURING": 3,
+		"DEPLOYMENT_STATE_RUNNING":     4,
+		"DEPLOYMENT_STATE_DEGRADED":    5,
+		"DEPLOYMENT_STATE_TERMINATING": 6,
+		"DEPLOYMENT_STATE_TERMINATED":  7,
+		"DEPLOYMENT_STATE_FAILED":      8,
+	}
+)
+
+func (x DeploymentState) Enum() *DeploymentState {
+	p := new(DeploymentState)
+	*p = x
+	return p
+}
+
+func (x DeploymentState) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (DeploymentState) Descriptor() protoreflect.EnumDescriptor {
+	return file_provisioner_v1_types_proto_enumTypes[1].Descriptor()
+}
+
+func (DeploymentState) Type() protoreflect.EnumType {
+	return &file_provisioner_v1_types_proto_enumTypes[1]
+}
+
+func (x DeploymentState) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use DeploymentState.Descriptor instead.
+func (DeploymentState) EnumDescriptor() ([]byte, []int) {
+	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{1}
+}
+
 // Spec is what the operator asks for. Provider-agnostic. Everything in
 // the spec is decided before any provider call happens.
 //
@@ -224,7 +299,7 @@ type ResourceRequirements struct {
 	MinVramGb int32 `protobuf:"varint,1,opt,name=min_vram_gb,json=minVramGb,proto3" json:"min_vram_gb,omitempty"`
 	// Minimum container disk in GB, per instance. 0 = use provider default.
 	MinDiskGb int32 `protobuf:"varint,2,opt,name=min_disk_gb,json=minDiskGb,proto3" json:"min_disk_gb,omitempty"`
-	// Minimum total system RAM in GB, per instance. 0 = use provider default.
+	// Minimum system RAM in GB, per instance. 0 = use provider default.
 	MinRamGb int32 `protobuf:"varint,3,opt,name=min_ram_gb,json=minRamGb,proto3" json:"min_ram_gb,omitempty"`
 	// GPU count on the instance. 0 means 1.
 	GpuCount int32 `protobuf:"varint,4,opt,name=gpu_count,json=gpuCount,proto3" json:"gpu_count,omitempty"`
@@ -708,6 +783,206 @@ func (x *InstanceRef) GetCreatedAt() *timestamppb.Timestamp {
 	return nil
 }
 
+// Deployment is an engine container running on a previously-provisioned
+// Instance. Locked by docs/design/0002-deploy.md -- see that doc for
+// the rationale behind: declarative-semantics under imperative verb
+// name, async-with-LRO state machine, exact-match drift detection on
+// (image, model), audit-only engine config in v0.1.
+type Deployment struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Operator-supplied identifier. Required. Tenant-globally unique
+	// across all providers (separate namespace from Instance ids -- a
+	// Deployment id and an Instance id can be the same string, they are
+	// looked up in different tables).
+	Id string `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	// Foreign key into Instance.id. The Deployment's target instance.
+	// Required: every Deployment must name an existing Instance.
+	InstanceId string `protobuf:"bytes,2,opt,name=instance_id,json=instanceId,proto3" json:"instance_id,omitempty"`
+	// Desired-state axis. Drift detection in v0.1 is exact-match on
+	// (image, model) only. Engine config below is pass-through, audit-
+	// only -- changing it does NOT cause re-deployment.
+	Image string `protobuf:"bytes,3,opt,name=image,proto3" json:"image,omitempty"`
+	Model string `protobuf:"bytes,4,opt,name=model,proto3" json:"model,omitempty"`
+	// Pass-through configuration. Recorded for audit (so operators can
+	// see what flags this deploy ran with) but NOT used to detect drift
+	// in v0.1. v0.2's --engine-config <yaml> promotes a typed engine
+	// config blob into desired state.
+	EngineArgs []string          `protobuf:"bytes,5,rep,name=engine_args,json=engineArgs,proto3" json:"engine_args,omitempty"`
+	Env        map[string]string `protobuf:"bytes,6,rep,name=env,proto3" json:"env,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	EnginePort int32             `protobuf:"varint,7,opt,name=engine_port,json=enginePort,proto3" json:"engine_port,omitempty"`
+	State      DeploymentState   `protobuf:"varint,8,opt,name=state,proto3,enum=provisioner.v1.DeploymentState" json:"state,omitempty"`
+	// Set when state == FAILED. Wraps the provider / SSH / docker
+	// error message preserving the original text.
+	FailureReason string `protobuf:"bytes,9,opt,name=failure_reason,json=failureReason,proto3" json:"failure_reason,omitempty"`
+	// LRO progress fields. Updated by the executor as deploy proceeds.
+	// Operators read via DescribeDeployment / WatchDeployment.
+	CurrentPhase    string                 `protobuf:"bytes,10,opt,name=current_phase,json=currentPhase,proto3" json:"current_phase,omitempty"`          // e.g. "ssh:connecting", "docker:pulling"
+	ProgressMessage string                 `protobuf:"bytes,11,opt,name=progress_message,json=progressMessage,proto3" json:"progress_message,omitempty"` // e.g. "pulling layer 4/12"
+	CreatedAt       *timestamppb.Timestamp `protobuf:"bytes,12,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`                   // when PENDING was written
+	StartedAt       *timestamppb.Timestamp `protobuf:"bytes,13,opt,name=started_at,json=startedAt,proto3" json:"started_at,omitempty"`                   // when STARTING entered
+	ReadyAt         *timestamppb.Timestamp `protobuf:"bytes,14,opt,name=ready_at,json=readyAt,proto3" json:"ready_at,omitempty"`                         // when RUNNING entered
+	TerminatedAt    *timestamppb.Timestamp `protobuf:"bytes,15,opt,name=terminated_at,json=terminatedAt,proto3" json:"terminated_at,omitempty"`          // when TERMINATED entered
+	// Container handle on the remote box. Filled when state >= STARTING.
+	// Used by describe / status to query the live container via
+	// `docker inspect`.
+	ContainerId string `protobuf:"bytes,16,opt,name=container_id,json=containerId,proto3" json:"container_id,omitempty"`
+	// Engine's OpenAI-compat endpoint URL. Filled when state == RUNNING.
+	// Phase 3 (telemetry seeding) and Phase 5 (`iplane up` UX wrapper)
+	// both surface this to operators.
+	EngineEndpoint string `protobuf:"bytes,17,opt,name=engine_endpoint,json=engineEndpoint,proto3" json:"engine_endpoint,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *Deployment) Reset() {
+	*x = Deployment{}
+	mi := &file_provisioner_v1_types_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Deployment) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Deployment) ProtoMessage() {}
+
+func (x *Deployment) ProtoReflect() protoreflect.Message {
+	mi := &file_provisioner_v1_types_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Deployment.ProtoReflect.Descriptor instead.
+func (*Deployment) Descriptor() ([]byte, []int) {
+	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *Deployment) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *Deployment) GetInstanceId() string {
+	if x != nil {
+		return x.InstanceId
+	}
+	return ""
+}
+
+func (x *Deployment) GetImage() string {
+	if x != nil {
+		return x.Image
+	}
+	return ""
+}
+
+func (x *Deployment) GetModel() string {
+	if x != nil {
+		return x.Model
+	}
+	return ""
+}
+
+func (x *Deployment) GetEngineArgs() []string {
+	if x != nil {
+		return x.EngineArgs
+	}
+	return nil
+}
+
+func (x *Deployment) GetEnv() map[string]string {
+	if x != nil {
+		return x.Env
+	}
+	return nil
+}
+
+func (x *Deployment) GetEnginePort() int32 {
+	if x != nil {
+		return x.EnginePort
+	}
+	return 0
+}
+
+func (x *Deployment) GetState() DeploymentState {
+	if x != nil {
+		return x.State
+	}
+	return DeploymentState_DEPLOYMENT_STATE_UNSPECIFIED
+}
+
+func (x *Deployment) GetFailureReason() string {
+	if x != nil {
+		return x.FailureReason
+	}
+	return ""
+}
+
+func (x *Deployment) GetCurrentPhase() string {
+	if x != nil {
+		return x.CurrentPhase
+	}
+	return ""
+}
+
+func (x *Deployment) GetProgressMessage() string {
+	if x != nil {
+		return x.ProgressMessage
+	}
+	return ""
+}
+
+func (x *Deployment) GetCreatedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.CreatedAt
+	}
+	return nil
+}
+
+func (x *Deployment) GetStartedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.StartedAt
+	}
+	return nil
+}
+
+func (x *Deployment) GetReadyAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.ReadyAt
+	}
+	return nil
+}
+
+func (x *Deployment) GetTerminatedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.TerminatedAt
+	}
+	return nil
+}
+
+func (x *Deployment) GetContainerId() string {
+	if x != nil {
+		return x.ContainerId
+	}
+	return ""
+}
+
+func (x *Deployment) GetEngineEndpoint() string {
+	if x != nil {
+		return x.EngineEndpoint
+	}
+	return ""
+}
+
 var File_provisioner_v1_types_proto protoreflect.FileDescriptor
 
 const file_provisioner_v1_types_proto_rawDesc = "" +
@@ -769,6 +1044,34 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"created_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x1a7\n" +
 	"\tTagsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x82\x06\n" +
+	"\n" +
+	"Deployment\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1f\n" +
+	"\vinstance_id\x18\x02 \x01(\tR\n" +
+	"instanceId\x12\x14\n" +
+	"\x05image\x18\x03 \x01(\tR\x05image\x12\x14\n" +
+	"\x05model\x18\x04 \x01(\tR\x05model\x12\x1f\n" +
+	"\vengine_args\x18\x05 \x03(\tR\n" +
+	"engineArgs\x125\n" +
+	"\x03env\x18\x06 \x03(\v2#.provisioner.v1.Deployment.EnvEntryR\x03env\x12\x1f\n" +
+	"\vengine_port\x18\a \x01(\x05R\n" +
+	"enginePort\x125\n" +
+	"\x05state\x18\b \x01(\x0e2\x1f.provisioner.v1.DeploymentStateR\x05state\x12%\n" +
+	"\x0efailure_reason\x18\t \x01(\tR\rfailureReason\x12#\n" +
+	"\rcurrent_phase\x18\n" +
+	" \x01(\tR\fcurrentPhase\x12)\n" +
+	"\x10progress_message\x18\v \x01(\tR\x0fprogressMessage\x129\n" +
+	"\n" +
+	"created_at\x18\f \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x129\n" +
+	"\n" +
+	"started_at\x18\r \x01(\v2\x1a.google.protobuf.TimestampR\tstartedAt\x125\n" +
+	"\bready_at\x18\x0e \x01(\v2\x1a.google.protobuf.TimestampR\areadyAt\x12?\n" +
+	"\rterminated_at\x18\x0f \x01(\v2\x1a.google.protobuf.TimestampR\fterminatedAt\x12!\n" +
+	"\fcontainer_id\x18\x10 \x01(\tR\vcontainerId\x12'\n" +
+	"\x0fengine_endpoint\x18\x11 \x01(\tR\x0eengineEndpoint\x1a6\n" +
+	"\bEnvEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01*\xc0\x01\n" +
 	"\rInstanceState\x12\x1e\n" +
 	"\x1aINSTANCE_STATE_UNSPECIFIED\x10\x00\x12\x1a\n" +
@@ -776,7 +1079,17 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"\x15INSTANCE_STATE_ACTIVE\x10\x02\x12\x1e\n" +
 	"\x1aINSTANCE_STATE_TERMINATING\x10\x03\x12\x1d\n" +
 	"\x19INSTANCE_STATE_TERMINATED\x10\x04\x12\x19\n" +
-	"\x15INSTANCE_STATE_FAILED\x10\x05B\xc8\x01\n" +
+	"\x15INSTANCE_STATE_FAILED\x10\x05*\xaf\x02\n" +
+	"\x0fDeploymentState\x12 \n" +
+	"\x1cDEPLOYMENT_STATE_UNSPECIFIED\x10\x00\x12\x1c\n" +
+	"\x18DEPLOYMENT_STATE_PENDING\x10\x01\x12\x1d\n" +
+	"\x19DEPLOYMENT_STATE_STARTING\x10\x02\x12 \n" +
+	"\x1cDEPLOYMENT_STATE_CONFIGURING\x10\x03\x12\x1c\n" +
+	"\x18DEPLOYMENT_STATE_RUNNING\x10\x04\x12\x1d\n" +
+	"\x19DEPLOYMENT_STATE_DEGRADED\x10\x05\x12 \n" +
+	"\x1cDEPLOYMENT_STATE_TERMINATING\x10\x06\x12\x1f\n" +
+	"\x1bDEPLOYMENT_STATE_TERMINATED\x10\a\x12\x1b\n" +
+	"\x17DEPLOYMENT_STATE_FAILED\x10\bB\xc8\x01\n" +
 	"\x12com.provisioner.v1B\n" +
 	"TypesProtoP\x01ZMgithub.com/inference-book/inference-plane/gen/go/provisioner/v1;provisionerv1\xa2\x02\x03PXX\xaa\x02\x0eProvisioner.V1\xca\x02\x0eProvisioner\\V1\xe2\x02\x1aProvisioner\\V1\\GPBMetadata\xea\x02\x0fProvisioner::V1b\x06proto3"
 
@@ -792,37 +1105,46 @@ func file_provisioner_v1_types_proto_rawDescGZIP() []byte {
 	return file_provisioner_v1_types_proto_rawDescData
 }
 
-var file_provisioner_v1_types_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_provisioner_v1_types_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
+var file_provisioner_v1_types_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
+var file_provisioner_v1_types_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
 var file_provisioner_v1_types_proto_goTypes = []any{
 	(InstanceState)(0),            // 0: provisioner.v1.InstanceState
-	(*Spec)(nil),                  // 1: provisioner.v1.Spec
-	(*ResourceRequirements)(nil),  // 2: provisioner.v1.ResourceRequirements
-	(*GpuInfo)(nil),               // 3: provisioner.v1.GpuInfo
-	(*SshTarget)(nil),             // 4: provisioner.v1.SshTarget
-	(*Instance)(nil),              // 5: provisioner.v1.Instance
-	(*InstanceRef)(nil),           // 6: provisioner.v1.InstanceRef
-	nil,                           // 7: provisioner.v1.Spec.TagsEntry
-	nil,                           // 8: provisioner.v1.InstanceRef.TagsEntry
-	(*timestamppb.Timestamp)(nil), // 9: google.protobuf.Timestamp
+	(DeploymentState)(0),          // 1: provisioner.v1.DeploymentState
+	(*Spec)(nil),                  // 2: provisioner.v1.Spec
+	(*ResourceRequirements)(nil),  // 3: provisioner.v1.ResourceRequirements
+	(*GpuInfo)(nil),               // 4: provisioner.v1.GpuInfo
+	(*SshTarget)(nil),             // 5: provisioner.v1.SshTarget
+	(*Instance)(nil),              // 6: provisioner.v1.Instance
+	(*InstanceRef)(nil),           // 7: provisioner.v1.InstanceRef
+	(*Deployment)(nil),            // 8: provisioner.v1.Deployment
+	nil,                           // 9: provisioner.v1.Spec.TagsEntry
+	nil,                           // 10: provisioner.v1.InstanceRef.TagsEntry
+	nil,                           // 11: provisioner.v1.Deployment.EnvEntry
+	(*timestamppb.Timestamp)(nil), // 12: google.protobuf.Timestamp
 }
 var file_provisioner_v1_types_proto_depIdxs = []int32{
-	2,  // 0: provisioner.v1.Spec.requirements:type_name -> provisioner.v1.ResourceRequirements
-	7,  // 1: provisioner.v1.Spec.tags:type_name -> provisioner.v1.Spec.TagsEntry
-	1,  // 2: provisioner.v1.Instance.spec:type_name -> provisioner.v1.Spec
-	3,  // 3: provisioner.v1.Instance.gpu:type_name -> provisioner.v1.GpuInfo
+	3,  // 0: provisioner.v1.Spec.requirements:type_name -> provisioner.v1.ResourceRequirements
+	9,  // 1: provisioner.v1.Spec.tags:type_name -> provisioner.v1.Spec.TagsEntry
+	2,  // 2: provisioner.v1.Instance.spec:type_name -> provisioner.v1.Spec
+	4,  // 3: provisioner.v1.Instance.gpu:type_name -> provisioner.v1.GpuInfo
 	0,  // 4: provisioner.v1.Instance.state:type_name -> provisioner.v1.InstanceState
-	9,  // 5: provisioner.v1.Instance.created_at:type_name -> google.protobuf.Timestamp
-	9,  // 6: provisioner.v1.Instance.activated_at:type_name -> google.protobuf.Timestamp
-	9,  // 7: provisioner.v1.Instance.terminated_at:type_name -> google.protobuf.Timestamp
-	4,  // 8: provisioner.v1.Instance.ssh:type_name -> provisioner.v1.SshTarget
-	8,  // 9: provisioner.v1.InstanceRef.tags:type_name -> provisioner.v1.InstanceRef.TagsEntry
-	9,  // 10: provisioner.v1.InstanceRef.created_at:type_name -> google.protobuf.Timestamp
-	11, // [11:11] is the sub-list for method output_type
-	11, // [11:11] is the sub-list for method input_type
-	11, // [11:11] is the sub-list for extension type_name
-	11, // [11:11] is the sub-list for extension extendee
-	0,  // [0:11] is the sub-list for field type_name
+	12, // 5: provisioner.v1.Instance.created_at:type_name -> google.protobuf.Timestamp
+	12, // 6: provisioner.v1.Instance.activated_at:type_name -> google.protobuf.Timestamp
+	12, // 7: provisioner.v1.Instance.terminated_at:type_name -> google.protobuf.Timestamp
+	5,  // 8: provisioner.v1.Instance.ssh:type_name -> provisioner.v1.SshTarget
+	10, // 9: provisioner.v1.InstanceRef.tags:type_name -> provisioner.v1.InstanceRef.TagsEntry
+	12, // 10: provisioner.v1.InstanceRef.created_at:type_name -> google.protobuf.Timestamp
+	11, // 11: provisioner.v1.Deployment.env:type_name -> provisioner.v1.Deployment.EnvEntry
+	1,  // 12: provisioner.v1.Deployment.state:type_name -> provisioner.v1.DeploymentState
+	12, // 13: provisioner.v1.Deployment.created_at:type_name -> google.protobuf.Timestamp
+	12, // 14: provisioner.v1.Deployment.started_at:type_name -> google.protobuf.Timestamp
+	12, // 15: provisioner.v1.Deployment.ready_at:type_name -> google.protobuf.Timestamp
+	12, // 16: provisioner.v1.Deployment.terminated_at:type_name -> google.protobuf.Timestamp
+	17, // [17:17] is the sub-list for method output_type
+	17, // [17:17] is the sub-list for method input_type
+	17, // [17:17] is the sub-list for extension type_name
+	17, // [17:17] is the sub-list for extension extendee
+	0,  // [0:17] is the sub-list for field type_name
 }
 
 func init() { file_provisioner_v1_types_proto_init() }
@@ -835,8 +1157,8 @@ func file_provisioner_v1_types_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_provisioner_v1_types_proto_rawDesc), len(file_provisioner_v1_types_proto_rawDesc)),
-			NumEnums:      1,
-			NumMessages:   8,
+			NumEnums:      2,
+			NumMessages:   10,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
