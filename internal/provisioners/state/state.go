@@ -35,10 +35,24 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 )
 
-// SchemaVersion is what new state files are stamped with. A v1.0 reader
-// inspects schema_version before parsing and can decide whether to
-// up-convert.
-const SchemaVersion = "1"
+// SchemaVersion is what new state files are stamped with. Uses
+// semver-shaped minor/patch bumps so the string communicates intent
+// of the change even though backward compatibility is not a project
+// invariant (no shipping customers):
+//
+//	MAJOR bump (X.0)   -- breaking change to an existing field
+//	                      (renamed, retyped, removed). Phase 1's
+//	                      shipped "1" is implicitly "1.0".
+//	MINOR bump (X.Y)   -- additive change. New top-level field, new
+//	                      message, new enum value. Old readers ignore
+//	                      what they don't know about.
+//	PATCH bump (X.Y.Z) -- cosmetic / comment / on-disk-formatting
+//	                      change. Field set unchanged.
+//
+// v0.1 Phase 1 shipped "1". This bumps to "1.1" -- the envelope gains
+// the deployments map (purely additive, no Instance changes). A future
+// breaking schema change would go to "2.0".
+const SchemaVersion = "1.1"
 
 // BackendLocalFile is the value written into the file's `backend` field.
 // v1.0's remote backend will write its own value here and may fall back
@@ -46,16 +60,19 @@ const SchemaVersion = "1"
 // writer last touched the file.
 const BackendLocalFile = "local-file"
 
-// File is the in-memory representation of state.json. The map is keyed
-// by Spec.ID (cross-provider), not by (provider, id) -- the design
-// doc's tenant-global uniqueness rule means an operator cannot have
-// two records with the same id even if they're on different providers,
-// and flat keying surfaces collisions at write time.
+// File is the in-memory representation of state.json. Two top-level
+// tables: instances (Phase 1) and deployments (Phase 2). Both are
+// keyed by tenant-global id; the two id namespaces are independent
+// (a Deployment.id and an Instance.id can match, they're looked up in
+// different maps). Deployments cross-reference instances by
+// Deployment.instance_id -- not embedded as sub-records, so v0.2's
+// multi-deployment-per-instance scales without restructuring.
 type File struct {
 	SchemaVersion string
 	Backend       string
 	OperatorID    string
 	Instances     map[string]*provisionerv1.Instance
+	Deployments   map[string]*provisionerv1.Deployment
 }
 
 // Store owns the file path and the flock. One Store per CLI invocation
@@ -170,6 +187,7 @@ func (s *Store) readFromDisk() (*File, error) {
 		Backend       string                     `json:"backend"`
 		OperatorID    string                     `json:"operator_id"`
 		Instances     map[string]json.RawMessage `json:"instances"`
+		Deployments   map[string]json.RawMessage `json:"deployments"`
 	}
 	if err := json.Unmarshal(raw, &env); err != nil {
 		return nil, fmt.Errorf("parse state file %q: %w", s.path, err)
@@ -179,6 +197,7 @@ func (s *Store) readFromDisk() (*File, error) {
 		Backend:       env.Backend,
 		OperatorID:    env.OperatorID,
 		Instances:     make(map[string]*provisionerv1.Instance, len(env.Instances)),
+		Deployments:   make(map[string]*provisionerv1.Deployment, len(env.Deployments)),
 	}
 	if file.OperatorID == "" {
 		file.OperatorID = s.operatorID
@@ -190,6 +209,13 @@ func (s *Store) readFromDisk() (*File, error) {
 			return nil, fmt.Errorf("parse instance %q in state file: %w", id, err)
 		}
 		file.Instances[id] = inst
+	}
+	for id, depRaw := range env.Deployments {
+		dep := &provisionerv1.Deployment{}
+		if err := unmarshal.Unmarshal(depRaw, dep); err != nil {
+			return nil, fmt.Errorf("parse deployment %q in state file: %w", id, err)
+		}
+		file.Deployments[id] = dep
 	}
 	return file, nil
 }
@@ -216,16 +242,26 @@ func (s *Store) writeToDisk(file *File) error {
 		}
 		instancesJSON[id] = b
 	}
+	deploymentsJSON := make(map[string]json.RawMessage, len(file.Deployments))
+	for id, dep := range file.Deployments {
+		b, err := marshal.Marshal(dep)
+		if err != nil {
+			return fmt.Errorf("marshal deployment %q: %w", id, err)
+		}
+		deploymentsJSON[id] = b
+	}
 	envelope := struct {
 		SchemaVersion string                     `json:"schema_version"`
 		Backend       string                     `json:"backend"`
 		OperatorID    string                     `json:"operator_id"`
 		Instances     map[string]json.RawMessage `json:"instances"`
+		Deployments   map[string]json.RawMessage `json:"deployments"`
 	}{
 		SchemaVersion: file.SchemaVersion,
 		Backend:       file.Backend,
 		OperatorID:    file.OperatorID,
 		Instances:     instancesJSON,
+		Deployments:   deploymentsJSON,
 	}
 	out, err := json.MarshalIndent(envelope, "", "  ")
 	if err != nil {
@@ -266,5 +302,6 @@ func (s *Store) emptyFile() *File {
 		Backend:       BackendLocalFile,
 		OperatorID:    s.operatorID,
 		Instances:     map[string]*provisionerv1.Instance{},
+		Deployments:   map[string]*provisionerv1.Deployment{},
 	}
 }

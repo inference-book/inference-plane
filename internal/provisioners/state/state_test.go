@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -51,6 +52,75 @@ func TestRead_EmptyFileReturnsDefault(t *testing.T) {
 	}
 	if len(f.Instances) != 0 {
 		t.Errorf("Instances should be empty, got %d", len(f.Instances))
+	}
+	if len(f.Deployments) != 0 {
+		t.Errorf("Deployments should be empty, got %d", len(f.Deployments))
+	}
+}
+
+func TestDeployment_RoundTripPersistence(t *testing.T) {
+	s := newStore(t)
+	want := &provisionerv1.Deployment{
+		Id:             "my-llama",
+		InstanceId:     "my-pod",
+		Image:          "vllm/vllm-openai:0.7.0",
+		Model:          "Qwen/Qwen2.5-7B-Instruct",
+		EngineArgs:     []string{"--gpu-memory-utilization", "0.9"},
+		Env:            map[string]string{"HF_TOKEN": "tok_redacted"},
+		EnginePort:     8000,
+		State:          provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING,
+		CurrentPhase:   "engine:serving",
+		ContainerId:    "abc1234",
+		EngineEndpoint: "http://1.2.3.4:8000",
+	}
+	if err := s.Update(func(f *File) error {
+		f.Deployments["my-llama"] = want
+		return nil
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	got, err := s.Read()
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	dep, ok := got.Deployments["my-llama"]
+	if !ok {
+		t.Fatal("deployment my-llama missing after round-trip")
+	}
+	if dep.GetId() != want.Id {
+		t.Errorf("Id = %q, want %q", dep.GetId(), want.Id)
+	}
+	if dep.GetInstanceId() != want.InstanceId {
+		t.Errorf("InstanceId = %q, want %q", dep.GetInstanceId(), want.InstanceId)
+	}
+	if dep.GetImage() != want.Image {
+		t.Errorf("Image = %q, want %q", dep.GetImage(), want.Image)
+	}
+	if dep.GetModel() != want.Model {
+		t.Errorf("Model = %q, want %q", dep.GetModel(), want.Model)
+	}
+	if dep.GetState() != want.State {
+		t.Errorf("State = %v, want RUNNING", dep.GetState())
+	}
+	if dep.GetContainerId() != want.ContainerId {
+		t.Errorf("ContainerId = %q, want %q", dep.GetContainerId(), want.ContainerId)
+	}
+	if dep.GetEngineEndpoint() != want.EngineEndpoint {
+		t.Errorf("EngineEndpoint = %q, want %q", dep.GetEngineEndpoint(), want.EngineEndpoint)
+	}
+}
+
+func TestSchemaVersion_BumpedTo1Dot1(t *testing.T) {
+	s := newStore(t)
+	if err := s.Update(func(f *File) error { return nil }); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	raw, err := os.ReadFile(s.Path())
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if !strings.Contains(string(raw), `"schema_version": "1.1"`) {
+		t.Errorf("on-disk envelope missing schema_version=1.1; got:\n%s", raw)
 	}
 }
 
