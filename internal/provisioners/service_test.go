@@ -9,8 +9,40 @@ import (
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
 	"github.com/inference-book/inference-plane/internal/provisioners"
 	"github.com/inference-book/inference-plane/internal/provisioners/state"
+	"github.com/inference-book/inference-plane/internal/sshkeys"
+	"github.com/panyam/oneauth/keys"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
+
+// mockKeyRegistrarProvider is mockProvider + a KeyRegistrar
+// implementation. Tests pick this struct (vs mockProvider) when they
+// want the provider to be ensured-with-a-key before Spawn.
+type mockKeyRegistrarProvider struct {
+	*mockProvider
+	registrarCalls int
+	registrarErr   error
+	lastPubKey     []byte
+	lastComment    string
+}
+
+func (m *mockKeyRegistrarProvider) EnsurePublicKey(ctx context.Context, publicKey []byte, comment string) error {
+	m.registrarCalls++
+	m.lastPubKey = append([]byte(nil), publicKey...)
+	m.lastComment = comment
+	return m.registrarErr
+}
+
+func newKeyStore(t *testing.T) *sshkeys.Store {
+	t.Helper()
+	s, err := sshkeys.New(
+		sshkeys.WithKeyStorage(keys.NewInMemoryKeyStore()),
+		sshkeys.WithClock(func() time.Time { return time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC) }),
+	)
+	if err != nil {
+		t.Fatalf("sshkeys.New: %v", err)
+	}
+	return s
+}
 
 // mockProvider lets each test wire up the four Provider methods
 // independently. Unsupplied methods default to safe no-ops.
@@ -398,5 +430,92 @@ func TestValidateID(t *testing.T) {
 		if (err == nil) != c.valid {
 			t.Errorf("ValidateID(%q) valid=%v want %v (err=%v)", c.id, err == nil, c.valid, err)
 		}
+	}
+}
+
+func TestCreateInstance_KeyRegistrar_CalledBeforeSpawn(t *testing.T) {
+	reg := &mockKeyRegistrarProvider{mockProvider: &mockProvider{name: "mock"}}
+	store, err := state.Open(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("state.Open: %v", err)
+	}
+	svc := provisioners.New([]provisioners.Provider{reg}, store, "default",
+		provisioners.WithKeyStore(newKeyStore(t)),
+	)
+
+	_, err = svc.CreateInstance(context.Background(), &provisionerv1.CreateInstanceRequest{Spec: okSpec()})
+	if err != nil {
+		t.Fatalf("CreateInstance: %v", err)
+	}
+	if reg.registrarCalls != 1 {
+		t.Errorf("EnsurePublicKey called %d times, want 1", reg.registrarCalls)
+	}
+	if reg.spawnCalls != 1 {
+		t.Errorf("Spawn called %d times, want 1", reg.spawnCalls)
+	}
+	// The comment string should be iplane-flavored so a downstream
+	// skip-if-present check works.
+	if !sshkeys.IsIplaneComment(reg.lastComment) {
+		t.Errorf("registered comment %q is not an iplane comment", reg.lastComment)
+	}
+	if len(reg.lastPubKey) == 0 || string(reg.lastPubKey[:11]) != "ssh-ed25519" {
+		t.Errorf("registered public key bytes do not look like ssh-ed25519 authorized_keys line: %q", reg.lastPubKey)
+	}
+}
+
+func TestCreateInstance_KeyRegistrar_SkippedWhenInterfaceAbsent(t *testing.T) {
+	mock := &mockProvider{name: "mock"} // does NOT implement KeyRegistrar
+	store, err := state.Open(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("state.Open: %v", err)
+	}
+	svc := provisioners.New([]provisioners.Provider{mock}, store, "default",
+		provisioners.WithKeyStore(newKeyStore(t)),
+	)
+	if _, err := svc.CreateInstance(context.Background(), &provisionerv1.CreateInstanceRequest{Spec: okSpec()}); err != nil {
+		t.Fatalf("CreateInstance: %v", err)
+	}
+	if mock.spawnCalls != 1 {
+		t.Errorf("Spawn called %d times, want 1 (no key registration should still proceed to Spawn)", mock.spawnCalls)
+	}
+}
+
+func TestCreateInstance_KeyRegistrar_SkippedWhenStoreAbsent(t *testing.T) {
+	reg := &mockKeyRegistrarProvider{mockProvider: &mockProvider{name: "mock"}}
+	store, err := state.Open(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("state.Open: %v", err)
+	}
+	svc := provisioners.New([]provisioners.Provider{reg}, store, "default") // no WithKeyStore
+
+	if _, err := svc.CreateInstance(context.Background(), &provisionerv1.CreateInstanceRequest{Spec: okSpec()}); err != nil {
+		t.Fatalf("CreateInstance: %v", err)
+	}
+	if reg.registrarCalls != 0 {
+		t.Errorf("EnsurePublicKey called %d times, want 0 when no key store is wired", reg.registrarCalls)
+	}
+	if reg.spawnCalls != 1 {
+		t.Errorf("Spawn called %d times, want 1", reg.spawnCalls)
+	}
+}
+
+func TestCreateInstance_KeyRegistrar_ErrorAbortsBeforeSpawn(t *testing.T) {
+	reg := &mockKeyRegistrarProvider{
+		mockProvider: &mockProvider{name: "mock"},
+		registrarErr: errors.New("forbidden: scoped key cannot mutate user settings"),
+	}
+	store, err := state.Open(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("state.Open: %v", err)
+	}
+	svc := provisioners.New([]provisioners.Provider{reg}, store, "default",
+		provisioners.WithKeyStore(newKeyStore(t)),
+	)
+	_, err = svc.CreateInstance(context.Background(), &provisionerv1.CreateInstanceRequest{Spec: okSpec()})
+	if err == nil {
+		t.Fatal("expected CreateInstance to fail when EnsurePublicKey errors")
+	}
+	if reg.spawnCalls != 0 {
+		t.Errorf("Spawn should NOT have been called (got %d calls) -- cost gate before spawn must hold", reg.spawnCalls)
 	}
 }

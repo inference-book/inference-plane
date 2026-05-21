@@ -9,6 +9,7 @@ import (
 
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
 	"github.com/inference-book/inference-plane/internal/provisioners/state"
+	"github.com/inference-book/inference-plane/internal/sshkeys"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
@@ -49,8 +50,18 @@ type Service struct {
 
 	providers  map[string]Provider
 	store      *state.Store
+	keyStore   keyEnsurer
 	operatorID string
 	clock      func() time.Time
+}
+
+// keyEnsurer is the narrow interface the Service uses to fetch an
+// SSH key pair for the (operator, provider) scope. Satisfied by
+// *sshkeys.Store; tests pass a stub. Declared here so the Service
+// is the contract owner -- callers must satisfy what Service needs,
+// not the other way around.
+type keyEnsurer interface {
+	EnsureKeyPair(operator, provider string) (*sshkeys.KeyPair, error)
 }
 
 // Option configures the Service at construction time.
@@ -60,6 +71,16 @@ type Option func(*Service)
 // so timestamps are assertable.
 func WithClock(c func() time.Time) Option {
 	return func(s *Service) { s.clock = c }
+}
+
+// WithKeyStore wires a key-management backend into the Service. When
+// set, CreateInstance calls EnsureKeyPair(operator, provider) before
+// Spawn and (if the provider satisfies KeyRegistrar) calls
+// EnsurePublicKey to register the key with the provider. When unset,
+// both steps are skipped -- useful for local-only deployments and
+// for tests that do not care about keys.
+func WithKeyStore(k keyEnsurer) Option {
+	return func(s *Service) { s.keyStore = k }
 }
 
 // New constructs a Service. Providers are keyed by their Name() so the
@@ -175,7 +196,28 @@ func (s *Service) CreateInstance(ctx context.Context, req *provisionerv1.CreateI
 		}, nil
 	}
 
-	// Step 3: Spawn (no flock held), then patch.
+	// Step 3a: ensure the operator's SSH key is registered with this
+	// provider, if the provider supports it and a key store is wired.
+	// Errors abort before Spawn so the operator does not pay for a
+	// pod that the executor cannot SSH into. Skipped when keyStore is
+	// nil (typical for local-only deployments + tests).
+	if s.keyStore != nil {
+		if reg, ok := provider.(KeyRegistrar); ok {
+			kp, err := s.keyStore.EnsureKeyPair(s.operatorID, provider.Name())
+			if err != nil {
+				return nil, status.Errorf(codes.Internal, "ensure ssh key for %s: %v", provider.Name(), err)
+			}
+			pubLine, err := kp.MarshalAuthorizedKey()
+			if err != nil {
+				return nil, status.Errorf(codes.Internal, "marshal ssh public key: %v", err)
+			}
+			if err := reg.EnsurePublicKey(ctx, pubLine, kp.Comment); err != nil {
+				return nil, status.Errorf(codes.FailedPrecondition, "register ssh public key with %s: %v", provider.Name(), err)
+			}
+		}
+	}
+
+	// Step 3b: Spawn (no flock held), then patch.
 	stampedSpec := withSystemTags(spec, s.operatorID)
 	spawned, spawnErr := provider.Spawn(ctx, stampedSpec)
 	if spawnErr != nil {
