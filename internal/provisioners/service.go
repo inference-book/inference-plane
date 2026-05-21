@@ -8,6 +8,7 @@ import (
 	"time"
 
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
+	"github.com/inference-book/inference-plane/internal/deployments/sshdocker"
 	"github.com/inference-book/inference-plane/internal/provisioners/state"
 	"github.com/inference-book/inference-plane/internal/sshkeys"
 	"google.golang.org/grpc/codes"
@@ -51,6 +52,7 @@ type Service struct {
 	providers  map[string]Provider
 	store      *state.Store
 	keyStore   keyEnsurer
+	executor   DeploymentExecutor
 	operatorID string
 	clock      func() time.Time
 }
@@ -626,46 +628,385 @@ func refToInstance(ref *provisionerv1.InstanceRef, providerName string) *provisi
 	}
 }
 
-// ── DeploymentService stubs ─────────────────────────────────────────
+// ── DeploymentService ───────────────────────────────────────────────
 //
 // Phase 2's deployment surface. The same Service struct implements both
 // gRPC servers (ProvisionerServiceServer + DeploymentServiceServer)
-// sharing state.Store + provider registry. The instance<->deployment
-// cross-reference via instance_id stays a same-package lookup.
+// sharing state.Store + provider registry + key store. The
+// instance<->deployment cross-reference via instance_id is a same-
+// package map lookup.
+
+// DeploymentExecutor is what the Service calls to drive the deploy +
+// destroy state machine. Production wraps sshdocker.Executor; tests
+// pass a stub. emit is called once per state transition (and on
+// progress updates); the Service patches the state file from these.
+type DeploymentExecutor interface {
+	Deploy(ctx context.Context, dep *provisionerv1.Deployment, inst *provisionerv1.Instance, key *sshkeys.KeyPair, emit func(sshdocker.StateUpdate)) error
+	Destroy(ctx context.Context, dep *provisionerv1.Deployment, inst *provisionerv1.Instance, key *sshkeys.KeyPair, emit func(sshdocker.StateUpdate)) error
+}
+
+// WithDeploymentExecutor wires the executor. Optional: when unset,
+// the deployment surface returns FailedPrecondition (operator gets
+// a clear "deployment requires a configured executor" message).
+// The CLI's in-process buildClient passes sshdocker.NewExecutor;
+// tests pass a stub.
+func WithDeploymentExecutor(e DeploymentExecutor) Option {
+	return func(s *Service) { s.executor = e }
+}
+
+// CreateDeployment runs the design-doc's three-step contract:
 //
-// All five methods return codes.Unimplemented in this PR. The SSH+docker
-// executor + CLI wiring land in Phase 2 PRs 2-4; this PR commits the
-// interface so those PRs slot in without proto churn.
-
-// CreateDeployment will run the deployment idempotency + state-hygiene
-// contract from docs/design/0002-deploy.md once the executor lands.
+//  1. Critical section: claim a PENDING record if no live deployment
+//     exists for this id; if a live one matches (image, model),
+//     return it as AlreadyExisted (idempotent).
+//
+//  2. Validate: target instance exists, has SSH endpoint, is not
+//     terminated. Load the SSH key for the instance's provider.
+//
+//  3. Launch executor goroutine. Each StateUpdate patches the
+//     deployment record in the state file. With Wait=true, block
+//     until terminal state; otherwise return after PENDING is
+//     written.
 func (s *Service) CreateDeployment(ctx context.Context, req *provisionerv1.CreateDeploymentRequest) (*provisionerv1.CreateDeploymentResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "CreateDeployment lands in Phase 2 PR 3 (executor); this PR is proto + state only")
+	if s.executor == nil {
+		return nil, status.Error(codes.FailedPrecondition, "deployment requires a configured executor (use provisioners.WithDeploymentExecutor)")
+	}
+	dep := req.GetDeployment()
+	if dep == nil {
+		return nil, status.Error(codes.InvalidArgument, "deployment is required")
+	}
+	if err := ValidateID(dep.GetId()); err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	if dep.GetInstanceId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "deployment.instance_id is required")
+	}
+	if dep.GetImage() == "" {
+		return nil, status.Error(codes.InvalidArgument, "deployment.image is required")
+	}
+	if dep.GetModel() == "" {
+		return nil, status.Error(codes.InvalidArgument, "deployment.model is required")
+	}
+
+	// Look up instance + verify it is deployable.
+	file, err := s.store.Read()
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	inst, ok := file.Instances[dep.GetInstanceId()]
+	if !ok {
+		return nil, status.Errorf(codes.InvalidArgument, "instance %q does not exist", dep.GetInstanceId())
+	}
+	switch inst.GetState() {
+	case provisionerv1.InstanceState_INSTANCE_STATE_TERMINATED, provisionerv1.InstanceState_INSTANCE_STATE_TERMINATING, provisionerv1.InstanceState_INSTANCE_STATE_FAILED:
+		return nil, status.Errorf(codes.FailedPrecondition, "instance %q is %s; create a fresh instance first", inst.GetId(), strings.TrimPrefix(inst.GetState().String(), "INSTANCE_STATE_"))
+	}
+	if inst.GetSsh() == nil || inst.GetSsh().GetHost() == "" {
+		return nil, status.Errorf(codes.InvalidArgument, "instance %q has no SSH endpoint; deployment requires an SSH-reachable instance (try --provider runpod)", inst.GetId())
+	}
+
+	// Idempotency on (operator, deployment id).
+	var record *provisionerv1.Deployment
+	var alreadyExisted bool
+	err = s.store.Update(func(f *state.File) error {
+		if existing, ok := f.Deployments[dep.GetId()]; ok {
+			switch existing.GetState() {
+			case provisionerv1.DeploymentState_DEPLOYMENT_STATE_PENDING,
+				provisionerv1.DeploymentState_DEPLOYMENT_STATE_STARTING,
+				provisionerv1.DeploymentState_DEPLOYMENT_STATE_CONFIGURING,
+				provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING,
+				provisionerv1.DeploymentState_DEPLOYMENT_STATE_DEGRADED:
+				if existing.GetInstanceId() != dep.GetInstanceId() {
+					return fmt.Errorf("deployment %q already exists on instance %q; destroy and recreate to move", dep.GetId(), existing.GetInstanceId())
+				}
+				if existing.GetImage() == dep.GetImage() && existing.GetModel() == dep.GetModel() {
+					record = existing
+					alreadyExisted = true
+					return nil
+				}
+				// Same id, different desired state -> overwrite the
+				// record (drift handling continues inside the executor).
+			case provisionerv1.DeploymentState_DEPLOYMENT_STATE_TERMINATING:
+				return fmt.Errorf("deployment %q is currently terminating; wait for completion", dep.GetId())
+			}
+			// TERMINATED / FAILED: treat as gone; claim a fresh record.
+		}
+		now := timestamppb.New(s.clock())
+		record = &provisionerv1.Deployment{
+			Id:         dep.GetId(),
+			InstanceId: dep.GetInstanceId(),
+			Image:      dep.GetImage(),
+			Model:      dep.GetModel(),
+			EngineArgs: dep.GetEngineArgs(),
+			Env:        dep.GetEnv(),
+			EnginePort: dep.GetEnginePort(),
+			State:      provisionerv1.DeploymentState_DEPLOYMENT_STATE_PENDING,
+			CreatedAt:  now,
+		}
+		f.Deployments[dep.GetId()] = record
+		return nil
+	})
+	if err != nil {
+		return nil, status.Error(codes.FailedPrecondition, err.Error())
+	}
+	if alreadyExisted {
+		return &provisionerv1.CreateDeploymentResponse{Deployment: record, AlreadyExisted: true}, nil
+	}
+
+	// Load SSH key for the instance's provider.
+	if s.keyStore == nil {
+		return nil, status.Error(codes.FailedPrecondition, "deployment requires a configured key store (use provisioners.WithKeyStore)")
+	}
+	key, err := s.keyStore.EnsureKeyPair(s.operatorID, inst.GetProvider())
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "load ssh key: %v", err)
+	}
+
+	// Launch executor. The emit callback patches the deployment
+	// record on each transition. Wait=true blocks; Wait=false
+	// returns after PENDING is recorded (server-side mode).
+	runCtx := context.Background() // detach from request ctx so async deploys survive caller disconnect
+	if req.GetWait() {
+		runCtx = ctx
+	}
+	done := s.launchDeploy(runCtx, record, inst, key)
+	if req.GetWait() {
+		<-done
+		// Re-read the record to surface terminal state.
+		file, err := s.store.Read()
+		if err != nil {
+			return nil, status.Error(codes.Internal, err.Error())
+		}
+		if final, ok := file.Deployments[record.GetId()]; ok {
+			record = final
+		}
+	}
+	return &provisionerv1.CreateDeploymentResponse{Deployment: record}, nil
 }
 
-// DescribeDeployment will return one deployment record by id.
+// launchDeploy starts the executor goroutine and returns a channel
+// closed when the executor finishes (terminal state reached). Each
+// emit fires a state-file patch.
+func (s *Service) launchDeploy(ctx context.Context, dep *provisionerv1.Deployment, inst *provisionerv1.Instance, key *sshkeys.KeyPair) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		emit := func(u sshdocker.StateUpdate) {
+			_ = s.patchDeployment(dep.GetId(), u)
+		}
+		_ = s.executor.Deploy(ctx, dep, inst, key, emit)
+	}()
+	return done
+}
+
+// patchDeployment applies a StateUpdate to the deployment record in
+// the state file under the flock. Errors are swallowed at the
+// emit-callback boundary (the executor cannot meaningfully react);
+// terminal state observers will see whatever last successfully
+// wrote.
+func (s *Service) patchDeployment(id string, u sshdocker.StateUpdate) error {
+	return s.store.Update(func(f *state.File) error {
+		rec, ok := f.Deployments[id]
+		if !ok {
+			return nil
+		}
+		rec.State = u.State
+		rec.CurrentPhase = u.Phase
+		rec.ProgressMessage = u.ProgressMessage
+		if u.ContainerID != "" {
+			rec.ContainerId = u.ContainerID
+		}
+		if u.EngineEndpoint != "" {
+			rec.EngineEndpoint = u.EngineEndpoint
+		}
+		if u.FailureReason != "" {
+			rec.FailureReason = u.FailureReason
+		}
+		now := timestamppb.New(s.clock())
+		switch u.State {
+		case provisionerv1.DeploymentState_DEPLOYMENT_STATE_STARTING:
+			if rec.StartedAt == nil {
+				rec.StartedAt = now
+			}
+		case provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING:
+			if rec.ReadyAt == nil {
+				rec.ReadyAt = now
+			}
+		case provisionerv1.DeploymentState_DEPLOYMENT_STATE_TERMINATED:
+			if rec.TerminatedAt == nil {
+				rec.TerminatedAt = now
+			}
+		}
+		return nil
+	})
+}
+
+// DescribeDeployment returns the local-state record for one deployment.
 func (s *Service) DescribeDeployment(ctx context.Context, req *provisionerv1.DescribeDeploymentRequest) (*provisionerv1.DescribeDeploymentResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "DescribeDeployment lands in Phase 2 PR 3 (executor); this PR is proto + state only")
+	id := req.GetId()
+	if err := ValidateID(id); err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	file, err := s.store.Read()
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	rec, ok := file.Deployments[id]
+	if !ok {
+		return nil, status.Errorf(codes.NotFound, "no deployment with id %q", id)
+	}
+	return &provisionerv1.DescribeDeploymentResponse{Deployment: rec}, nil
 }
 
-// ListDeployments will enumerate deployments with optional instance_id
-// or state filters.
+// ListDeployments returns deployments with optional instance_id +
+// state filters.
 func (s *Service) ListDeployments(ctx context.Context, req *provisionerv1.ListDeploymentsRequest) (*provisionerv1.ListDeploymentsResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "ListDeployments lands in Phase 2 PR 3 (executor); this PR is proto + state only")
+	file, err := s.store.Read()
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	instanceFilter := req.GetInstanceId()
+	stateFilter := req.GetState()
+	out := make([]*provisionerv1.Deployment, 0, len(file.Deployments))
+	for _, dep := range file.Deployments {
+		if instanceFilter != "" && dep.GetInstanceId() != instanceFilter {
+			continue
+		}
+		if stateFilter != provisionerv1.DeploymentState_DEPLOYMENT_STATE_UNSPECIFIED && dep.GetState() != stateFilter {
+			continue
+		}
+		out = append(out, dep)
+	}
+	return &provisionerv1.ListDeploymentsResponse{Deployments: out}, nil
 }
 
-// DestroyDeployment will stop the container and patch the record to
-// TERMINATED. Idempotent on already-terminated ids.
+// DestroyDeployment terminates the container and patches the record
+// to TERMINATED. Idempotent: a destroy of an already-terminated id
+// is a no-op.
 func (s *Service) DestroyDeployment(ctx context.Context, req *provisionerv1.DestroyDeploymentRequest) (*provisionerv1.DestroyDeploymentResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "DestroyDeployment lands in Phase 2 PR 3 (executor); this PR is proto + state only")
+	if s.executor == nil {
+		return nil, status.Error(codes.FailedPrecondition, "deployment requires a configured executor")
+	}
+	id := req.GetId()
+	if err := ValidateID(id); err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	var rec *provisionerv1.Deployment
+	err := s.store.Update(func(f *state.File) error {
+		existing, ok := f.Deployments[id]
+		if !ok {
+			return fmt.Errorf("no deployment with id %q", id)
+		}
+		if existing.GetState() == provisionerv1.DeploymentState_DEPLOYMENT_STATE_TERMINATED {
+			rec = existing
+			return nil
+		}
+		existing.State = provisionerv1.DeploymentState_DEPLOYMENT_STATE_TERMINATING
+		rec = existing
+		return nil
+	})
+	if err != nil {
+		return nil, status.Error(codes.NotFound, err.Error())
+	}
+	if rec.GetState() == provisionerv1.DeploymentState_DEPLOYMENT_STATE_TERMINATED {
+		return &provisionerv1.DestroyDeploymentResponse{Deployment: rec}, nil
+	}
+
+	// Look up the instance (needed for SSH) + the key.
+	file, err := s.store.Read()
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	inst, ok := file.Instances[rec.GetInstanceId()]
+	if !ok {
+		// Instance is gone; mark TERMINATED locally (force-like).
+		_ = s.patchDeployment(id, sshdocker.StateUpdate{
+			State:           provisionerv1.DeploymentState_DEPLOYMENT_STATE_TERMINATED,
+			ProgressMessage: "instance gone; marked terminated locally",
+		})
+		final, _ := s.store.Read()
+		return &provisionerv1.DestroyDeploymentResponse{Deployment: final.Deployments[id]}, nil
+	}
+	if s.keyStore == nil {
+		return nil, status.Error(codes.FailedPrecondition, "deployment requires a configured key store")
+	}
+	key, err := s.keyStore.EnsureKeyPair(s.operatorID, inst.GetProvider())
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "load ssh key: %v", err)
+	}
+
+	// Synchronous destroy (no Wait flag on the request -- destroy
+	// always blocks until terminal state, simpler semantics).
+	emit := func(u sshdocker.StateUpdate) {
+		_ = s.patchDeployment(id, u)
+	}
+	if err := s.executor.Destroy(ctx, rec, inst, key, emit); err != nil {
+		return nil, status.Errorf(codes.Internal, "destroy %s: %v", id, err)
+	}
+	final, _ := s.store.Read()
+	return &provisionerv1.DestroyDeploymentResponse{Deployment: final.Deployments[id]}, nil
 }
 
-// WatchDeployment will server-stream DeploymentStateChangedEvent until
-// the deployment reaches a terminal state or the client disconnects.
-// gRPC's server-streaming signature takes the request directly and a
-// stream object (no separate ctx param -- it lives on stream.Context()).
+// WatchDeployment streams state transitions for one deployment until
+// it reaches a terminal state or the client disconnects.
+//
+// v0.1 implementation: poll the state file every pollEvery; emit
+// a DeploymentStateChangedEvent whenever the observed state changes.
+// Real fanout from the executor's emit callback (no polling) lands
+// in v0.2 when there are multiple consumers; the polling shape is
+// sufficient for v0.1's single-CLI-watcher case.
 func (s *Service) WatchDeployment(req *provisionerv1.WatchDeploymentRequest, stream provisionerv1.DeploymentService_WatchDeploymentServer) error {
-	return status.Error(codes.Unimplemented, "WatchDeployment lands in Phase 2 PR 3 (executor); this PR is proto + state only")
+	id := req.GetId()
+	if err := ValidateID(id); err != nil {
+		return status.Error(codes.InvalidArgument, err.Error())
+	}
+	pollEvery := 500 * time.Millisecond
+
+	ticker := time.NewTicker(pollEvery)
+	defer ticker.Stop()
+
+	var lastState provisionerv1.DeploymentState
+	var lastPhase string
+	first := true
+	for {
+		file, err := s.store.Read()
+		if err != nil {
+			return status.Error(codes.Internal, err.Error())
+		}
+		rec, ok := file.Deployments[id]
+		if !ok {
+			return status.Errorf(codes.NotFound, "no deployment with id %q", id)
+		}
+		curState := rec.GetState()
+		curPhase := rec.GetCurrentPhase()
+		if first || curState != lastState || curPhase != lastPhase {
+			now := timestamppb.New(s.clock())
+			ev := &provisionerv1.DeploymentStateChangedEvent{
+				Id:              id,
+				From:            lastState,
+				To:              curState,
+				Phase:           curPhase,
+				ProgressMessage: rec.GetProgressMessage(),
+				At:              now,
+			}
+			if err := stream.Send(ev); err != nil {
+				return err
+			}
+			lastState = curState
+			lastPhase = curPhase
+			first = false
+		}
+		// Terminal state -> stream done.
+		if curState == provisionerv1.DeploymentState_DEPLOYMENT_STATE_TERMINATED ||
+			curState == provisionerv1.DeploymentState_DEPLOYMENT_STATE_FAILED {
+			return nil
+		}
+		select {
+		case <-stream.Context().Done():
+			return stream.Context().Err()
+		case <-ticker.C:
+		}
+	}
 }
 
 // Compile-time checks that Service implements both generated gRPC
