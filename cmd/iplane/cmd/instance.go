@@ -15,6 +15,7 @@ import (
 	"github.com/inference-book/inference-plane/internal/provisioners"
 	"github.com/inference-book/inference-plane/internal/provisioners/local"
 	"github.com/inference-book/inference-plane/internal/provisioners/runpod"
+	"github.com/inference-book/inference-plane/internal/deployments/sshdocker"
 	"github.com/inference-book/inference-plane/internal/provisioners/state"
 	"github.com/inference-book/inference-plane/internal/sshkeys"
 )
@@ -203,8 +204,16 @@ func buildClient() (provisionerClient, error) {
 		providers = append(providers, runpod.New(runpod.NewClient(key)))
 	}
 
+	// Wire the SSH+docker deployment executor. Production uses the
+	// real SSH dial; the executor reads Instance.ssh + the loaded
+	// key pair to dial each deployment's target pod. Local provider
+	// instances have no ssh.host so deployments against them are
+	// rejected at the Service layer before the executor is invoked.
+	executor := sshdocker.NewExecutor()
+
 	return provisioners.New(providers, store, instanceOperatorID,
 		provisioners.WithKeyStore(keyStore),
+		provisioners.WithDeploymentExecutor(executor),
 	), nil
 }
 

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
+	"github.com/inference-book/inference-plane/internal/deployments/sshdocker"
 	"github.com/inference-book/inference-plane/internal/provisioners"
 	"github.com/inference-book/inference-plane/internal/provisioners/state"
 	"github.com/inference-book/inference-plane/internal/sshkeys"
@@ -517,5 +518,259 @@ func TestCreateInstance_KeyRegistrar_ErrorAbortsBeforeSpawn(t *testing.T) {
 	}
 	if reg.spawnCalls != 0 {
 		t.Errorf("Spawn should NOT have been called (got %d calls) -- cost gate before spawn must hold", reg.spawnCalls)
+	}
+}
+
+// ── DeploymentService tests ─────────────────────────────────────────
+
+type fakeExecutor struct {
+	deployCalls  int
+	destroyCalls int
+	// Optional hook: if set, called instead of the default
+	// PENDING -> RUNNING / TERMINATED progression.
+	deployFn  func(emit func(sshdocker.StateUpdate)) error
+	destroyFn func(emit func(sshdocker.StateUpdate)) error
+}
+
+func (f *fakeExecutor) Deploy(ctx context.Context, dep *provisionerv1.Deployment, inst *provisionerv1.Instance, key *sshkeys.KeyPair, emit func(sshdocker.StateUpdate)) error {
+	f.deployCalls++
+	if f.deployFn != nil {
+		return f.deployFn(emit)
+	}
+	emit(sshdocker.StateUpdate{State: provisionerv1.DeploymentState_DEPLOYMENT_STATE_STARTING})
+	emit(sshdocker.StateUpdate{State: provisionerv1.DeploymentState_DEPLOYMENT_STATE_CONFIGURING})
+	emit(sshdocker.StateUpdate{State: provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING, EngineEndpoint: "http://1.2.3.4:8000"})
+	return nil
+}
+
+func (f *fakeExecutor) Destroy(ctx context.Context, dep *provisionerv1.Deployment, inst *provisionerv1.Instance, key *sshkeys.KeyPair, emit func(sshdocker.StateUpdate)) error {
+	f.destroyCalls++
+	if f.destroyFn != nil {
+		return f.destroyFn(emit)
+	}
+	emit(sshdocker.StateUpdate{State: provisionerv1.DeploymentState_DEPLOYMENT_STATE_TERMINATING})
+	emit(sshdocker.StateUpdate{State: provisionerv1.DeploymentState_DEPLOYMENT_STATE_TERMINATED})
+	return nil
+}
+
+// newSvcWithDeploy builds a Service wired with: an InstanceRef-style
+// runpod mock, a key store, a fake executor. Also seeds an ACTIVE
+// instance "my-pod" so deployment tests have something to target.
+func newSvcWithDeploy(t *testing.T) (*provisioners.Service, *state.Store, *fakeExecutor) {
+	t.Helper()
+	mock := &mockProvider{name: "runpod"}
+	store, err := state.Open(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("state.Open: %v", err)
+	}
+	exec := &fakeExecutor{}
+	svc := provisioners.New([]provisioners.Provider{mock}, store, "default",
+		provisioners.WithKeyStore(newKeyStore(t)),
+		provisioners.WithDeploymentExecutor(exec),
+	)
+	// Seed an ACTIVE instance with SSH endpoint.
+	if err := store.Update(func(f *state.File) error {
+		f.Instances["my-pod"] = &provisionerv1.Instance{
+			Id:       "my-pod",
+			Provider: "runpod",
+			State:    provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE,
+			Ssh:      &provisionerv1.SshTarget{Host: "1.2.3.4", Port: 22, User: "root"},
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return svc, store, exec
+}
+
+func okDep() *provisionerv1.Deployment {
+	return &provisionerv1.Deployment{
+		Id:         "my-llama",
+		InstanceId: "my-pod",
+		Image:      "vllm/vllm-openai:0.7.0",
+		Model:      "Qwen/Qwen2.5-7B-Instruct",
+		EnginePort: 8000,
+	}
+}
+
+func TestCreateDeployment_HappyPath_WaitsForRUNNING(t *testing.T) {
+	svc, store, exec := newSvcWithDeploy(t)
+	resp, err := svc.CreateDeployment(context.Background(), &provisionerv1.CreateDeploymentRequest{
+		Deployment: okDep(),
+		Wait:       true,
+	})
+	if err != nil {
+		t.Fatalf("CreateDeployment: %v", err)
+	}
+	if resp.GetDeployment().GetState() != provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING {
+		t.Errorf("final state = %v, want RUNNING", resp.GetDeployment().GetState())
+	}
+	if resp.GetDeployment().GetEngineEndpoint() == "" {
+		t.Error("engine endpoint should be populated on RUNNING")
+	}
+	if exec.deployCalls != 1 {
+		t.Errorf("Deploy called %d times, want 1", exec.deployCalls)
+	}
+	// Verify state file persisted the terminal state.
+	f, _ := store.Read()
+	if f.Deployments["my-llama"].GetState() != provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING {
+		t.Error("state file should reflect RUNNING")
+	}
+}
+
+func TestCreateDeployment_Idempotent_OnMatchingExisting(t *testing.T) {
+	svc, _, exec := newSvcWithDeploy(t)
+	if _, err := svc.CreateDeployment(context.Background(), &provisionerv1.CreateDeploymentRequest{Deployment: okDep(), Wait: true}); err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	resp, err := svc.CreateDeployment(context.Background(), &provisionerv1.CreateDeploymentRequest{Deployment: okDep(), Wait: true})
+	if err != nil {
+		t.Fatalf("second: %v", err)
+	}
+	if !resp.GetAlreadyExisted() {
+		t.Error("second call should report AlreadyExisted=true")
+	}
+	if exec.deployCalls != 1 {
+		t.Errorf("Deploy should only fire once for matching idempotent re-create; got %d", exec.deployCalls)
+	}
+}
+
+func TestCreateDeployment_InstanceMissing_Rejects(t *testing.T) {
+	svc, _, _ := newSvcWithDeploy(t)
+	dep := okDep()
+	dep.InstanceId = "no-such-pod"
+	_, err := svc.CreateDeployment(context.Background(), &provisionerv1.CreateDeploymentRequest{Deployment: dep, Wait: true})
+	if err == nil {
+		t.Fatal("expected error when target instance does not exist")
+	}
+}
+
+func TestCreateDeployment_InstanceNoSSH_Rejects(t *testing.T) {
+	svc, store, _ := newSvcWithDeploy(t)
+	// Strip SSH from the seeded instance.
+	if err := store.Update(func(f *state.File) error {
+		f.Instances["my-pod"].Ssh = nil
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := svc.CreateDeployment(context.Background(), &provisionerv1.CreateDeploymentRequest{Deployment: okDep(), Wait: true})
+	if err == nil {
+		t.Fatal("expected error when instance has no SSH endpoint")
+	}
+}
+
+func TestCreateDeployment_ExecutorError_PatchesFAILED(t *testing.T) {
+	svc, store, exec := newSvcWithDeploy(t)
+	exec.deployFn = func(emit func(sshdocker.StateUpdate)) error {
+		emit(sshdocker.StateUpdate{State: provisionerv1.DeploymentState_DEPLOYMENT_STATE_STARTING})
+		emit(sshdocker.StateUpdate{
+			State:         provisionerv1.DeploymentState_DEPLOYMENT_STATE_FAILED,
+			FailureReason: "engine /health never returned 2xx",
+		})
+		return errors.New("health timeout")
+	}
+	resp, err := svc.CreateDeployment(context.Background(), &provisionerv1.CreateDeploymentRequest{Deployment: okDep(), Wait: true})
+	if err != nil {
+		t.Fatalf("CreateDeployment: %v", err)
+	}
+	if resp.GetDeployment().GetState() != provisionerv1.DeploymentState_DEPLOYMENT_STATE_FAILED {
+		t.Errorf("state = %v, want FAILED", resp.GetDeployment().GetState())
+	}
+	if resp.GetDeployment().GetFailureReason() == "" {
+		t.Error("failure reason should be set")
+	}
+	// State-file confirmation.
+	f, _ := store.Read()
+	if f.Deployments["my-llama"].GetState() != provisionerv1.DeploymentState_DEPLOYMENT_STATE_FAILED {
+		t.Error("state file should reflect FAILED")
+	}
+}
+
+func TestDescribeDeployment_HappyPath(t *testing.T) {
+	svc, _, _ := newSvcWithDeploy(t)
+	if _, err := svc.CreateDeployment(context.Background(), &provisionerv1.CreateDeploymentRequest{Deployment: okDep(), Wait: true}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	resp, err := svc.DescribeDeployment(context.Background(), &provisionerv1.DescribeDeploymentRequest{Id: "my-llama"})
+	if err != nil {
+		t.Fatalf("describe: %v", err)
+	}
+	if resp.GetDeployment().GetId() != "my-llama" {
+		t.Errorf("id = %q", resp.GetDeployment().GetId())
+	}
+}
+
+func TestDescribeDeployment_NotFound(t *testing.T) {
+	svc, _, _ := newSvcWithDeploy(t)
+	_, err := svc.DescribeDeployment(context.Background(), &provisionerv1.DescribeDeploymentRequest{Id: "ghost"})
+	if err == nil {
+		t.Fatal("describe of missing id should error")
+	}
+}
+
+func TestListDeployments_FiltersByInstance(t *testing.T) {
+	svc, store, _ := newSvcWithDeploy(t)
+	// Add a second instance + a deployment on it.
+	if err := store.Update(func(f *state.File) error {
+		f.Instances["other-pod"] = &provisionerv1.Instance{
+			Id:       "other-pod",
+			Provider: "runpod",
+			State:    provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE,
+			Ssh:      &provisionerv1.SshTarget{Host: "5.6.7.8", Port: 22, User: "root"},
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	dep1 := okDep()
+	if _, err := svc.CreateDeployment(context.Background(), &provisionerv1.CreateDeploymentRequest{Deployment: dep1, Wait: true}); err != nil {
+		t.Fatalf("dep1: %v", err)
+	}
+	dep2 := okDep()
+	dep2.Id = "other-llama"
+	dep2.InstanceId = "other-pod"
+	if _, err := svc.CreateDeployment(context.Background(), &provisionerv1.CreateDeploymentRequest{Deployment: dep2, Wait: true}); err != nil {
+		t.Fatalf("dep2: %v", err)
+	}
+
+	// No filter -> both.
+	all, _ := svc.ListDeployments(context.Background(), &provisionerv1.ListDeploymentsRequest{})
+	if len(all.GetDeployments()) != 2 {
+		t.Errorf("no filter = %d, want 2", len(all.GetDeployments()))
+	}
+	// Filter to first instance -> 1.
+	filtered, _ := svc.ListDeployments(context.Background(), &provisionerv1.ListDeploymentsRequest{InstanceId: "my-pod"})
+	if len(filtered.GetDeployments()) != 1 || filtered.GetDeployments()[0].GetId() != "my-llama" {
+		t.Errorf("instance filter = %+v", filtered.GetDeployments())
+	}
+}
+
+func TestDestroyDeployment_HappyPath(t *testing.T) {
+	svc, store, exec := newSvcWithDeploy(t)
+	if _, err := svc.CreateDeployment(context.Background(), &provisionerv1.CreateDeploymentRequest{Deployment: okDep(), Wait: true}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	resp, err := svc.DestroyDeployment(context.Background(), &provisionerv1.DestroyDeploymentRequest{Id: "my-llama"})
+	if err != nil {
+		t.Fatalf("destroy: %v", err)
+	}
+	if resp.GetDeployment().GetState() != provisionerv1.DeploymentState_DEPLOYMENT_STATE_TERMINATED {
+		t.Errorf("final state = %v, want TERMINATED", resp.GetDeployment().GetState())
+	}
+	if exec.destroyCalls != 1 {
+		t.Errorf("Destroy called %d times, want 1", exec.destroyCalls)
+	}
+	f, _ := store.Read()
+	if f.Deployments["my-llama"].GetState() != provisionerv1.DeploymentState_DEPLOYMENT_STATE_TERMINATED {
+		t.Error("state file should reflect TERMINATED")
+	}
+}
+
+func TestDestroyDeployment_NotFound(t *testing.T) {
+	svc, _, _ := newSvcWithDeploy(t)
+	_, err := svc.DestroyDeployment(context.Background(), &provisionerv1.DestroyDeploymentRequest{Id: "ghost"})
+	if err == nil {
+		t.Fatal("destroy of missing id should error")
 	}
 }
