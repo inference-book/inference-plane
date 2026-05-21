@@ -83,6 +83,31 @@ type Provider interface {
 	List(ctx context.Context, filter map[string]string) ([]*provisionerv1.InstanceRef, error)
 }
 
+// KeyRegistrar is an optional Provider capability. Adapters implement
+// it when the provider needs an SSH public key registered before
+// Spawn so newly-created instances boot with the operator's key
+// already installed in /root/.ssh/authorized_keys.
+//
+// The Service calls EnsurePublicKey(ctx, pub, comment) once per
+// CreateInstance, before Spawn, when both (a) a key store is wired
+// into the Service via WithKeyStore, and (b) the target provider
+// satisfies this interface. Adapters that do not need this (local)
+// simply do not implement it and the call is skipped.
+//
+// EnsurePublicKey is expected to be idempotent: when the provider
+// already has this exact public key on file (matched by comment via
+// IsIplaneComment + exact-bytes check), the implementation should
+// be a no-op. RunPod's pubKey blob is a read-modify-write surface,
+// so the runpod adapter does both checks.
+//
+// Errors abort CreateInstance with FailedPrecondition; no Spawn
+// happens. This is the cost-gate behavior the design doc commits
+// to -- operators see "couldn't register SSH key" before any pod
+// gets billed.
+type KeyRegistrar interface {
+	EnsurePublicKey(ctx context.Context, publicKey []byte, comment string) error
+}
+
 // Tag keys stamped on every provider instance Spawn creates. The Service
 // uses them as List filters for the idempotency lookup and the
 // post-v0.1 reconcile loop.

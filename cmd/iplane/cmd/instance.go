@@ -16,6 +16,7 @@ import (
 	"github.com/inference-book/inference-plane/internal/provisioners/local"
 	"github.com/inference-book/inference-plane/internal/provisioners/runpod"
 	"github.com/inference-book/inference-plane/internal/provisioners/state"
+	"github.com/inference-book/inference-plane/internal/sshkeys"
 )
 
 // Shared flags on the instance group. Each subcommand reads them via
@@ -181,12 +182,30 @@ func buildClient() (provisionerClient, error) {
 		return nil, fmt.Errorf("open state store: %w", err)
 	}
 
+	// Open the SSH key store alongside the state store. iplane's
+	// chapter narrative keeps key management invisible: the CLI
+	// generates a per-(operator, provider) Ed25519 key on first
+	// `iplane instance create runpod ...` and registers it with
+	// RunPod's account so newly-created pods get it auto-installed.
+	// Operators never type ssh-keygen, never see the file.
+	//
+	// Layout: <state-dir>/keys/signing_keys/<safeClientID>.json,
+	// 0600 perms (oneauth's FSKeyStore handles both). Filesystem
+	// permissions are the encryption-at-rest model for v0.1; same
+	// trust model as ~/.ssh/id_rsa.
+	keyStore, err := sshkeys.New(sshkeys.WithDir(filepath.Join(dir, "keys")))
+	if err != nil {
+		return nil, fmt.Errorf("open ssh key store: %w", err)
+	}
+
 	providers := []provisioners.Provider{local.New()}
 	if key := os.Getenv("RUNPOD_API_KEY"); key != "" {
 		providers = append(providers, runpod.New(runpod.NewClient(key)))
 	}
 
-	return provisioners.New(providers, store, instanceOperatorID), nil
+	return provisioners.New(providers, store, instanceOperatorID,
+		provisioners.WithKeyStore(keyStore),
+	), nil
 }
 
 // checkProviderAvailable surfaces the "you asked for runpod but
