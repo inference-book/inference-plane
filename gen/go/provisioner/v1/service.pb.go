@@ -471,6 +471,117 @@ func (x *ListInstancesResponse) GetInstances() []*Instance {
 	return nil
 }
 
+type WaitForInstanceReadyRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Id    string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	// Maximum time the caller is willing to wait, in seconds. Bounded
+	// above by the provider's own ceiling (runpod default 90s) so a
+	// generous caller doesn't keep the connection open indefinitely.
+	// Zero means use the provider's default.
+	TimeoutSeconds int32 `protobuf:"varint,2,opt,name=timeout_seconds,json=timeoutSeconds,proto3" json:"timeout_seconds,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *WaitForInstanceReadyRequest) Reset() {
+	*x = WaitForInstanceReadyRequest{}
+	mi := &file_provisioner_v1_service_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WaitForInstanceReadyRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WaitForInstanceReadyRequest) ProtoMessage() {}
+
+func (x *WaitForInstanceReadyRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_provisioner_v1_service_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WaitForInstanceReadyRequest.ProtoReflect.Descriptor instead.
+func (*WaitForInstanceReadyRequest) Descriptor() ([]byte, []int) {
+	return file_provisioner_v1_service_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *WaitForInstanceReadyRequest) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *WaitForInstanceReadyRequest) GetTimeoutSeconds() int32 {
+	if x != nil {
+		return x.TimeoutSeconds
+	}
+	return 0
+}
+
+type WaitForInstanceReadyResponse struct {
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	Instance *Instance              `protobuf:"bytes,1,opt,name=instance,proto3" json:"instance,omitempty"`
+	// True when the SSH endpoint was already populated and the wait was
+	// a no-op. False when the provider's wait was actually exercised.
+	// Operators can branch on this when timing scripts.
+	AlreadyReady  bool `protobuf:"varint,2,opt,name=already_ready,json=alreadyReady,proto3" json:"already_ready,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *WaitForInstanceReadyResponse) Reset() {
+	*x = WaitForInstanceReadyResponse{}
+	mi := &file_provisioner_v1_service_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WaitForInstanceReadyResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WaitForInstanceReadyResponse) ProtoMessage() {}
+
+func (x *WaitForInstanceReadyResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_provisioner_v1_service_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WaitForInstanceReadyResponse.ProtoReflect.Descriptor instead.
+func (*WaitForInstanceReadyResponse) Descriptor() ([]byte, []int) {
+	return file_provisioner_v1_service_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *WaitForInstanceReadyResponse) GetInstance() *Instance {
+	if x != nil {
+		return x.Instance
+	}
+	return nil
+}
+
+func (x *WaitForInstanceReadyResponse) GetAlreadyReady() bool {
+	if x != nil {
+		return x.AlreadyReady
+	}
+	return false
+}
+
 type CreateDeploymentRequest struct {
 	state      protoimpl.MessageState `protogen:"open.v1"`
 	Deployment *Deployment            `protobuf:"bytes,1,opt,name=deployment,proto3" json:"deployment,omitempty"`
@@ -483,7 +594,7 @@ type CreateDeploymentRequest struct {
 
 func (x *CreateDeploymentRequest) Reset() {
 	*x = CreateDeploymentRequest{}
-	mi := &file_provisioner_v1_service_proto_msgTypes[8]
+	mi := &file_provisioner_v1_service_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -495,7 +606,7 @@ func (x *CreateDeploymentRequest) String() string {
 func (*CreateDeploymentRequest) ProtoMessage() {}
 
 func (x *CreateDeploymentRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_provisioner_v1_service_proto_msgTypes[8]
+	mi := &file_provisioner_v1_service_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -508,7 +619,7 @@ func (x *CreateDeploymentRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateDeploymentRequest.ProtoReflect.Descriptor instead.
 func (*CreateDeploymentRequest) Descriptor() ([]byte, []int) {
-	return file_provisioner_v1_service_proto_rawDescGZIP(), []int{8}
+	return file_provisioner_v1_service_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *CreateDeploymentRequest) GetDeployment() *Deployment {
@@ -538,7 +649,7 @@ type CreateDeploymentResponse struct {
 
 func (x *CreateDeploymentResponse) Reset() {
 	*x = CreateDeploymentResponse{}
-	mi := &file_provisioner_v1_service_proto_msgTypes[9]
+	mi := &file_provisioner_v1_service_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -550,7 +661,7 @@ func (x *CreateDeploymentResponse) String() string {
 func (*CreateDeploymentResponse) ProtoMessage() {}
 
 func (x *CreateDeploymentResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_provisioner_v1_service_proto_msgTypes[9]
+	mi := &file_provisioner_v1_service_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -563,7 +674,7 @@ func (x *CreateDeploymentResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateDeploymentResponse.ProtoReflect.Descriptor instead.
 func (*CreateDeploymentResponse) Descriptor() ([]byte, []int) {
-	return file_provisioner_v1_service_proto_rawDescGZIP(), []int{9}
+	return file_provisioner_v1_service_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *CreateDeploymentResponse) GetDeployment() *Deployment {
@@ -589,7 +700,7 @@ type DescribeDeploymentRequest struct {
 
 func (x *DescribeDeploymentRequest) Reset() {
 	*x = DescribeDeploymentRequest{}
-	mi := &file_provisioner_v1_service_proto_msgTypes[10]
+	mi := &file_provisioner_v1_service_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -601,7 +712,7 @@ func (x *DescribeDeploymentRequest) String() string {
 func (*DescribeDeploymentRequest) ProtoMessage() {}
 
 func (x *DescribeDeploymentRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_provisioner_v1_service_proto_msgTypes[10]
+	mi := &file_provisioner_v1_service_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -614,7 +725,7 @@ func (x *DescribeDeploymentRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DescribeDeploymentRequest.ProtoReflect.Descriptor instead.
 func (*DescribeDeploymentRequest) Descriptor() ([]byte, []int) {
-	return file_provisioner_v1_service_proto_rawDescGZIP(), []int{10}
+	return file_provisioner_v1_service_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *DescribeDeploymentRequest) GetId() string {
@@ -633,7 +744,7 @@ type DescribeDeploymentResponse struct {
 
 func (x *DescribeDeploymentResponse) Reset() {
 	*x = DescribeDeploymentResponse{}
-	mi := &file_provisioner_v1_service_proto_msgTypes[11]
+	mi := &file_provisioner_v1_service_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -645,7 +756,7 @@ func (x *DescribeDeploymentResponse) String() string {
 func (*DescribeDeploymentResponse) ProtoMessage() {}
 
 func (x *DescribeDeploymentResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_provisioner_v1_service_proto_msgTypes[11]
+	mi := &file_provisioner_v1_service_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -658,7 +769,7 @@ func (x *DescribeDeploymentResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DescribeDeploymentResponse.ProtoReflect.Descriptor instead.
 func (*DescribeDeploymentResponse) Descriptor() ([]byte, []int) {
-	return file_provisioner_v1_service_proto_rawDescGZIP(), []int{11}
+	return file_provisioner_v1_service_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *DescribeDeploymentResponse) GetDeployment() *Deployment {
@@ -682,7 +793,7 @@ type ListDeploymentsRequest struct {
 
 func (x *ListDeploymentsRequest) Reset() {
 	*x = ListDeploymentsRequest{}
-	mi := &file_provisioner_v1_service_proto_msgTypes[12]
+	mi := &file_provisioner_v1_service_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -694,7 +805,7 @@ func (x *ListDeploymentsRequest) String() string {
 func (*ListDeploymentsRequest) ProtoMessage() {}
 
 func (x *ListDeploymentsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_provisioner_v1_service_proto_msgTypes[12]
+	mi := &file_provisioner_v1_service_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -707,7 +818,7 @@ func (x *ListDeploymentsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListDeploymentsRequest.ProtoReflect.Descriptor instead.
 func (*ListDeploymentsRequest) Descriptor() ([]byte, []int) {
-	return file_provisioner_v1_service_proto_rawDescGZIP(), []int{12}
+	return file_provisioner_v1_service_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *ListDeploymentsRequest) GetInstanceId() string {
@@ -733,7 +844,7 @@ type ListDeploymentsResponse struct {
 
 func (x *ListDeploymentsResponse) Reset() {
 	*x = ListDeploymentsResponse{}
-	mi := &file_provisioner_v1_service_proto_msgTypes[13]
+	mi := &file_provisioner_v1_service_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -745,7 +856,7 @@ func (x *ListDeploymentsResponse) String() string {
 func (*ListDeploymentsResponse) ProtoMessage() {}
 
 func (x *ListDeploymentsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_provisioner_v1_service_proto_msgTypes[13]
+	mi := &file_provisioner_v1_service_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -758,7 +869,7 @@ func (x *ListDeploymentsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListDeploymentsResponse.ProtoReflect.Descriptor instead.
 func (*ListDeploymentsResponse) Descriptor() ([]byte, []int) {
-	return file_provisioner_v1_service_proto_rawDescGZIP(), []int{13}
+	return file_provisioner_v1_service_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *ListDeploymentsResponse) GetDeployments() []*Deployment {
@@ -781,7 +892,7 @@ type DestroyDeploymentRequest struct {
 
 func (x *DestroyDeploymentRequest) Reset() {
 	*x = DestroyDeploymentRequest{}
-	mi := &file_provisioner_v1_service_proto_msgTypes[14]
+	mi := &file_provisioner_v1_service_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -793,7 +904,7 @@ func (x *DestroyDeploymentRequest) String() string {
 func (*DestroyDeploymentRequest) ProtoMessage() {}
 
 func (x *DestroyDeploymentRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_provisioner_v1_service_proto_msgTypes[14]
+	mi := &file_provisioner_v1_service_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -806,7 +917,7 @@ func (x *DestroyDeploymentRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DestroyDeploymentRequest.ProtoReflect.Descriptor instead.
 func (*DestroyDeploymentRequest) Descriptor() ([]byte, []int) {
-	return file_provisioner_v1_service_proto_rawDescGZIP(), []int{14}
+	return file_provisioner_v1_service_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *DestroyDeploymentRequest) GetId() string {
@@ -832,7 +943,7 @@ type DestroyDeploymentResponse struct {
 
 func (x *DestroyDeploymentResponse) Reset() {
 	*x = DestroyDeploymentResponse{}
-	mi := &file_provisioner_v1_service_proto_msgTypes[15]
+	mi := &file_provisioner_v1_service_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -844,7 +955,7 @@ func (x *DestroyDeploymentResponse) String() string {
 func (*DestroyDeploymentResponse) ProtoMessage() {}
 
 func (x *DestroyDeploymentResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_provisioner_v1_service_proto_msgTypes[15]
+	mi := &file_provisioner_v1_service_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -857,7 +968,7 @@ func (x *DestroyDeploymentResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DestroyDeploymentResponse.ProtoReflect.Descriptor instead.
 func (*DestroyDeploymentResponse) Descriptor() ([]byte, []int) {
-	return file_provisioner_v1_service_proto_rawDescGZIP(), []int{15}
+	return file_provisioner_v1_service_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *DestroyDeploymentResponse) GetDeployment() *Deployment {
@@ -876,7 +987,7 @@ type WatchDeploymentRequest struct {
 
 func (x *WatchDeploymentRequest) Reset() {
 	*x = WatchDeploymentRequest{}
-	mi := &file_provisioner_v1_service_proto_msgTypes[16]
+	mi := &file_provisioner_v1_service_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -888,7 +999,7 @@ func (x *WatchDeploymentRequest) String() string {
 func (*WatchDeploymentRequest) ProtoMessage() {}
 
 func (x *WatchDeploymentRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_provisioner_v1_service_proto_msgTypes[16]
+	mi := &file_provisioner_v1_service_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -901,7 +1012,7 @@ func (x *WatchDeploymentRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WatchDeploymentRequest.ProtoReflect.Descriptor instead.
 func (*WatchDeploymentRequest) Descriptor() ([]byte, []int) {
-	return file_provisioner_v1_service_proto_rawDescGZIP(), []int{16}
+	return file_provisioner_v1_service_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *WatchDeploymentRequest) GetId() string {
@@ -929,7 +1040,7 @@ type DeploymentStateChangedEvent struct {
 
 func (x *DeploymentStateChangedEvent) Reset() {
 	*x = DeploymentStateChangedEvent{}
-	mi := &file_provisioner_v1_service_proto_msgTypes[17]
+	mi := &file_provisioner_v1_service_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -941,7 +1052,7 @@ func (x *DeploymentStateChangedEvent) String() string {
 func (*DeploymentStateChangedEvent) ProtoMessage() {}
 
 func (x *DeploymentStateChangedEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_provisioner_v1_service_proto_msgTypes[17]
+	mi := &file_provisioner_v1_service_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -954,7 +1065,7 @@ func (x *DeploymentStateChangedEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeploymentStateChangedEvent.ProtoReflect.Descriptor instead.
 func (*DeploymentStateChangedEvent) Descriptor() ([]byte, []int) {
-	return file_provisioner_v1_service_proto_rawDescGZIP(), []int{17}
+	return file_provisioner_v1_service_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *DeploymentStateChangedEvent) GetId() string {
@@ -1023,7 +1134,13 @@ const file_provisioner_v1_service_proto_rawDesc = "" +
 	"\x06source\x18\x01 \x01(\x0e2\x16.provisioner.v1.SourceR\x06source\x12\x1a\n" +
 	"\bprovider\x18\x02 \x01(\tR\bprovider\"O\n" +
 	"\x15ListInstancesResponse\x126\n" +
-	"\tinstances\x18\x01 \x03(\v2\x18.provisioner.v1.InstanceR\tinstances\"i\n" +
+	"\tinstances\x18\x01 \x03(\v2\x18.provisioner.v1.InstanceR\tinstances\"V\n" +
+	"\x1bWaitForInstanceReadyRequest\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12'\n" +
+	"\x0ftimeout_seconds\x18\x02 \x01(\x05R\x0etimeoutSeconds\"y\n" +
+	"\x1cWaitForInstanceReadyResponse\x124\n" +
+	"\binstance\x18\x01 \x01(\v2\x18.provisioner.v1.InstanceR\binstance\x12#\n" +
+	"\ralready_ready\x18\x02 \x01(\bR\falreadyReady\"i\n" +
 	"\x17CreateDeploymentRequest\x12:\n" +
 	"\n" +
 	"deployment\x18\x01 \x01(\v2\x1a.provisioner.v1.DeploymentR\n" +
@@ -1065,12 +1182,13 @@ const file_provisioner_v1_service_proto_rawDesc = "" +
 	"\x06Source\x12\x16\n" +
 	"\x12SOURCE_UNSPECIFIED\x10\x00\x12\x10\n" +
 	"\fSOURCE_LOCAL\x10\x01\x12\x11\n" +
-	"\rSOURCE_REMOTE\x10\x022\x9e\x03\n" +
+	"\rSOURCE_REMOTE\x10\x022\x91\x04\n" +
 	"\x12ProvisionerService\x12_\n" +
 	"\x0eCreateInstance\x12%.provisioner.v1.CreateInstanceRequest\x1a&.provisioner.v1.CreateInstanceResponse\x12b\n" +
 	"\x0fDestroyInstance\x12&.provisioner.v1.DestroyInstanceRequest\x1a'.provisioner.v1.DestroyInstanceResponse\x12e\n" +
 	"\x10DescribeInstance\x12'.provisioner.v1.DescribeInstanceRequest\x1a(.provisioner.v1.DescribeInstanceResponse\x12\\\n" +
-	"\rListInstances\x12$.provisioner.v1.ListInstancesRequest\x1a%.provisioner.v1.ListInstancesResponse2\x9f\x04\n" +
+	"\rListInstances\x12$.provisioner.v1.ListInstancesRequest\x1a%.provisioner.v1.ListInstancesResponse\x12q\n" +
+	"\x14WaitForInstanceReady\x12+.provisioner.v1.WaitForInstanceReadyRequest\x1a,.provisioner.v1.WaitForInstanceReadyResponse2\x9f\x04\n" +
 	"\x11DeploymentService\x12e\n" +
 	"\x10CreateDeployment\x12'.provisioner.v1.CreateDeploymentRequest\x1a(.provisioner.v1.CreateDeploymentResponse\x12k\n" +
 	"\x12DescribeDeployment\x12).provisioner.v1.DescribeDeploymentRequest\x1a*.provisioner.v1.DescribeDeploymentResponse\x12b\n" +
@@ -1092,73 +1210,78 @@ func file_provisioner_v1_service_proto_rawDescGZIP() []byte {
 }
 
 var file_provisioner_v1_service_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_provisioner_v1_service_proto_msgTypes = make([]protoimpl.MessageInfo, 18)
+var file_provisioner_v1_service_proto_msgTypes = make([]protoimpl.MessageInfo, 20)
 var file_provisioner_v1_service_proto_goTypes = []any{
-	(Source)(0),                         // 0: provisioner.v1.Source
-	(*CreateInstanceRequest)(nil),       // 1: provisioner.v1.CreateInstanceRequest
-	(*CreateInstanceResponse)(nil),      // 2: provisioner.v1.CreateInstanceResponse
-	(*DestroyInstanceRequest)(nil),      // 3: provisioner.v1.DestroyInstanceRequest
-	(*DestroyInstanceResponse)(nil),     // 4: provisioner.v1.DestroyInstanceResponse
-	(*DescribeInstanceRequest)(nil),     // 5: provisioner.v1.DescribeInstanceRequest
-	(*DescribeInstanceResponse)(nil),    // 6: provisioner.v1.DescribeInstanceResponse
-	(*ListInstancesRequest)(nil),        // 7: provisioner.v1.ListInstancesRequest
-	(*ListInstancesResponse)(nil),       // 8: provisioner.v1.ListInstancesResponse
-	(*CreateDeploymentRequest)(nil),     // 9: provisioner.v1.CreateDeploymentRequest
-	(*CreateDeploymentResponse)(nil),    // 10: provisioner.v1.CreateDeploymentResponse
-	(*DescribeDeploymentRequest)(nil),   // 11: provisioner.v1.DescribeDeploymentRequest
-	(*DescribeDeploymentResponse)(nil),  // 12: provisioner.v1.DescribeDeploymentResponse
-	(*ListDeploymentsRequest)(nil),      // 13: provisioner.v1.ListDeploymentsRequest
-	(*ListDeploymentsResponse)(nil),     // 14: provisioner.v1.ListDeploymentsResponse
-	(*DestroyDeploymentRequest)(nil),    // 15: provisioner.v1.DestroyDeploymentRequest
-	(*DestroyDeploymentResponse)(nil),   // 16: provisioner.v1.DestroyDeploymentResponse
-	(*WatchDeploymentRequest)(nil),      // 17: provisioner.v1.WatchDeploymentRequest
-	(*DeploymentStateChangedEvent)(nil), // 18: provisioner.v1.DeploymentStateChangedEvent
-	(*Spec)(nil),                        // 19: provisioner.v1.Spec
-	(*Instance)(nil),                    // 20: provisioner.v1.Instance
-	(*Deployment)(nil),                  // 21: provisioner.v1.Deployment
-	(DeploymentState)(0),                // 22: provisioner.v1.DeploymentState
-	(*timestamppb.Timestamp)(nil),       // 23: google.protobuf.Timestamp
+	(Source)(0),                          // 0: provisioner.v1.Source
+	(*CreateInstanceRequest)(nil),        // 1: provisioner.v1.CreateInstanceRequest
+	(*CreateInstanceResponse)(nil),       // 2: provisioner.v1.CreateInstanceResponse
+	(*DestroyInstanceRequest)(nil),       // 3: provisioner.v1.DestroyInstanceRequest
+	(*DestroyInstanceResponse)(nil),      // 4: provisioner.v1.DestroyInstanceResponse
+	(*DescribeInstanceRequest)(nil),      // 5: provisioner.v1.DescribeInstanceRequest
+	(*DescribeInstanceResponse)(nil),     // 6: provisioner.v1.DescribeInstanceResponse
+	(*ListInstancesRequest)(nil),         // 7: provisioner.v1.ListInstancesRequest
+	(*ListInstancesResponse)(nil),        // 8: provisioner.v1.ListInstancesResponse
+	(*WaitForInstanceReadyRequest)(nil),  // 9: provisioner.v1.WaitForInstanceReadyRequest
+	(*WaitForInstanceReadyResponse)(nil), // 10: provisioner.v1.WaitForInstanceReadyResponse
+	(*CreateDeploymentRequest)(nil),      // 11: provisioner.v1.CreateDeploymentRequest
+	(*CreateDeploymentResponse)(nil),     // 12: provisioner.v1.CreateDeploymentResponse
+	(*DescribeDeploymentRequest)(nil),    // 13: provisioner.v1.DescribeDeploymentRequest
+	(*DescribeDeploymentResponse)(nil),   // 14: provisioner.v1.DescribeDeploymentResponse
+	(*ListDeploymentsRequest)(nil),       // 15: provisioner.v1.ListDeploymentsRequest
+	(*ListDeploymentsResponse)(nil),      // 16: provisioner.v1.ListDeploymentsResponse
+	(*DestroyDeploymentRequest)(nil),     // 17: provisioner.v1.DestroyDeploymentRequest
+	(*DestroyDeploymentResponse)(nil),    // 18: provisioner.v1.DestroyDeploymentResponse
+	(*WatchDeploymentRequest)(nil),       // 19: provisioner.v1.WatchDeploymentRequest
+	(*DeploymentStateChangedEvent)(nil),  // 20: provisioner.v1.DeploymentStateChangedEvent
+	(*Spec)(nil),                         // 21: provisioner.v1.Spec
+	(*Instance)(nil),                     // 22: provisioner.v1.Instance
+	(*Deployment)(nil),                   // 23: provisioner.v1.Deployment
+	(DeploymentState)(0),                 // 24: provisioner.v1.DeploymentState
+	(*timestamppb.Timestamp)(nil),        // 25: google.protobuf.Timestamp
 }
 var file_provisioner_v1_service_proto_depIdxs = []int32{
-	19, // 0: provisioner.v1.CreateInstanceRequest.spec:type_name -> provisioner.v1.Spec
-	20, // 1: provisioner.v1.CreateInstanceResponse.instance:type_name -> provisioner.v1.Instance
-	20, // 2: provisioner.v1.DestroyInstanceResponse.instance:type_name -> provisioner.v1.Instance
+	21, // 0: provisioner.v1.CreateInstanceRequest.spec:type_name -> provisioner.v1.Spec
+	22, // 1: provisioner.v1.CreateInstanceResponse.instance:type_name -> provisioner.v1.Instance
+	22, // 2: provisioner.v1.DestroyInstanceResponse.instance:type_name -> provisioner.v1.Instance
 	0,  // 3: provisioner.v1.DescribeInstanceRequest.source:type_name -> provisioner.v1.Source
-	20, // 4: provisioner.v1.DescribeInstanceResponse.instance:type_name -> provisioner.v1.Instance
+	22, // 4: provisioner.v1.DescribeInstanceResponse.instance:type_name -> provisioner.v1.Instance
 	0,  // 5: provisioner.v1.ListInstancesRequest.source:type_name -> provisioner.v1.Source
-	20, // 6: provisioner.v1.ListInstancesResponse.instances:type_name -> provisioner.v1.Instance
-	21, // 7: provisioner.v1.CreateDeploymentRequest.deployment:type_name -> provisioner.v1.Deployment
-	21, // 8: provisioner.v1.CreateDeploymentResponse.deployment:type_name -> provisioner.v1.Deployment
-	21, // 9: provisioner.v1.DescribeDeploymentResponse.deployment:type_name -> provisioner.v1.Deployment
-	22, // 10: provisioner.v1.ListDeploymentsRequest.state:type_name -> provisioner.v1.DeploymentState
-	21, // 11: provisioner.v1.ListDeploymentsResponse.deployments:type_name -> provisioner.v1.Deployment
-	21, // 12: provisioner.v1.DestroyDeploymentResponse.deployment:type_name -> provisioner.v1.Deployment
-	22, // 13: provisioner.v1.DeploymentStateChangedEvent.from:type_name -> provisioner.v1.DeploymentState
-	22, // 14: provisioner.v1.DeploymentStateChangedEvent.to:type_name -> provisioner.v1.DeploymentState
-	23, // 15: provisioner.v1.DeploymentStateChangedEvent.at:type_name -> google.protobuf.Timestamp
-	1,  // 16: provisioner.v1.ProvisionerService.CreateInstance:input_type -> provisioner.v1.CreateInstanceRequest
-	3,  // 17: provisioner.v1.ProvisionerService.DestroyInstance:input_type -> provisioner.v1.DestroyInstanceRequest
-	5,  // 18: provisioner.v1.ProvisionerService.DescribeInstance:input_type -> provisioner.v1.DescribeInstanceRequest
-	7,  // 19: provisioner.v1.ProvisionerService.ListInstances:input_type -> provisioner.v1.ListInstancesRequest
-	9,  // 20: provisioner.v1.DeploymentService.CreateDeployment:input_type -> provisioner.v1.CreateDeploymentRequest
-	11, // 21: provisioner.v1.DeploymentService.DescribeDeployment:input_type -> provisioner.v1.DescribeDeploymentRequest
-	13, // 22: provisioner.v1.DeploymentService.ListDeployments:input_type -> provisioner.v1.ListDeploymentsRequest
-	15, // 23: provisioner.v1.DeploymentService.DestroyDeployment:input_type -> provisioner.v1.DestroyDeploymentRequest
-	17, // 24: provisioner.v1.DeploymentService.WatchDeployment:input_type -> provisioner.v1.WatchDeploymentRequest
-	2,  // 25: provisioner.v1.ProvisionerService.CreateInstance:output_type -> provisioner.v1.CreateInstanceResponse
-	4,  // 26: provisioner.v1.ProvisionerService.DestroyInstance:output_type -> provisioner.v1.DestroyInstanceResponse
-	6,  // 27: provisioner.v1.ProvisionerService.DescribeInstance:output_type -> provisioner.v1.DescribeInstanceResponse
-	8,  // 28: provisioner.v1.ProvisionerService.ListInstances:output_type -> provisioner.v1.ListInstancesResponse
-	10, // 29: provisioner.v1.DeploymentService.CreateDeployment:output_type -> provisioner.v1.CreateDeploymentResponse
-	12, // 30: provisioner.v1.DeploymentService.DescribeDeployment:output_type -> provisioner.v1.DescribeDeploymentResponse
-	14, // 31: provisioner.v1.DeploymentService.ListDeployments:output_type -> provisioner.v1.ListDeploymentsResponse
-	16, // 32: provisioner.v1.DeploymentService.DestroyDeployment:output_type -> provisioner.v1.DestroyDeploymentResponse
-	18, // 33: provisioner.v1.DeploymentService.WatchDeployment:output_type -> provisioner.v1.DeploymentStateChangedEvent
-	25, // [25:34] is the sub-list for method output_type
-	16, // [16:25] is the sub-list for method input_type
-	16, // [16:16] is the sub-list for extension type_name
-	16, // [16:16] is the sub-list for extension extendee
-	0,  // [0:16] is the sub-list for field type_name
+	22, // 6: provisioner.v1.ListInstancesResponse.instances:type_name -> provisioner.v1.Instance
+	22, // 7: provisioner.v1.WaitForInstanceReadyResponse.instance:type_name -> provisioner.v1.Instance
+	23, // 8: provisioner.v1.CreateDeploymentRequest.deployment:type_name -> provisioner.v1.Deployment
+	23, // 9: provisioner.v1.CreateDeploymentResponse.deployment:type_name -> provisioner.v1.Deployment
+	23, // 10: provisioner.v1.DescribeDeploymentResponse.deployment:type_name -> provisioner.v1.Deployment
+	24, // 11: provisioner.v1.ListDeploymentsRequest.state:type_name -> provisioner.v1.DeploymentState
+	23, // 12: provisioner.v1.ListDeploymentsResponse.deployments:type_name -> provisioner.v1.Deployment
+	23, // 13: provisioner.v1.DestroyDeploymentResponse.deployment:type_name -> provisioner.v1.Deployment
+	24, // 14: provisioner.v1.DeploymentStateChangedEvent.from:type_name -> provisioner.v1.DeploymentState
+	24, // 15: provisioner.v1.DeploymentStateChangedEvent.to:type_name -> provisioner.v1.DeploymentState
+	25, // 16: provisioner.v1.DeploymentStateChangedEvent.at:type_name -> google.protobuf.Timestamp
+	1,  // 17: provisioner.v1.ProvisionerService.CreateInstance:input_type -> provisioner.v1.CreateInstanceRequest
+	3,  // 18: provisioner.v1.ProvisionerService.DestroyInstance:input_type -> provisioner.v1.DestroyInstanceRequest
+	5,  // 19: provisioner.v1.ProvisionerService.DescribeInstance:input_type -> provisioner.v1.DescribeInstanceRequest
+	7,  // 20: provisioner.v1.ProvisionerService.ListInstances:input_type -> provisioner.v1.ListInstancesRequest
+	9,  // 21: provisioner.v1.ProvisionerService.WaitForInstanceReady:input_type -> provisioner.v1.WaitForInstanceReadyRequest
+	11, // 22: provisioner.v1.DeploymentService.CreateDeployment:input_type -> provisioner.v1.CreateDeploymentRequest
+	13, // 23: provisioner.v1.DeploymentService.DescribeDeployment:input_type -> provisioner.v1.DescribeDeploymentRequest
+	15, // 24: provisioner.v1.DeploymentService.ListDeployments:input_type -> provisioner.v1.ListDeploymentsRequest
+	17, // 25: provisioner.v1.DeploymentService.DestroyDeployment:input_type -> provisioner.v1.DestroyDeploymentRequest
+	19, // 26: provisioner.v1.DeploymentService.WatchDeployment:input_type -> provisioner.v1.WatchDeploymentRequest
+	2,  // 27: provisioner.v1.ProvisionerService.CreateInstance:output_type -> provisioner.v1.CreateInstanceResponse
+	4,  // 28: provisioner.v1.ProvisionerService.DestroyInstance:output_type -> provisioner.v1.DestroyInstanceResponse
+	6,  // 29: provisioner.v1.ProvisionerService.DescribeInstance:output_type -> provisioner.v1.DescribeInstanceResponse
+	8,  // 30: provisioner.v1.ProvisionerService.ListInstances:output_type -> provisioner.v1.ListInstancesResponse
+	10, // 31: provisioner.v1.ProvisionerService.WaitForInstanceReady:output_type -> provisioner.v1.WaitForInstanceReadyResponse
+	12, // 32: provisioner.v1.DeploymentService.CreateDeployment:output_type -> provisioner.v1.CreateDeploymentResponse
+	14, // 33: provisioner.v1.DeploymentService.DescribeDeployment:output_type -> provisioner.v1.DescribeDeploymentResponse
+	16, // 34: provisioner.v1.DeploymentService.ListDeployments:output_type -> provisioner.v1.ListDeploymentsResponse
+	18, // 35: provisioner.v1.DeploymentService.DestroyDeployment:output_type -> provisioner.v1.DestroyDeploymentResponse
+	20, // 36: provisioner.v1.DeploymentService.WatchDeployment:output_type -> provisioner.v1.DeploymentStateChangedEvent
+	27, // [27:37] is the sub-list for method output_type
+	17, // [17:27] is the sub-list for method input_type
+	17, // [17:17] is the sub-list for extension type_name
+	17, // [17:17] is the sub-list for extension extendee
+	0,  // [0:17] is the sub-list for field type_name
 }
 
 func init() { file_provisioner_v1_service_proto_init() }
@@ -1173,7 +1296,7 @@ func file_provisioner_v1_service_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_provisioner_v1_service_proto_rawDesc), len(file_provisioner_v1_service_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   18,
+			NumMessages:   20,
 			NumExtensions: 0,
 			NumServices:   2,
 		},

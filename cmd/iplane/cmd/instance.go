@@ -47,6 +47,7 @@ type provisionerClient interface {
 	DestroyInstance(context.Context, *provisionerv1.DestroyInstanceRequest) (*provisionerv1.DestroyInstanceResponse, error)
 	DescribeInstance(context.Context, *provisionerv1.DescribeInstanceRequest) (*provisionerv1.DescribeInstanceResponse, error)
 	ListInstances(context.Context, *provisionerv1.ListInstancesRequest) (*provisionerv1.ListInstancesResponse, error)
+	WaitForInstanceReady(context.Context, *provisionerv1.WaitForInstanceReadyRequest) (*provisionerv1.WaitForInstanceReadyResponse, error)
 }
 
 // connectProvisionerClient adapts the generated connect-rpc client to
@@ -85,6 +86,14 @@ func (a *connectProvisionerClient) DescribeInstance(ctx context.Context, req *pr
 
 func (a *connectProvisionerClient) ListInstances(ctx context.Context, req *provisionerv1.ListInstancesRequest) (*provisionerv1.ListInstancesResponse, error) {
 	resp, err := a.c.ListInstances(ctx, connect.NewRequest(req))
+	if err != nil {
+		return nil, err
+	}
+	return resp.Msg, nil
+}
+
+func (a *connectProvisionerClient) WaitForInstanceReady(ctx context.Context, req *provisionerv1.WaitForInstanceReadyRequest) (*provisionerv1.WaitForInstanceReadyResponse, error) {
+	resp, err := a.c.WaitForInstanceReady(ctx, connect.NewRequest(req))
 	if err != nil {
 		return nil, err
 	}

@@ -19,10 +19,11 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	ProvisionerService_CreateInstance_FullMethodName   = "/provisioner.v1.ProvisionerService/CreateInstance"
-	ProvisionerService_DestroyInstance_FullMethodName  = "/provisioner.v1.ProvisionerService/DestroyInstance"
-	ProvisionerService_DescribeInstance_FullMethodName = "/provisioner.v1.ProvisionerService/DescribeInstance"
-	ProvisionerService_ListInstances_FullMethodName    = "/provisioner.v1.ProvisionerService/ListInstances"
+	ProvisionerService_CreateInstance_FullMethodName       = "/provisioner.v1.ProvisionerService/CreateInstance"
+	ProvisionerService_DestroyInstance_FullMethodName      = "/provisioner.v1.ProvisionerService/DestroyInstance"
+	ProvisionerService_DescribeInstance_FullMethodName     = "/provisioner.v1.ProvisionerService/DescribeInstance"
+	ProvisionerService_ListInstances_FullMethodName        = "/provisioner.v1.ProvisionerService/ListInstances"
+	ProvisionerService_WaitForInstanceReady_FullMethodName = "/provisioner.v1.ProvisionerService/WaitForInstanceReady"
 )
 
 // ProvisionerServiceClient is the client API for ProvisionerService service.
@@ -68,6 +69,23 @@ type ProvisionerServiceClient interface {
 	// view (under the operator tag) so the CLI can surface leaked
 	// instances the operator has no local record of.
 	ListInstances(ctx context.Context, in *ListInstancesRequest, opts ...grpc.CallOption) (*ListInstancesResponse, error)
+	// WaitForInstanceReady is the explicit "Join" step for asynchronous
+	// Spawn paths (e.g. RunPod, where the public IP is assigned a few
+	// seconds after the pod is scheduled and ACTIVE). The Service
+	// dispatches to the provider's optional SSHReadyWaiter capability,
+	// patches the state file with the populated SshTarget on success,
+	// and returns the updated Instance.
+	//
+	// Providers without an SSH-readiness gap (local; future providers
+	// whose Spawn already blocks for full IP assignment) are a no-op --
+	// the response carries the unchanged Instance and the caller sees
+	// the same SshTarget already in state.
+	//
+	// Designed so callers explicitly drive the wait when they need the
+	// endpoint, rather than every CreateInstance paying for it: one-shot
+	// operators (interactive jupyter on the pod) skip it; deployment-
+	// bound flows call it before CreateDeployment.
+	WaitForInstanceReady(ctx context.Context, in *WaitForInstanceReadyRequest, opts ...grpc.CallOption) (*WaitForInstanceReadyResponse, error)
 }
 
 type provisionerServiceClient struct {
@@ -118,6 +136,16 @@ func (c *provisionerServiceClient) ListInstances(ctx context.Context, in *ListIn
 	return out, nil
 }
 
+func (c *provisionerServiceClient) WaitForInstanceReady(ctx context.Context, in *WaitForInstanceReadyRequest, opts ...grpc.CallOption) (*WaitForInstanceReadyResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(WaitForInstanceReadyResponse)
+	err := c.cc.Invoke(ctx, ProvisionerService_WaitForInstanceReady_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ProvisionerServiceServer is the server API for ProvisionerService service.
 // All implementations should embed UnimplementedProvisionerServiceServer
 // for forward compatibility.
@@ -161,6 +189,23 @@ type ProvisionerServiceServer interface {
 	// view (under the operator tag) so the CLI can surface leaked
 	// instances the operator has no local record of.
 	ListInstances(context.Context, *ListInstancesRequest) (*ListInstancesResponse, error)
+	// WaitForInstanceReady is the explicit "Join" step for asynchronous
+	// Spawn paths (e.g. RunPod, where the public IP is assigned a few
+	// seconds after the pod is scheduled and ACTIVE). The Service
+	// dispatches to the provider's optional SSHReadyWaiter capability,
+	// patches the state file with the populated SshTarget on success,
+	// and returns the updated Instance.
+	//
+	// Providers without an SSH-readiness gap (local; future providers
+	// whose Spawn already blocks for full IP assignment) are a no-op --
+	// the response carries the unchanged Instance and the caller sees
+	// the same SshTarget already in state.
+	//
+	// Designed so callers explicitly drive the wait when they need the
+	// endpoint, rather than every CreateInstance paying for it: one-shot
+	// operators (interactive jupyter on the pod) skip it; deployment-
+	// bound flows call it before CreateDeployment.
+	WaitForInstanceReady(context.Context, *WaitForInstanceReadyRequest) (*WaitForInstanceReadyResponse, error)
 }
 
 // UnimplementedProvisionerServiceServer should be embedded to have
@@ -181,6 +226,9 @@ func (UnimplementedProvisionerServiceServer) DescribeInstance(context.Context, *
 }
 func (UnimplementedProvisionerServiceServer) ListInstances(context.Context, *ListInstancesRequest) (*ListInstancesResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListInstances not implemented")
+}
+func (UnimplementedProvisionerServiceServer) WaitForInstanceReady(context.Context, *WaitForInstanceReadyRequest) (*WaitForInstanceReadyResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method WaitForInstanceReady not implemented")
 }
 func (UnimplementedProvisionerServiceServer) testEmbeddedByValue() {}
 
@@ -274,6 +322,24 @@ func _ProvisionerService_ListInstances_Handler(srv interface{}, ctx context.Cont
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ProvisionerService_WaitForInstanceReady_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(WaitForInstanceReadyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ProvisionerServiceServer).WaitForInstanceReady(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ProvisionerService_WaitForInstanceReady_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ProvisionerServiceServer).WaitForInstanceReady(ctx, req.(*WaitForInstanceReadyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ProvisionerService_ServiceDesc is the grpc.ServiceDesc for ProvisionerService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -296,6 +362,10 @@ var ProvisionerService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListInstances",
 			Handler:    _ProvisionerService_ListInstances_Handler,
+		},
+		{
+			MethodName: "WaitForInstanceReady",
+			Handler:    _ProvisionerService_WaitForInstanceReady_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

@@ -47,6 +47,9 @@ const (
 	// ProvisionerServiceListInstancesProcedure is the fully-qualified name of the ProvisionerService's
 	// ListInstances RPC.
 	ProvisionerServiceListInstancesProcedure = "/provisioner.v1.ProvisionerService/ListInstances"
+	// ProvisionerServiceWaitForInstanceReadyProcedure is the fully-qualified name of the
+	// ProvisionerService's WaitForInstanceReady RPC.
+	ProvisionerServiceWaitForInstanceReadyProcedure = "/provisioner.v1.ProvisionerService/WaitForInstanceReady"
 	// DeploymentServiceCreateDeploymentProcedure is the fully-qualified name of the DeploymentService's
 	// CreateDeployment RPC.
 	DeploymentServiceCreateDeploymentProcedure = "/provisioner.v1.DeploymentService/CreateDeployment"
@@ -86,6 +89,23 @@ type ProvisionerServiceClient interface {
 	// view (under the operator tag) so the CLI can surface leaked
 	// instances the operator has no local record of.
 	ListInstances(context.Context, *connect.Request[v1.ListInstancesRequest]) (*connect.Response[v1.ListInstancesResponse], error)
+	// WaitForInstanceReady is the explicit "Join" step for asynchronous
+	// Spawn paths (e.g. RunPod, where the public IP is assigned a few
+	// seconds after the pod is scheduled and ACTIVE). The Service
+	// dispatches to the provider's optional SSHReadyWaiter capability,
+	// patches the state file with the populated SshTarget on success,
+	// and returns the updated Instance.
+	//
+	// Providers without an SSH-readiness gap (local; future providers
+	// whose Spawn already blocks for full IP assignment) are a no-op --
+	// the response carries the unchanged Instance and the caller sees
+	// the same SshTarget already in state.
+	//
+	// Designed so callers explicitly drive the wait when they need the
+	// endpoint, rather than every CreateInstance paying for it: one-shot
+	// operators (interactive jupyter on the pod) skip it; deployment-
+	// bound flows call it before CreateDeployment.
+	WaitForInstanceReady(context.Context, *connect.Request[v1.WaitForInstanceReadyRequest]) (*connect.Response[v1.WaitForInstanceReadyResponse], error)
 }
 
 // NewProvisionerServiceClient constructs a client for the provisioner.v1.ProvisionerService
@@ -123,15 +143,22 @@ func NewProvisionerServiceClient(httpClient connect.HTTPClient, baseURL string, 
 			connect.WithSchema(provisionerServiceMethods.ByName("ListInstances")),
 			connect.WithClientOptions(opts...),
 		),
+		waitForInstanceReady: connect.NewClient[v1.WaitForInstanceReadyRequest, v1.WaitForInstanceReadyResponse](
+			httpClient,
+			baseURL+ProvisionerServiceWaitForInstanceReadyProcedure,
+			connect.WithSchema(provisionerServiceMethods.ByName("WaitForInstanceReady")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
 // provisionerServiceClient implements ProvisionerServiceClient.
 type provisionerServiceClient struct {
-	createInstance   *connect.Client[v1.CreateInstanceRequest, v1.CreateInstanceResponse]
-	destroyInstance  *connect.Client[v1.DestroyInstanceRequest, v1.DestroyInstanceResponse]
-	describeInstance *connect.Client[v1.DescribeInstanceRequest, v1.DescribeInstanceResponse]
-	listInstances    *connect.Client[v1.ListInstancesRequest, v1.ListInstancesResponse]
+	createInstance       *connect.Client[v1.CreateInstanceRequest, v1.CreateInstanceResponse]
+	destroyInstance      *connect.Client[v1.DestroyInstanceRequest, v1.DestroyInstanceResponse]
+	describeInstance     *connect.Client[v1.DescribeInstanceRequest, v1.DescribeInstanceResponse]
+	listInstances        *connect.Client[v1.ListInstancesRequest, v1.ListInstancesResponse]
+	waitForInstanceReady *connect.Client[v1.WaitForInstanceReadyRequest, v1.WaitForInstanceReadyResponse]
 }
 
 // CreateInstance calls provisioner.v1.ProvisionerService.CreateInstance.
@@ -152,6 +179,11 @@ func (c *provisionerServiceClient) DescribeInstance(ctx context.Context, req *co
 // ListInstances calls provisioner.v1.ProvisionerService.ListInstances.
 func (c *provisionerServiceClient) ListInstances(ctx context.Context, req *connect.Request[v1.ListInstancesRequest]) (*connect.Response[v1.ListInstancesResponse], error) {
 	return c.listInstances.CallUnary(ctx, req)
+}
+
+// WaitForInstanceReady calls provisioner.v1.ProvisionerService.WaitForInstanceReady.
+func (c *provisionerServiceClient) WaitForInstanceReady(ctx context.Context, req *connect.Request[v1.WaitForInstanceReadyRequest]) (*connect.Response[v1.WaitForInstanceReadyResponse], error) {
+	return c.waitForInstanceReady.CallUnary(ctx, req)
 }
 
 // ProvisionerServiceHandler is an implementation of the provisioner.v1.ProvisionerService service.
@@ -176,6 +208,23 @@ type ProvisionerServiceHandler interface {
 	// view (under the operator tag) so the CLI can surface leaked
 	// instances the operator has no local record of.
 	ListInstances(context.Context, *connect.Request[v1.ListInstancesRequest]) (*connect.Response[v1.ListInstancesResponse], error)
+	// WaitForInstanceReady is the explicit "Join" step for asynchronous
+	// Spawn paths (e.g. RunPod, where the public IP is assigned a few
+	// seconds after the pod is scheduled and ACTIVE). The Service
+	// dispatches to the provider's optional SSHReadyWaiter capability,
+	// patches the state file with the populated SshTarget on success,
+	// and returns the updated Instance.
+	//
+	// Providers without an SSH-readiness gap (local; future providers
+	// whose Spawn already blocks for full IP assignment) are a no-op --
+	// the response carries the unchanged Instance and the caller sees
+	// the same SshTarget already in state.
+	//
+	// Designed so callers explicitly drive the wait when they need the
+	// endpoint, rather than every CreateInstance paying for it: one-shot
+	// operators (interactive jupyter on the pod) skip it; deployment-
+	// bound flows call it before CreateDeployment.
+	WaitForInstanceReady(context.Context, *connect.Request[v1.WaitForInstanceReadyRequest]) (*connect.Response[v1.WaitForInstanceReadyResponse], error)
 }
 
 // NewProvisionerServiceHandler builds an HTTP handler from the service implementation. It returns
@@ -209,6 +258,12 @@ func NewProvisionerServiceHandler(svc ProvisionerServiceHandler, opts ...connect
 		connect.WithSchema(provisionerServiceMethods.ByName("ListInstances")),
 		connect.WithHandlerOptions(opts...),
 	)
+	provisionerServiceWaitForInstanceReadyHandler := connect.NewUnaryHandler(
+		ProvisionerServiceWaitForInstanceReadyProcedure,
+		svc.WaitForInstanceReady,
+		connect.WithSchema(provisionerServiceMethods.ByName("WaitForInstanceReady")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/provisioner.v1.ProvisionerService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case ProvisionerServiceCreateInstanceProcedure:
@@ -219,6 +274,8 @@ func NewProvisionerServiceHandler(svc ProvisionerServiceHandler, opts ...connect
 			provisionerServiceDescribeInstanceHandler.ServeHTTP(w, r)
 		case ProvisionerServiceListInstancesProcedure:
 			provisionerServiceListInstancesHandler.ServeHTTP(w, r)
+		case ProvisionerServiceWaitForInstanceReadyProcedure:
+			provisionerServiceWaitForInstanceReadyHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -242,6 +299,10 @@ func (UnimplementedProvisionerServiceHandler) DescribeInstance(context.Context, 
 
 func (UnimplementedProvisionerServiceHandler) ListInstances(context.Context, *connect.Request[v1.ListInstancesRequest]) (*connect.Response[v1.ListInstancesResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("provisioner.v1.ProvisionerService.ListInstances is not implemented"))
+}
+
+func (UnimplementedProvisionerServiceHandler) WaitForInstanceReady(context.Context, *connect.Request[v1.WaitForInstanceReadyRequest]) (*connect.Response[v1.WaitForInstanceReadyResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("provisioner.v1.ProvisionerService.WaitForInstanceReady is not implemented"))
 }
 
 // DeploymentServiceClient is a client for the provisioner.v1.DeploymentService service.

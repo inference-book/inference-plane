@@ -47,6 +47,24 @@ service ProvisionerService {
   // view (under the operator tag) so the CLI can surface leaked
   // instances the operator has no local record of.
   rpc ListInstances(ListInstancesRequest) returns (ListInstancesResponse);
+
+  // WaitForInstanceReady is the explicit "Join" step for asynchronous
+  // Spawn paths (e.g. RunPod, where the public IP is assigned a few
+  // seconds after the pod is scheduled and ACTIVE). The Service
+  // dispatches to the provider's optional SSHReadyWaiter capability,
+  // patches the state file with the populated SshTarget on success,
+  // and returns the updated Instance.
+  //
+  // Providers without an SSH-readiness gap (local; future providers
+  // whose Spawn already blocks for full IP assignment) are a no-op --
+  // the response carries the unchanged Instance and the caller sees
+  // the same SshTarget already in state.
+  //
+  // Designed so callers explicitly drive the wait when they need the
+  // endpoint, rather than every CreateInstance paying for it: one-shot
+  // operators (interactive jupyter on the pod) skip it; deployment-
+  // bound flows call it before CreateDeployment.
+  rpc WaitForInstanceReady(WaitForInstanceReadyRequest) returns (WaitForInstanceReadyResponse);
 }
 
 // Source selects whether the service consults local state, the provider,
@@ -105,6 +123,23 @@ message ListInstancesRequest {
 
 message ListInstancesResponse {
   repeated Instance instances = 1;
+}
+
+message WaitForInstanceReadyRequest {
+  string id = 1;
+  // Maximum time the caller is willing to wait, in seconds. Bounded
+  // above by the provider's own ceiling (runpod default 90s) so a
+  // generous caller doesn't keep the connection open indefinitely.
+  // Zero means use the provider's default.
+  int32 timeout_seconds = 2;
+}
+
+message WaitForInstanceReadyResponse {
+  Instance instance = 1;
+  // True when the SSH endpoint was already populated and the wait was
+  // a no-op. False when the provider's wait was actually exercised.
+  // Operators can branch on this when timing scripts.
+  bool already_ready = 2;
 }
 
 // DeploymentService is the operator-facing surface for engine-on-

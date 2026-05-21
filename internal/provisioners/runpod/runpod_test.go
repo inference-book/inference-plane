@@ -8,7 +8,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
 	"github.com/inference-book/inference-plane/internal/provisioners"
@@ -281,6 +283,191 @@ func TestSpawn_FollowupFailure_FallsBackToMinimalInstance(t *testing.T) {
 	}
 	if inst.GetGpu().GetSku() != "NVIDIA RTX A5000" {
 		t.Errorf("fallback should carry the resolved SKU; got %q", inst.GetGpu().GetSku())
+	}
+}
+
+func TestSpawn_ReturnsImmediately_NoSSH(t *testing.T) {
+	// Spawn no longer auto-waits for publicIp. The immediate
+	// follow-up GET typically returns an empty publicIp; the resulting
+	// Instance has nil/empty Ssh. Callers that need SSH call
+	// WaitForSSHReady afterward (the "Join" pattern).
+	_, p := newFake(t, func(method, path string, body []byte) (int, string) {
+		switch {
+		case method == "POST" && path == "/pods":
+			return 201, `{"id": "rp-async", "desiredStatus": "RUNNING"}`
+		case method == "GET" && path == "/pods/rp-async":
+			return 200, `{"id":"rp-async","name":"iplane-my-pod","createdAt":"2026-05-11T18:22:11Z","machine":{}}`
+		}
+		t.Errorf("unexpected %s %s", method, path)
+		return 500, "{}"
+	})
+
+	inst, err := p.Spawn(context.Background(), okSpec())
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	if inst.GetState() != provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE {
+		t.Errorf("Spawn should mark ACTIVE even without IP; got %v", inst.GetState())
+	}
+	if ssh := inst.GetSsh(); ssh != nil && ssh.GetHost() != "" {
+		t.Errorf("expected empty SSH right after Spawn; got host=%q", ssh.GetHost())
+	}
+}
+
+func TestWaitForSSHReady_PollsUntilPublicIPAppears(t *testing.T) {
+	// Models the real RunPod timing: first GET returns the pod
+	// without publicIp; a follow-up GET returns it populated.
+	// WaitForSSHReady should bridge from the empty state to the
+	// populated one and return the SshTarget.
+	var getCalls atomic.Int32
+	f := &fakeRunPod{t: t, respond: func(method, path string, body []byte) (int, string) {
+		if method == "GET" && path == "/pods/rp-ssh-test" {
+			n := getCalls.Add(1)
+			if n == 1 {
+				return 200, `{"id":"rp-ssh-test","machine":{}}`
+			}
+			return 200, `{"id":"rp-ssh-test","publicIp":"1.2.3.4","machine":{"gpuTypeId":"NVIDIA RTX A5000"}}`
+		}
+		t.Errorf("unexpected %s %s", method, path)
+		return 500, "{}"
+	}}
+	srv := httptest.NewServer(f.handler())
+	t.Cleanup(srv.Close)
+	client := NewClient("test-api-key", WithBaseURL(srv.URL), WithHTTPClient(srv.Client()))
+	p := New(client,
+		WithSSHReadyWait(2*time.Second, 5*time.Millisecond),
+		WithSSHProbe(noopSSHProbe))
+
+	ssh, err := p.WaitForSSHReady(context.Background(), "rp-ssh-test")
+	if err != nil {
+		t.Fatalf("WaitForSSHReady: %v", err)
+	}
+	if ssh == nil || ssh.GetHost() != "1.2.3.4" {
+		t.Errorf("expected populated ssh.host=1.2.3.4; got %+v", ssh)
+	}
+	if ssh.GetPort() != 22 || ssh.GetUser() != "root" {
+		t.Errorf("expected default port=22 user=root; got port=%d user=%q", ssh.GetPort(), ssh.GetUser())
+	}
+	if got := getCalls.Load(); got < 2 {
+		t.Errorf("expected at least 2 GETs (empty then populated); got %d", got)
+	}
+}
+
+func TestWaitForSSHReady_TimesOut(t *testing.T) {
+	// publicIp never arrives. Caller gets an error so they can decide
+	// whether to retry, fail loudly, or fall back to a different
+	// transport.
+	f := &fakeRunPod{t: t, respond: func(method, path string, body []byte) (int, string) {
+		return 200, `{"id":"rp-no-ip","machine":{}}`
+	}}
+	srv := httptest.NewServer(f.handler())
+	t.Cleanup(srv.Close)
+	client := NewClient("test-api-key", WithBaseURL(srv.URL), WithHTTPClient(srv.Client()))
+	p := New(client,
+		WithSSHReadyWait(15*time.Millisecond, 5*time.Millisecond),
+		WithSSHProbe(noopSSHProbe))
+
+	ssh, err := p.WaitForSSHReady(context.Background(), "rp-no-ip")
+	if err == nil {
+		t.Fatal("expected timeout error")
+	}
+	if ssh != nil {
+		t.Errorf("expected nil ssh on timeout; got %+v", ssh)
+	}
+}
+
+// noopSSHProbe disables the tcp/22 reachability check so tests that
+// only exercise the publicIp polling don't need a real listener on
+// the fake IP. Tests that DO want to exercise the port-probe path
+// pass their own probe function.
+func noopSSHProbe(ctx context.Context, host string, port int32) error { return nil }
+
+func TestWaitForSSHReady_RetriesUntilSSHPortReachable(t *testing.T) {
+	// publicIp is populated on the first GET; the TCP probe fails
+	// the first two times (container booting / sshd starting up)
+	// and succeeds on the third. WaitForSSHReady should return
+	// success only when the probe succeeds.
+	f := &fakeRunPod{t: t, respond: func(method, path string, body []byte) (int, string) {
+		return 200, `{"id":"rp-port","publicIp":"1.2.3.4","machine":{"gpuTypeId":"NVIDIA RTX A5000"}}`
+	}}
+	srv := httptest.NewServer(f.handler())
+	t.Cleanup(srv.Close)
+	client := NewClient("test-api-key", WithBaseURL(srv.URL), WithHTTPClient(srv.Client()))
+	var probeCalls atomic.Int32
+	flakyProbe := func(ctx context.Context, host string, port int32) error {
+		n := probeCalls.Add(1)
+		if n < 3 {
+			return errors.New("connect: connection refused")
+		}
+		return nil
+	}
+	p := New(client,
+		WithSSHReadyWait(2*time.Second, 5*time.Millisecond),
+		WithSSHProbe(flakyProbe))
+
+	ssh, err := p.WaitForSSHReady(context.Background(), "rp-port")
+	if err != nil {
+		t.Fatalf("WaitForSSHReady: %v", err)
+	}
+	if ssh == nil || ssh.GetHost() != "1.2.3.4" {
+		t.Errorf("expected populated ssh.host; got %+v", ssh)
+	}
+	if got := probeCalls.Load(); got < 3 {
+		t.Errorf("expected at least 3 probe calls; got %d", got)
+	}
+}
+
+func TestWaitForSSHReady_TimesOutWhenSSHPortNeverOpens(t *testing.T) {
+	// publicIp arrives instantly but the TCP probe always fails.
+	// WaitForSSHReady should return error after the deadline.
+	f := &fakeRunPod{t: t, respond: func(method, path string, body []byte) (int, string) {
+		return 200, `{"id":"rp-port-stuck","publicIp":"1.2.3.4","machine":{"gpuTypeId":"NVIDIA RTX A5000"}}`
+	}}
+	srv := httptest.NewServer(f.handler())
+	t.Cleanup(srv.Close)
+	client := NewClient("test-api-key", WithBaseURL(srv.URL), WithHTTPClient(srv.Client()))
+	failProbe := func(ctx context.Context, host string, port int32) error {
+		return errors.New("connect: connection refused")
+	}
+	p := New(client,
+		WithSSHReadyWait(15*time.Millisecond, 5*time.Millisecond),
+		WithSSHProbe(failProbe))
+
+	ssh, err := p.WaitForSSHReady(context.Background(), "rp-port-stuck")
+	if err == nil {
+		t.Fatal("expected timeout error when tcp/22 never opens")
+	}
+	// IP came back; partial SshTarget should be returned so callers
+	// can see what they got.
+	if ssh == nil || ssh.GetHost() != "1.2.3.4" {
+		t.Errorf("expected partial ssh target carrying the populated IP; got %+v", ssh)
+	}
+}
+
+func TestWaitForSSHReady_ImmediateHit(t *testing.T) {
+	// publicIp present on the first GET -- common case when the
+	// caller waits long enough that the IP is already assigned by
+	// the time they invoke this. Should return without polling
+	// further.
+	var getCalls atomic.Int32
+	f := &fakeRunPod{t: t, respond: func(method, path string, body []byte) (int, string) {
+		getCalls.Add(1)
+		return 200, `{"id":"rp-ready","publicIp":"5.6.7.8","machine":{}}`
+	}}
+	srv := httptest.NewServer(f.handler())
+	t.Cleanup(srv.Close)
+	client := NewClient("test-api-key", WithBaseURL(srv.URL), WithHTTPClient(srv.Client()))
+	p := New(client, WithSSHProbe(noopSSHProbe))
+
+	ssh, err := p.WaitForSSHReady(context.Background(), "rp-ready")
+	if err != nil {
+		t.Fatalf("WaitForSSHReady: %v", err)
+	}
+	if ssh.GetHost() != "5.6.7.8" {
+		t.Errorf("ssh.host = %q, want 5.6.7.8", ssh.GetHost())
+	}
+	if got := getCalls.Load(); got != 1 {
+		t.Errorf("expected exactly 1 GET (immediate hit); got %d", got)
 	}
 }
 

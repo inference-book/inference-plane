@@ -227,6 +227,7 @@ func runDemo() {
 	)
 
 	demo.Step("Check the service is reachable").ID("ping").
+		Note("CLI form:\n  iplane instance list --service-url " + *url).
 		Arrow("Operator", "iplane", "ListInstances (empty filter)").
 		Run(func(ctx demokit.StepContext) *demokit.StepResult {
 			rctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -259,7 +260,7 @@ func runDemo() {
 		})
 
 	demo.Step("Provision a small-class pod").ID("create-instance").
-		Note("class=small => 24 GB VRAM floor. The RunPod resolver picks the cheapest matching SKU. The Service registers an SSH keypair with the RunPod account on first run (PR 24); the resulting pod has that key pre-installed.").
+		Note("class=small => 24 GB VRAM floor. The RunPod resolver picks the cheapest matching SKU. The Service registers an SSH keypair with the RunPod account on first run (PR 24); the resulting pod has that key pre-installed.\n\nCLI form:\n  iplane instance create runpod " + instanceID + " --class small --service-url " + *url).
 		Arrow("Operator", "iplane", "CreateInstance{class=small}").
 		Arrow("iplane", "State", "write PENDING").
 		Arrow("iplane", "RunPod", "register pub key + spawn pod").
@@ -294,8 +295,32 @@ func runDemo() {
 			return nil
 		})
 
+	demo.Step("Wait for the pod's SSH endpoint to be assigned").ID("wait-ssh").
+		Note("RunPod assigns the public IP a few seconds AFTER the pod is scheduled ACTIVE. CreateInstance returns fast (no SSH yet); this step is the explicit 'Join' that blocks until the endpoint shows up. Providers without an SSH-readiness gap (local, future Lambda Labs) make this a no-op.\n\nCLI form:\n  iplane instance wait " + instanceID + " --service-url " + *url).
+		Arrow("Operator", "iplane", "WaitForInstanceReady{id}").
+		Arrow("iplane", "RunPod", "poll GET /pods/{id} until publicIp != \"\"").
+		Arrow("iplane", "State", "patch ssh.host / ssh.port / ssh.user").
+		Run(func(ctx demokit.StepContext) *demokit.StepResult {
+			rctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+			resp, err := provisionerClient.WaitForInstanceReady(rctx, connect.NewRequest(&provisionerv1.WaitForInstanceReadyRequest{
+				Id:             instanceID,
+				TimeoutSeconds: 90,
+			}))
+			if err != nil {
+				return demokit.Errf("WaitForInstanceReady: %v", err)
+			}
+			ssh := resp.Msg.GetInstance().GetSsh()
+			if ssh == nil || ssh.GetHost() == "" {
+				return demokit.Errf("provider returned without populating ssh endpoint")
+			}
+			fmt.Printf("  ssh endpoint:    %s@%s:%d\n", ssh.GetUser(), ssh.GetHost(), ssh.GetPort())
+			fmt.Printf("  already_ready:   %v (true = endpoint was already in state; no provider call needed)\n", resp.Msg.GetAlreadyReady())
+			return nil
+		})
+
 	demo.Step("Deploy the engine and wait for RUNNING").ID("deploy").
-		Note("CreateDeployment with Wait=true blocks until the engine is healthy or the deploy fails. The Service's executor SSHes in, docker-pulls the image, docker-runs it with --gpus all, and polls localhost:8000/health from inside the pod until 2xx.").
+		Note("CreateDeployment with Wait=true blocks until the engine is healthy or the deploy fails. The Service's executor SSHes in, docker-pulls the image, docker-runs it with --gpus all, and polls localhost:8000/health from inside the pod until 2xx.\n\nCLI form:\n  iplane deployment deploy " + deploymentID + " --instance " + instanceID + " --image " + engineImage + " --model <chosen> --service-url " + *url).
 		Arrow("Operator", "iplane", "CreateDeployment{image=vllm, model=qwen, wait=true}").
 		Arrow("iplane", "Pod", "SSH in").
 		Arrow("iplane", "Engine", "docker pull + docker run").
@@ -337,7 +362,7 @@ func runDemo() {
 		})
 
 	demo.Step("Hit /v1/models to prove the engine serves").ID("verify").
-		Note("vLLM's OpenAI-compatible surface exposes /v1/models for the served-model list. A 2xx here means a real OpenAI SDK can hit /v1/chat/completions next.").
+		Note("vLLM's OpenAI-compatible surface exposes /v1/models for the served-model list. A 2xx here means a real OpenAI SDK can hit /v1/chat/completions next.\n\nCLI form (no native verb; uses the engine_endpoint from `iplane deployment describe`):\n  endpoint=$(iplane deployment describe " + deploymentID + " --service-url " + *url + " -o json | jq -r .engine_endpoint)\n  curl -fsS \"${endpoint}/v1/models\"").
 		Arrow("Operator", "Engine", "GET /v1/models").
 		Run(func(ctx demokit.StepContext) *demokit.StepResult {
 			rctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -379,7 +404,7 @@ func runDemo() {
 		})
 
 	demo.Step("Destroy the deployment").ID("destroy-deploy").
-		Note("Stops + removes the engine container on the pod. The instance keeps running so a follow-up deploy could reuse it. Idempotent: already-TERMINATED is a no-op.").
+		Note("Stops + removes the engine container on the pod. The instance keeps running so a follow-up deploy could reuse it. Idempotent: already-TERMINATED is a no-op.\n\nCLI form:\n  iplane deployment destroy " + deploymentID + " --service-url " + *url).
 		Arrow("Operator", "iplane", "DestroyDeployment{id}").
 		Arrow("iplane", "Pod", "SSH: docker stop + docker rm").
 		Arrow("iplane", "State", "patch to TERMINATED").
@@ -398,7 +423,7 @@ func runDemo() {
 		})
 
 	demo.Step("Destroy the instance").ID("destroy-instance").
-		Note("Tearing down the pod stops billing. The instance + deployment records remain in the state file as TERMINATED -- an audit trail of what ran.").
+		Note("Tearing down the pod stops billing. The instance + deployment records remain in the state file as TERMINATED -- an audit trail of what ran.\n\nCLI form:\n  iplane instance destroy " + instanceID + " --service-url " + *url).
 		Arrow("Operator", "iplane", "DestroyInstance{id}").
 		Arrow("iplane", "RunPod", "terminate pod").
 		Arrow("iplane", "State", "patch to TERMINATED").

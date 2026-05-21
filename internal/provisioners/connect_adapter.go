@@ -69,6 +69,14 @@ func (a *ConnectProvisionerAdapter) ListInstances(ctx context.Context, req *conn
 	return connect.NewResponse(resp), nil
 }
 
+func (a *ConnectProvisionerAdapter) WaitForInstanceReady(ctx context.Context, req *connect.Request[provisionerv1.WaitForInstanceReadyRequest]) (*connect.Response[provisionerv1.WaitForInstanceReadyResponse], error) {
+	resp, err := a.svc.WaitForInstanceReady(ctx, req.Msg)
+	if err != nil {
+		return nil, statusToConnectErr(err)
+	}
+	return connect.NewResponse(resp), nil
+}
+
 // ConnectDeploymentAdapter wraps a gRPC DeploymentServiceServer
 // implementation (typically *Service) and exposes the
 // provisionerv1connect.DeploymentServiceHandler interface. Mirrors
