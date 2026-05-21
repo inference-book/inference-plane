@@ -108,6 +108,26 @@ type KeyRegistrar interface {
 	EnsurePublicKey(ctx context.Context, publicKey []byte, comment string) error
 }
 
+// SSHReadyWaiter is an optional capability a provider implements when
+// the SSH endpoint is not immediately available after Spawn (RunPod
+// assigns the public IP a few seconds after scheduling, for example).
+// The Service exposes it via WaitForInstanceReady so callers explicitly
+// drive the "Join" half of an asynchronous Spawn -- one-shot operators
+// who don't need SSH never pay the wait; deployment-bound flows call
+// it before CreateDeployment.
+//
+// Providers without an SSH-readiness gap (local, providers whose
+// Spawn already blocks for full IP assignment) simply do not implement
+// this; the Service returns the current Instance unchanged in that
+// case (the wait is a no-op).
+//
+// The returned SshTarget is the populated endpoint; nil + non-nil err
+// signals timeout / network failure / provider error. On error the
+// Service does NOT patch state -- the caller can retry.
+type SSHReadyWaiter interface {
+	WaitForSSHReady(ctx context.Context, providerID string) (*provisionerv1.SshTarget, error)
+}
+
 // Tag keys stamped on every provider instance Spawn creates. The Service
 // uses them as List filters for the idempotency lookup and the
 // post-v0.1 reconcile loop.

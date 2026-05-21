@@ -494,6 +494,38 @@ func TestDestroy_DryRun_NotFound(t *testing.T) {
 	}
 }
 
+func TestInstanceSSH_RemoteMode_Refused(t *testing.T) {
+	// With --service-url set, iplane instance ssh refuses because the
+	// keystore lives on the server side.
+	resetInstanceFlags()
+	rootCmd.SetArgs([]string{"instance", "ssh", "my-pod",
+		"--service-url", "http://localhost:9091"})
+	var buf bytes.Buffer
+	rootCmd.SetOut(&buf)
+	rootCmd.SetErr(&buf)
+	if err := rootCmd.Execute(); err == nil {
+		t.Fatalf("ssh in remote mode should fail; got:\n%s", buf.String())
+	} else if !strings.Contains(err.Error(), "in-process mode") {
+		t.Errorf("error %q should mention in-process mode requirement", err)
+	}
+}
+
+func TestInstanceSSH_NoInstance(t *testing.T) {
+	resetInstanceFlags()
+	rootCmd.SetArgs([]string{"instance", "ssh", "nope",
+		"--state-dir", t.TempDir()})
+	var buf bytes.Buffer
+	rootCmd.SetOut(&buf)
+	rootCmd.SetErr(&buf)
+	err := rootCmd.Execute()
+	if err == nil {
+		t.Fatalf("ssh for missing instance should fail; got:\n%s", buf.String())
+	}
+	if !strings.Contains(err.Error(), `no instance with id "nope"`) {
+		t.Errorf("error %q should name the missing id", err)
+	}
+}
+
 func TestUnknownProvider_PreCheck(t *testing.T) {
 	// checkProviderAvailable runs before any client construction. With
 	// --service-url unset, an unknown provider hits the local check.

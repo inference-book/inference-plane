@@ -37,6 +37,7 @@ package runpod
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/url"
 	"strings"
 	"time"
@@ -77,14 +78,72 @@ var defaultPortsList = []string{"22/tcp", "8000/http"}
 type Provider struct {
 	client *Client
 	clock  func() time.Time
+
+	// sshReadyTimeout caps how long WaitForSSHReady waits for the pod's
+	// PublicIP to be assigned AND for sshd inside the pod to be
+	// reachable on tcp/22. Two sequential conditions; the timeout
+	// covers both. Defaults: 120s timeout (covers the worst RunPod
+	// scheduling tail PLUS container boot + sshd startup), 3s
+	// polling interval. Tests inject short values via WithSSHReadyWait.
+	sshReadyTimeout  time.Duration
+	sshReadyInterval time.Duration
+
+	// sshProbe is the function used to verify tcp/22 is actually
+	// accepting connections (RunPod's publicIp can be assigned a few
+	// seconds before the container's sshd is ready to handshake).
+	// Default: net.DialTimeout. Tests inject a no-op via WithSSHProbe
+	// so they don't need a real listener.
+	sshProbe func(ctx context.Context, host string, port int32) error
+}
+
+// Option configures a Provider at construction.
+type Option func(*Provider)
+
+// WithSSHReadyWait overrides the default poll deadline + interval
+// used by WaitForSSHReady. Tests inject short values to keep them
+// fast.
+func WithSSHReadyWait(timeout, interval time.Duration) Option {
+	return func(p *Provider) {
+		p.sshReadyTimeout = timeout
+		p.sshReadyInterval = interval
+	}
+}
+
+// WithSSHProbe overrides the tcp-port-reachability check that
+// WaitForSSHReady runs after the publicIp is populated. Tests pass a
+// no-op so they don't need a real listener; production uses the
+// default net.DialTimeout-based probe.
+func WithSSHProbe(probe func(ctx context.Context, host string, port int32) error) Option {
+	return func(p *Provider) { p.sshProbe = probe }
 }
 
 // New builds a RunPod Provider on top of a configured Client.
-func New(client *Client) *Provider {
-	return &Provider{
-		client: client,
-		clock:  time.Now,
+func New(client *Client, opts ...Option) *Provider {
+	p := &Provider{
+		client:           client,
+		clock:            time.Now,
+		sshReadyTimeout:  120 * time.Second,
+		sshReadyInterval: 3 * time.Second,
+		sshProbe:         dialTCPProbe,
 	}
+	for _, opt := range opts {
+		opt(p)
+	}
+	return p
+}
+
+// dialTCPProbe is the production sshProbe: open a TCP connection
+// with a tight timeout and close it. A successful dial means sshd
+// (or whatever the pod has on port 22) accepted the SYN; the actual
+// SSH handshake happens later in the deployment executor.
+func dialTCPProbe(ctx context.Context, host string, port int32) error {
+	d := net.Dialer{Timeout: 3 * time.Second}
+	conn, err := d.DialContext(ctx, "tcp", fmt.Sprintf("%s:%d", host, port))
+	if err != nil {
+		return err
+	}
+	_ = conn.Close()
+	return nil
 }
 
 // Name satisfies provisioners.Provider.
@@ -218,7 +277,127 @@ func (p *Provider) Spawn(ctx context.Context, spec *provisionerv1.Spec) (*provis
 		return p.instanceFromCreate(spec, &created, resolvedClass, resolvedSKU, gpuCount), nil
 	}
 
+	// Note: pod.publicIp is usually empty here -- RunPod assigns the
+	// public IP a few seconds after the pod is scheduled, after this
+	// immediate follow-up GET returns. Callers that need the SSH
+	// endpoint populated (e.g. before deploying onto the pod) drive
+	// the wait explicitly via WaitForSSHReady; Spawn returns ACTIVE
+	// fast so callers that don't need SSH (e.g. operators who just
+	// want a billed pod for an interactive jupyter / vscode session)
+	// don't pay for it.
 	return p.podToInstance(&pod, spec, resolvedClass, resolvedSKU, gpuCount), nil
+}
+
+// WaitForSSHReady waits until the pod's SSH endpoint is genuinely
+// usable -- both (1) RunPod has assigned the public IP and (2) the
+// pod's sshd is accepting TCP connections on port 22. Both conditions
+// have an unbounded tail (RunPod's IP assignment ~5-10s, container
+// boot + sshd startup another ~10-30s), and the whole window has to
+// elapse before a Phase 2 deployment can SSH in. This is the single
+// "Join" point for callers.
+//
+// Returns the resolved SshTarget on success, or an error on timeout
+// / ctx cancellation / underlying GET failure. On timeout, the
+// partial SshTarget is returned alongside the error so callers who
+// want a "best effort" view (e.g. iplane instance describe after a
+// failed wait) can still inspect what came back.
+//
+// Multiple callers can safely call this concurrently; each is a
+// no-op-when-already-populated check followed by a polling loop.
+func (p *Provider) WaitForSSHReady(ctx context.Context, providerID string) (*provisionerv1.SshTarget, error) {
+	if providerID == "" {
+		return nil, provisioners.NewProviderError(p.Name(), "wait_ssh_ready", fmt.Errorf("providerID is empty"), 0)
+	}
+	timeout := p.sshReadyTimeout
+	if timeout <= 0 {
+		// Always allow at least one GET; tests that disable polling
+		// still want a single best-effort lookup.
+		timeout = 1 * time.Second
+	}
+	interval := p.sshReadyInterval
+	if interval <= 0 {
+		interval = 250 * time.Millisecond
+	}
+	deadline := time.Now().Add(timeout)
+
+	var last podBody
+	first := true
+	for {
+		if !first {
+			select {
+			case <-ctx.Done():
+				return sshTargetFromPod(&last), ctx.Err()
+			case <-time.After(interval):
+			}
+		}
+		first = false
+		if time.Now().After(deadline) {
+			return sshTargetFromPod(&last), provisioners.NewProviderError(p.Name(), "wait_ssh_ready",
+				fmt.Errorf("public ip not assigned within %s", timeout), 0)
+		}
+		getReq, err := p.client.newReq("GET", "/pods/"+providerID, nil, nil)
+		if err != nil {
+			return nil, provisioners.NewProviderError(p.Name(), "wait_ssh_ready", err, 0)
+		}
+		pod, err := skhttp.Call[podBody](ctx, getReq, p.client.callOpts()...)
+		if err != nil {
+			return sshTargetFromPod(&last), wrapErr("wait_ssh_ready", err)
+		}
+		last = pod
+		if pod.PublicIP != "" {
+			target := sshTargetFromPod(&pod)
+			// Stage 2: probe tcp/22 until sshd inside the pod is
+			// reachable. Reuses the same deadline + interval so the
+			// overall budget covers both stages.
+			if err := p.waitForSSHPort(ctx, target, deadline, interval); err != nil {
+				return target, err
+			}
+			return target, nil
+		}
+	}
+}
+
+// waitForSSHPort retries the TCP probe until it succeeds or the
+// deadline fires. A successful probe means the pod's sshd is up;
+// the deployment executor's actual SSH handshake will be the next
+// step.
+func (p *Provider) waitForSSHPort(ctx context.Context, target *provisionerv1.SshTarget, deadline time.Time, interval time.Duration) error {
+	if p.sshProbe == nil {
+		return nil
+	}
+	first := true
+	for {
+		if !first {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(interval):
+			}
+		}
+		first = false
+		if time.Now().After(deadline) {
+			return provisioners.NewProviderError(p.Name(), "wait_ssh_ready",
+				fmt.Errorf("tcp/%d on %s not reachable before deadline", target.GetPort(), target.GetHost()), 0)
+		}
+		if err := p.sshProbe(ctx, target.GetHost(), target.GetPort()); err == nil {
+			return nil
+		}
+	}
+}
+
+// sshTargetFromPod builds a SshTarget from a podBody, with sane
+// defaults (port 22, user root). Returns nil when PublicIP is empty
+// so callers can distinguish "haven't observed an IP yet" from
+// "observed an IP and it's literally blank."
+func sshTargetFromPod(pod *podBody) *provisionerv1.SshTarget {
+	if pod == nil || pod.PublicIP == "" {
+		return nil
+	}
+	return &provisionerv1.SshTarget{
+		Host: pod.PublicIP,
+		Port: 22,
+		User: "root",
+	}
 }
 
 // Terminate calls DELETE /pods/{id}. Idempotent: a 404 (not found)

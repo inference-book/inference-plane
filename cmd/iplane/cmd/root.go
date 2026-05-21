@@ -2,6 +2,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -36,15 +37,42 @@ local tooling for load testing and code generation. Run any subcommand
 with --help for its specific flags.`,
 }
 
+// exitCoder is implemented by errors that want to drive a specific
+// process exit code. `iplane deployment wait` returns one of these to
+// distinguish timeout (3) from FAILED (2) from generic failure (1);
+// `iplane deployment status` returns an exitCoder with an empty
+// message so RUNNING / FAILED / other render only the stdout line
+// without a stderr error.
+type exitCoder interface {
+	ExitCode() int
+}
+
 // Execute runs the root command. main.go calls this; its only job is
 // to print the error and exit non-zero if the command fails so the
-// shell sees the correct status code.
+// shell sees the correct status code. Errors implementing exitCoder
+// drive a custom exit code; an empty message suppresses the stderr
+// line so scripting-friendly commands (`status`) can carry their
+// signal entirely via exit code + stdout.
 func Execute() {
 	if err := rootCmd.Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		if msg := err.Error(); msg != "" {
+			fmt.Fprintln(os.Stderr, msg)
+		}
+		var ec exitCoder
+		if errors.As(err, &ec) {
+			os.Exit(ec.ExitCode())
+		}
 		os.Exit(1)
 	}
 }
+
+// exitWithCode is an exitCoder carrying no message -- the caller has
+// already printed everything to stdout and just wants to choose the
+// exit code. Used by `iplane deployment status`.
+type exitWithCode int
+
+func (e exitWithCode) Error() string { return "" }
+func (e exitWithCode) ExitCode() int { return int(e) }
 
 func init() {
 	cobra.OnInitialize(initConfig)

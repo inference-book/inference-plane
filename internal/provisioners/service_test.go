@@ -411,6 +411,129 @@ func TestListInstances_SelfHealsPending(t *testing.T) {
 	}
 }
 
+// mockSSHWaiter is mockProvider + the SSHReadyWaiter capability.
+// Tests with this provider exercise the WaitForInstanceReady path.
+type mockSSHWaiter struct {
+	*mockProvider
+	waitCalls  int
+	waitTarget *provisionerv1.SshTarget
+	waitErr    error
+}
+
+func (m *mockSSHWaiter) WaitForSSHReady(ctx context.Context, providerID string) (*provisionerv1.SshTarget, error) {
+	m.waitCalls++
+	if m.waitErr != nil {
+		return nil, m.waitErr
+	}
+	return m.waitTarget, nil
+}
+
+func TestWaitForInstanceReady_NotFound(t *testing.T) {
+	svc, _ := newSvc(t, &mockProvider{name: "mock"})
+	_, err := svc.WaitForInstanceReady(context.Background(), &provisionerv1.WaitForInstanceReadyRequest{Id: "nope"})
+	if err == nil {
+		t.Fatal("expected NotFound for unknown id")
+	}
+}
+
+func TestWaitForInstanceReady_AlreadyReady(t *testing.T) {
+	// Instance already has SSH populated in state -- the Service must
+	// short-circuit without touching the provider so retries are cheap.
+	waiter := &mockSSHWaiter{mockProvider: &mockProvider{name: "mock"}}
+	svc, store := newSvc(t, waiter)
+	_ = store.Update(func(f *state.File) error {
+		f.Instances["my-pod"] = &provisionerv1.Instance{
+			Id: "my-pod", Provider: "mock", ProviderId: "mock:my-pod",
+			State: provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE,
+			Ssh:   &provisionerv1.SshTarget{Host: "1.2.3.4", Port: 22, User: "root"},
+		}
+		return nil
+	})
+	resp, err := svc.WaitForInstanceReady(context.Background(), &provisionerv1.WaitForInstanceReadyRequest{Id: "my-pod"})
+	if err != nil {
+		t.Fatalf("WaitForInstanceReady: %v", err)
+	}
+	if !resp.GetAlreadyReady() {
+		t.Errorf("expected already_ready=true; got false")
+	}
+	if waiter.waitCalls != 0 {
+		t.Errorf("provider waiter should not have been called; got %d calls", waiter.waitCalls)
+	}
+}
+
+func TestWaitForInstanceReady_ProviderWithoutCapability_NoOp(t *testing.T) {
+	// Provider doesn't implement SSHReadyWaiter (e.g. local). The
+	// Service returns the current Instance unchanged; not an error.
+	svc, store := newSvc(t, &mockProvider{name: "mock"})
+	_ = store.Update(func(f *state.File) error {
+		f.Instances["my-pod"] = &provisionerv1.Instance{
+			Id: "my-pod", Provider: "mock", ProviderId: "mock:my-pod",
+			State: provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE,
+			// No SSH set.
+		}
+		return nil
+	})
+	resp, err := svc.WaitForInstanceReady(context.Background(), &provisionerv1.WaitForInstanceReadyRequest{Id: "my-pod"})
+	if err != nil {
+		t.Fatalf("WaitForInstanceReady: %v", err)
+	}
+	if !resp.GetAlreadyReady() {
+		t.Errorf("expected already_ready=true for provider w/o SSH capability; got false")
+	}
+}
+
+func TestWaitForInstanceReady_PopulatesSSH(t *testing.T) {
+	waiter := &mockSSHWaiter{
+		mockProvider: &mockProvider{name: "mock"},
+		waitTarget:   &provisionerv1.SshTarget{Host: "5.6.7.8", Port: 22, User: "root"},
+	}
+	svc, store := newSvc(t, waiter)
+	_ = store.Update(func(f *state.File) error {
+		f.Instances["my-pod"] = &provisionerv1.Instance{
+			Id: "my-pod", Provider: "mock", ProviderId: "mock:my-pod",
+			State: provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE,
+		}
+		return nil
+	})
+	resp, err := svc.WaitForInstanceReady(context.Background(), &provisionerv1.WaitForInstanceReadyRequest{Id: "my-pod"})
+	if err != nil {
+		t.Fatalf("WaitForInstanceReady: %v", err)
+	}
+	if resp.GetAlreadyReady() {
+		t.Errorf("expected already_ready=false after provider call; got true")
+	}
+	if ssh := resp.GetInstance().GetSsh(); ssh == nil || ssh.GetHost() != "5.6.7.8" {
+		t.Errorf("ssh.host = %+v, want 5.6.7.8", ssh)
+	}
+	if waiter.waitCalls != 1 {
+		t.Errorf("provider waiter called %d times; want 1", waiter.waitCalls)
+	}
+	// And the state file must reflect the new SSH.
+	f, _ := store.Read()
+	if f.Instances["my-pod"].GetSsh().GetHost() != "5.6.7.8" {
+		t.Errorf("state file ssh not patched; got %+v", f.Instances["my-pod"].GetSsh())
+	}
+}
+
+func TestWaitForInstanceReady_ProviderError_Surfaces(t *testing.T) {
+	waiter := &mockSSHWaiter{
+		mockProvider: &mockProvider{name: "mock"},
+		waitErr:      errors.New("transient runpod failure"),
+	}
+	svc, store := newSvc(t, waiter)
+	_ = store.Update(func(f *state.File) error {
+		f.Instances["my-pod"] = &provisionerv1.Instance{
+			Id: "my-pod", Provider: "mock", ProviderId: "mock:my-pod",
+			State: provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE,
+		}
+		return nil
+	})
+	_, err := svc.WaitForInstanceReady(context.Background(), &provisionerv1.WaitForInstanceReadyRequest{Id: "my-pod"})
+	if err == nil {
+		t.Fatal("expected error from provider waiter to surface")
+	}
+}
+
 func TestValidateID(t *testing.T) {
 	cases := []struct {
 		id    string
