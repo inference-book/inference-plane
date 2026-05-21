@@ -77,14 +77,46 @@ var defaultPortsList = []string{"22/tcp", "8000/http"}
 type Provider struct {
 	client *Client
 	clock  func() time.Time
+
+	// sshReadyTimeout caps how long Spawn waits for the pod's PublicIP
+	// to appear after CREATE returns. RunPod assigns the public IP a
+	// few seconds after the pod is scheduled; deployment (Phase 2)
+	// hard-requires the SSH endpoint, so we block here rather than
+	// hand back an ACTIVE Instance with no way to reach it.
+	//
+	// Defaults: 90s timeout (worst-case RunPod scheduling tail) with a
+	// 3s polling interval (RunPod's rate limit is generous; this is
+	// just to avoid hammering). Tests inject short values via
+	// WithSSHReadyWait so they finish quickly.
+	sshReadyTimeout  time.Duration
+	sshReadyInterval time.Duration
+}
+
+// Option configures a Provider at construction.
+type Option func(*Provider)
+
+// WithSSHReadyWait overrides the default Spawn-time poll deadline for
+// the PublicIP-assigned signal. Used by tests to compress the timing;
+// production rarely needs to override.
+func WithSSHReadyWait(timeout, interval time.Duration) Option {
+	return func(p *Provider) {
+		p.sshReadyTimeout = timeout
+		p.sshReadyInterval = interval
+	}
 }
 
 // New builds a RunPod Provider on top of a configured Client.
-func New(client *Client) *Provider {
-	return &Provider{
-		client: client,
-		clock:  time.Now,
+func New(client *Client, opts ...Option) *Provider {
+	p := &Provider{
+		client:           client,
+		clock:            time.Now,
+		sshReadyTimeout:  90 * time.Second,
+		sshReadyInterval: 3 * time.Second,
 	}
+	for _, opt := range opts {
+		opt(p)
+	}
+	return p
 }
 
 // Name satisfies provisioners.Provider.
@@ -218,7 +250,91 @@ func (p *Provider) Spawn(ctx context.Context, spec *provisionerv1.Spec) (*provis
 		return p.instanceFromCreate(spec, &created, resolvedClass, resolvedSKU, gpuCount), nil
 	}
 
+	// Note: pod.publicIp is usually empty here -- RunPod assigns the
+	// public IP a few seconds after the pod is scheduled, after this
+	// immediate follow-up GET returns. Callers that need the SSH
+	// endpoint populated (e.g. before deploying onto the pod) drive
+	// the wait explicitly via WaitForSSHReady; Spawn returns ACTIVE
+	// fast so callers that don't need SSH (e.g. operators who just
+	// want a billed pod for an interactive jupyter / vscode session)
+	// don't pay for it.
 	return p.podToInstance(&pod, spec, resolvedClass, resolvedSKU, gpuCount), nil
+}
+
+// WaitForSSHReady polls GET /pods/{id} until the pod's public IP is
+// populated (RunPod assigns it a few seconds after scheduling).
+// Returns the resolved SshTarget on success, or an error on timeout /
+// ctx cancellation / underlying GET failure.
+//
+// Designed as the "Join" half of an asynchronous Spawn -- Spawn
+// returns ACTIVE immediately with empty SSH, then a caller (typically
+// the deployment surface, or an operator running `iplane instance
+// wait`) calls WaitForSSHReady at the point it needs the endpoint.
+// Multiple callers can safely call this concurrently; each is a
+// no-op-when-already-populated check followed by a polling loop.
+//
+// On timeout the SshTarget is returned alongside the error so callers
+// who want a "best effort" view (e.g. recovery scripts) can still
+// inspect what came back.
+func (p *Provider) WaitForSSHReady(ctx context.Context, providerID string) (*provisionerv1.SshTarget, error) {
+	if providerID == "" {
+		return nil, provisioners.NewProviderError(p.Name(), "wait_ssh_ready", fmt.Errorf("providerID is empty"), 0)
+	}
+	timeout := p.sshReadyTimeout
+	if timeout <= 0 {
+		// Always allow at least one GET; tests that disable polling
+		// still want a single best-effort lookup.
+		timeout = 1 * time.Second
+	}
+	interval := p.sshReadyInterval
+	if interval <= 0 {
+		interval = 250 * time.Millisecond
+	}
+	deadline := time.Now().Add(timeout)
+
+	var last podBody
+	first := true
+	for {
+		if !first {
+			select {
+			case <-ctx.Done():
+				return sshTargetFromPod(&last), ctx.Err()
+			case <-time.After(interval):
+			}
+		}
+		first = false
+		if time.Now().After(deadline) {
+			return sshTargetFromPod(&last), provisioners.NewProviderError(p.Name(), "wait_ssh_ready",
+				fmt.Errorf("public ip not assigned within %s", timeout), 0)
+		}
+		getReq, err := p.client.newReq("GET", "/pods/"+providerID, nil, nil)
+		if err != nil {
+			return nil, provisioners.NewProviderError(p.Name(), "wait_ssh_ready", err, 0)
+		}
+		pod, err := skhttp.Call[podBody](ctx, getReq, p.client.callOpts()...)
+		if err != nil {
+			return sshTargetFromPod(&last), wrapErr("wait_ssh_ready", err)
+		}
+		last = pod
+		if pod.PublicIP != "" {
+			return sshTargetFromPod(&pod), nil
+		}
+	}
+}
+
+// sshTargetFromPod builds a SshTarget from a podBody, with sane
+// defaults (port 22, user root). Returns nil when PublicIP is empty
+// so callers can distinguish "haven't observed an IP yet" from
+// "observed an IP and it's literally blank."
+func sshTargetFromPod(pod *podBody) *provisionerv1.SshTarget {
+	if pod == nil || pod.PublicIP == "" {
+		return nil
+	}
+	return &provisionerv1.SshTarget{
+		Host: pod.PublicIP,
+		Port: 22,
+		User: "root",
+	}
 }
 
 // Terminate calls DELETE /pods/{id}. Idempotent: a 404 (not found)
