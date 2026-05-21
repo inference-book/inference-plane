@@ -89,7 +89,7 @@ func TestMarshalUnmarshalPrivatePEM_RoundTrip(t *testing.T) {
 	if !strings.Contains(string(pemBytes), "OPENSSH PRIVATE KEY") {
 		t.Errorf("PEM block type should be OPENSSH PRIVATE KEY; got:\n%s", pemBytes)
 	}
-	got, err := UnmarshalPrivatePEM("default", "runpod", pemBytes)
+	got, err := UnmarshalPrivatePEM("default", "runpod", kp.Comment, pemBytes)
 	if err != nil {
 		t.Fatalf("UnmarshalPrivatePEM: %v", err)
 	}

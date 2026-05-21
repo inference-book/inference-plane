@@ -118,9 +118,18 @@ func (k *KeyPair) MarshalPrivatePEM() ([]byte, error) {
 }
 
 // UnmarshalPrivatePEM parses a PEM-encoded OPENSSH PRIVATE KEY block
-// back into a key pair. operator + provider come from the storage
-// scope (oneauth's ClientID); CreatedAt is parsed from the comment.
-func UnmarshalPrivatePEM(operator, provider string, pemBytes []byte) (*KeyPair, error) {
+// back into a KeyPair. The comment is passed in explicitly because
+// `ssh.MarshalPrivateKey` bakes it into the OpenSSH binary blob
+// rather than the PEM headers, and parsing that binary form here
+// would couple the package to internal OpenSSH format details. The
+// Store caches the comment in oneauth's KeyRecord.Kid alongside the
+// PEM bytes.
+//
+// CreatedAt is parsed from the comment's trailing RFC3339 suffix
+// (the "<ts>" in "iplane-<op>-<prov>-<ts>"); if the comment is empty
+// or malformed, CreatedAt is the zero value -- callers care about
+// the comment for identification, not the timestamp.
+func UnmarshalPrivatePEM(operator, provider, comment string, pemBytes []byte) (*KeyPair, error) {
 	raw, err := ssh.ParseRawPrivateKey(pemBytes)
 	if err != nil {
 		return nil, fmt.Errorf("ssh.ParseRawPrivateKey: %w", err)
@@ -139,22 +148,16 @@ func UnmarshalPrivatePEM(operator, provider string, pemBytes []byte) (*KeyPair, 
 	if !ok {
 		return nil, fmt.Errorf("Ed25519 private did not yield Ed25519 public (got %T)", priv.Public())
 	}
-	// Recover the comment from the PEM block (it's stashed in
-	// ssh.MarshalPrivateKey output, accessible via ParseAuthorizedKey
-	// on the public, but here we let the comment ride on the parsed
-	// PEM's Headers if present, or reconstruct from a freshly-format
-	// scope+now if we cannot).
-	comment := ""
-	if block, _ := pem.Decode(pemBytes); block != nil {
-		if c, ok := block.Headers["Comment"]; ok {
-			comment = c
-		}
-	}
 	createdAt := time.Time{}
 	if comment != "" {
 		// Parse the RFC3339 suffix from "iplane-<op>-<prov>-<ts>".
-		if i := strings.LastIndex(comment, "-"); i > 0 {
-			if t, err := time.Parse(time.RFC3339, comment[i+1:]); err == nil {
+		// time.RFC3339 has dashes inside the timestamp itself
+		// (2026-05-20T...), so split on " " is wrong; the comment
+		// uses '-' between parts but the timestamp dominates the
+		// tail. Strip the known "iplane-<op>-<prov>-" prefix.
+		prefix := fmt.Sprintf("iplane-%s-%s-", operator, provider)
+		if strings.HasPrefix(comment, prefix) {
+			if t, err := time.Parse(time.RFC3339, strings.TrimPrefix(comment, prefix)); err == nil {
 				createdAt = t
 			}
 		}
