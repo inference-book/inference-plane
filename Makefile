@@ -1,8 +1,14 @@
-.PHONY: build up down pull smoke load logs dashboards clean check-pins help
+.PHONY: build up down pull smoke load logs dashboards clean check-pins help install
+
+PKG    := ./cmd/iplane
 
 # Default target: list available targets.
 help:
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+
+install:
+	go install $(PKG)
+	@echo "installed to $$(go env GOBIN || echo $$(go env GOPATH)/bin)/$(BINARY)"
 
 # ── Local code ──────────────────────────────────────────────────────────
 build: ## Compile the iplane binary into bin/
