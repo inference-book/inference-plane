@@ -356,6 +356,82 @@ func (s *Service) DescribeInstance(ctx context.Context, req *provisionerv1.Descr
 	return &provisionerv1.DescribeInstanceResponse{Instance: refreshed}, nil
 }
 
+// WaitForInstanceReady dispatches to the provider's SSHReadyWaiter
+// capability and patches the state file with the populated SshTarget
+// on success. Providers without the capability are a no-op -- the
+// response carries the unchanged Instance.
+//
+// Caller's ctx + the optional timeout_seconds field both bound the
+// wait. timeout_seconds=0 (the default) defers to whatever cap the
+// provider applies internally; non-zero shortens (but does not
+// extend) the deadline.
+func (s *Service) WaitForInstanceReady(ctx context.Context, req *provisionerv1.WaitForInstanceReadyRequest) (*provisionerv1.WaitForInstanceReadyResponse, error) {
+	id := req.GetId()
+	if err := ValidateID(id); err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+
+	file, err := s.store.Read()
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	inst, ok := file.Instances[id]
+	if !ok {
+		return nil, status.Errorf(codes.NotFound, "no instance with id %q", id)
+	}
+
+	// Fast path: SSH already populated. Return without touching the
+	// provider so repeat callers (idempotent retries, polling scripts)
+	// don't hammer the upstream API.
+	if ssh := inst.GetSsh(); ssh != nil && ssh.GetHost() != "" {
+		return &provisionerv1.WaitForInstanceReadyResponse{
+			Instance:     inst,
+			AlreadyReady: true,
+		}, nil
+	}
+
+	provider, ok := s.providers[inst.GetProvider()]
+	if !ok {
+		return nil, status.Errorf(codes.FailedPrecondition, "provider %q not configured (cannot wait for ssh ready)", inst.GetProvider())
+	}
+	waiter, ok := provider.(SSHReadyWaiter)
+	if !ok {
+		// Provider has no SSH-readiness gap (e.g. local). Whatever's
+		// in state IS the final SSH view; return it unchanged.
+		return &provisionerv1.WaitForInstanceReadyResponse{
+			Instance:     inst,
+			AlreadyReady: true,
+		}, nil
+	}
+
+	waitCtx := ctx
+	if to := req.GetTimeoutSeconds(); to > 0 {
+		var cancel context.CancelFunc
+		waitCtx, cancel = context.WithTimeout(ctx, time.Duration(to)*time.Second)
+		defer cancel()
+	}
+	target, werr := waiter.WaitForSSHReady(waitCtx, inst.GetProviderId())
+	if werr != nil {
+		// DeadlineExceeded from the provider surfaces as the same gRPC
+		// code so the CLI can render an actionable "didn't get IP in
+		// time, retry?" message.
+		if errors.Is(werr, context.DeadlineExceeded) {
+			return nil, status.Errorf(codes.DeadlineExceeded, "wait_for_instance_ready %q: %v", id, werr)
+		}
+		return nil, status.Errorf(codes.Unavailable, "wait_for_instance_ready %q: %v", id, werr)
+	}
+
+	updated := proto.Clone(inst).(*provisionerv1.Instance)
+	updated.Ssh = target
+	if patchErr := s.patchRecord(id, updated); patchErr != nil {
+		return nil, status.Errorf(codes.Internal, "wait_for_instance_ready %q: state patch failed: %v", id, patchErr)
+	}
+	return &provisionerv1.WaitForInstanceReadyResponse{
+		Instance:     updated,
+		AlreadyReady: false,
+	}, nil
+}
+
 // ListInstances returns the local-state view (SOURCE_LOCAL, default,
 // with per-record self-heal for pending/terminating records) or the
 // provider's view (SOURCE_REMOTE -- requires a provider filter).
