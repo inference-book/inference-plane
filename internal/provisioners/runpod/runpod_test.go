@@ -334,7 +334,9 @@ func TestWaitForSSHReady_PollsUntilPublicIPAppears(t *testing.T) {
 	srv := httptest.NewServer(f.handler())
 	t.Cleanup(srv.Close)
 	client := NewClient("test-api-key", WithBaseURL(srv.URL), WithHTTPClient(srv.Client()))
-	p := New(client, WithSSHReadyWait(2*time.Second, 5*time.Millisecond))
+	p := New(client,
+		WithSSHReadyWait(2*time.Second, 5*time.Millisecond),
+		WithSSHProbe(noopSSHProbe))
 
 	ssh, err := p.WaitForSSHReady(context.Background(), "rp-ssh-test")
 	if err != nil {
@@ -361,7 +363,9 @@ func TestWaitForSSHReady_TimesOut(t *testing.T) {
 	srv := httptest.NewServer(f.handler())
 	t.Cleanup(srv.Close)
 	client := NewClient("test-api-key", WithBaseURL(srv.URL), WithHTTPClient(srv.Client()))
-	p := New(client, WithSSHReadyWait(15*time.Millisecond, 5*time.Millisecond))
+	p := New(client,
+		WithSSHReadyWait(15*time.Millisecond, 5*time.Millisecond),
+		WithSSHProbe(noopSSHProbe))
 
 	ssh, err := p.WaitForSSHReady(context.Background(), "rp-no-ip")
 	if err == nil {
@@ -369,6 +373,74 @@ func TestWaitForSSHReady_TimesOut(t *testing.T) {
 	}
 	if ssh != nil {
 		t.Errorf("expected nil ssh on timeout; got %+v", ssh)
+	}
+}
+
+// noopSSHProbe disables the tcp/22 reachability check so tests that
+// only exercise the publicIp polling don't need a real listener on
+// the fake IP. Tests that DO want to exercise the port-probe path
+// pass their own probe function.
+func noopSSHProbe(ctx context.Context, host string, port int32) error { return nil }
+
+func TestWaitForSSHReady_RetriesUntilSSHPortReachable(t *testing.T) {
+	// publicIp is populated on the first GET; the TCP probe fails
+	// the first two times (container booting / sshd starting up)
+	// and succeeds on the third. WaitForSSHReady should return
+	// success only when the probe succeeds.
+	f := &fakeRunPod{t: t, respond: func(method, path string, body []byte) (int, string) {
+		return 200, `{"id":"rp-port","publicIp":"1.2.3.4","machine":{"gpuTypeId":"NVIDIA RTX A5000"}}`
+	}}
+	srv := httptest.NewServer(f.handler())
+	t.Cleanup(srv.Close)
+	client := NewClient("test-api-key", WithBaseURL(srv.URL), WithHTTPClient(srv.Client()))
+	var probeCalls atomic.Int32
+	flakyProbe := func(ctx context.Context, host string, port int32) error {
+		n := probeCalls.Add(1)
+		if n < 3 {
+			return errors.New("connect: connection refused")
+		}
+		return nil
+	}
+	p := New(client,
+		WithSSHReadyWait(2*time.Second, 5*time.Millisecond),
+		WithSSHProbe(flakyProbe))
+
+	ssh, err := p.WaitForSSHReady(context.Background(), "rp-port")
+	if err != nil {
+		t.Fatalf("WaitForSSHReady: %v", err)
+	}
+	if ssh == nil || ssh.GetHost() != "1.2.3.4" {
+		t.Errorf("expected populated ssh.host; got %+v", ssh)
+	}
+	if got := probeCalls.Load(); got < 3 {
+		t.Errorf("expected at least 3 probe calls; got %d", got)
+	}
+}
+
+func TestWaitForSSHReady_TimesOutWhenSSHPortNeverOpens(t *testing.T) {
+	// publicIp arrives instantly but the TCP probe always fails.
+	// WaitForSSHReady should return error after the deadline.
+	f := &fakeRunPod{t: t, respond: func(method, path string, body []byte) (int, string) {
+		return 200, `{"id":"rp-port-stuck","publicIp":"1.2.3.4","machine":{"gpuTypeId":"NVIDIA RTX A5000"}}`
+	}}
+	srv := httptest.NewServer(f.handler())
+	t.Cleanup(srv.Close)
+	client := NewClient("test-api-key", WithBaseURL(srv.URL), WithHTTPClient(srv.Client()))
+	failProbe := func(ctx context.Context, host string, port int32) error {
+		return errors.New("connect: connection refused")
+	}
+	p := New(client,
+		WithSSHReadyWait(15*time.Millisecond, 5*time.Millisecond),
+		WithSSHProbe(failProbe))
+
+	ssh, err := p.WaitForSSHReady(context.Background(), "rp-port-stuck")
+	if err == nil {
+		t.Fatal("expected timeout error when tcp/22 never opens")
+	}
+	// IP came back; partial SshTarget should be returned so callers
+	// can see what they got.
+	if ssh == nil || ssh.GetHost() != "1.2.3.4" {
+		t.Errorf("expected partial ssh target carrying the populated IP; got %+v", ssh)
 	}
 }
 
@@ -385,7 +457,7 @@ func TestWaitForSSHReady_ImmediateHit(t *testing.T) {
 	srv := httptest.NewServer(f.handler())
 	t.Cleanup(srv.Close)
 	client := NewClient("test-api-key", WithBaseURL(srv.URL), WithHTTPClient(srv.Client()))
-	p := New(client)
+	p := New(client, WithSSHProbe(noopSSHProbe))
 
 	ssh, err := p.WaitForSSHReady(context.Background(), "rp-ready")
 	if err != nil {
