@@ -3,11 +3,10 @@ package provisioners
 import (
 	"context"
 	"errors"
-	"fmt"
 
 	"connectrpc.com/connect"
+	"github.com/panyam/servicekit/connectbridge"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
@@ -120,59 +119,14 @@ func (a *ConnectDeploymentAdapter) DestroyDeployment(ctx context.Context, req *c
 }
 
 // WatchDeployment routes the Connect server-streaming call to the
-// gRPC server-streaming method via connectStreamBridge -- a generic
-// adapter that satisfies grpc.ServerStreamingServer[T] on top of a
-// *connect.ServerStream[T]. The underlying gRPC stub returns
+// gRPC server-streaming method via servicekit's ConnectStreamBridge --
+// a generic adapter that satisfies grpc.ServerStreamingServer[T] on
+// top of a *connect.ServerStream[T]. The underlying gRPC stub returns
 // Unimplemented in this PR; when the Phase 2 executor lands and emits
 // real events, no changes to this method or the bridge are needed.
-//
-// TODO(servicekit#30): connectStreamBridge is copied from
-// lilbattle/web/server/connectbridge.go and is a candidate for stack
-// pushdown into servicekit. See https://github.com/panyam/servicekit/issues/30;
-// the migration of both iplane and lilbattle to a shared servicekit
-// primitive is tracked there. Until then this is acknowledged
-// duplication.
 func (a *ConnectDeploymentAdapter) WatchDeployment(ctx context.Context, req *connect.Request[provisionerv1.WatchDeploymentRequest], stream *connect.ServerStream[provisionerv1.DeploymentStateChangedEvent]) error {
-	return a.svc.WatchDeployment(req.Msg, &connectStreamBridge[provisionerv1.DeploymentStateChangedEvent]{
-		ctx:           ctx,
-		connectStream: stream,
-	})
+	return a.svc.WatchDeployment(req.Msg, connectbridge.NewConnectStreamBridge(ctx, stream))
 }
-
-// connectStreamBridge converts a *connect.ServerStream[T] into something
-// that satisfies grpc.ServerStreamingServer[T] (which is what
-// generated gRPC server-streaming methods expect). Generic over the
-// message type so one bridge handles every streaming RPC.
-//
-// Lifted from lilbattle/web/server/connectbridge.go pending pushdown
-// to servicekit. Header / trailer metadata are no-op in v0.1 (the
-// stubs never set them); when the executor needs real metadata
-// propagation, that goes in alongside the servicekit pushdown.
-type connectStreamBridge[T any] struct {
-	ctx           context.Context
-	connectStream *connect.ServerStream[T]
-}
-
-func (b *connectStreamBridge[T]) Send(msg *T) error {
-	return b.connectStream.Send(msg)
-}
-
-func (b *connectStreamBridge[T]) Context() context.Context { return b.ctx }
-
-func (b *connectStreamBridge[T]) SendMsg(m any) error {
-	if msg, ok := m.(*T); ok {
-		return b.connectStream.Send(msg)
-	}
-	return fmt.Errorf("connectStreamBridge: invalid message type %T", m)
-}
-
-func (b *connectStreamBridge[T]) RecvMsg(m any) error {
-	return fmt.Errorf("connectStreamBridge: RecvMsg not supported for server streaming")
-}
-
-func (b *connectStreamBridge[T]) SetHeader(metadata.MD) error  { return nil }
-func (b *connectStreamBridge[T]) SendHeader(metadata.MD) error { return nil }
-func (b *connectStreamBridge[T]) SetTrailer(metadata.MD)       {}
 
 // statusToConnectErr translates a gRPC status.Error (which is what the
 // gRPC service returns) into a *connect.Error with the matching code.

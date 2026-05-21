@@ -6,7 +6,7 @@ require (
 	connectrpc.com/connect v1.19.2
 	github.com/go-viper/mapstructure/v2 v2.4.0
 	github.com/panyam/demokit v0.0.19
-	github.com/panyam/servicekit v0.1.1
+	github.com/panyam/servicekit v0.1.2
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/viper v1.21.0
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.68.0
