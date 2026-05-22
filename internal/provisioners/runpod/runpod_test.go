@@ -314,6 +314,60 @@ func TestSpawn_ReturnsImmediately_NoSSH(t *testing.T) {
 	}
 }
 
+func TestWaitForSSHReady_HonorsPortMapping(t *testing.T) {
+	// RunPod sometimes NATs the container's port 22 to a random
+	// public-side port (e.g. 22085). sshTargetFromPod must surface
+	// THAT port -- otherwise the operator's ssh / the deployment
+	// executor's dial lands on the wrong service or times out.
+	f := &fakeRunPod{t: t, respond: func(method, path string, body []byte) (int, string) {
+		return 200, `{
+			"id":"rp-natted",
+			"publicIp":"1.2.3.4",
+			"portMappings":{"22":22085},
+			"machine":{"gpuTypeId":"NVIDIA RTX A5000"}
+		}`
+	}}
+	srv := httptest.NewServer(f.handler())
+	t.Cleanup(srv.Close)
+	client := NewClient("test-api-key", WithBaseURL(srv.URL), WithHTTPClient(srv.Client()))
+	p := New(client, WithSSHProbe(noopSSHProbe))
+
+	ssh, err := p.WaitForSSHReady(context.Background(), "rp-natted")
+	if err != nil {
+		t.Fatalf("WaitForSSHReady: %v", err)
+	}
+	if ssh.GetHost() != "1.2.3.4" {
+		t.Errorf("ssh.host = %q, want 1.2.3.4", ssh.GetHost())
+	}
+	if ssh.GetPort() != 22085 {
+		t.Errorf("ssh.port = %d, want 22085 (NATed external)", ssh.GetPort())
+	}
+}
+
+func TestWaitForSSHReady_FallsBackToPort22(t *testing.T) {
+	// No portMappings reported -- the pod exposes container port 22
+	// on the public IP directly. Fall back to 22.
+	f := &fakeRunPod{t: t, respond: func(method, path string, body []byte) (int, string) {
+		return 200, `{
+			"id":"rp-direct",
+			"publicIp":"5.6.7.8",
+			"machine":{"gpuTypeId":"NVIDIA RTX A5000"}
+		}`
+	}}
+	srv := httptest.NewServer(f.handler())
+	t.Cleanup(srv.Close)
+	client := NewClient("test-api-key", WithBaseURL(srv.URL), WithHTTPClient(srv.Client()))
+	p := New(client, WithSSHProbe(noopSSHProbe))
+
+	ssh, err := p.WaitForSSHReady(context.Background(), "rp-direct")
+	if err != nil {
+		t.Fatalf("WaitForSSHReady: %v", err)
+	}
+	if ssh.GetPort() != 22 {
+		t.Errorf("ssh.port = %d, want 22 (no NAT reported)", ssh.GetPort())
+	}
+}
+
 func TestWaitForSSHReady_PollsUntilPublicIPAppears(t *testing.T) {
 	// Models the real RunPod timing: first GET returns the pod
 	// without publicIp; a follow-up GET returns it populated.

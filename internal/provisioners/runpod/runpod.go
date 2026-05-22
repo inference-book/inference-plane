@@ -385,19 +385,39 @@ func (p *Provider) waitForSSHPort(ctx context.Context, target *provisionerv1.Ssh
 	}
 }
 
-// sshTargetFromPod builds a SshTarget from a podBody, with sane
-// defaults (port 22, user root). Returns nil when PublicIP is empty
-// so callers can distinguish "haven't observed an IP yet" from
-// "observed an IP and it's literally blank."
+// sshTargetFromPod builds a SshTarget from a podBody. Honors RunPod's
+// portMappings field -- a pod whose internal port 22 is NATed to a
+// random external port (e.g. 22085) returns that external port, not
+// 22, so the operator's ssh / the deployment executor's dial lands
+// on the container's sshd and not the host's. Returns nil when
+// PublicIP is empty so callers can distinguish "haven't observed an
+// IP yet" from "observed an IP and it's literally blank."
 func sshTargetFromPod(pod *podBody) *provisionerv1.SshTarget {
 	if pod == nil || pod.PublicIP == "" {
 		return nil
 	}
 	return &provisionerv1.SshTarget{
 		Host: pod.PublicIP,
-		Port: 22,
+		Port: sshPortFromPod(pod),
 		User: "root",
 	}
+}
+
+// sshPortFromPod resolves the externally-dialable port for the
+// container's sshd. RunPod sometimes maps the container's port 22
+// to an arbitrary public-side port (random in the dynamic-port
+// range); the operator dials that public port, RunPod's NAT
+// forwards to container:22. Without the lookup we'd dial port 22
+// directly and either hit the host's sshd (wrong keys) or time
+// out (no service listening on that port).
+//
+// Falls back to 22 when no mapping is reported -- some RunPod
+// configurations expose port 22 as-is on the public IP.
+func sshPortFromPod(pod *podBody) int32 {
+	if mapped, ok := pod.PortMappings["22"]; ok && mapped > 0 {
+		return int32(mapped)
+	}
+	return 22
 }
 
 // Terminate calls DELETE /pods/{id}. Idempotent: a 404 (not found)
@@ -508,7 +528,7 @@ func (p *Provider) podToInstance(pod *podBody, spec *provisionerv1.Spec, resolve
 	ssh := &provisionerv1.SshTarget{}
 	if pod.PublicIP != "" {
 		ssh.Host = pod.PublicIP
-		ssh.Port = 22
+		ssh.Port = sshPortFromPod(pod)
 		ssh.User = "root"
 	}
 
@@ -668,6 +688,14 @@ type podBody struct {
 	DesiredStatus string         `json:"desiredStatus"`
 	PublicIP      string         `json:"publicIp"`
 	Ports         []string       `json:"ports"`
+	// PortMappings encodes RunPod's NAT for ports declared in the
+	// create-pod request. Keys are container-internal ports (as
+	// strings, JSON-style), values are the public-IP-side ports.
+	// Example: {"22": 22085} means an operator dialing publicIp:22085
+	// reaches the container's port 22. SSH wires this through into
+	// Ssh.Port; without the translation, every dial hits the host's
+	// sshd or nothing at all.
+	PortMappings  map[string]int `json:"portMappings"`
 	Machine       *podMachine    `json:"machine"`
 }
 
