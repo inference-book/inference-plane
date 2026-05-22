@@ -148,6 +148,7 @@ func resetInstanceFlags() {
 
 	listProvider = ""
 	listRemote = false
+	listAll = false
 
 	describeRemote = false
 
@@ -242,6 +243,70 @@ func TestList_Empty(t *testing.T) {
 	}
 	if !strings.Contains(out, "(no instances)") {
 		t.Errorf("empty list should say (no instances); got:\n%s", out)
+	}
+}
+
+func TestList_HidesTerminatedByDefault(t *testing.T) {
+	// Create + destroy -> state=TERMINATED. Default list should
+	// hide it; --all should surface it. Mirrors `docker ps` (no -a)
+	// hiding exited containers.
+	env := newTestEnv(t, "mock")
+	if _, err := runCmd(t, env,
+		"create", "mock", "alpha", "--class", "small",
+	); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := runCmd(t, env, "destroy", "alpha"); err != nil {
+		t.Fatalf("destroy: %v", err)
+	}
+
+	out, err := runCmd(t, env, "list")
+	if err != nil {
+		t.Fatalf("list: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "(no instances)") {
+		t.Errorf("default list should hide terminated; got:\n%s", out)
+	}
+
+	outAll, err := runCmd(t, env, "list", "--all")
+	if err != nil {
+		t.Fatalf("list --all: %v\n%s", err, outAll)
+	}
+	if !strings.Contains(outAll, "alpha") {
+		t.Errorf("--all should show terminated alpha; got:\n%s", outAll)
+	}
+	if !strings.Contains(outAll, "TERMINATED") {
+		t.Errorf("--all should report TERMINATED state; got:\n%s", outAll)
+	}
+}
+
+func TestList_HidesTerminatedAlongsideLive(t *testing.T) {
+	// Mix of states: one live, one terminated. Default list shows
+	// only the live one; --all shows both.
+	env := newTestEnv(t, "mock")
+	if _, err := runCmd(t, env,
+		"create", "mock", "alpha", "--class", "small",
+	); err != nil {
+		t.Fatalf("create alpha: %v", err)
+	}
+	if _, err := runCmd(t, env,
+		"create", "mock", "beta", "--class", "small",
+	); err != nil {
+		t.Fatalf("create beta: %v", err)
+	}
+	if _, err := runCmd(t, env, "destroy", "beta"); err != nil {
+		t.Fatalf("destroy beta: %v", err)
+	}
+
+	out, err := runCmd(t, env, "list")
+	if err != nil {
+		t.Fatalf("list: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "alpha") {
+		t.Errorf("default list missing live alpha; got:\n%s", out)
+	}
+	if strings.Contains(out, "beta") {
+		t.Errorf("default list should hide terminated beta; got:\n%s", out)
 	}
 }
 

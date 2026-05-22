@@ -201,6 +201,7 @@ func resetDeploymentFlags() {
 
 	listDeploymentInstance = ""
 	listDeploymentState = ""
+	listDeploymentAll = false
 
 	watchTimeout = 10 * time.Minute
 
@@ -521,6 +522,65 @@ func TestDeploymentList_InvalidState(t *testing.T) {
 	_, err := runDeploymentCmd(t, env, "list", "--state", "bogus")
 	if err == nil {
 		t.Fatal("expected error for bogus state")
+	}
+}
+
+func TestDeploymentList_HidesTerminatedByDefault(t *testing.T) {
+	// Deploy + destroy -> state=TERMINATED. Default list should
+	// hide it; --all should surface it.
+	env := newDeploymentTestEnv(t)
+	if _, err := runDeploymentCmd(t, env,
+		"deploy", "my-llama",
+		"--instance", "my-pod",
+		"--image", "vllm/vllm-openai:0.7.0",
+		"--model", "Qwen/Qwen2.5-1.5B-Instruct",
+	); err != nil {
+		t.Fatalf("seed deploy: %v", err)
+	}
+	if _, err := runDeploymentCmd(t, env, "destroy", "my-llama"); err != nil {
+		t.Fatalf("destroy: %v", err)
+	}
+
+	out, err := runDeploymentCmd(t, env, "list")
+	if err != nil {
+		t.Fatalf("list: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "(no deployments)") {
+		t.Errorf("default list should hide terminated; got:\n%s", out)
+	}
+
+	outAll, err := runDeploymentCmd(t, env, "list", "--all")
+	if err != nil {
+		t.Fatalf("list --all: %v\n%s", err, outAll)
+	}
+	if !strings.Contains(outAll, "my-llama") {
+		t.Errorf("--all should show terminated my-llama; got:\n%s", outAll)
+	}
+}
+
+func TestDeploymentList_StateOverridesHide(t *testing.T) {
+	// An explicit --state TERMINATED bypasses the default hide and
+	// returns terminated records (the operator named the state they
+	// want, so honor it).
+	env := newDeploymentTestEnv(t)
+	if _, err := runDeploymentCmd(t, env,
+		"deploy", "my-llama",
+		"--instance", "my-pod",
+		"--image", "vllm/vllm-openai:0.7.0",
+		"--model", "Qwen/Qwen2.5-1.5B-Instruct",
+	); err != nil {
+		t.Fatalf("seed deploy: %v", err)
+	}
+	if _, err := runDeploymentCmd(t, env, "destroy", "my-llama"); err != nil {
+		t.Fatalf("destroy: %v", err)
+	}
+
+	out, err := runDeploymentCmd(t, env, "list", "--state", "terminated")
+	if err != nil {
+		t.Fatalf("list --state terminated: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "my-llama") {
+		t.Errorf("--state terminated should surface my-llama without --all; got:\n%s", out)
 	}
 }
 
