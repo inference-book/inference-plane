@@ -1,15 +1,16 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"time"
 
 	"github.com/spf13/cobra"
 
-	"github.com/inference-book/inference-plane/internal/provisioners/state"
-	"github.com/inference-book/inference-plane/internal/sshkeys"
+	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
 )
 
 var instanceSSHCmd = &cobra.Command{
@@ -20,11 +21,15 @@ var instanceSSHCmd = &cobra.Command{
 operator's iplane-managed keypair. Saves the operator from having to
 locate the private key on disk or set up an SSH config block.
 
-The verb reads the instance's ssh.host / ssh.port / ssh.user from
-the local state file (so 'iplane instance wait' must have populated
-them for providers like RunPod), writes the private key to a temp
-file with 0600 permissions, and exec's the system 'ssh' binary
-against it.
+In in-process mode (default) the verb reads the keystore directly.
+With --service-url it fetches the key bytes via the GetInstanceSSHKey
+RPC from the running iplane serve, materializes them to a 0600 temp
+file, runs ssh, and removes the temp file. Either way the operator
+sees the same flow.
+
+Security note: --service-url mode causes private key bytes to traverse
+the gRPC connection. The v0.1 control plane has no per-operator auth;
+rely on network isolation (localhost / private network) for safety.
 
 Pass extra ssh flags after a literal '--':
 
@@ -35,71 +40,51 @@ Pass extra ssh flags after a literal '--':
   iplane instance ssh my-pod -- -L 8000:localhost:8000
 
   # one-shot remote command
-  iplane instance ssh my-pod -- cat /etc/os-release
-
-In-process mode only. With --service-url the keystore lives on the
-server and the CLI has no way to read the private key bytes; use a
-plain ssh command from the host running 'iplane serve' instead.`,
+  iplane instance ssh my-pod -- cat /etc/os-release`,
 	RunE: runInstanceSSH,
-	// Allow flags after positional args via DisableFlagParsing -- we
-	// parse args ourselves so anything after '--' gets passed through
-	// to ssh literally.
-	DisableFlagParsing: false,
 }
 
 func runInstanceSSH(cmd *cobra.Command, args []string) error {
-	if instanceServiceURL != "" {
-		return fmt.Errorf("iplane instance ssh requires in-process mode (the CLI must read the private key directly); --service-url is set. From the host running iplane serve, use a plain 'ssh -i <key>' instead.")
-	}
-
 	id := args[0]
 	extraArgs := args[1:]
 
-	dir, err := resolveStateDir()
+	client, err := buildClient()
 	if err != nil {
 		return err
 	}
-	store, err := state.Open(dir, instanceOperatorID)
+
+	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
+	defer cancel()
+
+	// DescribeInstance gives us ssh.host / ssh.port. Source=LOCAL is
+	// fine -- if state is stale (instance terminated since last sync),
+	// ssh will fail loudly on connect, not silently succeed against
+	// the wrong host.
+	descResp, err := client.DescribeInstance(ctx, &provisionerv1.DescribeInstanceRequest{
+		Id:     id,
+		Source: provisionerv1.Source_SOURCE_LOCAL,
+	})
 	if err != nil {
-		return fmt.Errorf("open state store: %w", err)
+		return fmt.Errorf("describe %q: %w", id, err)
 	}
-	file, err := store.Read()
-	if err != nil {
-		return fmt.Errorf("read state: %w", err)
-	}
-	inst, ok := file.Instances[id]
-	if !ok {
-		return fmt.Errorf("no instance with id %q", id)
-	}
+	inst := descResp.GetInstance()
 	sshTarget := inst.GetSsh()
 	if sshTarget == nil || sshTarget.GetHost() == "" {
 		return fmt.Errorf("instance %q has no SSH endpoint in state (try 'iplane instance wait %s' first)", id, id)
 	}
 
-	keyStore, err := sshkeys.New(sshkeys.WithDir(filepath.Join(dir, "keys")))
+	keyResp, err := client.GetInstanceSSHKey(ctx, &provisionerv1.GetInstanceSSHKeyRequest{Id: id})
 	if err != nil {
-		return fmt.Errorf("open ssh key store: %w", err)
-	}
-	kp, err := keyStore.EnsureKeyPair(instanceOperatorID, inst.GetProvider())
-	if err != nil {
-		return fmt.Errorf("load ssh keypair for (%s,%s): %w", instanceOperatorID, inst.GetProvider(), err)
-	}
-	pemBytes, err := kp.MarshalPrivatePEM()
-	if err != nil {
-		return fmt.Errorf("marshal private key: %w", err)
+		return fmt.Errorf("fetch ssh key for %q: %w", id, err)
 	}
 
-	// Write the private key to a temp file. ssh refuses key files with
-	// permissions wider than 0600, so we create with 0600 directly.
-	// CreateTemp + Chmod has a TOCTOU window; opening with explicit
-	// mode via OpenFile closes it.
 	tmpDir, err := os.MkdirTemp("", "iplane-ssh-*")
 	if err != nil {
 		return fmt.Errorf("create temp dir: %w", err)
 	}
 	defer os.RemoveAll(tmpDir)
 	keyPath := filepath.Join(tmpDir, "id_ed25519")
-	if err := os.WriteFile(keyPath, pemBytes, 0600); err != nil {
+	if err := os.WriteFile(keyPath, keyResp.GetPrivateKeyPem(), 0600); err != nil {
 		return fmt.Errorf("write temp key: %w", err)
 	}
 
@@ -108,7 +93,10 @@ func runInstanceSSH(cmd *cobra.Command, args []string) error {
 	if port == 0 {
 		port = 22
 	}
-	user := sshTarget.GetUser()
+	user := keyResp.GetUser()
+	if user == "" {
+		user = sshTarget.GetUser()
+	}
 	if user == "" {
 		user = "root"
 	}
@@ -116,9 +104,6 @@ func runInstanceSSH(cmd *cobra.Command, args []string) error {
 	sshArgs := []string{
 		"-i", keyPath,
 		"-p", fmt.Sprintf("%d", port),
-		// v0.1: trust the provider's pod identity. TOFU + a managed
-		// known_hosts file is a v0.2+ defense layer. Suppressing the
-		// host-key prompt matches what the deployment executor does.
 		"-o", "StrictHostKeyChecking=no",
 		"-o", "UserKnownHostsFile=/dev/null",
 		"-o", "LogLevel=ERROR",
@@ -131,7 +116,6 @@ func runInstanceSSH(cmd *cobra.Command, args []string) error {
 	sshCmd.Stdout = os.Stdout
 	sshCmd.Stderr = os.Stderr
 	if err := sshCmd.Run(); err != nil {
-		// Pass through ssh's own exit code so scripts can branch on it.
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			return exitWithCode(exitErr.ExitCode())
 		}
