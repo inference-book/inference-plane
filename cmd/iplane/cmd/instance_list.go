@@ -13,6 +13,7 @@ import (
 var (
 	listProvider string
 	listRemote   bool
+	listAll      bool
 )
 
 var instanceListCmd = &cobra.Command{
@@ -33,7 +34,13 @@ as different questions worth asking separately:
                        iplane that match the operator tag.
 
 --remote requires --provider (we don't enumerate all configured
-providers silently; see design doc line 99 -- v0.1 punts that to v0.3).`,
+providers silently; see design doc line 99 -- v0.1 punts that to v0.3).
+
+By default the list HIDES instances in terminal states (TERMINATED,
+FAILED) so an operator's day-to-day view is just live resources. The
+state file still has the records -- 'iplane instance describe <id>'
+works on them. Pass --all to include terminal-state records in the
+list output (useful for audit / debugging).`,
 	RunE: runInstanceList,
 }
 
@@ -68,7 +75,29 @@ func runInstanceList(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("list: %w", err)
 	}
 
-	return renderInstances(cmd.OutOrStdout(), instanceOutput, resp.GetInstances())
+	instances := resp.GetInstances()
+	if !listAll {
+		instances = filterLiveInstances(instances)
+	}
+	return renderInstances(cmd.OutOrStdout(), instanceOutput, instances)
+}
+
+// filterLiveInstances drops records in terminal states (TERMINATED,
+// FAILED). Default behavior of `iplane instance list` so the day-to-day
+// view is just live resources; the operator opts into the full audit
+// view via --all. Matches `docker ps` (no `-a`, hides exited
+// containers).
+func filterLiveInstances(in []*provisionerv1.Instance) []*provisionerv1.Instance {
+	out := make([]*provisionerv1.Instance, 0, len(in))
+	for _, inst := range in {
+		switch inst.GetState() {
+		case provisionerv1.InstanceState_INSTANCE_STATE_TERMINATED,
+			provisionerv1.InstanceState_INSTANCE_STATE_FAILED:
+			continue
+		}
+		out = append(out, inst)
+	}
+	return out
 }
 
 func init() {
@@ -77,4 +106,5 @@ func init() {
 	f := instanceListCmd.Flags()
 	f.StringVar(&listProvider, "provider", "", `restrict to one provider (required with --remote)`)
 	f.BoolVar(&listRemote, "remote", false, `query the provider directly rather than the local state file`)
+	f.BoolVar(&listAll, "all", false, `include TERMINATED and FAILED instances (hidden by default)`)
 }
