@@ -143,7 +143,8 @@ func init() {
 	f := deploymentDeployCmd.Flags()
 	f.StringVar(&deployInstanceID, "instance", "", `target instance id (required)`)
 	f.StringVar(&deployImage, "image", "", `engine container image, e.g. vllm/vllm-openai:0.7.0 (required)`)
-	f.StringVar(&deployModel, "model", "", `model id, e.g. Qwen/Qwen2.5-1.5B-Instruct (required)`)
+	f.StringVar(&deployModel, "model", "",
+		`HF model id, e.g. Qwen/Qwen2.5-1.5B-Instruct (required; see 'iplane deployment models' for a starter list)`)
 	f.Int32Var(&deployEnginePort, "engine-port", 8000, `port the engine listens on inside the container`)
 	f.StringSliceVar(&deployEngineArgs, "engine-args", nil,
 		`additional args passed to the engine entrypoint (comma-separated or repeated)`)
