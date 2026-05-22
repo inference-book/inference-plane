@@ -11,6 +11,28 @@ The repo and the book follow the **Tanenbaum / MINIX** model:
 
 Two audiences, one project. Readers can take three doors in: clone-and-run as a product user, read the book to understand the design, or read the code to see how the implementation actually works.
 
+## What iplane is — own vs adopt vs pluggable
+
+iplane is **not** an inference engine, a model server, or a competitor to Ray / Triton / vLLM. It is the **provisioning + cost + scheduling control plane** that runs *above* those systems. The inference stack has layers; iplane occupies specific ones and is deliberate about the rest:
+
+| Layer | Does | Examples | iplane's stance |
+| ----- | ---- | -------- | --------------- |
+| **Engine** | token generation, KV cache, attention kernels | vLLM, TensorRT-LLM, SGLang | **Adopt.** We run engines; we never reimplement one. The engine is a property of the *image*, not something iplane installs. |
+| **Model server** | load/unload models on a node, batch, expose an API | Triton, Ray Serve, `vllm serve` | **Pluggable.** Ship a teachable default (image-as-pod / `vllm serve`); Triton / Ray slot in behind a capability interface. |
+| **Scheduler** | place models across a fleet, bin-pack by VRAM | Ray scheduler, kube-scheduler | **Own** (pluggable — k8s / Ray delegation is possible). The from-scratch version is the teaching centerpiece. |
+| **Provisioning** | rent GPUs across providers, manage keys / spot | — nothing else spans providers | **Own.** The moat. |
+| **Cost-aware placement** | cheapest provider with capacity | — nothing else models this | **Own.** Tied to provisioning. |
+
+**The thesis:** Ray, Triton, and Kubernetes all assume the cluster already exists — they schedule onto / serve on hardware you already have. The layer iplane uniquely owns is *creating* that capacity across heterogeneous providers and deciding what runs where, cost-first. iplane **embraces** the SOTA (runs Triton / Ray / vLLM as first-class) and **complements** it with that missing layer. The from-scratch model server + scheduler are *teaching scaffolds* (the MINIX move), not production competitors — at scale you'd reach for Ray Serve / KServe, and the capability seams let you.
+
+**Core concepts (stable across versions; the scheduler's intelligence grows, not the concepts):**
+
+- **Instance** = `GPU + Image` — provisioned capacity running an engine-carrying image; SSH-able for debugging.
+- **Deployment** = a *model placed on an instance* by the scheduler.
+- **Scheduler** = maps deployment → instance. v0.1: trivial (1:1, fresh instance per deployment). v0.2: horizontal replicas. v1.0 (lab): VRAM bin-packing + per-model lifecycle across a fleet.
+
+**Extension mechanism**: Go capability interfaces discovered at runtime (`Provider`, `KeyRegistrar`, `SSHReadyWaiter`, and the model-serving `Deployer` today; `ModelServer` + `Scheduler` as they gain second implementations). Each interface is *extracted when a second impl appears*, not invented speculatively.
+
 ## Topology (v0.1)
 
 One process, two listeners.
