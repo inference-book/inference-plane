@@ -698,3 +698,22 @@ func TestDeploymentDestroy_NotFound(t *testing.T) {
 		t.Fatal("destroy of missing id should error in dry-run")
 	}
 }
+
+func TestDeploymentModels_ListsCuratedSet(t *testing.T) {
+	env := newDeploymentTestEnv(t)
+	out, err := runDeploymentCmd(t, env, "models")
+	if err != nil {
+		t.Fatalf("models: %v\n%s", err, out)
+	}
+	// Every curated id must appear in the listing.
+	for _, m := range curatedModels {
+		if !strings.Contains(out, m.ID) {
+			t.Errorf("models output missing %q; got:\n%s", m.ID, out)
+		}
+	}
+	// And the HF search URL must be surfaced so operators have somewhere
+	// to look beyond the starter list.
+	if !strings.Contains(out, hfHubSearchURL) {
+		t.Errorf("models output missing HF Hub URL; got:\n%s", out)
+	}
+}
