@@ -94,7 +94,7 @@ func (t *rewriteTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 }
 
 const iplaneKey1 = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIN1qOJSfqQS1J0CKvqg7n0X2Kvz5kZbAVfAHvKvYrPLB iplane-default-runpod-2026-05-20T15:30:00Z\n"
-const iplaneKey2 = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMR1qOJSfqQS1J0CKvqg7n0X2Kvz5kZbAVfAHvKvYrPLB iplane-default-runpod-2026-05-20T15:30:00Z\n"
+const iplaneKey2 = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIN1qOJSfqQS1J0CKvqg7n0X2Kvz5kZbAVfAHvKvYrPLC iplane-default-runpod-2026-05-20T15:30:00Z\n"
 const userKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBBQQbcAVcAVcAVcAVcAVcAVcAVcAVcAVcAVcAVcAVcA user@laptop\n"
 
 func TestEnsurePublicKey_UploadsWhenAbsent(t *testing.T) {
@@ -148,9 +148,12 @@ func TestEnsurePublicKey_PreservesOtherKeys(t *testing.T) {
 
 func TestEnsurePublicKey_ReplacesStaleIplaneKey(t *testing.T) {
 	// Old iplane key with the same comment-prefix but DIFFERENT bytes
-	// (e.g. operator's key got regenerated). EnsurePublicKey should
-	// append the new one; cleanup of the old is a separate concern
-	// (rotation), tracked for v0.2.
+	// (e.g. operator wiped the keystore and a new keypair was
+	// generated). EnsurePublicKey now PRUNES the stale iplane entry
+	// and writes only the current key -- prevents the blob from
+	// growing unbounded across keystore regenerations, and avoids
+	// confusing RunPod's pod-init when multiple iplane lines are
+	// present.
 	f := newFakeGraphQL(t)
 	f.currentPubKey = iplaneKey2 + userKey
 	p := providerForTest(t, f)
@@ -159,7 +162,53 @@ func TestEnsurePublicKey_ReplacesStaleIplaneKey(t *testing.T) {
 		t.Fatalf("EnsurePublicKey: %v", err)
 	}
 	if len(f.updates) != 1 {
-		t.Fatalf("updateUserSettings called %d times, want 1 (different bytes, should still upload)", len(f.updates))
+		t.Fatalf("updateUserSettings called %d times, want 1", len(f.updates))
+	}
+	written := f.updates[0]
+	if !strings.Contains(written, strings.TrimSuffix(iplaneKey1, "\n")) {
+		t.Errorf("written blob missing the current iplane key:\n%s", written)
+	}
+	if strings.Contains(written, strings.TrimSuffix(iplaneKey2, "\n")) {
+		t.Errorf("stale iplane key was NOT pruned; blob still contains it:\n%s", written)
+	}
+	if !strings.Contains(written, strings.TrimSuffix(userKey, "\n")) {
+		t.Errorf("operator's own key was NOT preserved; blob:\n%s", written)
+	}
+}
+
+func TestEnsurePublicKey_NoOp_WhenCurrentKeyAlone(t *testing.T) {
+	// The blob is already exactly our current iplane key and nothing
+	// else. EnsurePublicKey must not write -- avoids hammering RunPod
+	// on every CreateInstance.
+	f := newFakeGraphQL(t)
+	f.currentPubKey = iplaneKey1
+	p := providerForTest(t, f)
+
+	if err := p.EnsurePublicKey(context.Background(), []byte(iplaneKey1), "iplane-default-runpod-2026-05-20T15:30:00Z"); err != nil {
+		t.Fatalf("EnsurePublicKey: %v", err)
+	}
+	if len(f.updates) != 0 {
+		t.Errorf("expected zero updates; got %d", len(f.updates))
+	}
+}
+
+func TestEnsurePublicKey_PrunesEvenWhenCurrentKeyAlreadyPresent(t *testing.T) {
+	// Current key IS in the blob, but a stale iplane entry is also
+	// there (e.g. the blob accumulated across earlier keystores).
+	// EnsurePublicKey should still rewrite to prune the stale one.
+	f := newFakeGraphQL(t)
+	f.currentPubKey = iplaneKey2 + iplaneKey1 + userKey
+	p := providerForTest(t, f)
+
+	if err := p.EnsurePublicKey(context.Background(), []byte(iplaneKey1), "iplane-default-runpod-2026-05-20T15:30:00Z"); err != nil {
+		t.Fatalf("EnsurePublicKey: %v", err)
+	}
+	if len(f.updates) != 1 {
+		t.Fatalf("expected 1 update to prune stale entries; got %d", len(f.updates))
+	}
+	written := f.updates[0]
+	if strings.Contains(written, strings.TrimSuffix(iplaneKey2, "\n")) {
+		t.Errorf("stale iplane key was NOT pruned:\n%s", written)
 	}
 }
 

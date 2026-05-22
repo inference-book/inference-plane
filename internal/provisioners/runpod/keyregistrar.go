@@ -57,42 +57,71 @@ func (p *Provider) EnsurePublicKey(ctx context.Context, publicKey []byte, commen
 	}
 	wantMarshaled := ssh.MarshalAuthorizedKey(wantParsed)
 
-	// Iterate the existing blob, decide whether our key is present.
+	// Walk the existing blob:
+	//   - non-iplane lines are preserved verbatim (operator's own
+	//     keys, runpodctl entries, anything the RunPod UI added).
+	//   - iplane-tagged lines that match our exact bytes are KEPT
+	//     and flagged haveMatch; we can short-circuit the write.
+	//   - iplane-tagged lines with bytes that DON'T match (stale
+	//     keys from prior runs with a wiped keystore) are dropped.
+	//     A long-running operator account would otherwise accumulate
+	//     iplane-* entries forever, eventually risking RunPod's
+	//     pod-init not honoring whatever's past whatever line limit
+	//     it imposes.
+	var kept [][]byte
+	haveMatch := false
+	prunedStale := false
 	rest := []byte(current)
 	for len(rest) > 0 {
+		lineStart := rest
 		parsed, gotComment, _, next, parseErr := ssh.ParseAuthorizedKey(rest)
 		if parseErr != nil {
-			// Malformed line in the existing blob -- skip past it.
-			// RunPod's web UI tolerates this; we should too.
+			// Malformed line in the existing blob -- preserve it
+			// verbatim and skip past.
 			if idx := bytes.IndexByte(rest, '\n'); idx >= 0 {
+				kept = append(kept, append([]byte(nil), rest[:idx]...))
 				rest = rest[idx+1:]
 				continue
 			}
+			kept = append(kept, append([]byte(nil), rest...))
 			break
 		}
+		consumed := len(lineStart) - len(next)
+		lineBytes := lineStart[:consumed]
 		rest = next
 		if !sshkeys.IsIplaneComment(gotComment) {
+			kept = append(kept, append([]byte(nil), bytes.TrimRight(lineBytes, "\n")...))
 			continue
 		}
 		if bytes.Equal(ssh.MarshalAuthorizedKey(parsed), wantMarshaled) {
-			// Already present -- idempotent no-op.
-			return nil
+			// Our exact key already in the blob -- preserve.
+			kept = append(kept, append([]byte(nil), bytes.TrimRight(lineBytes, "\n")...))
+			haveMatch = true
+			continue
 		}
+		// Stale iplane key from a prior keystore -- drop.
+		prunedStale = true
 	}
 
-	// Not present. Append and write back the full blob. Preserve
-	// whatever else RunPod's existing pubKey contained (user's own
-	// keys, runpodctl entries, etc.).
-	newBlob := strings.TrimRight(current, "\n")
-	if newBlob != "" {
-		newBlob += "\n"
-	}
-	newBlob += string(publicKey)
-	if !strings.HasSuffix(newBlob, "\n") {
-		newBlob += "\n"
+	// Fast path: our key was already in the blob AND nothing else
+	// needed pruning. No write needed -- idempotent no-op.
+	if haveMatch && !prunedStale {
+		return nil
 	}
 
-	return p.updatePubKeyBlob(ctx, newBlob)
+	// Rebuild. Append our key if it wasn't already present after
+	// pruning stale entries.
+	var sb strings.Builder
+	for _, line := range kept {
+		sb.Write(line)
+		sb.WriteByte('\n')
+	}
+	if !haveMatch {
+		sb.Write(bytes.TrimRight(publicKey, "\n"))
+		sb.WriteByte('\n')
+	}
+
+	return p.updatePubKeyBlob(ctx, sb.String())
 }
 
 // graphqlResponse is the envelope every GraphQL call returns:
@@ -160,6 +189,13 @@ func (p *Provider) gqlPost(ctx context.Context, query string) (json.RawMessage, 
 		return nil, fmt.Errorf("graphql errors: %s", strings.Join(msgs, "; "))
 	}
 	return env.Data, nil
+}
+
+// FetchUserPubKey exposes the GraphQL fetch of the user-level
+// pubKey blob so diagnostic commands (iplane runpod debug-keys) can
+// surface it without re-implementing the GraphQL transport.
+func (p *Provider) FetchUserPubKey(ctx context.Context) (string, error) {
+	return p.fetchPubKeyBlob(ctx)
 }
 
 // fetchPubKeyBlob reads the operator's current authorized_keys-style
