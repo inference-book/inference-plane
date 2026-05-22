@@ -224,6 +224,72 @@ func TestDeploy_PullFailure_GoesToFAILED_NoRun(t *testing.T) {
 	}
 }
 
+func TestDeploy_DockerInstallFailure_GoesToFAILED_NoPull(t *testing.T) {
+	// command -v docker fails AND apt-get install fails -> the
+	// executor must fail BEFORE pulling. Catches the runpod/pytorch
+	// regression where the base image has no docker and we'd crash
+	// at the first inspect with `command not found`.
+	r := &fakeRunner{}
+	r.on("command -v docker", fakeResp{exitCode: 1})
+	r.on("apt-get install", fakeResp{
+		stderr:   "bash: line 1: apt-get: command not found",
+		exitCode: 127,
+	})
+
+	c := &collector{}
+	exec := newExecutorWithFake(r)
+	err := exec.Deploy(context.Background(), testDep(), testInst(), testKey(t), c.emit)
+	if err == nil {
+		t.Fatal("expected error when docker install fails")
+	}
+	// No docker.* command should have fired after the failed install.
+	if r.callsContaining("docker inspect") > 0 {
+		t.Errorf("docker inspect should not fire after install failure; got %d", r.callsContaining("docker inspect"))
+	}
+	if r.callsContaining("docker pull") > 0 {
+		t.Errorf("docker pull should not fire after install failure; got %d", r.callsContaining("docker pull"))
+	}
+	if c.lastState() != provisionerv1.DeploymentState_DEPLOYMENT_STATE_FAILED {
+		t.Errorf("final state = %v, want FAILED", c.lastState())
+	}
+	last := c.updates[len(c.updates)-1]
+	if !strings.Contains(last.FailureReason, "--base-image") {
+		t.Errorf("failure reason should point at --base-image; got %q", last.FailureReason)
+	}
+}
+
+func TestDeploy_DockerNeedsInstall_StillProceeds(t *testing.T) {
+	// command -v docker fails BUT apt-get install succeeds. The
+	// executor should install, then continue to the normal
+	// inspect/pull/run/health flow. Verifies the install isn't a
+	// dead-end -- once installed, the deploy progresses.
+	r := &fakeRunner{}
+	// First check fails.
+	r.on("command -v docker", fakeResp{exitCode: 1})
+	// Apt install succeeds (default-success branch matched by substring).
+	r.on("apt-get install", fakeResp{exitCode: 0})
+	// Then the standard fresh-container flow proceeds.
+	r.on("docker inspect", fakeResp{
+		stderr:   "No such object: iplane-deployment-my-llama",
+		exitCode: 1,
+	})
+	r.on("docker pull", fakeResp{stdout: "Pulled.\n"})
+	r.on("docker run", fakeResp{stdout: "abc1234\n"})
+	r.on("curl", fakeResp{stdout: "200"})
+
+	c := &collector{}
+	exec := newExecutorWithFake(r)
+	if err := exec.Deploy(context.Background(), testDep(), testInst(), testKey(t), c.emit); err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	if c.lastState() != provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING {
+		t.Errorf("final state = %v, want RUNNING (install -> proceed)", c.lastState())
+	}
+	if r.callsContaining("apt-get install -y docker.io") != 1 {
+		t.Errorf("expected exactly 1 apt install call; got %d", r.callsContaining("apt-get install -y docker.io"))
+	}
+}
+
 func TestDeploy_SSHConnectFailure_GoesToFAILED(t *testing.T) {
 	exec := NewExecutor(
 		WithDial(func(ctx context.Context, _ *provisionerv1.Instance, _ *sshkeys.KeyPair) (RemoteRunner, error) {

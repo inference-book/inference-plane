@@ -279,6 +279,78 @@ func TestHealth_503_ReturnsFalse(t *testing.T) {
 	}
 }
 
+func TestEnsureInstalled_AlreadyPresent_FastPath(t *testing.T) {
+	// `command -v docker` returns 0 -> docker is on the path. The
+	// helper must short-circuit; apt-get should never be invoked.
+	r := &fakeRunner{}
+	r.on("command -v docker", fakeResp{stdout: "/usr/bin/docker\n", exitCode: 0})
+
+	d := NewDocker(r)
+	if err := d.EnsureInstalled(context.Background()); err != nil {
+		t.Fatalf("EnsureInstalled: %v", err)
+	}
+	if got := r.callsContaining("apt-get"); got != 0 {
+		t.Errorf("apt-get should not run when docker is present; got %d calls", got)
+	}
+	if got := r.callsContaining("command -v docker"); got != 1 {
+		t.Errorf("expected 1 `command -v docker` call; got %d", got)
+	}
+}
+
+func TestEnsureInstalled_InstallsViaApt(t *testing.T) {
+	// `command -v docker` returns non-zero -> helper proceeds to
+	// apt-install. The install command must include apt-get update,
+	// docker.io install, daemon start, and a docker info verification.
+	r := &fakeRunner{}
+	r.on("command -v docker", fakeResp{exitCode: 1})
+	// The single install line is matched by any of its substrings.
+	r.on("apt-get install -y docker.io", fakeResp{exitCode: 0})
+
+	d := NewDocker(r)
+	if err := d.EnsureInstalled(context.Background()); err != nil {
+		t.Fatalf("EnsureInstalled: %v", err)
+	}
+
+	// Verify the install command shape -- catches regressions where
+	// any of the four required steps is dropped.
+	wantSubstrings := []string{
+		"apt-get update",
+		"apt-get install -y docker.io",
+		"systemctl start docker",
+		"service docker start",
+		"docker info",
+	}
+	for _, want := range wantSubstrings {
+		if got := r.callsContaining(want); got == 0 {
+			t.Errorf("install command missing %q; got calls:\n  %s", want, strings.Join(r.calls, "\n  "))
+		}
+	}
+}
+
+func TestEnsureInstalled_AptFailure_ActionableError(t *testing.T) {
+	// command -v fails AND apt-get install fails (e.g., alpine-based
+	// image with no apt). The error must name the most likely cause
+	// and point operators at --base-image rather than leaving them
+	// with the raw exit code.
+	r := &fakeRunner{}
+	r.on("command -v docker", fakeResp{exitCode: 1})
+	r.on("apt-get install", fakeResp{
+		stderr:   "bash: line 1: apt-get: command not found",
+		exitCode: 127,
+	})
+
+	d := NewDocker(r)
+	err := d.EnsureInstalled(context.Background())
+	if err == nil {
+		t.Fatal("EnsureInstalled should error when apt install fails")
+	}
+	for _, want := range []string{"--base-image", "doesn't include docker"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q should mention %q", err, want)
+		}
+	}
+}
+
 func TestShellEscape(t *testing.T) {
 	cases := []struct {
 		in, want string

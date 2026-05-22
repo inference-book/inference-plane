@@ -58,6 +58,60 @@ func NewDocker(r RemoteRunner) *Docker {
 	return &Docker{r: r}
 }
 
+// EnsureInstalled makes sure the docker CLI + daemon are present on
+// the remote host. Many RunPod base images (notably runpod/pytorch)
+// don't ship with docker -- a fresh pod fails at the first
+// `docker inspect` with `command not found`. This method runs
+// upfront so subsequent docker.* calls have something to talk to.
+//
+// Fast path: `command -v docker` exits 0, return nil. Cost: one
+// SSH command.
+//
+// Slow path: install via apt. The full apt sequence is a single
+// remote shell line so we don't need state across calls:
+//
+//   apt-get update -y && \
+//   DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io && \
+//   (systemctl start docker 2>/dev/null || service docker start 2>/dev/null || true) && \
+//   docker info >/dev/null 2>&1
+//
+// On any failure, returns a single actionable error pointing the
+// operator at --base-image. The most common cause is a non-apt base
+// image (alpine, distroless, etc); the message names that explicitly
+// so operators don't have to guess.
+func (d *Docker) EnsureInstalled(ctx context.Context) error {
+	// Fast path first -- avoid hitting apt at all when docker is
+	// already present (second deploy on the same pod, custom base
+	// image that ships docker, etc).
+	_, _, code, err := d.r.Run(ctx, "command -v docker")
+	if err != nil {
+		return fmt.Errorf("ensure docker: check failed: %w", err)
+	}
+	if code == 0 {
+		return nil
+	}
+
+	// Slow path: install via apt. Quiet by default (we surface
+	// failures with the captured stderr); operators wanting verbose
+	// output can re-run with IPLANE_RUNPOD_DEBUG and tail the daemon.
+	install := strings.Join([]string{
+		"apt-get update -y >/dev/null 2>&1",
+		"DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io >/dev/null 2>&1",
+		"(systemctl start docker 2>/dev/null || service docker start 2>/dev/null || true)",
+		"docker info >/dev/null 2>&1",
+	}, " && ")
+
+	_, stderr, code, err := d.r.Run(ctx, install)
+	if err != nil {
+		return fmt.Errorf("ensure docker: install command failed: %w", err)
+	}
+	if code != 0 {
+		return fmt.Errorf("ensure docker: install failed (exit %d): %s\n  the pod's base image likely doesn't include docker AND can't apt-install it (e.g., non-Debian-family image). Use --base-image with a docker-capable image, or pre-install docker on the pod template.",
+			code, strings.TrimSpace(string(stderr)))
+	}
+	return nil
+}
+
 // Inspect runs `docker inspect <name> --format=...` and parses the
 // state into a ContainerState. If the container does not exist,
 // returns ContainerState{Exists: false} with no error -- "not found"

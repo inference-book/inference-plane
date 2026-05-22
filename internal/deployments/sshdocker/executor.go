@@ -133,6 +133,21 @@ func (e *Executor) Deploy(ctx context.Context, dep *provisionerv1.Deployment, in
 	d := NewDocker(runner)
 	name := ContainerName(dep.GetId())
 
+	// Step 0: ensure docker is installed on the pod. Many RunPod
+	// base images (notably runpod/pytorch) don't ship with the docker
+	// CLI; without this we'd hit "command not found" on the first
+	// inspect. EnsureInstalled is cheap when docker is already
+	// present (one SSH for `command -v docker`); installs via apt
+	// when missing.
+	emit(StateUpdate{
+		State:           provisionerv1.DeploymentState_DEPLOYMENT_STATE_STARTING,
+		Phase:           "docker:ensuring",
+		ProgressMessage: "verifying docker is installed (auto-installing if not)",
+	})
+	if err := d.EnsureInstalled(ctx); err != nil {
+		return e.failed(emit, "docker:ensuring", "docker setup failed", err)
+	}
+
 	// Step 1: inspect what's currently on the box.
 	state, err := d.Inspect(ctx, name)
 	if err != nil {
