@@ -199,7 +199,7 @@ func runDemo() {
 			defer cancel()
 			_, err := client.ListInstances(rctx, connect.NewRequest(&provisionerv1.ListInstancesRequest{}))
 			if err != nil {
-				return demokit.Errf("cannot reach %s: %v (is `make serve` running?)", *url, err)
+				return abortDemo(cleanup, "cannot reach %s: %v (is `make serve` running?)", *url, err)
 			}
 			fmt.Println("  service reachable")
 			return nil
@@ -225,7 +225,7 @@ func runDemo() {
 				},
 			}))
 			if err != nil {
-				return demokit.Errf("CreateInstance: %v", err)
+				return abortDemo(cleanup, "CreateInstance: %v", err)
 			}
 			inst := resp.Msg.GetInstance()
 			mu.Lock()
@@ -251,7 +251,7 @@ func runDemo() {
 				Source: provisionerv1.Source_SOURCE_LOCAL,
 			}))
 			if err != nil {
-				return demokit.Errf("DescribeInstance: %v", err)
+				return abortDemo(cleanup, "DescribeInstance: %v", err)
 			}
 			inst := resp.Msg.GetInstance()
 			fmt.Printf("  state file says: state=%s, gpu=%s (%dGB), rate=$%.4f/hr\n",
@@ -277,7 +277,7 @@ func runDemo() {
 				},
 			}))
 			if err != nil {
-				return demokit.Errf("CreateInstance (idempotent): %v", err)
+				return abortDemo(cleanup, "CreateInstance (idempotent): %v", err)
 			}
 			fmt.Printf("  already_existed = %v (no provider call)\n", resp.Msg.GetAlreadyExisted())
 			return nil
@@ -291,7 +291,7 @@ func runDemo() {
 			defer cancel()
 			resp, err := client.ListInstances(rctx, connect.NewRequest(&provisionerv1.ListInstancesRequest{}))
 			if err != nil {
-				return demokit.Errf("ListInstances: %v", err)
+				return abortDemo(cleanup, "ListInstances: %v", err)
 			}
 			fmt.Printf("  local state: %d record(s)\n", len(resp.Msg.GetInstances()))
 			for _, inst := range resp.Msg.GetInstances() {
@@ -317,7 +317,7 @@ func runDemo() {
 					Provider: *provider,
 				}))
 				if err != nil {
-					return demokit.Errf("ListInstances (remote): %v", err)
+					return abortDemo(cleanup, "ListInstances (remote): %v", err)
 				}
 				fmt.Printf("  %s sees: %d instance(s) under this operator\n", *provider, len(resp.Msg.GetInstances()))
 				for _, inst := range resp.Msg.GetInstances() {
@@ -337,7 +337,7 @@ func runDemo() {
 			defer cancel()
 			resp, err := client.DestroyInstance(rctx, connect.NewRequest(&provisionerv1.DestroyInstanceRequest{Id: demoID}))
 			if err != nil {
-				return demokit.Errf("DestroyInstance: %v", err)
+				return abortDemo(cleanup, "DestroyInstance: %v", err)
 			}
 			fmt.Printf("  final state: %s (terminated_at=%s)\n",
 				resp.Msg.GetInstance().GetState(),
@@ -368,4 +368,25 @@ func regionLabel(r string) string {
 		return "(unpinned)"
 	}
 	return r
+}
+
+// abortDemo is the fail-fast helper used by step Run callbacks in
+// place of `return demokit.Errf(...)`. Reasoning: demokit v0.0.23
+// records an errored step and proceeds to the next one, which
+// cascades unrelated failures from a single root cause. For these
+// walkthroughs we want the demo to stop where it first goes wrong.
+//
+// abortDemo runs the cleanup closure (deferred-terminate paid
+// resources), prints the failure to stderr, and exits non-zero.
+// Returns *demokit.StepResult only so callers can `return
+// abortDemo(...)` to match the existing call shape; the function
+// never actually returns to the caller.
+func abortDemo(cleanup func(), format string, args ...any) *demokit.StepResult {
+	msg := fmt.Sprintf(format, args...)
+	fmt.Fprintf(os.Stderr, "\n\nStep failed: %s\n", msg)
+	if cleanup != nil {
+		cleanup()
+	}
+	os.Exit(1)
+	return nil // unreachable
 }
