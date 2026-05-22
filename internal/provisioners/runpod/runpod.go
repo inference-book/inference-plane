@@ -649,19 +649,21 @@ func isWrappedNotFound(err error) bool {
 // Go side. Omit-empty everywhere; the API treats missing fields as
 // "use the documented default."
 type createPodRequest struct {
-	Name              string   `json:"name,omitempty"`
-	ImageName         string   `json:"imageName,omitempty"`
-	GPUTypeIDs        []string `json:"gpuTypeIds,omitempty"`
-	GPUTypePriority   string   `json:"gpuTypePriority,omitempty"`
-	GPUCount          int      `json:"gpuCount,omitempty"`
-	MinRAMPerGPU      int      `json:"minRAMPerGPU,omitempty"` // RunPod expresses RAM per-GPU; we convert from per-instance.
-	CloudType         string   `json:"cloudType,omitempty"`
-	ComputeType       string   `json:"computeType,omitempty"`
-	ContainerDiskInGB int      `json:"containerDiskInGb,omitempty"`
-	VolumeInGB        int      `json:"volumeInGb,omitempty"`
-	NetworkVolumeID   string   `json:"networkVolumeId,omitempty"`
-	Ports             []string `json:"ports,omitempty"`
-	Interruptible     bool     `json:"interruptible,omitempty"`
+	Name              string            `json:"name,omitempty"`
+	ImageName         string            `json:"imageName,omitempty"`
+	GPUTypeIDs        []string          `json:"gpuTypeIds,omitempty"`
+	GPUTypePriority   string            `json:"gpuTypePriority,omitempty"`
+	GPUCount          int               `json:"gpuCount,omitempty"`
+	MinRAMPerGPU      int               `json:"minRAMPerGPU,omitempty"` // RunPod expresses RAM per-GPU; we convert from per-instance.
+	CloudType         string            `json:"cloudType,omitempty"`
+	ComputeType       string            `json:"computeType,omitempty"`
+	ContainerDiskInGB int               `json:"containerDiskInGb,omitempty"`
+	VolumeInGB        int               `json:"volumeInGb,omitempty"`
+	NetworkVolumeID   string            `json:"networkVolumeId,omitempty"`
+	Ports             []string          `json:"ports,omitempty"`
+	Env               map[string]string `json:"env,omitempty"`               // RunPod's REST uses a flat key/value map.
+	DockerArgs        string            `json:"dockerArgs,omitempty"`        // appended to the image's ENTRYPOINT/CMD; how we pass `--model X` etc to vLLM.
+	Interruptible     bool              `json:"interruptible,omitempty"`
 	TemplateID        string   `json:"templateId,omitempty"`
 	SupportPublicIP   bool     `json:"supportPublicIp,omitempty"`
 	DataCenterIDs     []string `json:"dataCenterIds,omitempty"` // best-effort; if rejected, RunPod schedules anywhere
