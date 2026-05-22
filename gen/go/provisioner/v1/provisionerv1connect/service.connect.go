@@ -50,6 +50,9 @@ const (
 	// ProvisionerServiceWaitForInstanceReadyProcedure is the fully-qualified name of the
 	// ProvisionerService's WaitForInstanceReady RPC.
 	ProvisionerServiceWaitForInstanceReadyProcedure = "/provisioner.v1.ProvisionerService/WaitForInstanceReady"
+	// ProvisionerServiceGetInstanceSSHKeyProcedure is the fully-qualified name of the
+	// ProvisionerService's GetInstanceSSHKey RPC.
+	ProvisionerServiceGetInstanceSSHKeyProcedure = "/provisioner.v1.ProvisionerService/GetInstanceSSHKey"
 	// DeploymentServiceCreateDeploymentProcedure is the fully-qualified name of the DeploymentService's
 	// CreateDeployment RPC.
 	DeploymentServiceCreateDeploymentProcedure = "/provisioner.v1.DeploymentService/CreateDeployment"
@@ -106,6 +109,20 @@ type ProvisionerServiceClient interface {
 	// operators (interactive jupyter on the pod) skip it; deployment-
 	// bound flows call it before CreateDeployment.
 	WaitForInstanceReady(context.Context, *connect.Request[v1.WaitForInstanceReadyRequest]) (*connect.Response[v1.WaitForInstanceReadyResponse], error)
+	// GetInstanceSSHKey returns the operator's iplane-managed private
+	// key bytes (PEM-encoded) for an instance, so the CLI can
+	// materialize them locally and run ssh against the pod when
+	// operating in remote mode (--service-url). The keystore lives on
+	// the server side, so in-process clients can read the key directly;
+	// remote clients need this RPC to bridge the gap.
+	//
+	// Security caveat: this returns private key bytes over the wire.
+	// v0.1 has no per-operator authentication on the gRPC surface --
+	// any caller with --service-url access can fetch any operator's
+	// key. Acceptable when the iplane serve is bound to localhost /
+	// a private network; not safe to expose publicly without an
+	// auth layer in front.
+	GetInstanceSSHKey(context.Context, *connect.Request[v1.GetInstanceSSHKeyRequest]) (*connect.Response[v1.GetInstanceSSHKeyResponse], error)
 }
 
 // NewProvisionerServiceClient constructs a client for the provisioner.v1.ProvisionerService
@@ -149,6 +166,12 @@ func NewProvisionerServiceClient(httpClient connect.HTTPClient, baseURL string, 
 			connect.WithSchema(provisionerServiceMethods.ByName("WaitForInstanceReady")),
 			connect.WithClientOptions(opts...),
 		),
+		getInstanceSSHKey: connect.NewClient[v1.GetInstanceSSHKeyRequest, v1.GetInstanceSSHKeyResponse](
+			httpClient,
+			baseURL+ProvisionerServiceGetInstanceSSHKeyProcedure,
+			connect.WithSchema(provisionerServiceMethods.ByName("GetInstanceSSHKey")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -159,6 +182,7 @@ type provisionerServiceClient struct {
 	describeInstance     *connect.Client[v1.DescribeInstanceRequest, v1.DescribeInstanceResponse]
 	listInstances        *connect.Client[v1.ListInstancesRequest, v1.ListInstancesResponse]
 	waitForInstanceReady *connect.Client[v1.WaitForInstanceReadyRequest, v1.WaitForInstanceReadyResponse]
+	getInstanceSSHKey    *connect.Client[v1.GetInstanceSSHKeyRequest, v1.GetInstanceSSHKeyResponse]
 }
 
 // CreateInstance calls provisioner.v1.ProvisionerService.CreateInstance.
@@ -184,6 +208,11 @@ func (c *provisionerServiceClient) ListInstances(ctx context.Context, req *conne
 // WaitForInstanceReady calls provisioner.v1.ProvisionerService.WaitForInstanceReady.
 func (c *provisionerServiceClient) WaitForInstanceReady(ctx context.Context, req *connect.Request[v1.WaitForInstanceReadyRequest]) (*connect.Response[v1.WaitForInstanceReadyResponse], error) {
 	return c.waitForInstanceReady.CallUnary(ctx, req)
+}
+
+// GetInstanceSSHKey calls provisioner.v1.ProvisionerService.GetInstanceSSHKey.
+func (c *provisionerServiceClient) GetInstanceSSHKey(ctx context.Context, req *connect.Request[v1.GetInstanceSSHKeyRequest]) (*connect.Response[v1.GetInstanceSSHKeyResponse], error) {
+	return c.getInstanceSSHKey.CallUnary(ctx, req)
 }
 
 // ProvisionerServiceHandler is an implementation of the provisioner.v1.ProvisionerService service.
@@ -225,6 +254,20 @@ type ProvisionerServiceHandler interface {
 	// operators (interactive jupyter on the pod) skip it; deployment-
 	// bound flows call it before CreateDeployment.
 	WaitForInstanceReady(context.Context, *connect.Request[v1.WaitForInstanceReadyRequest]) (*connect.Response[v1.WaitForInstanceReadyResponse], error)
+	// GetInstanceSSHKey returns the operator's iplane-managed private
+	// key bytes (PEM-encoded) for an instance, so the CLI can
+	// materialize them locally and run ssh against the pod when
+	// operating in remote mode (--service-url). The keystore lives on
+	// the server side, so in-process clients can read the key directly;
+	// remote clients need this RPC to bridge the gap.
+	//
+	// Security caveat: this returns private key bytes over the wire.
+	// v0.1 has no per-operator authentication on the gRPC surface --
+	// any caller with --service-url access can fetch any operator's
+	// key. Acceptable when the iplane serve is bound to localhost /
+	// a private network; not safe to expose publicly without an
+	// auth layer in front.
+	GetInstanceSSHKey(context.Context, *connect.Request[v1.GetInstanceSSHKeyRequest]) (*connect.Response[v1.GetInstanceSSHKeyResponse], error)
 }
 
 // NewProvisionerServiceHandler builds an HTTP handler from the service implementation. It returns
@@ -264,6 +307,12 @@ func NewProvisionerServiceHandler(svc ProvisionerServiceHandler, opts ...connect
 		connect.WithSchema(provisionerServiceMethods.ByName("WaitForInstanceReady")),
 		connect.WithHandlerOptions(opts...),
 	)
+	provisionerServiceGetInstanceSSHKeyHandler := connect.NewUnaryHandler(
+		ProvisionerServiceGetInstanceSSHKeyProcedure,
+		svc.GetInstanceSSHKey,
+		connect.WithSchema(provisionerServiceMethods.ByName("GetInstanceSSHKey")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/provisioner.v1.ProvisionerService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case ProvisionerServiceCreateInstanceProcedure:
@@ -276,6 +325,8 @@ func NewProvisionerServiceHandler(svc ProvisionerServiceHandler, opts ...connect
 			provisionerServiceListInstancesHandler.ServeHTTP(w, r)
 		case ProvisionerServiceWaitForInstanceReadyProcedure:
 			provisionerServiceWaitForInstanceReadyHandler.ServeHTTP(w, r)
+		case ProvisionerServiceGetInstanceSSHKeyProcedure:
+			provisionerServiceGetInstanceSSHKeyHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -303,6 +354,10 @@ func (UnimplementedProvisionerServiceHandler) ListInstances(context.Context, *co
 
 func (UnimplementedProvisionerServiceHandler) WaitForInstanceReady(context.Context, *connect.Request[v1.WaitForInstanceReadyRequest]) (*connect.Response[v1.WaitForInstanceReadyResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("provisioner.v1.ProvisionerService.WaitForInstanceReady is not implemented"))
+}
+
+func (UnimplementedProvisionerServiceHandler) GetInstanceSSHKey(context.Context, *connect.Request[v1.GetInstanceSSHKeyRequest]) (*connect.Response[v1.GetInstanceSSHKeyResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("provisioner.v1.ProvisionerService.GetInstanceSSHKey is not implemented"))
 }
 
 // DeploymentServiceClient is a client for the provisioner.v1.DeploymentService service.

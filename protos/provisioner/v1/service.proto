@@ -65,6 +65,21 @@ service ProvisionerService {
   // operators (interactive jupyter on the pod) skip it; deployment-
   // bound flows call it before CreateDeployment.
   rpc WaitForInstanceReady(WaitForInstanceReadyRequest) returns (WaitForInstanceReadyResponse);
+
+  // GetInstanceSSHKey returns the operator's iplane-managed private
+  // key bytes (PEM-encoded) for an instance, so the CLI can
+  // materialize them locally and run ssh against the pod when
+  // operating in remote mode (--service-url). The keystore lives on
+  // the server side, so in-process clients can read the key directly;
+  // remote clients need this RPC to bridge the gap.
+  //
+  // Security caveat: this returns private key bytes over the wire.
+  // v0.1 has no per-operator authentication on the gRPC surface --
+  // any caller with --service-url access can fetch any operator's
+  // key. Acceptable when the iplane serve is bound to localhost /
+  // a private network; not safe to expose publicly without an
+  // auth layer in front.
+  rpc GetInstanceSSHKey(GetInstanceSSHKeyRequest) returns (GetInstanceSSHKeyResponse);
 }
 
 // Source selects whether the service consults local state, the provider,
@@ -140,6 +155,25 @@ message WaitForInstanceReadyResponse {
   // a no-op. False when the provider's wait was actually exercised.
   // Operators can branch on this when timing scripts.
   bool already_ready = 2;
+}
+
+message GetInstanceSSHKeyRequest {
+  string id = 1;
+}
+
+message GetInstanceSSHKeyResponse {
+  // PEM-encoded private key bytes (Ed25519, OpenSSH-format). The CLI
+  // writes these to a 0600 temp file and exec's ssh against it.
+  bytes private_key_pem = 1;
+  // Authorized-keys-style line of the matching public key, for
+  // informational use (the operator can stash it in their own
+  // authorized_keys if they ever want to ssh-in via plain ssh
+  // from a different machine that doesn't have iplane installed).
+  bytes public_key_authorized = 2;
+  // The SSH user the iplane convention connects as (currently always
+  // "root" -- pod sshds expect root). Included so the CLI doesn't
+  // hard-code the user separately.
+  string user = 3;
 }
 
 // DeploymentService is the operator-facing surface for engine-on-
