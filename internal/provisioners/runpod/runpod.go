@@ -661,9 +661,15 @@ type createPodRequest struct {
 	VolumeInGB        int               `json:"volumeInGb,omitempty"`
 	NetworkVolumeID   string            `json:"networkVolumeId,omitempty"`
 	Ports             []string          `json:"ports,omitempty"`
-	Env               map[string]string `json:"env,omitempty"`               // RunPod's REST uses a flat key/value map.
-	DockerArgs        string            `json:"dockerArgs,omitempty"`        // appended to the image's ENTRYPOINT/CMD; how we pass `--model X` etc to vLLM.
-	Interruptible     bool              `json:"interruptible,omitempty"`
+	Env               map[string]string `json:"env,omitempty"` // RunPod's REST uses a flat key/value map.
+	// DockerStartCmd REPLACES the image's CMD with these argv tokens
+	// (ENTRYPOINT — the engine binary — stays). RunPod's REST API
+	// removed the legacy single-string `dockerArgs` in favor of these
+	// two array fields; we pass args as an argv slice, not a shell-split
+	// string.
+	DockerStartCmd   []string `json:"dockerStartCmd,omitempty"`
+	DockerEntrypoint []string `json:"dockerEntrypoint,omitempty"`
+	Interruptible    bool     `json:"interruptible,omitempty"`
 	TemplateID        string   `json:"templateId,omitempty"`
 	SupportPublicIP   bool     `json:"supportPublicIp,omitempty"`
 	DataCenterIDs     []string `json:"dataCenterIds,omitempty"` // best-effort; if rejected, RunPod schedules anywhere

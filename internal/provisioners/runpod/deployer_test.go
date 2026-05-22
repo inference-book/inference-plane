@@ -79,11 +79,12 @@ func TestDeploy_HappyPath_GoesToRUNNING(t *testing.T) {
 			if req.ImageName != "vllm/vllm-openai:v0.7.0" {
 				t.Errorf("POST body imageName = %q, want vllm/vllm-openai:v0.7.0", req.ImageName)
 			}
-			if !strings.Contains(req.DockerArgs, "--model Qwen/Qwen2.5-1.5B-Instruct") {
-				t.Errorf("dockerArgs missing --model: %q", req.DockerArgs)
+			joined := strings.Join(req.DockerStartCmd, " ")
+			if !strings.Contains(joined, "--model Qwen/Qwen2.5-1.5B-Instruct") {
+				t.Errorf("dockerStartCmd missing --model: %v", req.DockerStartCmd)
 			}
-			if !strings.Contains(req.DockerArgs, "--gpu-memory-utilization") {
-				t.Errorf("dockerArgs missing operator engine-args: %q", req.DockerArgs)
+			if !strings.Contains(joined, "--gpu-memory-utilization") {
+				t.Errorf("dockerStartCmd missing operator engine-args: %v", req.DockerStartCmd)
 			}
 			if req.Env["HF_HUB_DISABLE_TELEMETRY"] != "1" {
 				t.Errorf("env not propagated: %+v", req.Env)

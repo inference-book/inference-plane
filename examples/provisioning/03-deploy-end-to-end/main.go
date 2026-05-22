@@ -258,7 +258,7 @@ func runDemo() {
 		})
 
 	demo.Step("Deploy: provision a pod running the engine image, wait for RUNNING").ID("deploy").
-		Note("One step. CreateDeployment with no instance_id auto-provisions: the control plane rents a small-class pod whose container IS the engine image (image-as-pod), passing the model via dockerArgs, then polls the engine's /health from the operator side until 2xx. No SSH, no docker-in-docker. The instance + deployment are recorded 1:1 (two views -- GPU and model -- of the same pod).\n\nCLI form:\n  iplane deployment deploy " + deploymentID + " --provider runpod --class small --image " + engineImage + " --model <chosen> --service-url " + *url).
+		Note("One step. CreateDeployment with no instance_id auto-provisions: the control plane rents a small-class pod whose container IS the engine image (image-as-pod), passing the model via the pod's dockerStartCmd (the engine's argv), then polls the engine's /health from the operator side until 2xx. No SSH, no docker-in-docker. The instance + deployment are recorded 1:1 (two views -- GPU and model -- of the same pod).\n\nCLI form:\n  iplane deployment deploy " + deploymentID + " --provider runpod --class small --image " + engineImage + " --model <chosen> --service-url " + *url).
 		Arrow("Operator", "iplane", "CreateDeployment{image=vllm, model=qwen, class=small, wait=true}").
 		Arrow("iplane", "State", "write PENDING (instance + deployment)").
 		Arrow("iplane", "RunPod", "create pod with engine image + model").

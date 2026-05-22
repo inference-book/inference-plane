@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"strings"
 	"time"
 
 	skhttp "github.com/panyam/servicekit/http"
@@ -165,16 +164,18 @@ func buildEnginePodRequest(dep *provisionerv1.Deployment, inst *provisionerv1.In
 		env[k] = v
 	}
 
-	// Build the docker args. vLLM (and most OpenAI-compat engines)
-	// take `--model X --host 0.0.0.0 --port N` plus the operator's
-	// custom args. The image's ENTRYPOINT is the engine binary;
-	// dockerArgs is appended after it.
-	args := []string{
+	// Build the docker CMD. vLLM (and most OpenAI-compat engines) take
+	// `--model X --host 0.0.0.0 --port N` plus the operator's custom
+	// args. The image ENTRYPOINT is the engine binary; we REPLACE the
+	// image CMD with this argv via RunPod's dockerStartCmd field. The
+	// legacy single-string `dockerArgs` was removed from RunPod's REST
+	// schema; argv tokens go on the wire as a JSON array.
+	cmd := []string{
 		"--model", dep.GetModel(),
 		"--host", "0.0.0.0",
 		"--port", fmt.Sprintf("%d", enginePort),
 	}
-	args = append(args, dep.GetEngineArgs()...)
+	cmd = append(cmd, dep.GetEngineArgs()...)
 
 	// GPU count: from the resolved instance if present, else the
 	// requirements, else 1.
@@ -198,8 +199,8 @@ func buildEnginePodRequest(dep *provisionerv1.Deployment, inst *provisionerv1.In
 			fmt.Sprintf("%d/http", enginePort),
 			"22/tcp",
 		},
-		Env:        env,
-		DockerArgs: strings.Join(args, " "),
+		Env:            env,
+		DockerStartCmd: cmd,
 	}, nil
 }
 
