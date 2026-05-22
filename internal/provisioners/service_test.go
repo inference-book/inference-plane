@@ -3,6 +3,7 @@ package provisioners_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -531,6 +532,64 @@ func TestWaitForInstanceReady_ProviderError_Surfaces(t *testing.T) {
 	_, err := svc.WaitForInstanceReady(context.Background(), &provisionerv1.WaitForInstanceReadyRequest{Id: "my-pod"})
 	if err == nil {
 		t.Fatal("expected error from provider waiter to surface")
+	}
+}
+
+func TestGetInstanceSSHKey_NotFound(t *testing.T) {
+	svc, _ := newSvc(t, &mockProvider{name: "mock"})
+	_, err := svc.GetInstanceSSHKey(context.Background(), &provisionerv1.GetInstanceSSHKeyRequest{Id: "nope"})
+	if err == nil {
+		t.Fatal("expected NotFound for unknown id")
+	}
+}
+
+func TestGetInstanceSSHKey_NoKeyStoreConfigured(t *testing.T) {
+	// Service was constructed without WithKeyStore -- the key-fetch
+	// RPC should refuse with a clear FailedPrecondition. Operators
+	// can't extract a key from a Service that never managed one.
+	svc, _ := newSvc(t, &mockProvider{name: "mock"})
+	_, err := svc.GetInstanceSSHKey(context.Background(), &provisionerv1.GetInstanceSSHKeyRequest{Id: "my-pod"})
+	if err == nil {
+		t.Fatal("expected FailedPrecondition when keyStore is nil")
+	}
+	if !strings.Contains(err.Error(), "ssh key store not configured") {
+		t.Errorf("error %q should mention missing key store", err)
+	}
+}
+
+func TestGetInstanceSSHKey_HappyPath(t *testing.T) {
+	store, err := state.Open(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("state.Open: %v", err)
+	}
+	svc := provisioners.New([]provisioners.Provider{&mockProvider{name: "mock"}},
+		store, "default",
+		provisioners.WithKeyStore(newKeyStore(t)))
+
+	_ = store.Update(func(f *state.File) error {
+		f.Instances["my-pod"] = &provisionerv1.Instance{
+			Id: "my-pod", Provider: "mock", ProviderId: "mock:my-pod",
+			State: provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE,
+			Ssh:   &provisionerv1.SshTarget{Host: "1.2.3.4", Port: 22, User: "root"},
+		}
+		return nil
+	})
+
+	resp, err := svc.GetInstanceSSHKey(context.Background(), &provisionerv1.GetInstanceSSHKeyRequest{Id: "my-pod"})
+	if err != nil {
+		t.Fatalf("GetInstanceSSHKey: %v", err)
+	}
+	if len(resp.GetPrivateKeyPem()) == 0 {
+		t.Error("expected private_key_pem bytes; got empty")
+	}
+	if !strings.HasPrefix(string(resp.GetPrivateKeyPem()), "-----BEGIN") {
+		t.Errorf("private_key_pem should be PEM-encoded; got: %q", string(resp.GetPrivateKeyPem())[:40])
+	}
+	if len(resp.GetPublicKeyAuthorized()) == 0 {
+		t.Error("expected public_key_authorized bytes; got empty")
+	}
+	if resp.GetUser() != "root" {
+		t.Errorf("user = %q, want root", resp.GetUser())
 	}
 }
 

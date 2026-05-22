@@ -432,6 +432,56 @@ func (s *Service) WaitForInstanceReady(ctx context.Context, req *provisionerv1.W
 	}, nil
 }
 
+// GetInstanceSSHKey returns the operator's iplane-managed private key
+// for an instance, so a remote CLI can materialize it locally and run
+// ssh. The keystore lives server-side; this RPC is the only way for
+// --service-url clients to reach it.
+//
+// Security: this returns private key bytes over the wire. v0.1 trusts
+// any caller with access to the gRPC server (no per-operator auth);
+// rely on network isolation (localhost / private network) for safety.
+func (s *Service) GetInstanceSSHKey(ctx context.Context, req *provisionerv1.GetInstanceSSHKeyRequest) (*provisionerv1.GetInstanceSSHKeyResponse, error) {
+	id := req.GetId()
+	if err := ValidateID(id); err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	if s.keyStore == nil {
+		return nil, status.Error(codes.FailedPrecondition, "ssh key store not configured (Service was constructed without WithKeyStore)")
+	}
+
+	file, err := s.store.Read()
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	inst, ok := file.Instances[id]
+	if !ok {
+		return nil, status.Errorf(codes.NotFound, "no instance with id %q", id)
+	}
+
+	kp, err := s.keyStore.EnsureKeyPair(s.operatorID, inst.GetProvider())
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "load ssh keypair: %v", err)
+	}
+	privPEM, err := kp.MarshalPrivatePEM()
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "marshal private key: %v", err)
+	}
+	pubLine, err := kp.MarshalAuthorizedKey()
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "marshal public key: %v", err)
+	}
+
+	user := inst.GetSsh().GetUser()
+	if user == "" {
+		user = "root"
+	}
+	return &provisionerv1.GetInstanceSSHKeyResponse{
+		PrivateKeyPem:        privPEM,
+		PublicKeyAuthorized:  pubLine,
+		User:                 user,
+	}, nil
+}
+
 // ListInstances returns the local-state view (SOURCE_LOCAL, default,
 // with per-record self-heal for pending/terminating records) or the
 // provider's view (SOURCE_REMOTE -- requires a provider filter).
