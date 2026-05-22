@@ -8,7 +8,6 @@ import (
 	"time"
 
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
-	"github.com/inference-book/inference-plane/internal/deployments/sshdocker"
 	"github.com/inference-book/inference-plane/internal/provisioners/state"
 	"github.com/inference-book/inference-plane/internal/sshkeys"
 	"google.golang.org/grpc/codes"
@@ -767,8 +766,8 @@ func refToInstance(ref *provisionerv1.InstanceRef, providerName string) *provisi
 // pass a stub. emit is called once per state transition (and on
 // progress updates); the Service patches the state file from these.
 type DeploymentExecutor interface {
-	Deploy(ctx context.Context, dep *provisionerv1.Deployment, inst *provisionerv1.Instance, key *sshkeys.KeyPair, emit func(sshdocker.StateUpdate)) error
-	Destroy(ctx context.Context, dep *provisionerv1.Deployment, inst *provisionerv1.Instance, key *sshkeys.KeyPair, emit func(sshdocker.StateUpdate)) error
+	Deploy(ctx context.Context, dep *provisionerv1.Deployment, inst *provisionerv1.Instance, key *sshkeys.KeyPair, emit func(DeployStateUpdate)) error
+	Destroy(ctx context.Context, dep *provisionerv1.Deployment, inst *provisionerv1.Instance, key *sshkeys.KeyPair, emit func(DeployStateUpdate)) error
 }
 
 // WithDeploymentExecutor wires the executor. Optional: when unset,
@@ -794,9 +793,6 @@ func WithDeploymentExecutor(e DeploymentExecutor) Option {
 //     until terminal state; otherwise return after PENDING is
 //     written.
 func (s *Service) CreateDeployment(ctx context.Context, req *provisionerv1.CreateDeploymentRequest) (*provisionerv1.CreateDeploymentResponse, error) {
-	if s.executor == nil {
-		return nil, status.Error(codes.FailedPrecondition, "deployment requires a configured executor (use provisioners.WithDeploymentExecutor)")
-	}
 	dep := req.GetDeployment()
 	if dep == nil {
 		return nil, status.Error(codes.InvalidArgument, "deployment is required")
@@ -917,12 +913,53 @@ func (s *Service) launchDeploy(ctx context.Context, dep *provisionerv1.Deploymen
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		emit := func(u sshdocker.StateUpdate) {
+		emit := func(u DeployStateUpdate) {
 			_ = s.patchDeployment(dep.GetId(), u)
 		}
-		_ = s.executor.Deploy(ctx, dep, inst, key, emit)
+		_ = s.deployerFor(inst).Deploy(ctx, dep, inst, key, emit)
 	}()
 	return done
+}
+
+// deployerFor returns the Deployer that should run for this instance.
+// Capability-check pattern: if the provider satisfies the Deployer
+// interface itself (image-native providers like RunPod, Vast.ai,
+// Modal), use it. Otherwise fall back to the configured
+// DeploymentExecutor (typically sshdocker -- for VM-style providers
+// like Lambda Labs and raw AWS/GCP instances).
+//
+// Returns the same interface shape (Deployer methods are a strict
+// subset of DeploymentExecutor + identical signature), so call sites
+// don't have to branch.
+func (s *Service) deployerFor(inst *provisionerv1.Instance) Deployer {
+	if provider, ok := s.providers[inst.GetProvider()]; ok {
+		if d, ok := provider.(Deployer); ok {
+			return d
+		}
+	}
+	return executorAsDeployer{exec: s.executor}
+}
+
+// executorAsDeployer adapts a DeploymentExecutor to the Deployer
+// interface. They have the same method signatures by construction;
+// this wrapper just lets the dispatch above return one type whether
+// the path is provider-native or via the fallback executor.
+type executorAsDeployer struct {
+	exec DeploymentExecutor
+}
+
+func (e executorAsDeployer) Deploy(ctx context.Context, dep *provisionerv1.Deployment, inst *provisionerv1.Instance, key *sshkeys.KeyPair, emit func(DeployStateUpdate)) error {
+	if e.exec == nil {
+		return errors.New("no executor configured and provider does not implement Deployer")
+	}
+	return e.exec.Deploy(ctx, dep, inst, key, emit)
+}
+
+func (e executorAsDeployer) Destroy(ctx context.Context, dep *provisionerv1.Deployment, inst *provisionerv1.Instance, key *sshkeys.KeyPair, emit func(DeployStateUpdate)) error {
+	if e.exec == nil {
+		return errors.New("no executor configured and provider does not implement Deployer")
+	}
+	return e.exec.Destroy(ctx, dep, inst, key, emit)
 }
 
 // patchDeployment applies a StateUpdate to the deployment record in
@@ -930,7 +967,7 @@ func (s *Service) launchDeploy(ctx context.Context, dep *provisionerv1.Deploymen
 // emit-callback boundary (the executor cannot meaningfully react);
 // terminal state observers will see whatever last successfully
 // wrote.
-func (s *Service) patchDeployment(id string, u sshdocker.StateUpdate) error {
+func (s *Service) patchDeployment(id string, u DeployStateUpdate) error {
 	return s.store.Update(func(f *state.File) error {
 		rec, ok := f.Deployments[id]
 		if !ok {
@@ -1010,9 +1047,6 @@ func (s *Service) ListDeployments(ctx context.Context, req *provisionerv1.ListDe
 // to TERMINATED. Idempotent: a destroy of an already-terminated id
 // is a no-op.
 func (s *Service) DestroyDeployment(ctx context.Context, req *provisionerv1.DestroyDeploymentRequest) (*provisionerv1.DestroyDeploymentResponse, error) {
-	if s.executor == nil {
-		return nil, status.Error(codes.FailedPrecondition, "deployment requires a configured executor")
-	}
 	id := req.GetId()
 	if err := ValidateID(id); err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
@@ -1046,7 +1080,7 @@ func (s *Service) DestroyDeployment(ctx context.Context, req *provisionerv1.Dest
 	inst, ok := file.Instances[rec.GetInstanceId()]
 	if !ok {
 		// Instance is gone; mark TERMINATED locally (force-like).
-		_ = s.patchDeployment(id, sshdocker.StateUpdate{
+		_ = s.patchDeployment(id, DeployStateUpdate{
 			State:           provisionerv1.DeploymentState_DEPLOYMENT_STATE_TERMINATED,
 			ProgressMessage: "instance gone; marked terminated locally",
 		})
@@ -1063,10 +1097,10 @@ func (s *Service) DestroyDeployment(ctx context.Context, req *provisionerv1.Dest
 
 	// Synchronous destroy (no Wait flag on the request -- destroy
 	// always blocks until terminal state, simpler semantics).
-	emit := func(u sshdocker.StateUpdate) {
+	emit := func(u DeployStateUpdate) {
 		_ = s.patchDeployment(id, u)
 	}
-	if err := s.executor.Destroy(ctx, rec, inst, key, emit); err != nil {
+	if err := s.deployerFor(inst).Destroy(ctx, rec, inst, key, emit); err != nil {
 		return nil, status.Errorf(codes.Internal, "destroy %s: %v", id, err)
 	}
 	final, _ := s.store.Read()

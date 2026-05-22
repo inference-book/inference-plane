@@ -142,7 +142,7 @@ func main() {
 		Run(func(ctx demokit.StepContext) *demokit.StepResult {
 			out, err := runIplane(iplane, *stateDir, "instance", "list")
 			if err != nil {
-				return demokit.Errf("list: %v\n%s", err, out)
+				return abortDemo(cleanup, "list: %v\n%s", err, out)
 			}
 			fmt.Println(indentBlock(string(out)))
 			return nil
@@ -172,7 +172,7 @@ func main() {
 				"--class", "small",
 			)
 			if err != nil {
-				return demokit.Errf("create: %v\n%s", err, out)
+				return abortDemo(cleanup, "create: %v\n%s", err, out)
 			}
 			fmt.Println(indentBlock(string(out)))
 			mu.Lock()
@@ -193,7 +193,7 @@ func main() {
 		Run(func(ctx demokit.StepContext) *demokit.StepResult {
 			out, err := runIplane(iplane, *stateDir, "instance", "describe", demoID)
 			if err != nil {
-				return demokit.Errf("describe: %v\n%s", err, out)
+				return abortDemo(cleanup, "describe: %v\n%s", err, out)
 			}
 			fmt.Println(indentBlock(string(out)))
 			return nil
@@ -210,10 +210,10 @@ func main() {
 				"--class", "small",
 			)
 			if err != nil {
-				return demokit.Errf("create (idempotent): %v\n%s", err, out)
+				return abortDemo(cleanup, "create (idempotent): %v\n%s", err, out)
 			}
 			if !strings.Contains(string(out), "Found existing") {
-				return demokit.Errf("expected 'Found existing' on rerun; got:\n%s", out)
+				return abortDemo(cleanup, "expected 'Found existing' on rerun; got:\n%s", out)
 			}
 			fmt.Println(indentBlock(string(out)))
 			return nil
@@ -231,7 +231,7 @@ func main() {
 		Run(func(ctx demokit.StepContext) *demokit.StepResult {
 			out, err := runIplane(iplane, *stateDir, "instance", "list")
 			if err != nil {
-				return demokit.Errf("list: %v\n%s", err, out)
+				return abortDemo(cleanup, "list: %v\n%s", err, out)
 			}
 			fmt.Println(indentBlock(string(out)))
 			return nil
@@ -250,7 +250,7 @@ func main() {
 					"--provider", *provider,
 				)
 				if err != nil {
-					return demokit.Errf("list --remote: %v\n%s", err, out)
+					return abortDemo(cleanup, "list --remote: %v\n%s", err, out)
 				}
 				fmt.Println(indentBlock(string(out)))
 				return nil
@@ -271,7 +271,7 @@ func main() {
 		Run(func(ctx demokit.StepContext) *demokit.StepResult {
 			out, err := runIplane(iplane, *stateDir, "instance", "destroy", demoID)
 			if err != nil {
-				return demokit.Errf("destroy: %v\n%s", err, out)
+				return abortDemo(cleanup, "destroy: %v\n%s", err, out)
 			}
 			fmt.Println(indentBlock(string(out)))
 			mu.Lock()
@@ -342,4 +342,25 @@ func indentBlock(s string) string {
 		lines[i] = "  " + line
 	}
 	return strings.Join(lines, "\n")
+}
+
+// abortDemo is the fail-fast helper used by step Run callbacks in
+// place of `return demokit.Errf(...)`. Reasoning: demokit v0.0.23
+// records an errored step and proceeds to the next one, which
+// cascades unrelated failures from a single root cause. For these
+// walkthroughs we want the demo to stop where it first goes wrong.
+//
+// abortDemo runs the cleanup closure (deferred-terminate paid
+// resources), prints the failure to stderr, and exits non-zero.
+// Returns *demokit.StepResult only so callers can `return
+// abortDemo(...)` to match the existing call shape; the function
+// never actually returns to the caller.
+func abortDemo(cleanup func(), format string, args ...any) *demokit.StepResult {
+	msg := fmt.Sprintf(format, args...)
+	fmt.Fprintf(os.Stderr, "\n\nStep failed: %s\n", msg)
+	if cleanup != nil {
+		cleanup()
+	}
+	os.Exit(1)
+	return nil // unreachable
 }

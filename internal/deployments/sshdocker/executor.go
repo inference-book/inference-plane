@@ -7,20 +7,19 @@ import (
 	"time"
 
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
+	"github.com/inference-book/inference-plane/internal/provisioners"
 	"github.com/inference-book/inference-plane/internal/sshkeys"
 )
 
 // StateUpdate is what the Executor emits as it progresses through the
 // deployment state machine. The Service consumes these to patch the
 // state file + emit WatchDeployment events.
-type StateUpdate struct {
-	State           provisionerv1.DeploymentState
-	Phase           string // free-form: "ssh:connecting", "docker:pulling", "engine:waiting", "engine:serving"
-	ProgressMessage string // free-form: human-readable status
-	ContainerID     string // filled when State >= STARTING
-	EngineEndpoint  string // filled when State == RUNNING
-	FailureReason   string // filled when State == FAILED
-}
+//
+// Aliased to provisioners.DeployStateUpdate so the canonical type
+// lives in the higher-level package. Lets provider adapters (like
+// runpod) implement the Deployer capability without importing
+// sshdocker as a sibling.
+type StateUpdate = provisioners.DeployStateUpdate
 
 // DialFunc opens a RemoteRunner against the given instance. Tests
 // substitute a stub that returns a fake RemoteRunner; production

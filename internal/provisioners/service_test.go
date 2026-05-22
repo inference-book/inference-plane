@@ -593,6 +593,150 @@ func TestGetInstanceSSHKey_HappyPath(t *testing.T) {
 	}
 }
 
+// mockDeployerProvider is mockProvider + the Deployer capability. Its
+// Deploy/Destroy methods record that they were invoked AND emit a
+// RUNNING / TERMINATED update so the Service's launchDeploy
+// goroutine completes.
+type mockDeployerProvider struct {
+	*mockProvider
+	deployCalls  int
+	destroyCalls int
+}
+
+func (m *mockDeployerProvider) Deploy(ctx context.Context, dep *provisionerv1.Deployment, inst *provisionerv1.Instance, key *sshkeys.KeyPair, emit func(provisioners.DeployStateUpdate)) error {
+	m.deployCalls++
+	emit(provisioners.DeployStateUpdate{
+		State:          provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING,
+		Phase:          "test:provider-deployer",
+		ContainerID:    "mock-pod-1",
+		EngineEndpoint: "http://1.2.3.4:8000",
+	})
+	return nil
+}
+
+func (m *mockDeployerProvider) Destroy(ctx context.Context, dep *provisionerv1.Deployment, inst *provisionerv1.Instance, key *sshkeys.KeyPair, emit func(provisioners.DeployStateUpdate)) error {
+	m.destroyCalls++
+	emit(provisioners.DeployStateUpdate{
+		State: provisionerv1.DeploymentState_DEPLOYMENT_STATE_TERMINATED,
+		Phase: "test:provider-deployer",
+	})
+	return nil
+}
+
+// recordingExecutor satisfies provisioners.DeploymentExecutor and
+// records that its Deploy / Destroy methods were called. Used to
+// verify that the Service dispatcher only falls back to the
+// configured executor when the provider does NOT implement Deployer.
+type recordingExecutor struct {
+	deployCalls  int
+	destroyCalls int
+}
+
+func (r *recordingExecutor) Deploy(ctx context.Context, dep *provisionerv1.Deployment, inst *provisionerv1.Instance, key *sshkeys.KeyPair, emit func(provisioners.DeployStateUpdate)) error {
+	r.deployCalls++
+	emit(provisioners.DeployStateUpdate{State: provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING})
+	return nil
+}
+
+func (r *recordingExecutor) Destroy(ctx context.Context, dep *provisionerv1.Deployment, inst *provisionerv1.Instance, key *sshkeys.KeyPair, emit func(provisioners.DeployStateUpdate)) error {
+	r.destroyCalls++
+	emit(provisioners.DeployStateUpdate{State: provisionerv1.DeploymentState_DEPLOYMENT_STATE_TERMINATED})
+	return nil
+}
+
+func TestDeployerDispatch_ProviderCapability_TakesPrecedence(t *testing.T) {
+	// Provider implements Deployer; configured executor exists too.
+	// Service must dispatch to provider.Deployer, NOT the fallback.
+	deployer := &mockDeployerProvider{mockProvider: &mockProvider{name: "mock"}}
+	fallback := &recordingExecutor{}
+
+	store, err := state.Open(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("state.Open: %v", err)
+	}
+	svc := provisioners.New([]provisioners.Provider{deployer},
+		store, "default",
+		provisioners.WithKeyStore(newKeyStore(t)),
+		provisioners.WithDeploymentExecutor(fallback))
+
+	// Seed an active instance the deployment can reference.
+	_ = store.Update(func(f *state.File) error {
+		f.Instances["my-pod"] = &provisionerv1.Instance{
+			Id: "my-pod", Provider: "mock", ProviderId: "mock:my-pod",
+			State: provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE,
+			Gpu:   &provisionerv1.GpuInfo{Sku: "mock-sku"},
+			Ssh:   &provisionerv1.SshTarget{Host: "1.2.3.4", Port: 22, User: "root"},
+		}
+		return nil
+	})
+
+	resp, err := svc.CreateDeployment(context.Background(), &provisionerv1.CreateDeploymentRequest{
+		Deployment: &provisionerv1.Deployment{
+			Id:         "my-llama",
+			InstanceId: "my-pod",
+			Image:      "vllm/vllm-openai:v0.7.0",
+			Model:      "Qwen/Qwen2.5-1.5B-Instruct",
+			EnginePort: 8000,
+		},
+		Wait: true,
+	})
+	if err != nil {
+		t.Fatalf("CreateDeployment: %v", err)
+	}
+	if deployer.deployCalls != 1 {
+		t.Errorf("provider.Deploy calls = %d, want 1", deployer.deployCalls)
+	}
+	if fallback.deployCalls != 0 {
+		t.Errorf("fallback executor.Deploy calls = %d, want 0 (provider Deployer should win)", fallback.deployCalls)
+	}
+	if resp.GetDeployment().GetState() != provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING {
+		t.Errorf("final state = %v, want RUNNING", resp.GetDeployment().GetState())
+	}
+}
+
+func TestDeployerDispatch_NoCapability_FallsBackToConfiguredExecutor(t *testing.T) {
+	// Provider does NOT implement Deployer; the Service must use the
+	// configured executor (the v0.2 path for VM-style providers).
+	plain := &mockProvider{name: "mock"}
+	fallback := &recordingExecutor{}
+
+	store, err := state.Open(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("state.Open: %v", err)
+	}
+	svc := provisioners.New([]provisioners.Provider{plain},
+		store, "default",
+		provisioners.WithKeyStore(newKeyStore(t)),
+		provisioners.WithDeploymentExecutor(fallback))
+
+	_ = store.Update(func(f *state.File) error {
+		f.Instances["my-pod"] = &provisionerv1.Instance{
+			Id: "my-pod", Provider: "mock", ProviderId: "mock:my-pod",
+			State: provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE,
+			Gpu:   &provisionerv1.GpuInfo{Sku: "mock-sku"},
+			Ssh:   &provisionerv1.SshTarget{Host: "1.2.3.4", Port: 22, User: "root"},
+		}
+		return nil
+	})
+
+	_, err = svc.CreateDeployment(context.Background(), &provisionerv1.CreateDeploymentRequest{
+		Deployment: &provisionerv1.Deployment{
+			Id:         "my-llama",
+			InstanceId: "my-pod",
+			Image:      "vllm/vllm-openai:v0.7.0",
+			Model:      "Qwen/Qwen2.5-1.5B-Instruct",
+			EnginePort: 8000,
+		},
+		Wait: true,
+	})
+	if err != nil {
+		t.Fatalf("CreateDeployment: %v", err)
+	}
+	if fallback.deployCalls != 1 {
+		t.Errorf("fallback executor.Deploy calls = %d, want 1", fallback.deployCalls)
+	}
+}
+
 func TestValidateID(t *testing.T) {
 	cases := []struct {
 		id    string

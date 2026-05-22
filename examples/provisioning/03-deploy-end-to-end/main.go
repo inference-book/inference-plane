@@ -234,7 +234,7 @@ func runDemo() {
 			defer cancel()
 			_, err := provisionerClient.ListInstances(rctx, connect.NewRequest(&provisionerv1.ListInstancesRequest{}))
 			if err != nil {
-				return demokit.Errf("cannot reach %s: %v (is `make serve` running?)", *url, err)
+				return abortDemo(cleanup, "cannot reach %s: %v (is `make serve` running?)", *url, err)
 			}
 			fmt.Println("  service reachable")
 			return nil
@@ -279,7 +279,7 @@ func runDemo() {
 				},
 			}))
 			if err != nil {
-				return demokit.Errf("CreateInstance: %v", err)
+				return abortDemo(cleanup, "CreateInstance: %v", err)
 			}
 			inst := resp.Msg.GetInstance()
 			mu.Lock()
@@ -308,11 +308,11 @@ func runDemo() {
 				TimeoutSeconds: 90,
 			}))
 			if err != nil {
-				return demokit.Errf("WaitForInstanceReady: %v", err)
+				return abortDemo(cleanup, "WaitForInstanceReady: %v", err)
 			}
 			ssh := resp.Msg.GetInstance().GetSsh()
 			if ssh == nil || ssh.GetHost() == "" {
-				return demokit.Errf("provider returned without populating ssh endpoint")
+				return abortDemo(cleanup, "provider returned without populating ssh endpoint")
 			}
 			fmt.Printf("  ssh endpoint:    %s@%s:%d\n", ssh.GetUser(), ssh.GetHost(), ssh.GetPort())
 			fmt.Printf("  already_ready:   %v (true = endpoint was already in state; no provider call needed)\n", resp.Msg.GetAlreadyReady())
@@ -341,14 +341,14 @@ func runDemo() {
 				Wait: true,
 			}))
 			if err != nil {
-				return demokit.Errf("CreateDeployment: %v", err)
+				return abortDemo(cleanup, "CreateDeployment: %v", err)
 			}
 			dep := resp.Msg.GetDeployment()
 			mu.Lock()
 			spawnedDeploy = dep.GetId()
 			mu.Unlock()
 			if dep.GetState() != provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING {
-				return demokit.Errf("deploy reached %s, want RUNNING (reason: %s)",
+				return abortDemo(cleanup, "deploy reached %s, want RUNNING (reason: %s)",
 					dep.GetState(), dep.GetFailureReason())
 			}
 			fmt.Printf("  deployment id:   %s\n", dep.GetId())
@@ -371,24 +371,24 @@ func runDemo() {
 			// state across steps via closure if the deploy step retried.
 			descResp, err := deploymentClient.DescribeDeployment(rctx, connect.NewRequest(&provisionerv1.DescribeDeploymentRequest{Id: deploymentID}))
 			if err != nil {
-				return demokit.Errf("DescribeDeployment: %v", err)
+				return abortDemo(cleanup, "DescribeDeployment: %v", err)
 			}
 			endpoint := descResp.Msg.GetDeployment().GetEngineEndpoint()
 			if endpoint == "" {
-				return demokit.Errf("engine_endpoint not set on RUNNING deployment")
+				return abortDemo(cleanup, "engine_endpoint not set on RUNNING deployment")
 			}
 			fullURL := strings.TrimRight(endpoint, "/") + "/v1/models"
 			req, err := http.NewRequestWithContext(rctx, http.MethodGet, fullURL, nil)
 			if err != nil {
-				return demokit.Errf("build request: %v", err)
+				return abortDemo(cleanup, "build request: %v", err)
 			}
 			resp, err := http.DefaultClient.Do(req)
 			if err != nil {
-				return demokit.Errf("GET %s: %v", fullURL, err)
+				return abortDemo(cleanup, "GET %s: %v", fullURL, err)
 			}
 			defer resp.Body.Close()
 			if resp.StatusCode/100 != 2 {
-				return demokit.Errf("%s -> %d (want 2xx)", fullURL, resp.StatusCode)
+				return abortDemo(cleanup, "%s -> %d (want 2xx)", fullURL, resp.StatusCode)
 			}
 			var body struct {
 				Data []struct {
@@ -413,7 +413,7 @@ func runDemo() {
 			defer cancel()
 			resp, err := deploymentClient.DestroyDeployment(rctx, connect.NewRequest(&provisionerv1.DestroyDeploymentRequest{Id: deploymentID}))
 			if err != nil {
-				return demokit.Errf("DestroyDeployment: %v", err)
+				return abortDemo(cleanup, "DestroyDeployment: %v", err)
 			}
 			fmt.Printf("  final state:     %s\n", resp.Msg.GetDeployment().GetState())
 			mu.Lock()
@@ -432,7 +432,7 @@ func runDemo() {
 			defer cancel()
 			resp, err := provisionerClient.DestroyInstance(rctx, connect.NewRequest(&provisionerv1.DestroyInstanceRequest{Id: instanceID}))
 			if err != nil {
-				return demokit.Errf("DestroyInstance: %v", err)
+				return abortDemo(cleanup, "DestroyInstance: %v", err)
 			}
 			fmt.Printf("  final state:     %s\n", resp.Msg.GetInstance().GetState())
 			mu.Lock()
@@ -452,4 +452,25 @@ func runDemo() {
 	}
 
 	demo.Execute()
+}
+
+// abortDemo is the fail-fast helper used by step Run callbacks in
+// place of `return demokit.Errf(...)`. Reasoning: demokit v0.0.23
+// records an errored step and proceeds to the next one, which
+// cascades unrelated failures from a single root cause. For these
+// walkthroughs we want the demo to stop where it first goes wrong.
+//
+// abortDemo runs the cleanup closure (deferred-terminate paid
+// resources), prints the failure to stderr, and exits non-zero.
+// Returns *demokit.StepResult only so callers can `return
+// abortDemo(...)` to match the existing call shape; the function
+// never actually returns to the caller.
+func abortDemo(cleanup func(), format string, args ...any) *demokit.StepResult {
+	msg := fmt.Sprintf(format, args...)
+	fmt.Fprintf(os.Stderr, "\n\nStep failed: %s\n", msg)
+	if cleanup != nil {
+		cleanup()
+	}
+	os.Exit(1)
+	return nil // unreachable
 }
