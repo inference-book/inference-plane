@@ -494,21 +494,10 @@ func TestDestroy_DryRun_NotFound(t *testing.T) {
 	}
 }
 
-func TestInstanceSSH_RemoteMode_Refused(t *testing.T) {
-	// With --service-url set, iplane instance ssh refuses because the
-	// keystore lives on the server side.
-	resetInstanceFlags()
-	rootCmd.SetArgs([]string{"instance", "ssh", "my-pod",
-		"--service-url", "http://localhost:9091"})
-	var buf bytes.Buffer
-	rootCmd.SetOut(&buf)
-	rootCmd.SetErr(&buf)
-	if err := rootCmd.Execute(); err == nil {
-		t.Fatalf("ssh in remote mode should fail; got:\n%s", buf.String())
-	} else if !strings.Contains(err.Error(), "in-process mode") {
-		t.Errorf("error %q should mention in-process mode requirement", err)
-	}
-}
+// (TestInstanceSSH_RemoteMode_Refused removed: --service-url mode now
+// works via the GetInstanceSSHKey RPC. Happy-path remote ssh requires
+// a real ssh server to actually validate, which the demokit walkthrough
+// exercises against a real RunPod pod.)
 
 func TestInstanceSSH_NoInstance(t *testing.T) {
 	resetInstanceFlags()

@@ -24,6 +24,7 @@ const (
 	ProvisionerService_DescribeInstance_FullMethodName     = "/provisioner.v1.ProvisionerService/DescribeInstance"
 	ProvisionerService_ListInstances_FullMethodName        = "/provisioner.v1.ProvisionerService/ListInstances"
 	ProvisionerService_WaitForInstanceReady_FullMethodName = "/provisioner.v1.ProvisionerService/WaitForInstanceReady"
+	ProvisionerService_GetInstanceSSHKey_FullMethodName    = "/provisioner.v1.ProvisionerService/GetInstanceSSHKey"
 )
 
 // ProvisionerServiceClient is the client API for ProvisionerService service.
@@ -86,6 +87,20 @@ type ProvisionerServiceClient interface {
 	// operators (interactive jupyter on the pod) skip it; deployment-
 	// bound flows call it before CreateDeployment.
 	WaitForInstanceReady(ctx context.Context, in *WaitForInstanceReadyRequest, opts ...grpc.CallOption) (*WaitForInstanceReadyResponse, error)
+	// GetInstanceSSHKey returns the operator's iplane-managed private
+	// key bytes (PEM-encoded) for an instance, so the CLI can
+	// materialize them locally and run ssh against the pod when
+	// operating in remote mode (--service-url). The keystore lives on
+	// the server side, so in-process clients can read the key directly;
+	// remote clients need this RPC to bridge the gap.
+	//
+	// Security caveat: this returns private key bytes over the wire.
+	// v0.1 has no per-operator authentication on the gRPC surface --
+	// any caller with --service-url access can fetch any operator's
+	// key. Acceptable when the iplane serve is bound to localhost /
+	// a private network; not safe to expose publicly without an
+	// auth layer in front.
+	GetInstanceSSHKey(ctx context.Context, in *GetInstanceSSHKeyRequest, opts ...grpc.CallOption) (*GetInstanceSSHKeyResponse, error)
 }
 
 type provisionerServiceClient struct {
@@ -140,6 +155,16 @@ func (c *provisionerServiceClient) WaitForInstanceReady(ctx context.Context, in 
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(WaitForInstanceReadyResponse)
 	err := c.cc.Invoke(ctx, ProvisionerService_WaitForInstanceReady_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *provisionerServiceClient) GetInstanceSSHKey(ctx context.Context, in *GetInstanceSSHKeyRequest, opts ...grpc.CallOption) (*GetInstanceSSHKeyResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetInstanceSSHKeyResponse)
+	err := c.cc.Invoke(ctx, ProvisionerService_GetInstanceSSHKey_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -206,6 +231,20 @@ type ProvisionerServiceServer interface {
 	// operators (interactive jupyter on the pod) skip it; deployment-
 	// bound flows call it before CreateDeployment.
 	WaitForInstanceReady(context.Context, *WaitForInstanceReadyRequest) (*WaitForInstanceReadyResponse, error)
+	// GetInstanceSSHKey returns the operator's iplane-managed private
+	// key bytes (PEM-encoded) for an instance, so the CLI can
+	// materialize them locally and run ssh against the pod when
+	// operating in remote mode (--service-url). The keystore lives on
+	// the server side, so in-process clients can read the key directly;
+	// remote clients need this RPC to bridge the gap.
+	//
+	// Security caveat: this returns private key bytes over the wire.
+	// v0.1 has no per-operator authentication on the gRPC surface --
+	// any caller with --service-url access can fetch any operator's
+	// key. Acceptable when the iplane serve is bound to localhost /
+	// a private network; not safe to expose publicly without an
+	// auth layer in front.
+	GetInstanceSSHKey(context.Context, *GetInstanceSSHKeyRequest) (*GetInstanceSSHKeyResponse, error)
 }
 
 // UnimplementedProvisionerServiceServer should be embedded to have
@@ -229,6 +268,9 @@ func (UnimplementedProvisionerServiceServer) ListInstances(context.Context, *Lis
 }
 func (UnimplementedProvisionerServiceServer) WaitForInstanceReady(context.Context, *WaitForInstanceReadyRequest) (*WaitForInstanceReadyResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method WaitForInstanceReady not implemented")
+}
+func (UnimplementedProvisionerServiceServer) GetInstanceSSHKey(context.Context, *GetInstanceSSHKeyRequest) (*GetInstanceSSHKeyResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetInstanceSSHKey not implemented")
 }
 func (UnimplementedProvisionerServiceServer) testEmbeddedByValue() {}
 
@@ -340,6 +382,24 @@ func _ProvisionerService_WaitForInstanceReady_Handler(srv interface{}, ctx conte
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ProvisionerService_GetInstanceSSHKey_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetInstanceSSHKeyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ProvisionerServiceServer).GetInstanceSSHKey(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ProvisionerService_GetInstanceSSHKey_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ProvisionerServiceServer).GetInstanceSSHKey(ctx, req.(*GetInstanceSSHKeyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ProvisionerService_ServiceDesc is the grpc.ServiceDesc for ProvisionerService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -366,6 +426,10 @@ var ProvisionerService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "WaitForInstanceReady",
 			Handler:    _ProvisionerService_WaitForInstanceReady_Handler,
+		},
+		{
+			MethodName: "GetInstanceSSHKey",
+			Handler:    _ProvisionerService_GetInstanceSSHKey_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
