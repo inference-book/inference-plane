@@ -800,9 +800,6 @@ func (s *Service) CreateDeployment(ctx context.Context, req *provisionerv1.Creat
 	if err := ValidateID(dep.GetId()); err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
-	if dep.GetInstanceId() == "" {
-		return nil, status.Error(codes.InvalidArgument, "deployment.instance_id is required")
-	}
 	if dep.GetImage() == "" {
 		return nil, status.Error(codes.InvalidArgument, "deployment.image is required")
 	}
@@ -810,21 +807,31 @@ func (s *Service) CreateDeployment(ctx context.Context, req *provisionerv1.Creat
 		return nil, status.Error(codes.InvalidArgument, "deployment.model is required")
 	}
 
-	// Look up instance + verify it is deployable.
-	file, err := s.store.Read()
+	// Resolve the target instance: place the deployment. v0.1's
+	// scheduler is trivial -- if instance_id names an existing
+	// instance, deploy there; otherwise provision a fresh instance
+	// dedicated to this deployment (1:1). The placement seam is where
+	// the v1.0 bin-packing scheduler will eventually live.
+	inst, err := s.placeDeployment(ctx, req)
 	if err != nil {
-		return nil, status.Error(codes.Internal, err.Error())
+		return nil, err
 	}
-	inst, ok := file.Instances[dep.GetInstanceId()]
-	if !ok {
-		return nil, status.Errorf(codes.InvalidArgument, "instance %q does not exist", dep.GetInstanceId())
-	}
-	switch inst.GetState() {
-	case provisionerv1.InstanceState_INSTANCE_STATE_TERMINATED, provisionerv1.InstanceState_INSTANCE_STATE_TERMINATING, provisionerv1.InstanceState_INSTANCE_STATE_FAILED:
-		return nil, status.Errorf(codes.FailedPrecondition, "instance %q is %s; create a fresh instance first", inst.GetId(), strings.TrimPrefix(inst.GetState().String(), "INSTANCE_STATE_"))
-	}
-	if inst.GetSsh() == nil || inst.GetSsh().GetHost() == "" {
-		return nil, status.Errorf(codes.InvalidArgument, "instance %q has no SSH endpoint; deployment requires an SSH-reachable instance (try --provider runpod)", inst.GetId())
+	// Persist the (possibly freshly-synthesized) instance_id back onto
+	// the deployment so the record links to its instance.
+	dep.InstanceId = inst.GetId()
+
+	// The SSH-endpoint precondition only applies to the sshdocker
+	// fallback path (VM-style providers, where the executor SSHes in).
+	// Image-native providers (those satisfying Deployer) provision the
+	// engine pod themselves and don't need a pre-existing SSH endpoint.
+	if _, imageNative := s.providerAsDeployer(inst); !imageNative {
+		switch inst.GetState() {
+		case provisionerv1.InstanceState_INSTANCE_STATE_TERMINATED, provisionerv1.InstanceState_INSTANCE_STATE_TERMINATING, provisionerv1.InstanceState_INSTANCE_STATE_FAILED:
+			return nil, status.Errorf(codes.FailedPrecondition, "instance %q is %s; create a fresh instance first", inst.GetId(), strings.TrimPrefix(inst.GetState().String(), "INSTANCE_STATE_"))
+		}
+		if inst.GetSsh() == nil || inst.GetSsh().GetHost() == "" {
+			return nil, status.Errorf(codes.InvalidArgument, "instance %q has no SSH endpoint; deployment on a non-image-native provider requires an SSH-reachable instance", inst.GetId())
+		}
 	}
 
 	// Idempotency on (operator, deployment id).
@@ -916,9 +923,52 @@ func (s *Service) launchDeploy(ctx context.Context, dep *provisionerv1.Deploymen
 		emit := func(u DeployStateUpdate) {
 			_ = s.patchDeployment(dep.GetId(), u)
 		}
-		_ = s.deployerFor(inst).Deploy(ctx, dep, inst, key, emit)
+		if err := s.deployerFor(inst).Deploy(ctx, dep, inst, key, emit); err == nil {
+			s.finalizeInstanceAfterDeploy(ctx, inst, dep.GetId())
+		}
 	}()
 	return done
+}
+
+// finalizeInstanceAfterDeploy promotes an auto-provisioned instance
+// from PENDING to ACTIVE once its image-native deployment is RUNNING.
+// The engine pod the Deployer spawned IS the instance; we look it up
+// (the deployment's container_id is the pod id) and Describe it to
+// populate the instance's GPU + SSH endpoint, so `iplane instance
+// ssh` / `describe` work against the same pod. Best-effort: a Describe
+// failure still marks the instance ACTIVE with the pod id.
+//
+// No-op for explicitly-placed instances (already ACTIVE from their own
+// CreateInstance) and for non-RUNNING deployments.
+func (s *Service) finalizeInstanceAfterDeploy(ctx context.Context, inst *provisionerv1.Instance, depID string) {
+	file, err := s.store.Read()
+	if err != nil {
+		return
+	}
+	d, ok := file.Deployments[depID]
+	if !ok || d.GetState() != provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING {
+		return
+	}
+	cur, ok := file.Instances[inst.GetId()]
+	if !ok || cur.GetState() == provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE {
+		return
+	}
+	podID := d.GetContainerId()
+	provider, ok := s.providers[cur.GetProvider()]
+	if !ok {
+		return
+	}
+	if described, derr := provider.Describe(ctx, podID); derr == nil {
+		finalized := s.finalizeActive(described, cur.GetSpec(), cur.GetProvider(), cur.GetCreatedAt())
+		finalized.ProviderId = podID
+		_ = s.patchRecord(cur.GetId(), finalized)
+		return
+	}
+	// Describe failed -- still record what we know.
+	cur.ProviderId = podID
+	cur.State = provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE
+	cur.ActivatedAt = timestamppb.New(s.clock())
+	_ = s.patchRecord(cur.GetId(), cur)
 }
 
 // deployerFor returns the Deployer that should run for this instance.
@@ -932,12 +982,90 @@ func (s *Service) launchDeploy(ctx context.Context, dep *provisionerv1.Deploymen
 // subset of DeploymentExecutor + identical signature), so call sites
 // don't have to branch.
 func (s *Service) deployerFor(inst *provisionerv1.Instance) Deployer {
-	if provider, ok := s.providers[inst.GetProvider()]; ok {
-		if d, ok := provider.(Deployer); ok {
-			return d
-		}
+	if d, imageNative := s.providerAsDeployer(inst); imageNative {
+		return d
 	}
 	return executorAsDeployer{exec: s.executor}
+}
+
+// providerAsDeployer reports whether the instance's provider is
+// image-native (satisfies Deployer directly). Returns the Deployer
+// and true when so; (nil, false) when the provider needs the
+// sshdocker fallback. CreateDeployment uses the bool to decide
+// whether the SSH-endpoint precondition applies.
+func (s *Service) providerAsDeployer(inst *provisionerv1.Instance) (Deployer, bool) {
+	if provider, ok := s.providers[inst.GetProvider()]; ok {
+		if d, ok := provider.(Deployer); ok {
+			return d, true
+		}
+	}
+	return nil, false
+}
+
+// placeDeployment resolves the instance a deployment lands on -- the
+// v0.1 scheduler seam. Trivial today: an explicit instance_id is used
+// as-is; an empty one provisions a fresh instance dedicated to this
+// deployment (1:1). The v1.0 bin-packing scheduler replaces the
+// auto-provision branch with "find an instance in the group with VRAM
+// headroom, or provision one."
+//
+// The synthesized instance carries the deployment's requirements +
+// the engine image on its Spec, so the image-native Deployer can
+// resolve the SKU and spawn the engine pod. The instance shares the
+// deployment id (for v0.1's 1:1 mapping they are two views -- GPU vs
+// model -- of the same pod).
+func (s *Service) placeDeployment(ctx context.Context, req *provisionerv1.CreateDeploymentRequest) (*provisionerv1.Instance, error) {
+	dep := req.GetDeployment()
+	file, err := s.store.Read()
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+
+	// Explicit placement: deploy onto a named, existing instance.
+	if dep.GetInstanceId() != "" {
+		inst, ok := file.Instances[dep.GetInstanceId()]
+		if !ok {
+			return nil, status.Errorf(codes.InvalidArgument, "instance %q does not exist", dep.GetInstanceId())
+		}
+		return inst, nil
+	}
+
+	// Auto-provision: synthesize a fresh instance for this deployment.
+	reqs := req.GetRequirements()
+	if reqs == nil {
+		return nil, status.Error(codes.InvalidArgument, "deployment without an explicit instance requires resource requirements (--class, --min-vram-gb, or --sku)")
+	}
+	providerName := req.GetProvider()
+	if providerName == "" {
+		return nil, status.Error(codes.InvalidArgument, "deployment without an explicit instance requires a provider")
+	}
+	if _, ok := s.providers[providerName]; !ok {
+		return nil, status.Errorf(codes.InvalidArgument, "unknown provider %q", providerName)
+	}
+
+	// The instance shares the deployment id (1:1 in v0.1). Its Spec
+	// carries the engine image as base_image + the requirements, so
+	// the Deployer resolves the SKU and runs the engine image as the
+	// pod. If a same-id instance already exists (idempotent re-deploy),
+	// reuse it.
+	if existing, ok := file.Instances[dep.GetId()]; ok {
+		return existing, nil
+	}
+	spec := &provisionerv1.Spec{
+		Id:           dep.GetId(),
+		Provider:     providerName,
+		Region:       req.GetRegion(),
+		BaseImage:    dep.GetImage(),
+		Requirements: reqs,
+	}
+	if err := ValidateAndExpandRequirements(spec); err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	inst := newPendingInstance(spec, providerName, s.clock())
+	if err := s.patchRecord(inst.GetId(), inst); err != nil {
+		return nil, status.Errorf(codes.Internal, "record placed instance: %v", err)
+	}
+	return inst, nil
 }
 
 // executorAsDeployer adapts a DeploymentExecutor to the Deployer
@@ -1103,8 +1231,33 @@ func (s *Service) DestroyDeployment(ctx context.Context, req *provisionerv1.Dest
 	if err := s.deployerFor(inst).Destroy(ctx, rec, inst, key, emit); err != nil {
 		return nil, status.Errorf(codes.Internal, "destroy %s: %v", id, err)
 	}
+
+	// For an auto-provisioned 1:1 deployment (instance id == deployment
+	// id), the engine pod the Deployer just terminated IS the instance,
+	// so mark the instance TERMINATED too. An explicitly-placed
+	// instance (different id, possibly shared / reused) is left alone --
+	// the operator tears it down via `iplane instance destroy`.
+	if inst.GetId() == id {
+		if cur, ok := mustReadInstances(s)[id]; ok && cur.GetState() != provisionerv1.InstanceState_INSTANCE_STATE_TERMINATED {
+			cur.State = provisionerv1.InstanceState_INSTANCE_STATE_TERMINATED
+			cur.TerminatedAt = timestamppb.New(s.clock())
+			_ = s.patchRecord(id, cur)
+		}
+	}
+
 	final, _ := s.store.Read()
 	return &provisionerv1.DestroyDeploymentResponse{Deployment: final.Deployments[id]}, nil
+}
+
+// mustReadInstances returns the current Instances map (empty on read
+// error). Helper for the coupled-teardown path where a read failure
+// just means "skip the instance patch."
+func mustReadInstances(s *Service) map[string]*provisionerv1.Instance {
+	file, err := s.store.Read()
+	if err != nil {
+		return map[string]*provisionerv1.Instance{}
+	}
+	return file.Instances
 }
 
 // WatchDeployment streams state transitions for one deployment until

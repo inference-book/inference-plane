@@ -1,5 +1,54 @@
 # 0002 — Deploy
 
+> **SUPERSEDED (2026-05-22, PR 44 + the image-as-pod pivot).** The
+> SSH+docker design below was implemented, then failed in practice and
+> was replaced. The original text is preserved as a design-evolution
+> record (good chapter material — "here's what we designed, here's what
+> reality forced"). This banner is the current model.
+>
+> **What broke.** The plan: provision a docker-capable base pod
+> (`runpod/pytorch`), SSH in, `docker pull` + `docker run` the engine
+> on it. RunPod's container runtime doesn't support docker-in-docker on
+> the default base (no privileged container, no cgroups for an inner
+> daemon). Auto-installing docker got partway (CLI installed, daemon
+> wouldn't start). Every base image was a fresh OS-compat surface (apt
+> vs apk, systemd vs sysvinit, privileged or not).
+>
+> **Current model (image-as-pod).** The engine image IS the pod.
+> RunPod's REST API takes a docker image as the workload directly;
+> iplane hands it the engine image, the model (via `dockerArgs`), and
+> env. Health is an HTTP poll of the engine's `/health` from the
+> operator side. No SSH, no inner docker, no DinD.
+>
+> **Concepts (current).**
+> - **Instance** = `GPU + Image` — provisioned capacity running an
+>   engine-carrying image; SSH-able for debugging.
+> - **Deployment** = a *model placed on an instance* by the scheduler.
+> - **Scheduler** (iplane-owned) maps deployment → instance. v0.1:
+>   trivial (auto-provision a fresh instance per deployment, 1:1; the
+>   instance shares the deployment id). v0.2: horizontal replicas.
+>   v1.0 (lab): VRAM bin-packing + per-model lifecycle across a fleet.
+>
+> **Model-serving is a pluggable capability.** "Get a model serving on
+> a node" has impls: image-as-pod (v0.1 default, PR 44), later Triton /
+> Ray / an iplane node-agent. The SSH+docker executor below **survives,
+> demoted to the VM-provider fallback** (Lambda Labs, raw AWS in v0.2)
+> — right when the provider gives you a VM, not a container runtime.
+> One capability, many impls, dispatched by provider capability check.
+>
+> **Positioning.** iplane embraces engines/servers (vLLM, Triton, Ray)
+> and complements them with the layer none provide: cross-provider
+> provisioning + cost-first placement. See `ARCHITECTURE.md`
+> ("own vs adopt vs pluggable").
+>
+> **What survives from the design below:** the failure-mode contract
+> (idempotency, state-file hygiene, terminate idempotency); the
+> Instance/Deployment split (reframed as capacity vs placement, not
+> host vs container); SSH key management (now for debugging + the VM
+> fallback, not the deploy hot path).
+>
+> ---
+
 ## Why this doc exists
 
 v0.1 Phase 2 adds the second iplane primitive that mutates the world outside the operator's laptop: a containerized engine running on a previously-provisioned instance, billed by uptime. Phase 2 builds the `iplane instance deploy` verb against the Provisioner contract from [0001-provisioner.md](0001-provisioner.md). If the deployment contract drifts mid-phase, every downstream piece (telemetry seeding, model store, the `iplane up` wrapper) pays for it. Locking the shape now — verb semantics, resource model, state-file schema, failure-mode contract, SSH key management — is what this doc does. No Go code lands in this PR; Phase 2 implements against the shape proposed here.

@@ -227,6 +227,20 @@ message CreateDeploymentRequest {
   // When true, block until the deployment reaches RUNNING (or FAILED).
   // Default false -- async-with-LRO. CLI's `--wait` flag sets this.
   bool wait = 2;
+  // Resource requirements for the instance the deployment is placed on.
+  // Used when deployment.instance_id is empty: the scheduler provisions
+  // a fresh instance satisfying these constraints (image-as-pod
+  // providers run the engine image directly on it). Ignored when
+  // instance_id names an existing instance (the deployment lands on
+  // that instance's already-resolved hardware). Same three-layer shape
+  // as instance create: class shorthand, numeric floors, or exact sku.
+  ResourceRequirements requirements = 3;
+  // Provider to provision on when auto-provisioning (instance_id empty).
+  // Ignored when instance_id names an existing instance (its provider
+  // is used). v0.1: "runpod" is the image-native default.
+  string provider = 4;
+  // Region hint passed through to the provider when auto-provisioning.
+  string region = 5;
 }
 
 message CreateDeploymentResponse {

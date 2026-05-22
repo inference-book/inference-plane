@@ -175,6 +175,62 @@ func TestDeploy_NoSKU_OnInstance_GoesToFAILED(t *testing.T) {
 	}
 }
 
+func TestDeploy_SKUFromRequirements_AutoProvisioned(t *testing.T) {
+	// Auto-provisioned instance: a PENDING shell with no resolved GPU,
+	// only Spec.Requirements. The deployer resolves the SKU from the
+	// requirements (here an explicit Sku) and stamps it into the POST.
+	host, port := engineHealthServer(t, http.StatusOK)
+
+	var sawSKU string
+	var getCalls atomic.Int32
+	f := &fakeRunPod{t: t, respond: func(method, path string, body []byte) (int, string) {
+		switch {
+		case method == "POST" && path == "/pods":
+			var req createPodRequest
+			_ = json.Unmarshal(body, &req)
+			if len(req.GPUTypeIDs) > 0 {
+				sawSKU = req.GPUTypeIDs[0]
+			}
+			if req.GPUCount != 2 {
+				t.Errorf("GPUCount = %d, want 2 (from requirements)", req.GPUCount)
+			}
+			return 201, `{"id":"rp-auto-1"}`
+		case method == "GET" && path == "/pods/rp-auto-1":
+			if getCalls.Add(1) == 1 {
+				return 200, `{"id":"rp-auto-1","machine":{}}`
+			}
+			return 200, fmt.Sprintf(
+				`{"id":"rp-auto-1","publicIp":%q,"portMappings":{"8000":%d}}`, host, port)
+		}
+		t.Errorf("unexpected %s %s", method, path)
+		return 500, "{}"
+	}}
+	srv := httptest.NewServer(f.handler())
+	t.Cleanup(srv.Close)
+	client := NewClient("test-api-key", WithBaseURL(srv.URL), WithHTTPClient(srv.Client()))
+	p := New(client, WithSSHReadyWait(2*time.Second, 5*time.Millisecond))
+
+	inst := okInst()
+	inst.Gpu = nil // PENDING shell, GPU not yet resolved
+	inst.Spec = &provisionerv1.Spec{
+		Requirements: &provisionerv1.ResourceRequirements{
+			Sku:      "NVIDIA RTX A5000",
+			GpuCount: 2,
+		},
+	}
+
+	c := &collector{}
+	if err := p.Deploy(context.Background(), okDep(), inst, nil, c.emit); err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	if sawSKU != "NVIDIA RTX A5000" {
+		t.Errorf("POST GPUTypeIDs[0] = %q, want SKU resolved from requirements", sawSKU)
+	}
+	if c.lastState() != provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING {
+		t.Errorf("final state = %v, want RUNNING", c.lastState())
+	}
+}
+
 func TestDeploy_HealthTimeout_GoesToFAILED(t *testing.T) {
 	// /health never returns 2xx -- engine listener serves 503.
 	host, port := engineHealthServer(t, http.StatusServiceUnavailable)

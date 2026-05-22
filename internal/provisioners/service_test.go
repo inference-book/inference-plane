@@ -737,6 +737,108 @@ func TestDeployerDispatch_NoCapability_FallsBackToConfiguredExecutor(t *testing.
 	}
 }
 
+func TestCreateDeployment_AutoProvision_RecordsInstanceAnd1to1(t *testing.T) {
+	// No instance_id: the scheduler seam auto-provisions a fresh
+	// instance dedicated to this deployment. On an image-native (Deployer)
+	// provider this must succeed WITHOUT any pre-existing SSH endpoint --
+	// the dropped precondition. The synthesized instance shares the
+	// deployment id (1:1) and is promoted to ACTIVE once RUNNING.
+	deployer := &mockDeployerProvider{mockProvider: &mockProvider{name: "mock"}}
+
+	store, err := state.Open(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("state.Open: %v", err)
+	}
+	svc := provisioners.New([]provisioners.Provider{deployer},
+		store, "default",
+		provisioners.WithKeyStore(newKeyStore(t)))
+
+	resp, err := svc.CreateDeployment(context.Background(), &provisionerv1.CreateDeploymentRequest{
+		Deployment: &provisionerv1.Deployment{
+			Id:         "my-llama",
+			Image:      "vllm/vllm-openai:v0.7.0",
+			Model:      "Qwen/Qwen2.5-1.5B-Instruct",
+			EnginePort: 8000,
+		},
+		Provider: "mock",
+		Requirements: &provisionerv1.ResourceRequirements{
+			Class:    provisioners.GPUClassSmall,
+			GpuCount: 1,
+		},
+		Wait: true,
+	})
+	if err != nil {
+		t.Fatalf("CreateDeployment (auto-provision): %v", err)
+	}
+	if deployer.deployCalls != 1 {
+		t.Errorf("provider.Deploy calls = %d, want 1", deployer.deployCalls)
+	}
+	if deployer.spawnCalls != 0 {
+		t.Errorf("Spawn calls = %d, want 0 (image-native deploy provisions the pod itself, not via Spawn)", deployer.spawnCalls)
+	}
+	dep := resp.GetDeployment()
+	if dep.GetState() != provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING {
+		t.Errorf("deployment state = %v, want RUNNING", dep.GetState())
+	}
+	if dep.GetInstanceId() != "my-llama" {
+		t.Errorf("deployment.instance_id = %q, want my-llama (1:1)", dep.GetInstanceId())
+	}
+
+	file, _ := store.Read()
+	inst, ok := file.Instances["my-llama"]
+	if !ok {
+		t.Fatal("auto-provisioned instance was not recorded")
+	}
+	if inst.GetState() != provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE {
+		t.Errorf("instance state = %v, want ACTIVE after RUNNING deploy", inst.GetState())
+	}
+	if inst.GetProvider() != "mock" {
+		t.Errorf("instance provider = %q, want mock", inst.GetProvider())
+	}
+}
+
+func TestDestroyDeployment_AutoProvisioned_CascadesToInstance(t *testing.T) {
+	// Tearing down a 1:1 auto-provisioned deployment terminates the
+	// engine pod, which IS the instance -- so the instance record is
+	// terminated too (no orphaned ACTIVE instance left behind).
+	deployer := &mockDeployerProvider{mockProvider: &mockProvider{name: "mock"}}
+
+	store, err := state.Open(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("state.Open: %v", err)
+	}
+	svc := provisioners.New([]provisioners.Provider{deployer},
+		store, "default",
+		provisioners.WithKeyStore(newKeyStore(t)))
+
+	if _, err := svc.CreateDeployment(context.Background(), &provisionerv1.CreateDeploymentRequest{
+		Deployment: &provisionerv1.Deployment{
+			Id: "my-llama", Image: "vllm/vllm-openai:v0.7.0",
+			Model: "Qwen/Qwen2.5-1.5B-Instruct", EnginePort: 8000,
+		},
+		Provider:     "mock",
+		Requirements: &provisionerv1.ResourceRequirements{Class: provisioners.GPUClassSmall, GpuCount: 1},
+		Wait:         true,
+	}); err != nil {
+		t.Fatalf("CreateDeployment: %v", err)
+	}
+
+	if _, err := svc.DestroyDeployment(context.Background(), &provisionerv1.DestroyDeploymentRequest{Id: "my-llama"}); err != nil {
+		t.Fatalf("DestroyDeployment: %v", err)
+	}
+	if deployer.destroyCalls != 1 {
+		t.Errorf("provider.Destroy calls = %d, want 1", deployer.destroyCalls)
+	}
+
+	file, _ := store.Read()
+	if got := file.Deployments["my-llama"].GetState(); got != provisionerv1.DeploymentState_DEPLOYMENT_STATE_TERMINATED {
+		t.Errorf("deployment state = %v, want TERMINATED", got)
+	}
+	if got := file.Instances["my-llama"].GetState(); got != provisionerv1.InstanceState_INSTANCE_STATE_TERMINATED {
+		t.Errorf("instance state = %v, want TERMINATED (cascade)", got)
+	}
+}
+
 func TestValidateID(t *testing.T) {
 	cases := []struct {
 		id    string

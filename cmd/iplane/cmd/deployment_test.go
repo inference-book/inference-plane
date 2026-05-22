@@ -190,8 +190,16 @@ func resetDeploymentFlags() {
 	deploymentOutput = "table"
 
 	deployInstanceID = ""
+	deployProvider = ""
+	deployRegion = ""
 	deployImage = ""
 	deployModel = ""
+	deployClass = ""
+	deploySKU = ""
+	deployMinVRAM = 0
+	deployMinRAM = 0
+	deployMinDisk = 0
+	deployGPUCount = 0
 	deployEnginePort = 8000
 	deployEngineArgs = nil
 	deployEnv = nil
@@ -274,7 +282,10 @@ func TestDeploy_RequiresInstanceImageModel(t *testing.T) {
 		args []string
 		want string
 	}{
-		{"no-instance", []string{"deploy", "my-llama", "--image", "x", "--model", "y"}, "--instance is required"},
+		// --instance is now optional: omitting it triggers auto-provision,
+		// which instead requires --provider and a GPU-shape flag.
+		{"no-instance-no-provider", []string{"deploy", "my-llama", "--image", "x", "--model", "y"}, "--provider is required"},
+		{"no-instance-no-shape", []string{"deploy", "my-llama", "--image", "x", "--model", "y", "--provider", "runpod"}, "auto-provision requires"},
 		{"no-image", []string{"deploy", "my-llama", "--instance", "my-pod", "--model", "y"}, "--image is required"},
 		{"no-model", []string{"deploy", "my-llama", "--instance", "my-pod", "--image", "x"}, "--model is required"},
 	}

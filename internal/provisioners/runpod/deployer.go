@@ -131,9 +131,25 @@ func (p *Provider) Destroy(ctx context.Context, dep *provisionerv1.Deployment, _
 // picked the class when provisioning the instance record); the
 // engine image + model + env come from the Deployment.
 func buildEnginePodRequest(dep *provisionerv1.Deployment, inst *provisionerv1.Instance) (createPodRequest, error) {
+	// SKU resolution, two cases:
+	//   - explicit instance: the GPU was already resolved at instance
+	//     create; reuse inst.Gpu.Sku.
+	//   - auto-provisioned instance: the instance is a PENDING shell
+	//     carrying Spec.Requirements; resolve the cheapest matching SKU
+	//     here (same MatchSKUs path Spawn uses).
 	gpuSKU := inst.GetGpu().GetSku()
 	if gpuSKU == "" {
-		return createPodRequest{}, fmt.Errorf("instance has no resolved GPU SKU; deploy must follow a successful instance create")
+		reqs := inst.GetSpec().GetRequirements()
+		if reqs == nil {
+			return createPodRequest{}, fmt.Errorf("instance has neither a resolved GPU SKU nor resource requirements to resolve one")
+		}
+		if sku := reqs.GetSku(); sku != "" {
+			gpuSKU = sku
+		} else if matches := MatchSKUs(reqs); len(matches) > 0 {
+			gpuSKU = matches[0]
+		} else {
+			return createPodRequest{}, fmt.Errorf("no runpod SKU satisfies the deployment's requirements (min_vram_gb=%d)", reqs.GetMinVramGb())
+		}
 	}
 
 	enginePort := dep.GetEnginePort()
@@ -160,11 +176,21 @@ func buildEnginePodRequest(dep *provisionerv1.Deployment, inst *provisionerv1.In
 	}
 	args = append(args, dep.GetEngineArgs()...)
 
+	// GPU count: from the resolved instance if present, else the
+	// requirements, else 1.
+	gpuCount := int(inst.GetGpu().GetCount())
+	if gpuCount <= 0 {
+		gpuCount = int(inst.GetSpec().GetRequirements().GetGpuCount())
+	}
+	if gpuCount <= 0 {
+		gpuCount = 1
+	}
+
 	return createPodRequest{
 		Name:              "iplane-engine-" + dep.GetId(),
 		ImageName:         dep.GetImage(),
 		GPUTypeIDs:        []string{gpuSKU},
-		GPUCount:          int(inst.GetGpu().GetCount()),
+		GPUCount:          gpuCount,
 		ContainerDiskInGB: defaultContainerDiskGB,
 		VolumeInGB:        defaultVolumeGB,
 		ComputeType:       defaultComputeType,
