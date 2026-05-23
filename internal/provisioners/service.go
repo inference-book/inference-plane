@@ -961,6 +961,11 @@ func (s *Service) finalizeInstanceAfterDeploy(ctx context.Context, inst *provisi
 	if described, derr := provider.Describe(ctx, podID); derr == nil {
 		finalized := s.finalizeActive(described, cur.GetSpec(), cur.GetProvider(), cur.GetCreatedAt())
 		finalized.ProviderId = podID
+		// Leave Ssh unset: Describe's publicIp+portMapping is unverified
+		// (the engine /health proved port 8000, not port 22). The operator
+		// drives wait_for_instance_ready next, which dials sshd to confirm
+		// reachability before stamping the verified endpoint into state.
+		finalized.Ssh = nil
 		_ = s.patchRecord(cur.GetId(), finalized)
 		return
 	}

@@ -303,6 +303,31 @@ func runDemo() {
 			return nil
 		})
 
+	demo.Step("Wait for SSH on the engine pod").ID("wait-ssh").
+		Note("Deploy promotes the 1:1 instance to ACTIVE once the engine /health returns 2xx, but the instance's SSH port is unverified at that point. This step explicitly waits for sshd on the same pod to accept TCP -- the operator's debugging affordance ('shell into the box running my model'). The deployer doesn't need SSH; this is purely for `iplane instance ssh` to work after.\n\nCLI form:\n  iplane instance wait " + deploymentID + " --service-url " + *url).
+		Arrow("Operator", "iplane", "WaitForInstanceReady{id}").
+		Arrow("iplane", "RunPod", "poll GET /pods/{id} for publicIp + portMappings[22]").
+		Arrow("iplane", "Pod", "dial sshd port (NAT-mapped) until accept").
+		Arrow("iplane", "State", "patch ssh.host / ssh.port / ssh.user (verified)").
+		Run(func(ctx demokit.StepContext) *demokit.StepResult {
+			rctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+			defer cancel()
+			resp, err := provisionerClient.WaitForInstanceReady(rctx, connect.NewRequest(&provisionerv1.WaitForInstanceReadyRequest{
+				Id:             deploymentID, // 1:1 -- the instance shares the deployment id
+				TimeoutSeconds: 150,
+			}))
+			if err != nil {
+				return abortDemo(cleanup, "WaitForInstanceReady: %v", err)
+			}
+			ssh := resp.Msg.GetInstance().GetSsh()
+			if ssh == nil || ssh.GetHost() == "" {
+				return abortDemo(cleanup, "provider returned without populating ssh endpoint")
+			}
+			fmt.Printf("  ssh endpoint:    %s@%s:%d\n", ssh.GetUser(), ssh.GetHost(), ssh.GetPort())
+			fmt.Printf("  already_ready:   %v\n", resp.Msg.GetAlreadyReady())
+			return nil
+		})
+
 	demo.Step("Hit /v1/models to prove the engine serves").ID("verify").
 		Note("vLLM's OpenAI-compatible surface exposes /v1/models for the served-model list. A 2xx here means a real OpenAI SDK can hit /v1/chat/completions next.\n\nCLI form (no native verb; uses the engine_endpoint from `iplane deployment describe`):\n  endpoint=$(iplane deployment describe " + deploymentID + " --service-url " + *url + " -o json | jq -r .engine_endpoint)\n  curl -fsS \"${endpoint}/v1/models\"").
 		Arrow("Operator", "Engine", "GET /v1/models").
