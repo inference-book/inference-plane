@@ -248,6 +248,11 @@ func (p *Provider) Spawn(ctx context.Context, spec *provisionerv1.Spec) (*provis
 		VolumeInGB:        defaultVolumeGB,
 		Ports:             defaultPortsList,
 		DataCenterIDs:     dataCenterIDs,
+		// COMMUNITY cloud doesn't assign publicIp by default; without
+		// this, WaitForSSHReady (and any deployment placed on this
+		// instance) hangs because publicIp stays "". See the matching
+		// note in deployer.go.
+		SupportPublicIP: true,
 	}
 
 	req, err := p.client.newReq("POST", "/pods", nil, createBody)
