@@ -264,6 +264,17 @@ func (s *Service) DestroyInstance(ctx context.Context, req *provisionerv1.Destro
 		}
 		providerID = existing.GetProviderId()
 		providerName = existing.GetProvider()
+		// Backfill provider_id for 1:1 auto-provisioned instances that
+		// were created before patchDeployment learned to stamp it.
+		// Without this, a Deploy that POSTed a pod then failed before
+		// finalize leaves the instance with empty provider_id, and
+		// destroy skips the Terminate call -- the real pod leaks.
+		if providerID == "" {
+			if dep, ok := f.Deployments[id]; ok && dep.GetContainerId() != "" {
+				providerID = dep.GetContainerId()
+				existing.ProviderId = providerID
+			}
+		}
 		existing.State = provisionerv1.InstanceState_INSTANCE_STATE_TERMINATING
 		record = existing
 		return nil
@@ -1111,6 +1122,17 @@ func (s *Service) patchDeployment(id string, u DeployStateUpdate) error {
 		rec.ProgressMessage = u.ProgressMessage
 		if u.ContainerID != "" {
 			rec.ContainerId = u.ContainerID
+			// For a 1:1 auto-provisioned deployment (instance shares the
+			// deployment id), the container_id IS the pod id at the
+			// provider. Stamp it onto the instance's provider_id the
+			// moment we learn it -- before this point the instance is
+			// PENDING with no provider_id, and a Deploy that fails after
+			// POST but before finalize would leave the pod orphaned at
+			// the provider (instance destroy would skip the Terminate
+			// call because provider_id is empty).
+			if inst, ok := f.Instances[id]; ok && inst.GetProviderId() == "" {
+				inst.ProviderId = u.ContainerID
+			}
 		}
 		if u.EngineEndpoint != "" {
 			rec.EngineEndpoint = u.EngineEndpoint
