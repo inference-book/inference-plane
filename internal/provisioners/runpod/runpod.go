@@ -60,6 +60,22 @@ import (
 // available" because the cheap SKUs live in COMMUNITY. Leaving
 // cloudType empty lets RunPod schedule on whichever has capacity for
 // the requested gpuTypeIds.
+//
+// publicIp interaction: SECURE pods get publicIp by default; COMMUNITY
+// pods do NOT. Because cloudType is unpinned, the same Spawn call can
+// silently land on either cloud -- giving "sometimes I see a publicIp,
+// sometimes I don't" behavior that hangs our waitForEngineReady /
+// WaitForSSHReady probes (both poll for publicIp + NAT mappings). We
+// set `supportPublicIp: true` on every POST /pods so the IP is
+// allocated regardless of which cloud was picked. The flip side:
+// community hosts that can't honor the request will reject the POST
+// up front (clean 500), which is preferable to a silent 2m hang.
+//
+// Also relevant: gpuTypePriority=availability (defaultGPUPriority
+// below) tells RunPod "land on any matching SKU on any host with
+// capacity," which makes community placements more likely than the
+// old "pin to cheapest matches[0]" path -- so we'd see the missing
+// publicIp on a lot more pods without the supportPublicIp toggle.
 const (
 	defaultBaseImage       = "runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04"
 	defaultContainerDiskGB = 20
@@ -248,10 +264,8 @@ func (p *Provider) Spawn(ctx context.Context, spec *provisionerv1.Spec) (*provis
 		VolumeInGB:        defaultVolumeGB,
 		Ports:             defaultPortsList,
 		DataCenterIDs:     dataCenterIDs,
-		// COMMUNITY cloud doesn't assign publicIp by default; without
-		// this, WaitForSSHReady (and any deployment placed on this
-		// instance) hangs because publicIp stays "". See the matching
-		// note in deployer.go.
+		// Force publicIp allocation. See the cloudType comment block
+		// above for why this is required when cloudType is unpinned.
 		SupportPublicIP: true,
 	}
 

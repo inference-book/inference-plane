@@ -219,12 +219,8 @@ func buildEnginePodRequest(dep *provisionerv1.Deployment, inst *provisionerv1.In
 			fmt.Sprintf("%d/tcp", enginePort),
 			"22/tcp",
 		},
-		// Force a publicIp allocation. On SECURE cloud this is the
-		// default; on COMMUNITY cloud (where the cheaper SKUs often
-		// land) it ISN'T -- pods get a runpod.net proxy URL only, and
-		// our publicIp+NAT health probe would hang forever (publicIp
-		// stays ""). Setting this guarantees a routable IP regardless
-		// of which cloud RunPod schedules onto.
+		// Force publicIp allocation. See the cloudType comment block in
+		// runpod.go for why this is required when cloudType is unpinned.
 		SupportPublicIP: true,
 		Env:             env,
 		DockerStartCmd:  cmd,
