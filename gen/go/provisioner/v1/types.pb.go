@@ -830,8 +830,23 @@ type Deployment struct {
 	// Phase 3 (telemetry seeding) and Phase 5 (`iplane up` UX wrapper)
 	// both surface this to operators.
 	EngineEndpoint string `protobuf:"bytes,17,opt,name=engine_endpoint,json=engineEndpoint,proto3" json:"engine_endpoint,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// Operator wants shell-level access to the running engine pod
+	// ("shell into the box running my model"). Provider-neutral intent;
+	// each adapter translates to its own mechanism:
+	//   - RunPod: allocate publicIp + NAT-map sshd (costs more, restricts
+	//     placement to publicIp-capable hosts).
+	//   - Lambda Labs / raw VMs (v0.2): no-op -- sshd is baseline; this
+	//     just controls whether `inst.ssh` is populated.
+	//   - Modal (later): satisfied via the provider's logs/exec UI;
+	//     adapter may reject the request if shell isn't available.
+	//   - k8s (v1.0): translates to a port-forward / kubectl exec hint.
+	//
+	// Default false: the engine port goes through the provider's
+	// managed proxy (no publicIp on RunPod, in-cluster service URL on
+	// k8s) -- cheapest capacity, no debug side-channel.
+	DebugShell    bool `protobuf:"varint,18,opt,name=debug_shell,json=debugShell,proto3" json:"debug_shell,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Deployment) Reset() {
@@ -983,6 +998,13 @@ func (x *Deployment) GetEngineEndpoint() string {
 	return ""
 }
 
+func (x *Deployment) GetDebugShell() bool {
+	if x != nil {
+		return x.DebugShell
+	}
+	return false
+}
+
 var File_provisioner_v1_types_proto protoreflect.FileDescriptor
 
 const file_provisioner_v1_types_proto_rawDesc = "" +
@@ -1044,7 +1066,7 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"created_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x1a7\n" +
 	"\tTagsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x82\x06\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xa3\x06\n" +
 	"\n" +
 	"Deployment\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1f\n" +
@@ -1069,7 +1091,9 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"\bready_at\x18\x0e \x01(\v2\x1a.google.protobuf.TimestampR\areadyAt\x12?\n" +
 	"\rterminated_at\x18\x0f \x01(\v2\x1a.google.protobuf.TimestampR\fterminatedAt\x12!\n" +
 	"\fcontainer_id\x18\x10 \x01(\tR\vcontainerId\x12'\n" +
-	"\x0fengine_endpoint\x18\x11 \x01(\tR\x0eengineEndpoint\x1a6\n" +
+	"\x0fengine_endpoint\x18\x11 \x01(\tR\x0eengineEndpoint\x12\x1f\n" +
+	"\vdebug_shell\x18\x12 \x01(\bR\n" +
+	"debugShell\x1a6\n" +
 	"\bEnvEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01*\xc0\x01\n" +

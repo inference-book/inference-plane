@@ -3,7 +3,6 @@ package runpod
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -43,37 +42,28 @@ func okInst() *provisionerv1.Instance {
 	}
 }
 
-// engineHealthServer is a localhost httptest server that serves
-// /health with a configurable response. Used by the deployer tests
-// to back the "publicIp:port" the fake RunPod GET response advertises.
-func engineHealthServer(t *testing.T, status int) (host string, port int32) {
+// proxyServer stands in for proxy.runpod.net during tests. The
+// deployer's health probe dials <base>/<pod-id>-<port>/health (see
+// waitForEngineReady's proxyBaseURL branch); this server matches that
+// path shape and returns the configured status code.
+func proxyServer(t *testing.T, status int) string {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/health" {
+		// e.g. /rp-engine-1-8000/health
+		if strings.HasSuffix(r.URL.Path, "/health") {
 			w.WriteHeader(status)
 			return
 		}
 		w.WriteHeader(http.StatusNotFound)
 	}))
 	t.Cleanup(srv.Close)
-	// Parse the listener address into host + port.
-	addr := strings.TrimPrefix(srv.URL, "http://")
-	parts := strings.Split(addr, ":")
-	host = parts[0]
-	var p int32
-	fmt.Sscanf(parts[1], "%d", &p)
-	port = p
-	return host, port
+	return srv.URL
 }
 
 func TestDeploy_HappyPath_GoesToRUNNING(t *testing.T) {
-	// Stand up a real engine listener so /health probes succeed.
-	host, port := engineHealthServer(t, http.StatusOK)
-
-	var getCalls atomic.Int32
+	proxyURL := proxyServer(t, http.StatusOK)
 	f := &fakeRunPod{t: t, respond: func(method, path string, body []byte) (int, string) {
-		switch {
-		case method == "POST" && path == "/pods":
+		if method == "POST" && path == "/pods" {
 			var req createPodRequest
 			_ = json.Unmarshal(body, &req)
 			if req.ImageName != "vllm/vllm-openai:v0.7.0" {
@@ -89,18 +79,15 @@ func TestDeploy_HappyPath_GoesToRUNNING(t *testing.T) {
 			if req.Env["HF_HUB_DISABLE_TELEMETRY"] != "1" {
 				t.Errorf("env not propagated: %+v", req.Env)
 			}
-			return 201, `{"id":"rp-engine-1","desiredStatus":"RUNNING"}`
-		case method == "GET" && path == "/pods/rp-engine-1":
-			n := getCalls.Add(1)
-			if n == 1 {
-				// First GET: no publicIp yet.
-				return 200, `{"id":"rp-engine-1","machine":{}}`
+			// Default deploy is proxy-only: no publicIp, no /tcp ports
+			// other than the engine /http.
+			if req.SupportPublicIP {
+				t.Errorf("SupportPublicIP=true on default deploy; want false (proxy-only is the cost-aware default)")
 			}
-			// Subsequent GETs: publicIp + port mapping pointing at the
-			// local engine server, so the health probe hits a real 200.
-			return 200, fmt.Sprintf(
-				`{"id":"rp-engine-1","publicIp":%q,"portMappings":{"8000":%d},"machine":{"gpuTypeId":"NVIDIA RTX A5000"}}`,
-				host, port)
+			if len(req.Ports) != 1 || req.Ports[0] != "8000/http" {
+				t.Errorf("Ports = %v, want [8000/http]", req.Ports)
+			}
+			return 201, `{"id":"rp-engine-1","desiredStatus":"RUNNING"}`
 		}
 		t.Errorf("unexpected %s %s", method, path)
 		return 500, "{}"
@@ -108,7 +95,10 @@ func TestDeploy_HappyPath_GoesToRUNNING(t *testing.T) {
 	srv := httptest.NewServer(f.handler())
 	t.Cleanup(srv.Close)
 	client := NewClient("test-api-key", WithBaseURL(srv.URL), WithHTTPClient(srv.Client()))
-	p := New(client, WithSSHReadyWait(2*time.Second, 5*time.Millisecond))
+	p := New(client,
+		WithSSHReadyWait(2*time.Second, 5*time.Millisecond),
+		WithProxyBaseURL(proxyURL),
+	)
 
 	c := &collector{}
 	if err := p.Deploy(context.Background(), okDep(), okInst(), nil, c.emit); err != nil {
@@ -180,13 +170,11 @@ func TestDeploy_SKUFromRequirements_AutoProvisioned(t *testing.T) {
 	// Auto-provisioned instance: a PENDING shell with no resolved GPU,
 	// only Spec.Requirements. The deployer resolves the SKU from the
 	// requirements (here an explicit Sku) and stamps it into the POST.
-	host, port := engineHealthServer(t, http.StatusOK)
+	proxyURL := proxyServer(t, http.StatusOK)
 
 	var sawSKU string
-	var getCalls atomic.Int32
 	f := &fakeRunPod{t: t, respond: func(method, path string, body []byte) (int, string) {
-		switch {
-		case method == "POST" && path == "/pods":
+		if method == "POST" && path == "/pods" {
 			var req createPodRequest
 			_ = json.Unmarshal(body, &req)
 			if len(req.GPUTypeIDs) > 0 {
@@ -196,12 +184,6 @@ func TestDeploy_SKUFromRequirements_AutoProvisioned(t *testing.T) {
 				t.Errorf("GPUCount = %d, want 2 (from requirements)", req.GPUCount)
 			}
 			return 201, `{"id":"rp-auto-1"}`
-		case method == "GET" && path == "/pods/rp-auto-1":
-			if getCalls.Add(1) == 1 {
-				return 200, `{"id":"rp-auto-1","machine":{}}`
-			}
-			return 200, fmt.Sprintf(
-				`{"id":"rp-auto-1","publicIp":%q,"portMappings":{"8000":%d}}`, host, port)
 		}
 		t.Errorf("unexpected %s %s", method, path)
 		return 500, "{}"
@@ -209,7 +191,10 @@ func TestDeploy_SKUFromRequirements_AutoProvisioned(t *testing.T) {
 	srv := httptest.NewServer(f.handler())
 	t.Cleanup(srv.Close)
 	client := NewClient("test-api-key", WithBaseURL(srv.URL), WithHTTPClient(srv.Client()))
-	p := New(client, WithSSHReadyWait(2*time.Second, 5*time.Millisecond))
+	p := New(client,
+		WithSSHReadyWait(2*time.Second, 5*time.Millisecond),
+		WithProxyBaseURL(proxyURL),
+	)
 
 	inst := okInst()
 	inst.Gpu = nil // PENDING shell, GPU not yet resolved
@@ -237,31 +222,27 @@ func TestDeploy_PassesFullSKUListWhenAutoProvisioned(t *testing.T) {
 	// hands RunPod the FULL cheapest-first match list so the platform
 	// can route around per-SKU capacity outages. Pinning matches[0]
 	// would 500 on "no capacity" whenever the cheapest is saturated.
-	host, port := engineHealthServer(t, http.StatusOK)
+	proxyURL := proxyServer(t, http.StatusOK)
 
 	var sawSKUs []string
 	var sawPriority string
-	var getCalls atomic.Int32
 	f := &fakeRunPod{t: t, respond: func(method, path string, body []byte) (int, string) {
-		switch {
-		case method == "POST" && path == "/pods":
+		if method == "POST" && path == "/pods" {
 			var req createPodRequest
 			_ = json.Unmarshal(body, &req)
 			sawSKUs = req.GPUTypeIDs
 			sawPriority = req.GPUTypePriority
 			return 201, `{"id":"rp-multi-1"}`
-		case method == "GET" && path == "/pods/rp-multi-1":
-			if getCalls.Add(1) == 1 {
-				return 200, `{"id":"rp-multi-1","machine":{}}`
-			}
-			return 200, fmt.Sprintf(`{"id":"rp-multi-1","publicIp":%q,"portMappings":{"8000":%d}}`, host, port)
 		}
 		return 500, "{}"
 	}}
 	srv := httptest.NewServer(f.handler())
 	t.Cleanup(srv.Close)
 	client := NewClient("test-api-key", WithBaseURL(srv.URL), WithHTTPClient(srv.Client()))
-	p := New(client, WithSSHReadyWait(2*time.Second, 5*time.Millisecond))
+	p := New(client,
+		WithSSHReadyWait(2*time.Second, 5*time.Millisecond),
+		WithProxyBaseURL(proxyURL),
+	)
 
 	inst := okInst()
 	inst.Gpu = nil
@@ -284,18 +265,61 @@ func TestDeploy_PassesFullSKUListWhenAutoProvisioned(t *testing.T) {
 	}
 }
 
+func TestDeploy_DebugShell_OptsIntoPublicIPAndSSHPort(t *testing.T) {
+	// debug_shell=true is the operator opt-in: pay for publicIp +
+	// expose sshd on a NAT-mapped 22/tcp. Default flow is proxy-only;
+	// this verifies the opt-in flips both fields on the POST body.
+	proxyURL := proxyServer(t, http.StatusOK)
+
+	var sawPorts []string
+	var sawSupportIP bool
+	f := &fakeRunPod{t: t, respond: func(method, path string, body []byte) (int, string) {
+		if method == "POST" && path == "/pods" {
+			var req createPodRequest
+			_ = json.Unmarshal(body, &req)
+			sawPorts = req.Ports
+			sawSupportIP = req.SupportPublicIP
+			return 201, `{"id":"rp-debug-1"}`
+		}
+		return 500, "{}"
+	}}
+	srv := httptest.NewServer(f.handler())
+	t.Cleanup(srv.Close)
+	client := NewClient("test-api-key", WithBaseURL(srv.URL), WithHTTPClient(srv.Client()))
+	p := New(client,
+		WithSSHReadyWait(2*time.Second, 5*time.Millisecond),
+		WithProxyBaseURL(proxyURL),
+	)
+
+	dep := okDep()
+	dep.DebugShell = true
+
+	c := &collector{}
+	if err := p.Deploy(context.Background(), dep, okInst(), nil, c.emit); err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	if !sawSupportIP {
+		t.Error("SupportPublicIP=false on debug_shell=true; want true")
+	}
+	wantPorts := map[string]bool{"8000/http": true, "22/tcp": true}
+	got := map[string]bool{}
+	for _, p := range sawPorts {
+		got[p] = true
+	}
+	for p := range wantPorts {
+		if !got[p] {
+			t.Errorf("Ports missing %q; got %v", p, sawPorts)
+		}
+	}
+}
+
 func TestDeploy_HealthTimeout_GoesToFAILED(t *testing.T) {
-	// /health never returns 2xx -- engine listener serves 503.
-	host, port := engineHealthServer(t, http.StatusServiceUnavailable)
+	// Proxy never returns 2xx -- stays at 503.
+	proxyURL := proxyServer(t, http.StatusServiceUnavailable)
 
 	f := &fakeRunPod{t: t, respond: func(method, path string, body []byte) (int, string) {
-		switch {
-		case method == "POST" && path == "/pods":
+		if method == "POST" && path == "/pods" {
 			return 201, `{"id":"rp-engine-2"}`
-		case method == "GET" && path == "/pods/rp-engine-2":
-			return 200, fmt.Sprintf(
-				`{"id":"rp-engine-2","publicIp":%q,"portMappings":{"8000":%d}}`,
-				host, port)
 		}
 		return 500, "{}"
 	}}
@@ -303,7 +327,10 @@ func TestDeploy_HealthTimeout_GoesToFAILED(t *testing.T) {
 	t.Cleanup(srv.Close)
 	client := NewClient("test-api-key", WithBaseURL(srv.URL), WithHTTPClient(srv.Client()))
 	// Tight timeout so the test finishes fast.
-	p := New(client, WithSSHReadyWait(30*time.Millisecond, 5*time.Millisecond))
+	p := New(client,
+		WithSSHReadyWait(30*time.Millisecond, 5*time.Millisecond),
+		WithProxyBaseURL(proxyURL),
+	)
 
 	c := &collector{}
 	err := p.Deploy(context.Background(), okDep(), okInst(), nil, c.emit)

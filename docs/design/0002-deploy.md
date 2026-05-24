@@ -14,15 +14,22 @@
 > wouldn't start). Every base image was a fresh OS-compat surface (apt
 > vs apk, systemd vs sysvinit, privileged or not).
 >
-> **Current model (image-as-pod).** The engine image IS the pod.
-> RunPod's REST API takes a docker image as the workload directly;
-> iplane hands it the engine image, the model (via `dockerArgs`), and
-> env. Health is an HTTP poll of the engine's `/health` from the
-> operator side. No SSH, no inner docker, no DinD.
+> **Current model (image-as-pod, proxy-by-default).** The engine
+> image IS the pod. RunPod's REST API takes a docker image as the
+> workload directly; iplane hands it the engine image, the model
+> (via `dockerStartCmd`), and env. The engine port is reverse-proxied
+> at the provider's HTTPS proxy URL — **no publicIp allocated by
+> default**. Health is an HTTP poll of `/health` on that proxy URL
+> from the operator side. No SSH, no inner docker, no DinD, no NAT.
+> Cost-aware: publicIp is a billed resource and restricts placement
+> to publicIp-capable hosts; the proxy default keeps deploys on the
+> cheapest community capacity. Operators opt into a publicIp +
+> NAT-mapped sshd via `deployment.debug_shell` (CLI: `--debug-shell`).
 >
 > **Concepts (current).**
 > - **Instance** = `GPU + Image` — provisioned capacity running an
->   engine-carrying image; SSH-able for debugging.
+>   engine-carrying image. Engine reachable via proxy URL; shell
+>   access is an opt-in.
 > - **Deployment** = a *model placed on an instance* by the scheduler.
 > - **Scheduler** (iplane-owned) maps deployment → instance. v0.1:
 >   trivial (auto-provision a fresh instance per deployment, 1:1; the

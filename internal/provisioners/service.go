@@ -945,9 +945,17 @@ func (s *Service) launchDeploy(ctx context.Context, dep *provisionerv1.Deploymen
 // from PENDING to ACTIVE once its image-native deployment is RUNNING.
 // The engine pod the Deployer spawned IS the instance; we look it up
 // (the deployment's container_id is the pod id) and Describe it to
-// populate the instance's GPU + SSH endpoint, so `iplane instance
-// ssh` / `describe` work against the same pod. Best-effort: a Describe
-// failure still marks the instance ACTIVE with the pod id.
+// pick up GPU / region metadata for the record. Best-effort: a
+// Describe failure still marks the instance ACTIVE with the pod id.
+//
+// SSH endpoint handling: the default deploy is proxy-only -- no
+// publicIp allocated, no SSH endpoint to populate. When the operator
+// opts in via deployment.debug_shell, the provider also requested a
+// publicIp + sshd; Describe's response carries the host/port, but
+// it's UNVERIFIED at this point (the engine /health on the proxy
+// proved engine reachability, not sshd). We deliberately leave Ssh
+// nil and require the operator to drive wait_for_instance_ready,
+// which dials sshd before stamping the verified endpoint into state.
 //
 // No-op for explicitly-placed instances (already ACTIVE from their own
 // CreateInstance) and for non-RUNNING deployments.

@@ -200,6 +200,7 @@ func resetDeploymentFlags() {
 	deployMinRAM = 0
 	deployMinDisk = 0
 	deployGPUCount = 0
+	deployDebugShell = false
 	deployEnginePort = 8000
 	deployEngineArgs = nil
 	deployEnv = nil

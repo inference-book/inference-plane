@@ -6,8 +6,7 @@ Provision a GPU instance, deploy vLLM with an OpenAI-compatible API, hit /v1/mod
 
 - **Check the service is reachable** — CLI form:
 - **Choose a model size** — All three are open-weight Qwen models that fit on a 24 GB small-class GPU. Bigger = more capable but slower cold-start and more $.
-- **Deploy: provision a pod running the engine image, wait for RUNNING** — One step. CreateDeployment with no instance_id auto-provisions: the control plane rents a small-class pod whose container IS the engine image (image-as-pod), passing the model via the pod's dockerStartCmd (the engine's argv), then polls the engine's /health from the operator side until 2xx. No SSH, no docker-in-docker. The instance + deployment are recorded 1:1 (two views -- GPU and model -- of the same pod).
-- **Wait for SSH on the engine pod** — Deploy promotes the 1:1 instance to ACTIVE once the engine /health returns 2xx, but the instance's SSH port is unverified at that point. This step explicitly waits for sshd on the same pod to accept TCP -- the operator's debugging affordance ('shell into the box running my model'). The deployer doesn't need SSH; this is purely for `iplane instance ssh` to work after.
+- **Deploy: provision a pod running the engine image, wait for RUNNING** — One step. CreateDeployment with no instance_id auto-provisions: the control plane rents a small-class pod whose container IS the engine image (image-as-pod). The engine port is reverse-proxied via the provider's HTTPS proxy (no publicIp allocated -- cheapest community capacity), and we HTTP-poll /health on the proxy URL until 2xx. No SSH, no docker-in-docker, no NAT. The instance + deployment are recorded 1:1 (two views -- GPU and model -- of the same pod). Want shell access for debugging? Re-run with --debug-shell (pays the publicIp fee + restricts placement).
 - **Hit /v1/models to prove the engine serves** — vLLM's OpenAI-compatible surface exposes /v1/models for the served-model list. A 2xx here means a real OpenAI SDK can hit /v1/chat/completions next.
 - **Destroy the deployment (tears down the pod)** — Terminates the engine pod. Because this deployment auto-provisioned its instance (1:1), the pod IS the instance -- destroying the deployment terminates the pod and marks both records TERMINATED. (For an explicitly-placed deployment on a shared instance, the instance would survive.) Idempotent: already-TERMINATED is a no-op.
 
@@ -34,16 +33,10 @@ sequenceDiagram
     iplane->>Engine: HTTP-poll /health until 2xx
     iplane->>State: patch RUNNING + engine endpoint
 
-    Note over Operator,Engine: Step 4: Wait for SSH on the engine pod
-    Operator->>iplane: WaitForInstanceReady{id}
-    iplane->>RunPod: poll GET /pods/{id} for publicIp + portMappings[22]
-    iplane->>Pod: dial sshd port (NAT-mapped) until accept
-    iplane->>State: patch ssh.host / ssh.port / ssh.user (verified)
-
-    Note over Operator,Engine: Step 5: Hit /v1/models to prove the engine serves
+    Note over Operator,Engine: Step 4: Hit /v1/models to prove the engine serves
     Operator->>Engine: GET /v1/models
 
-    Note over Operator,Engine: Step 6: Destroy the deployment (tears down the pod)
+    Note over Operator,Engine: Step 5: Destroy the deployment (tears down the pod)
     Operator->>iplane: DestroyDeployment{id}
     iplane->>RunPod: terminate pod
     iplane->>State: patch deployment + instance to TERMINATED
@@ -56,7 +49,7 @@ sequenceDiagram
 This walkthrough deploys a model with one command. The control plane provisions a GPU pod whose container IS the engine image (image-as-pod) -- no SSH, no docker-in-docker. The instance + deployment are recorded 1:1 (the instance shares the deployment id: two views, GPU and model, of the same pod).
 Target URL:    http://localhost:9091
 Provider:      runpod
-Deployment id: demo-llama-20260523t000445 (the instance shares this id)
+Deployment id: demo-llama-20260524t175704 (the instance shares this id)
 Cost depends on chosen model size + cold-start. The 1.5B default is ~$0.02 for a full run; 7B is ~$0.12. Defer-terminates on exit / Ctrl-C.
 
 ### Step 1: Check the service is reachable
@@ -70,32 +63,25 @@ All three are open-weight Qwen models that fit on a 24 GB small-class GPU. Bigge
 
 ### Step 3: Deploy: provision a pod running the engine image, wait for RUNNING
 
-One step. CreateDeployment with no instance_id auto-provisions: the control plane rents a small-class pod whose container IS the engine image (image-as-pod), passing the model via the pod's dockerStartCmd (the engine's argv), then polls the engine's /health from the operator side until 2xx. No SSH, no docker-in-docker. The instance + deployment are recorded 1:1 (two views -- GPU and model -- of the same pod).
+One step. CreateDeployment with no instance_id auto-provisions: the control plane rents a small-class pod whose container IS the engine image (image-as-pod). The engine port is reverse-proxied via the provider's HTTPS proxy (no publicIp allocated -- cheapest community capacity), and we HTTP-poll /health on the proxy URL until 2xx. No SSH, no docker-in-docker, no NAT. The instance + deployment are recorded 1:1 (two views -- GPU and model -- of the same pod). Want shell access for debugging? Re-run with --debug-shell (pays the publicIp fee + restricts placement).
 
 CLI form:
-  iplane deployment deploy demo-llama-20260523t000445 --provider runpod --class small --image vllm/vllm-openai:v0.7.0 --model <chosen> --service-url http://localhost:9091
+  iplane deployment deploy demo-llama-20260524t175704 --provider runpod --class small --image vllm/vllm-openai:v0.7.0 --model <chosen> --service-url http://localhost:9091
 
-### Step 4: Wait for SSH on the engine pod
-
-Deploy promotes the 1:1 instance to ACTIVE once the engine /health returns 2xx, but the instance's SSH port is unverified at that point. This step explicitly waits for sshd on the same pod to accept TCP -- the operator's debugging affordance ('shell into the box running my model'). The deployer doesn't need SSH; this is purely for `iplane instance ssh` to work after.
-
-CLI form:
-  iplane instance wait demo-llama-20260523t000445 --service-url http://localhost:9091
-
-### Step 5: Hit /v1/models to prove the engine serves
+### Step 4: Hit /v1/models to prove the engine serves
 
 vLLM's OpenAI-compatible surface exposes /v1/models for the served-model list. A 2xx here means a real OpenAI SDK can hit /v1/chat/completions next.
 
 CLI form (no native verb; uses the engine_endpoint from `iplane deployment describe`):
-  endpoint=$(iplane deployment describe demo-llama-20260523t000445 --service-url http://localhost:9091 -o json | jq -r .engine_endpoint)
+  endpoint=$(iplane deployment describe demo-llama-20260524t175704 --service-url http://localhost:9091 -o json | jq -r .engine_endpoint)
   curl -fsS "${endpoint}/v1/models"
 
-### Step 6: Destroy the deployment (tears down the pod)
+### Step 5: Destroy the deployment (tears down the pod)
 
 Terminates the engine pod. Because this deployment auto-provisioned its instance (1:1), the pod IS the instance -- destroying the deployment terminates the pod and marks both records TERMINATED. (For an explicitly-placed deployment on a shared instance, the instance would survive.) Idempotent: already-TERMINATED is a no-op.
 
 CLI form:
-  iplane deployment destroy demo-llama-20260523t000445 --service-url http://localhost:9091
+  iplane deployment destroy demo-llama-20260524t175704 --service-url http://localhost:9091
 
 ### Done
 

@@ -61,21 +61,32 @@ import (
 // cloudType empty lets RunPod schedule on whichever has capacity for
 // the requested gpuTypeIds.
 //
-// publicIp interaction: SECURE pods get publicIp by default; COMMUNITY
-// pods do NOT. Because cloudType is unpinned, the same Spawn call can
-// silently land on either cloud -- giving "sometimes I see a publicIp,
-// sometimes I don't" behavior that hangs our waitForEngineReady /
-// WaitForSSHReady probes (both poll for publicIp + NAT mappings). We
-// set `supportPublicIp: true` on every POST /pods so the IP is
-// allocated regardless of which cloud was picked. The flip side:
-// community hosts that can't honor the request will reject the POST
-// up front (clean 500), which is preferable to a silent 2m hang.
+// publicIp + cost interaction: SECURE pods get publicIp by default;
+// COMMUNITY pods do NOT (the cheaper tier). publicIp is a billed
+// resource on RunPod (~$0.01-0.03/hr) and demanding it restricts us
+// to publicIp-capable hosts -- so allocating one we don't need leaves
+// money on the table.
 //
-// Also relevant: gpuTypePriority=availability (defaultGPUPriority
-// below) tells RunPod "land on any matching SKU on any host with
-// capacity," which makes community placements more likely than the
-// old "pin to cheapest matches[0]" path -- so we'd see the missing
-// publicIp on a lot more pods without the supportPublicIp toggle.
+// Cost-aware default: the Deployer ships the engine port as /http
+// (proxied at <pod-id>-<port>.proxy.runpod.net) and DOES NOT request
+// supportPublicIp. The proxy URL is free, deterministic, and works
+// regardless of which cloud RunPod scheduled onto. Health probes hit
+// the proxy URL directly; no Stage-1 publicIp wait, no NAT lookup.
+//
+// Opt-in: Deployment.debug_shell=true (CLI: --debug-shell) flips the
+// deploy to declare 22/tcp + supportPublicIp=true. The operator pays
+// for the routable IP and the placement penalty in exchange for
+// shell access to the running engine pod (`iplane instance ssh`).
+//
+// Spawn (iplane instance create) does set supportPublicIp=true: that
+// path's purpose is provisioning an SSH-able VM-style instance, so
+// no publicIp = no usable instance.
+//
+// gpuTypePriority=availability (defaultGPUPriority below) tells
+// RunPod "land on any matching SKU on any host with capacity" --
+// which makes community placements more likely. Without the proxy
+// default, this would compound the publicIp variance; with the
+// proxy default, it's just "find the cheapest free GPU."
 const (
 	defaultBaseImage       = "runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04"
 	defaultContainerDiskGB = 20
@@ -110,6 +121,13 @@ type Provider struct {
 	// Default: net.DialTimeout. Tests inject a no-op via WithSSHProbe
 	// so they don't need a real listener.
 	sshProbe func(ctx context.Context, host string, port int32) error
+
+	// proxyBaseURL overrides the proxy.runpod.net base for tests --
+	// when set, the health probe dials <proxyBaseURL>/<pod-id>-<port>
+	// instead of https://<pod-id>-<port>.proxy.runpod.net. Empty in
+	// production. Tests stand up an httptest server to play the
+	// proxy's role.
+	proxyBaseURL string
 }
 
 // Option configures a Provider at construction.
@@ -122,6 +140,15 @@ func WithSSHReadyWait(timeout, interval time.Duration) Option {
 	return func(p *Provider) {
 		p.sshReadyTimeout = timeout
 		p.sshReadyInterval = interval
+	}
+}
+
+// WithProxyBaseURL overrides the RunPod proxy URL base. Test-only;
+// production always uses https://proxy.runpod.net via the deterministic
+// per-pod subdomain.
+func WithProxyBaseURL(base string) Option {
+	return func(p *Provider) {
+		p.proxyBaseURL = base
 	}
 }
 

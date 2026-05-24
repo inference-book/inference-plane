@@ -275,6 +275,21 @@ message Deployment {
   // Phase 3 (telemetry seeding) and Phase 5 (`iplane up` UX wrapper)
   // both surface this to operators.
   string engine_endpoint = 17;
+
+  // Operator wants shell-level access to the running engine pod
+  // ("shell into the box running my model"). Provider-neutral intent;
+  // each adapter translates to its own mechanism:
+  //   - RunPod: allocate publicIp + NAT-map sshd (costs more, restricts
+  //     placement to publicIp-capable hosts).
+  //   - Lambda Labs / raw VMs (v0.2): no-op -- sshd is baseline; this
+  //     just controls whether `inst.ssh` is populated.
+  //   - Modal (later): satisfied via the provider's logs/exec UI;
+  //     adapter may reject the request if shell isn't available.
+  //   - k8s (v1.0): translates to a port-forward / kubectl exec hint.
+  // Default false: the engine port goes through the provider's
+  // managed proxy (no publicIp on RunPod, in-cluster service URL on
+  // k8s) -- cheapest capacity, no debug side-channel.
+  bool debug_shell = 18;
 }
 
 enum DeploymentState {

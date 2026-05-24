@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	skhttp "github.com/panyam/servicekit/http"
@@ -72,12 +73,14 @@ func (p *Provider) Deploy(ctx context.Context, dep *provisionerv1.Deployment, in
 	emit(provisioners.DeployStateUpdate{
 		State:           provisionerv1.DeploymentState_DEPLOYMENT_STATE_CONFIGURING,
 		Phase:           "runpod:scheduling",
-		ProgressMessage: "pod created; waiting for public IP + engine /health",
+		ProgressMessage: "pod created; waiting for engine /health via proxy URL",
 		ContainerID:     created.ID,
 	})
 
-	// Wait for the engine to be reachable. publicIp + port-mapped 22
-	// (for debug ssh) AND the engine port reachable via HTTP /health.
+	// Wait for the engine to be reachable via RunPod's HTTPS proxy.
+	// The proxy URL is deterministic from the pod id -- no Stage-1
+	// publicIp poll needed, no NAT port lookup. The proxy 502s while
+	// the container boots, then 200s once the engine answers.
 	endpoint, err := p.waitForEngineReady(ctx, created.ID, dep.GetEnginePort(), emit)
 	if err != nil {
 		return failedf(emit, "runpod:engine-ready", err)
@@ -204,32 +207,50 @@ func buildEnginePodRequest(dep *provisionerv1.Deployment, inst *provisionerv1.In
 		ContainerDiskInGB: defaultContainerDiskGB,
 		VolumeInGB:        defaultVolumeGB,
 		ComputeType:       defaultComputeType,
-		// RunPod port suffixes are NOT interchangeable:
-		//   /tcp  -> NAT-mapped onto pod.publicIp; appears in
-		//            pod.portMappings[<internal>] = <external>
+		// RunPod port suffixes:
 		//   /http -> reverse-proxied at
-		//            https://<pod-id>-<port>.proxy.runpod.net;
-		//            absent from portMappings; NOT reachable on publicIp
-		// We poll the engine's /health on publicIp + NAT, so the engine
-		// port MUST be /tcp. (Using /http here ships the engine via the
-		// runpod.net proxy but leaves our health probe dialing a port
-		// that isn't open on the public IP -- the deploy times out at
-		// 2 minutes with "engine /health not reachable".)
-		Ports: []string{
-			fmt.Sprintf("%d/tcp", enginePort),
-			"22/tcp",
-		},
-		// Force publicIp allocation. See the cloudType comment block in
-		// runpod.go for why this is required when cloudType is unpinned.
-		SupportPublicIP: true,
+		//            https://<pod-id>-<port>.proxy.runpod.net.
+		//            No publicIp needed; absent from portMappings.
+		//            Free; works on community capacity.
+		//   /tcp  -> NAT-mapped onto pod.publicIp; appears in
+		//            pod.portMappings[<internal>] = <external>.
+		//            Needs supportPublicIp; bills extra; restricts
+		//            placement to publicIp-capable hosts.
+		// Cost-aware default: engine port is /http (proxy URL). SSH is
+		// /tcp but only added when the operator opts in via debug_shell
+		// -- otherwise we'd allocate a publicIp the workload doesn't
+		// need and lose the cheapest community capacity in the catalog.
+		Ports:          enginePodPorts(enginePort, dep.GetDebugShell()),
+		SupportPublicIP: dep.GetDebugShell(),
 		Env:             env,
 		DockerStartCmd:  cmd,
 	}, nil
 }
 
-// waitForEngineReady polls GET /pods/{id} for publicIp + portMapping,
-// then HTTP-polls the engine's /health endpoint until 2xx. Returns
-// the engine endpoint URL on success.
+// enginePodPorts returns the Ports list for POST /pods. Engine port is
+// always /http (proxy-routed); SSH is /tcp and only added when the
+// operator asked for debug-shell access.
+func enginePodPorts(enginePort int32, debugShell bool) []string {
+	ports := []string{fmt.Sprintf("%d/http", enginePort)}
+	if debugShell {
+		ports = append(ports, "22/tcp")
+	}
+	return ports
+}
+
+// proxyEndpointForPod returns the deterministic RunPod proxy URL for
+// a (pod, port) pair: https://<pod-id>-<port>.proxy.runpod.net. The
+// proxy is wired up the moment the pod is scheduled (before the
+// container is healthy) and 5xxs while the engine is still booting,
+// 2xxs once /health answers. Exported via the waitForEngineReady
+// constant so tests can override the base.
+func proxyEndpointForPod(podID string, port int32) string {
+	return fmt.Sprintf("https://%s-%d.proxy.runpod.net", podID, port)
+}
+
+// waitForEngineReady polls the engine's /health via the provider's
+// HTTPS proxy URL (deterministic from the pod id -- no publicIp / NAT
+// lookup needed). Returns the engine endpoint URL on success.
 func (p *Provider) waitForEngineReady(ctx context.Context, podID string, enginePort int32, emit func(provisioners.DeployStateUpdate)) (string, error) {
 	if enginePort == 0 {
 		enginePort = 8000
@@ -244,37 +265,14 @@ func (p *Provider) waitForEngineReady(ctx context.Context, podID string, engineP
 	}
 	deadline := time.Now().Add(timeout)
 
-	// Stage 1: wait for publicIp.
-	var pod podBody
-	for {
-		if time.Now().After(deadline) {
-			return "", fmt.Errorf("publicIp not assigned within %s", timeout)
-		}
-		getReq, err := p.client.newReq("GET", "/pods/"+podID, nil, nil)
-		if err != nil {
-			return "", fmt.Errorf("build get request: %w", err)
-		}
-		fresh, err := skhttp.Call[podBody](ctx, getReq, p.client.callOpts()...)
-		if err == nil && fresh.PublicIP != "" {
-			pod = fresh
-			break
-		}
-		select {
-		case <-ctx.Done():
-			return "", ctx.Err()
-		case <-time.After(interval):
-		}
+	endpoint := proxyEndpointForPod(podID, enginePort)
+	if p.proxyBaseURL != "" {
+		// Test override -- inject a local httptest server in place of
+		// proxy.runpod.net.
+		endpoint = fmt.Sprintf("%s/%s-%d", strings.TrimRight(p.proxyBaseURL, "/"), podID, enginePort)
 	}
 
-	// Resolve the externally-dialable engine port via the NAT mapping
-	// (RunPod often NATs container:8000 to a random external port).
-	externalPort := enginePort
-	if mapped, ok := pod.PortMappings[fmt.Sprintf("%d", enginePort)]; ok && mapped > 0 {
-		externalPort = int32(mapped)
-	}
-	endpoint := fmt.Sprintf("http://%s:%d", pod.PublicIP, externalPort)
-
-	// Stage 2: HTTP-poll the engine's /health.
+	// HTTP-poll the engine's /health.
 	healthURL := endpoint + "/health"
 	first := true
 	for {

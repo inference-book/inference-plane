@@ -40,6 +40,7 @@ var (
 	deployMinRAM     int32
 	deployMinDisk    int32
 	deployGPUCount   int32
+	deployDebugShell bool
 	deployWait       bool
 	deployTimeout    time.Duration
 	deployDryRun     bool
@@ -120,6 +121,7 @@ func runDeploymentDeploy(cmd *cobra.Command, args []string) error {
 		EnginePort: deployEnginePort,
 		EngineArgs: deployEngineArgs,
 		Env:        deployEnv,
+		DebugShell: deployDebugShell,
 	}
 	req := &provisionerv1.CreateDeploymentRequest{
 		Deployment: dep,
@@ -194,6 +196,8 @@ func init() {
 		`additional args passed to the engine entrypoint (comma-separated or repeated)`)
 	f.StringToStringVar(&deployEnv, "env", nil,
 		`env var to set in the engine container, KEY=VALUE (repeatable)`)
+	f.BoolVar(&deployDebugShell, "debug-shell", false,
+		`opt in to shell-level access to the engine pod (allocates a routable IP + ssh; costs more, narrows placement). Engine endpoint is unchanged either way.`)
 	f.BoolVar(&deployWait, "wait", true, `block until the engine reaches a terminal state`)
 	f.DurationVar(&deployTimeout, "timeout", 8*time.Minute,
 		`maximum time to wait for the engine to reach a terminal state (only with --wait)`)
