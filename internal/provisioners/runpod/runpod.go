@@ -195,7 +195,7 @@ func New(client *Client, opts ...Option) *Provider {
 		client:             client,
 		clock:              time.Now,
 		sshReadyTimeout:    120 * time.Second,
-		engineReadyTimeout: 5 * time.Minute,
+		engineReadyTimeout: 10 * time.Minute,
 		sshReadyInterval:   5 * time.Second,
 		sshProbe:           dialTCPProbe,
 	}

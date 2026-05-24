@@ -64,9 +64,15 @@ var modelOptions = map[string]struct {
 	estCostUSD   float64
 	estDurationS int
 }{
-	"1.5B": {id: "Qwen/Qwen2.5-1.5B-Instruct", approxVRAM: "~3 GB", coldStartHi: "30-60s", estCostUSD: 0.02, estDurationS: 90},
-	"3B":   {id: "Qwen/Qwen2.5-3B-Instruct", approxVRAM: "~6 GB", coldStartHi: "60-90s", estCostUSD: 0.05, estDurationS: 150},
-	"7B":   {id: "Qwen/Qwen2.5-7B-Instruct", approxVRAM: "~14 GB", coldStartHi: "90-180s", estCostUSD: 0.12, estDurationS: 300},
+	// Cold-start estimates calibrated for image-as-pod: RunPod pulls
+	// the full vllm/vllm-openai image (~10-15 GB) on a fresh host
+	// before vLLM downloads the model from HF and loads it. Hot host
+	// (image cached) shrinks this dramatically; the estimates here
+	// are conservative upper bounds so the demo doesn't time out
+	// before the deploy genuinely completes.
+	"1.5B": {id: "Qwen/Qwen2.5-1.5B-Instruct", approxVRAM: "~3 GB", coldStartHi: "3-8 min cold / ~60s hot", estCostUSD: 0.05, estDurationS: 360},
+	"3B":   {id: "Qwen/Qwen2.5-3B-Instruct", approxVRAM: "~6 GB", coldStartHi: "5-10 min cold / ~90s hot", estCostUSD: 0.10, estDurationS: 480},
+	"7B":   {id: "Qwen/Qwen2.5-7B-Instruct", approxVRAM: "~14 GB", coldStartHi: "8-15 min cold / 2-3 min hot", estCostUSD: 0.25, estDurationS: 720},
 }
 
 const (
