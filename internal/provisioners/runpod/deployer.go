@@ -255,9 +255,18 @@ func (p *Provider) waitForEngineReady(ctx context.Context, podID string, engineP
 	if enginePort == 0 {
 		enginePort = 8000
 	}
-	timeout := p.sshReadyTimeout
+	// Engine-ready uses its own timeout: model load + image pull is
+	// minutes, not the ~30s sshd allocation that sshReadyTimeout is
+	// tuned for. The fallback applies only if the engine timeout
+	// wasn't configured AND ssh timeout wasn't either (raw &Provider{}
+	// construction); both production New() and WithSSHReadyWait set
+	// engine-ready explicitly.
+	timeout := p.engineReadyTimeout
 	if timeout <= 0 {
-		timeout = 120 * time.Second
+		timeout = p.sshReadyTimeout // back-compat for raw constructions
+	}
+	if timeout <= 0 {
+		timeout = 5 * time.Minute
 	}
 	interval := p.sshReadyInterval
 	if interval <= 0 {

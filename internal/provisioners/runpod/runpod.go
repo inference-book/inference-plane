@@ -106,14 +106,27 @@ type Provider struct {
 	client *Client
 	clock  func() time.Time
 
-	// sshReadyTimeout caps how long WaitForSSHReady waits for the pod's
-	// PublicIP to be assigned AND for sshd inside the pod to be
-	// reachable on tcp/22. Two sequential conditions; the timeout
-	// covers both. Defaults: 120s timeout (covers the worst RunPod
-	// scheduling tail PLUS container boot + sshd startup), 3s
-	// polling interval. Tests inject short values via WithSSHReadyWait.
-	sshReadyTimeout  time.Duration
-	sshReadyInterval time.Duration
+	// Two distinct readiness waits with very different timing profiles:
+	//
+	//   sshReadyTimeout    -- WaitForSSHReady: publicIp allocation +
+	//                          sshd accepting on tcp/22. Tail is
+	//                          dominated by IP allocation (~30s) and
+	//                          sshd startup (~15s). 120s is comfortable.
+	//
+	//   engineReadyTimeout -- waitForEngineReady: image-as-pod deploys
+	//                          HTTP-poll the engine /health on the
+	//                          provider's proxy URL. Tail is dominated
+	//                          by the container image pull (multi-GB,
+	//                          1-5 min on a fresh host) and engine model
+	//                          load (Qwen2.5-1.5B is ~3GB from HF).
+	//                          5min is the conservative default; image
+	//                          + model cache hits shrink it to ~60s.
+	//
+	// Polling interval is shared (the rate doesn't need different
+	// tuning per wait kind).
+	sshReadyTimeout    time.Duration
+	engineReadyTimeout time.Duration
+	sshReadyInterval   time.Duration
 
 	// sshProbe is the function used to verify tcp/22 is actually
 	// accepting connections (RunPod's publicIp can be assigned a few
@@ -133,13 +146,29 @@ type Provider struct {
 // Option configures a Provider at construction.
 type Option func(*Provider)
 
-// WithSSHReadyWait overrides the default poll deadline + interval
-// used by WaitForSSHReady. Tests inject short values to keep them
-// fast.
+// WithSSHReadyWait overrides the poll deadline + interval used by
+// WaitForSSHReady. Tests inject short values to keep them fast.
+//
+// NOTE: this sets BOTH the ssh-ready timeout AND the engine-ready
+// timeout to the same value, for back-compat with existing tests
+// (most of which want one short timeout for everything). Production
+// callers wanting per-wait tuning should use WithEngineReadyTimeout
+// separately.
 func WithSSHReadyWait(timeout, interval time.Duration) Option {
 	return func(p *Provider) {
 		p.sshReadyTimeout = timeout
+		p.engineReadyTimeout = timeout
 		p.sshReadyInterval = interval
+	}
+}
+
+// WithEngineReadyTimeout overrides only the engine-ready timeout
+// (waitForEngineReady on the image-as-pod deploy path). Useful when
+// the engine image is large and cold-pulls regularly take longer
+// than the 5-minute default.
+func WithEngineReadyTimeout(timeout time.Duration) Option {
+	return func(p *Provider) {
+		p.engineReadyTimeout = timeout
 	}
 }
 
@@ -163,11 +192,12 @@ func WithSSHProbe(probe func(ctx context.Context, host string, port int32) error
 // New builds a RunPod Provider on top of a configured Client.
 func New(client *Client, opts ...Option) *Provider {
 	p := &Provider{
-		client:           client,
-		clock:            time.Now,
-		sshReadyTimeout:  120 * time.Second,
-		sshReadyInterval: 5 * time.Second,
-		sshProbe:         dialTCPProbe,
+		client:             client,
+		clock:              time.Now,
+		sshReadyTimeout:    120 * time.Second,
+		engineReadyTimeout: 5 * time.Minute,
+		sshReadyInterval:   5 * time.Second,
+		sshProbe:           dialTCPProbe,
 	}
 	for _, opt := range opts {
 		opt(p)
