@@ -274,6 +274,16 @@ func runDemo() {
 			opt := modelOptions[chosenSize]
 			rctx, cancel := context.WithTimeout(context.Background(), time.Duration(opt.estDurationS)*time.Second+3*time.Minute)
 			defer cancel()
+
+			// Spawn a watcher in parallel with the blocking CreateDeployment.
+			// The deployer emits a progress_message every poll (elapsed
+			// time + last HTTP status); WatchDeployment streams those to
+			// us so the operator sees forward motion instead of a blank
+			// screen during the cold image pull + model load.
+			watchCtx, watchCancel := context.WithCancel(rctx)
+			defer watchCancel()
+			go streamDeployProgress(watchCtx, deploymentClient, deploymentID)
+
 			resp, err := deploymentClient.CreateDeployment(rctx, connect.NewRequest(&provisionerv1.CreateDeploymentRequest{
 				Deployment: &provisionerv1.Deployment{
 					Id:         deploymentID,
@@ -286,6 +296,7 @@ func runDemo() {
 				Requirements: &provisionerv1.ResourceRequirements{Class: provisioners.GPUClassSmall},
 				Wait:         true,
 			}))
+			watchCancel() // stop the watcher as soon as CreateDeployment returns
 			if err != nil {
 				return abortDemo(cleanup, "CreateDeployment: %v", err)
 			}
@@ -387,6 +398,35 @@ func runDemo() {
 	}
 
 	demo.Execute()
+}
+
+// streamDeployProgress subscribes to WatchDeployment and prints each
+// state-transition / phase / progress_message change to stdout while
+// the main goroutine blocks on CreateDeployment{Wait: true}. The
+// operator sees forward motion ("waiting for engine /health (1m12s
+// elapsed) -- HTTP 502 Bad Gateway") instead of a blank screen.
+// Silently swallows the stream error -- the watcher is a UX nicety,
+// not a correctness path. The caller cancels watchCtx as soon as
+// CreateDeployment returns.
+func streamDeployProgress(ctx context.Context, client provisionerv1connect.DeploymentServiceClient, deploymentID string) {
+	stream, err := client.WatchDeployment(ctx, connect.NewRequest(&provisionerv1.WatchDeploymentRequest{Id: deploymentID}))
+	if err != nil {
+		return
+	}
+	for stream.Receive() {
+		ev := stream.Msg()
+		// Skip the initial fast-path event (from == UNSPECIFIED is the
+		// catch-up event the server fires when the watcher attaches);
+		// keep the body so we surface the current phase right away.
+		phase := ev.GetPhase()
+		msg := ev.GetProgressMessage()
+		switch {
+		case msg != "":
+			fmt.Printf("  ... %s\n", msg)
+		case phase != "":
+			fmt.Printf("  ... %s\n", phase)
+		}
+	}
 }
 
 // abortDemo is the fail-fast helper used by step Run callbacks in

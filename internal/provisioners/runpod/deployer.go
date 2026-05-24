@@ -281,8 +281,13 @@ func (p *Provider) waitForEngineReady(ctx context.Context, podID string, engineP
 		endpoint = fmt.Sprintf("%s/%s-%d", strings.TrimRight(p.proxyBaseURL, "/"), podID, enginePort)
 	}
 
-	// HTTP-poll the engine's /health.
+	// HTTP-poll the engine's /health. Each tick re-emits a
+	// progress_message that carries elapsed-time + last HTTP status (or
+	// dial error) -- the only signal the operator gets during the cold
+	// image pull + model load window. WatchDeployment fires on
+	// progress_message changes so the CLI streams these to stdout.
 	healthURL := endpoint + "/health"
+	started := time.Now()
 	first := true
 	for {
 		if !first {
@@ -296,14 +301,21 @@ func (p *Provider) waitForEngineReady(ctx context.Context, podID string, engineP
 		if time.Now().After(deadline) {
 			return endpoint, fmt.Errorf("engine /health not reachable within %s", timeout)
 		}
-		ok, err := httpProbeHealth(ctx, healthURL)
+		elapsed := time.Since(started).Round(time.Second)
+		ok, statusText, err := httpProbeHealth(ctx, healthURL)
 		if ok {
 			return endpoint, nil
 		}
-		msg := "polling engine /health (not 2xx yet)"
-		if err != nil {
-			msg = fmt.Sprintf("polling engine /health: %v", err)
+		var detail string
+		switch {
+		case err != nil:
+			detail = fmt.Sprintf("dial error: %v", err)
+		case statusText != "":
+			detail = "HTTP " + statusText
+		default:
+			detail = "no response"
 		}
+		msg := fmt.Sprintf("waiting for engine /health (%s elapsed) -- %s", elapsed, detail)
 		emit(provisioners.DeployStateUpdate{
 			State:           provisionerv1.DeploymentState_DEPLOYMENT_STATE_CONFIGURING,
 			Phase:           "engine:waiting",
@@ -314,21 +326,22 @@ func (p *Provider) waitForEngineReady(ctx context.Context, podID string, engineP
 }
 
 // httpProbeHealth dials the endpoint with a tight timeout. Returns
-// (true, nil) on 2xx, (false, nil) on connect-but-not-2xx, (false,
-// err) on real failures.
-func httpProbeHealth(ctx context.Context, url string) (bool, error) {
+// (true, "200 OK", nil) on 2xx,
+// (false, "<status>", nil) on connect-but-not-2xx (e.g. "502 Bad Gateway"),
+// (false, "", err) on real failures (DNS, refused, timeout).
+func httpProbeHealth(ctx context.Context, url string) (bool, string, error) {
 	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, url, nil)
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
 	defer resp.Body.Close()
-	return resp.StatusCode/100 == 2, nil
+	return resp.StatusCode/100 == 2, resp.Status, nil
 }
 
 // failedf emits a FAILED state update with the wrapped error reason

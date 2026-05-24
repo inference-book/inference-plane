@@ -1326,7 +1326,7 @@ func (s *Service) WatchDeployment(req *provisionerv1.WatchDeploymentRequest, str
 	defer ticker.Stop()
 
 	var lastState provisionerv1.DeploymentState
-	var lastPhase string
+	var lastPhase, lastProgress string
 	first := true
 	for {
 		file, err := s.store.Read()
@@ -1339,14 +1339,19 @@ func (s *Service) WatchDeployment(req *provisionerv1.WatchDeploymentRequest, str
 		}
 		curState := rec.GetState()
 		curPhase := rec.GetCurrentPhase()
-		if first || curState != lastState || curPhase != lastPhase {
+		curProgress := rec.GetProgressMessage()
+		// Fire on any of: state / phase / progress_message change. The
+		// engine-waiting loop holds (state, phase) steady for minutes;
+		// progress_message ticks every poll with elapsed-time / HTTP
+		// status -- the only signal the operator gets during cold pulls.
+		if first || curState != lastState || curPhase != lastPhase || curProgress != lastProgress {
 			now := timestamppb.New(s.clock())
 			ev := &provisionerv1.DeploymentStateChangedEvent{
 				Id:              id,
 				From:            lastState,
 				To:              curState,
 				Phase:           curPhase,
-				ProgressMessage: rec.GetProgressMessage(),
+				ProgressMessage: curProgress,
 				At:              now,
 			}
 			if err := stream.Send(ev); err != nil {
@@ -1354,6 +1359,7 @@ func (s *Service) WatchDeployment(req *provisionerv1.WatchDeploymentRequest, str
 			}
 			lastState = curState
 			lastPhase = curPhase
+			lastProgress = curProgress
 			first = false
 		}
 		// Terminal state -> stream done.
