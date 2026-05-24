@@ -204,8 +204,19 @@ func buildEnginePodRequest(dep *provisionerv1.Deployment, inst *provisionerv1.In
 		ContainerDiskInGB: defaultContainerDiskGB,
 		VolumeInGB:        defaultVolumeGB,
 		ComputeType:       defaultComputeType,
+		// RunPod port suffixes are NOT interchangeable:
+		//   /tcp  -> NAT-mapped onto pod.publicIp; appears in
+		//            pod.portMappings[<internal>] = <external>
+		//   /http -> reverse-proxied at
+		//            https://<pod-id>-<port>.proxy.runpod.net;
+		//            absent from portMappings; NOT reachable on publicIp
+		// We poll the engine's /health on publicIp + NAT, so the engine
+		// port MUST be /tcp. (Using /http here ships the engine via the
+		// runpod.net proxy but leaves our health probe dialing a port
+		// that isn't open on the public IP -- the deploy times out at
+		// 2 minutes with "engine /health not reachable".)
 		Ports: []string{
-			fmt.Sprintf("%d/http", enginePort),
+			fmt.Sprintf("%d/tcp", enginePort),
 			"22/tcp",
 		},
 		Env:            env,
