@@ -123,7 +123,7 @@ func New(client *Client, opts ...Option) *Provider {
 		client:           client,
 		clock:            time.Now,
 		sshReadyTimeout:  120 * time.Second,
-		sshReadyInterval: 3 * time.Second,
+		sshReadyInterval: 5 * time.Second,
 		sshProbe:         dialTCPProbe,
 	}
 	for _, opt := range opts {

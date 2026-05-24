@@ -226,7 +226,7 @@ func (p *Provider) waitForEngineReady(ctx context.Context, podID string, engineP
 	}
 	interval := p.sshReadyInterval
 	if interval <= 0 {
-		interval = 3 * time.Second
+		interval = 5 * time.Second
 	}
 	deadline := time.Now().Add(timeout)
 
