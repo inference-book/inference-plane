@@ -901,6 +901,44 @@ func TestDestroyInstance_AfterDeployFailure_StillTerminatesAtProvider(t *testing
 	}
 }
 
+func TestWaitForInstanceReady_NoSSHRequested_FailsFast(t *testing.T) {
+	// A 1:1 auto-provisioned instance whose deployment was created with
+	// debug_shell=false (the cost-aware default) was POSTed to the
+	// provider WITHOUT supportPublicIp -- the publicIp is never coming.
+	// WaitForInstanceReady must surface that as a permanent
+	// FailedPrecondition, not poll a doomed-to-fail provider for 120s.
+	mock := &mockProvider{name: "mock"}
+	store, err := state.Open(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("state.Open: %v", err)
+	}
+	svc := provisioners.New([]provisioners.Provider{mock},
+		store, "default",
+		provisioners.WithKeyStore(newKeyStore(t)))
+
+	_ = store.Update(func(f *state.File) error {
+		f.Instances["my-llama"] = &provisionerv1.Instance{
+			Id: "my-llama", Provider: "mock",
+			State: provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE,
+			// No Ssh -- never populated under proxy-only deploy.
+		}
+		f.Deployments["my-llama"] = &provisionerv1.Deployment{
+			Id: "my-llama", InstanceId: "my-llama",
+			DebugShell: false, // the cost-aware default
+			State:      provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING,
+		}
+		return nil
+	})
+
+	_, err = svc.WaitForInstanceReady(context.Background(), &provisionerv1.WaitForInstanceReadyRequest{Id: "my-llama"})
+	if err == nil {
+		t.Fatal("expected FailedPrecondition; got nil error")
+	}
+	if !strings.Contains(err.Error(), "debug_shell") {
+		t.Errorf("error message should mention debug_shell; got: %v", err)
+	}
+}
+
 func TestDestroyInstance_BackfillsProviderIDFromLinkedDeployment(t *testing.T) {
 	// Cleanup path for state files written by an older binary: an
 	// auto-provisioned instance with empty provider_id is paired (1:1

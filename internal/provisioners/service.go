@@ -400,6 +400,18 @@ func (s *Service) WaitForInstanceReady(ctx context.Context, req *provisionerv1.W
 		}, nil
 	}
 
+	// Correctness check: was SSH ever requested on this instance? An
+	// auto-provisioned 1:1 instance whose linked deployment has
+	// debug_shell=false (the cost-aware default) was created without
+	// supportPublicIp at the provider, so the provider's WaitForSSHReady
+	// would poll an IP that's NEVER coming and time out hard. Surface
+	// that explicitly: not a transient timeout, a permanent "you didn't
+	// ask for shell access on this deployment."
+	if dep, ok := file.Deployments[id]; ok && dep.GetInstanceId() == id && !dep.GetDebugShell() {
+		return nil, status.Errorf(codes.FailedPrecondition,
+			"instance %q has no SSH endpoint -- deployment %q was created with debug_shell=false (the cost-aware default). Re-deploy with --debug-shell to opt into a routable publicIp + sshd.", id, dep.GetId())
+	}
+
 	provider, ok := s.providers[inst.GetProvider()]
 	if !ok {
 		return nil, status.Errorf(codes.FailedPrecondition, "provider %q not configured (cannot wait for ssh ready)", inst.GetProvider())

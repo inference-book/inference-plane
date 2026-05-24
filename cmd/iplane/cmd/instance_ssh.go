@@ -64,7 +64,7 @@ func runInstanceSSH(cmd *cobra.Command, args []string) error {
 	inst := descResp.GetInstance()
 	sshTarget := inst.GetSsh()
 	if sshTarget == nil || sshTarget.GetHost() == "" {
-		return fmt.Errorf("instance %q has no SSH endpoint in state (try 'iplane instance wait %s' first)", id, id)
+		return fmt.Errorf("instance %q has no SSH endpoint -- either the deployment was created with the cost-aware proxy-only default (re-deploy with --debug-shell to opt into a routable publicIp + sshd), or the wait hasn't completed yet (run 'iplane instance wait %s' for an explicit error)", id, id)
 	}
 
 	keyResp, err := client.GetInstanceSSHKey(ctx, &provisionerv1.GetInstanceSSHKeyRequest{Id: id})
