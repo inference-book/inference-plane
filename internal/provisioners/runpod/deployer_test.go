@@ -232,6 +232,58 @@ func TestDeploy_SKUFromRequirements_AutoProvisioned(t *testing.T) {
 	}
 }
 
+func TestDeploy_PassesFullSKUListWhenAutoProvisioned(t *testing.T) {
+	// Class-only / min-vram requirements (no explicit SKU): the deployer
+	// hands RunPod the FULL cheapest-first match list so the platform
+	// can route around per-SKU capacity outages. Pinning matches[0]
+	// would 500 on "no capacity" whenever the cheapest is saturated.
+	host, port := engineHealthServer(t, http.StatusOK)
+
+	var sawSKUs []string
+	var sawPriority string
+	var getCalls atomic.Int32
+	f := &fakeRunPod{t: t, respond: func(method, path string, body []byte) (int, string) {
+		switch {
+		case method == "POST" && path == "/pods":
+			var req createPodRequest
+			_ = json.Unmarshal(body, &req)
+			sawSKUs = req.GPUTypeIDs
+			sawPriority = req.GPUTypePriority
+			return 201, `{"id":"rp-multi-1"}`
+		case method == "GET" && path == "/pods/rp-multi-1":
+			if getCalls.Add(1) == 1 {
+				return 200, `{"id":"rp-multi-1","machine":{}}`
+			}
+			return 200, fmt.Sprintf(`{"id":"rp-multi-1","publicIp":%q,"portMappings":{"8000":%d}}`, host, port)
+		}
+		return 500, "{}"
+	}}
+	srv := httptest.NewServer(f.handler())
+	t.Cleanup(srv.Close)
+	client := NewClient("test-api-key", WithBaseURL(srv.URL), WithHTTPClient(srv.Client()))
+	p := New(client, WithSSHReadyWait(2*time.Second, 5*time.Millisecond))
+
+	inst := okInst()
+	inst.Gpu = nil
+	inst.Spec = &provisionerv1.Spec{
+		Requirements: &provisionerv1.ResourceRequirements{
+			MinVramGb: 24,
+			GpuCount:  1,
+		},
+	}
+
+	c := &collector{}
+	if err := p.Deploy(context.Background(), okDep(), inst, nil, c.emit); err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	if len(sawSKUs) < 2 {
+		t.Errorf("GPUTypeIDs len = %d, want >=2 (full match list, not pinned matches[0])", len(sawSKUs))
+	}
+	if sawPriority != "availability" {
+		t.Errorf("gpuTypePriority = %q, want availability", sawPriority)
+	}
+}
+
 func TestDeploy_HealthTimeout_GoesToFAILED(t *testing.T) {
 	// /health never returns 2xx -- engine listener serves 503.
 	host, port := engineHealthServer(t, http.StatusServiceUnavailable)

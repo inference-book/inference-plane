@@ -66,7 +66,7 @@ func (p *Provider) Deploy(ctx context.Context, dep *provisionerv1.Deployment, in
 	}
 	if created.ID == "" {
 		return failedf(emit, "runpod:create-pod",
-			fmt.Errorf("runpod returned empty pod id (likely no capacity for sku %q)", inst.GetGpu().GetSku()))
+			fmt.Errorf("runpod returned empty pod id (likely no capacity for any of skus %v)", podReq.GPUTypeIDs))
 	}
 
 	emit(provisioners.DeployStateUpdate{
@@ -130,22 +130,30 @@ func (p *Provider) Destroy(ctx context.Context, dep *provisionerv1.Deployment, _
 // picked the class when provisioning the instance record); the
 // engine image + model + env come from the Deployment.
 func buildEnginePodRequest(dep *provisionerv1.Deployment, inst *provisionerv1.Instance) (createPodRequest, error) {
-	// SKU resolution, two cases:
-	//   - explicit instance: the GPU was already resolved at instance
-	//     create; reuse inst.Gpu.Sku.
-	//   - auto-provisioned instance: the instance is a PENDING shell
-	//     carrying Spec.Requirements; resolve the cheapest matching SKU
-	//     here (same MatchSKUs path Spawn uses).
-	gpuSKU := inst.GetGpu().GetSku()
-	if gpuSKU == "" {
+	// SKU resolution. RunPod's `gpuTypeIds` accepts a SET of acceptable
+	// SKUs and lets the platform pick one with capacity, so we hand it
+	// the full cheapest-first match list (with `gpuTypePriority=AVAILABILITY`
+	// as a tie-breaker hint). Three cases:
+	//   - explicit instance with a resolved SKU: pin to it (the
+	//     operator picked this exact GPU at instance-create time).
+	//   - auto-provisioned instance with reqs.Sku set: also pin
+	//     (operator forced an exact SKU via --sku).
+	//   - auto-provisioned instance with class / min-vram: pass the
+	//     whole MatchSKUs list so RunPod can route to any SKU with
+	//     free capacity, not just the cheapest. Mitigates the common
+	//     "no capacity on A5000 right now" 500.
+	var gpuSKUs []string
+	if sku := inst.GetGpu().GetSku(); sku != "" {
+		gpuSKUs = []string{sku}
+	} else {
 		reqs := inst.GetSpec().GetRequirements()
 		if reqs == nil {
 			return createPodRequest{}, fmt.Errorf("instance has neither a resolved GPU SKU nor resource requirements to resolve one")
 		}
 		if sku := reqs.GetSku(); sku != "" {
-			gpuSKU = sku
+			gpuSKUs = []string{sku}
 		} else if matches := MatchSKUs(reqs); len(matches) > 0 {
-			gpuSKU = matches[0]
+			gpuSKUs = matches
 		} else {
 			return createPodRequest{}, fmt.Errorf("no runpod SKU satisfies the deployment's requirements (min_vram_gb=%d)", reqs.GetMinVramGb())
 		}
@@ -190,7 +198,8 @@ func buildEnginePodRequest(dep *provisionerv1.Deployment, inst *provisionerv1.In
 	return createPodRequest{
 		Name:              "iplane-engine-" + dep.GetId(),
 		ImageName:         dep.GetImage(),
-		GPUTypeIDs:        []string{gpuSKU},
+		GPUTypeIDs:        gpuSKUs,
+		GPUTypePriority:   "availability",
 		GPUCount:          gpuCount,
 		ContainerDiskInGB: defaultContainerDiskGB,
 		VolumeInGB:        defaultVolumeGB,
