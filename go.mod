@@ -5,7 +5,7 @@ go 1.26.3
 require (
 	connectrpc.com/connect v1.19.2
 	github.com/go-viper/mapstructure/v2 v2.4.0
-	github.com/panyam/demokit v0.0.23
+	github.com/panyam/demokit v0.0.25
 	github.com/panyam/oneauth v0.0.83
 	github.com/panyam/servicekit v0.1.2
 	github.com/spf13/cobra v1.10.2
