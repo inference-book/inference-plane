@@ -108,6 +108,15 @@ func runDeploymentDeploy(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// In-process mode (no --service-url): the CLI process IS the
+	// Service host, so --no-wait would exit the moment the deploy is
+	// enqueued -- killing the executor goroutine and leaving the record
+	// PENDING forever. --no-wait only makes sense against a long-running
+	// `iplane serve` that holds the goroutine across CLI invocations.
+	if !deployWait && deploymentServiceURL == "" {
+		return fmt.Errorf("--wait=false requires --service-url <iplane serve> (in-process mode exits as soon as the deploy is enqueued, killing the executor goroutine)")
+	}
+
 	client, err := buildDeploymentClient()
 	if err != nil {
 		return err

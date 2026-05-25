@@ -23,10 +23,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -364,6 +366,74 @@ func runDemo() {
 			for _, m := range body.Data {
 				fmt.Printf("  served model:    %s\n", m.ID)
 			}
+			return nil
+		})
+
+	demo.Step("Serve a real inference request").ID("serve").
+		Note("The chapter's payoff. Single-turn /v1/chat/completions: prompt in, tokens out. iplane is NOT in the data path -- this POST goes from the operator's laptop straight to the engine_endpoint (the provider's HTTPS proxy URL). What iplane delivered was 'a dialable endpoint serving an OpenAI-compat API'; this step proves the operator can use it.\n\nCLI form:\n  iplane deployment query " + deploymentID + " \"Say hello in one sentence.\" --service-url " + *url).
+		Arrow("Operator", "Engine", "POST /v1/chat/completions (single-turn)").
+		Arrow("Engine", "Operator", "{choices:[{message:{...}}], usage:{...}}").
+		Run(func(ctx demokit.StepContext) *demokit.StepResult {
+			rctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+			defer cancel()
+			descResp, err := deploymentClient.DescribeDeployment(rctx, connect.NewRequest(&provisionerv1.DescribeDeploymentRequest{Id: deploymentID}))
+			if err != nil {
+				return abortDemo(cleanup, "DescribeDeployment: %v", err)
+			}
+			dep := descResp.Msg.GetDeployment()
+			endpoint := dep.GetEngineEndpoint()
+			modelID := dep.GetModel()
+			prompt := "In one sentence, what is a transformer?"
+
+			reqBody := map[string]any{
+				"model": modelID,
+				"messages": []map[string]string{
+					{"role": "user", "content": prompt},
+				},
+				"max_tokens":  120,
+				"temperature": 0.2,
+			}
+			bodyBytes, _ := json.Marshal(reqBody)
+			fullURL := strings.TrimRight(endpoint, "/") + "/v1/chat/completions"
+			httpReq, err := http.NewRequestWithContext(rctx, http.MethodPost, fullURL, bytes.NewReader(bodyBytes))
+			if err != nil {
+				return abortDemo(cleanup, "build request: %v", err)
+			}
+			httpReq.Header.Set("Content-Type", "application/json")
+			started := time.Now()
+			resp, err := http.DefaultClient.Do(httpReq)
+			if err != nil {
+				return abortDemo(cleanup, "POST %s: %v", fullURL, err)
+			}
+			defer resp.Body.Close()
+			respBytes, _ := io.ReadAll(resp.Body)
+			elapsed := time.Since(started).Round(time.Millisecond)
+			if resp.StatusCode/100 != 2 {
+				return abortDemo(cleanup, "%s -> %d: %s", fullURL, resp.StatusCode, strings.TrimSpace(string(respBytes)))
+			}
+			var parsed struct {
+				Choices []struct {
+					Message struct {
+						Content string `json:"content"`
+					} `json:"message"`
+					FinishReason string `json:"finish_reason"`
+				} `json:"choices"`
+				Usage struct {
+					PromptTokens     int `json:"prompt_tokens"`
+					CompletionTokens int `json:"completion_tokens"`
+				} `json:"usage"`
+			}
+			if err := json.Unmarshal(respBytes, &parsed); err != nil {
+				return abortDemo(cleanup, "decode response: %v (body: %s)", err, strings.TrimSpace(string(respBytes)))
+			}
+			if len(parsed.Choices) == 0 {
+				return abortDemo(cleanup, "response had no choices: %s", strings.TrimSpace(string(respBytes)))
+			}
+			fmt.Printf("  prompt:          %q\n", prompt)
+			fmt.Printf("  response:        %q\n", strings.TrimSpace(parsed.Choices[0].Message.Content))
+			fmt.Printf("  finish reason:   %s\n", parsed.Choices[0].FinishReason)
+			fmt.Printf("  tokens:          %d prompt + %d completion\n", parsed.Usage.PromptTokens, parsed.Usage.CompletionTokens)
+			fmt.Printf("  latency:         %s\n", elapsed)
 			return nil
 		})
 
