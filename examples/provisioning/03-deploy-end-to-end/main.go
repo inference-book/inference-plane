@@ -210,6 +210,10 @@ func runDemo() {
 	// Per-run state captured during steps. The chosen model size lands
 	// here after the operator selects it; deploy reads from here.
 	var chosenSize string
+	// Telemetry sink discovered from the operator's shell in the
+	// wire-telemetry step; deploy injects these as OTEL_EXPORTER_*
+	// env on the engine pod.
+	var otelEndpoint, otelHeaders string
 
 	demo := demokit.New("Deploy end-to-end").
 		Description("Provision a GPU instance, deploy vLLM with an OpenAI-compatible API, hit /v1/models to prove it serves, then tear it all down.").
@@ -265,6 +269,35 @@ func runDemo() {
 			return nil
 		})
 
+	demo.Step("Wire telemetry: discover the OTLP endpoint the engine will ship to").ID("wire-telemetry").
+		Note("The engine runs on a remote pod and needs a routable OTLP URL to ship traces / metrics to. iplane supports two sinks:\n\n  - Hosted (Grafana Cloud Free, Honeycomb, etc.): export IPLANE_OTEL_ENDPOINT to your provider's OTLP HTTP URL and IPLANE_OTEL_HEADERS to your auth header (e.g. 'Authorization=Basic <token>'). Zero local infra.\n\n  - Local stack via cloudflared tunnel: run `COMPOSE_PROFILES=tunnel make up`, then export IPLANE_OTEL_ENDPOINT=$(iplane telemetry url). Data lands in the local Grafana at http://localhost:3000.\n\nThis step reads IPLANE_OTEL_ENDPOINT from the operator's shell. If unset, the demo hard-fails -- the chapter's telemetry beat doesn't work without a sink, and silent skips would teach the wrong lesson.").
+		Arrow("Operator", "Shell", "IPLANE_OTEL_ENDPOINT=<grafana cloud OR `iplane telemetry url`>").
+		Arrow("Demo", "Shell", "read IPLANE_OTEL_ENDPOINT / IPLANE_OTEL_HEADERS").
+		Run(func(ctx demokit.StepContext) *demokit.StepResult {
+			endpoint := os.Getenv("IPLANE_OTEL_ENDPOINT")
+			if endpoint == "" {
+				return abortDemo(cleanup,
+					"IPLANE_OTEL_ENDPOINT is not set.\n"+
+						"Pick a sink and export the URL before re-running the demo:\n\n"+
+						"  # Hosted: copy from Grafana Cloud Free (or another OTLP provider)\n"+
+						"  export IPLANE_OTEL_ENDPOINT=https://otlp-gateway-prod-XXX.grafana.net/otlp\n"+
+						"  export IPLANE_OTEL_HEADERS='Authorization=Basic <token>'\n\n"+
+						"  # Local stack via tunnel:\n"+
+						"  COMPOSE_PROFILES=tunnel make up\n"+
+						"  export IPLANE_OTEL_ENDPOINT=$(iplane telemetry url)\n\n"+
+						"See docs/telemetry.md for the full recipe.")
+			}
+			otelEndpoint = endpoint
+			otelHeaders = os.Getenv("IPLANE_OTEL_HEADERS")
+			fmt.Printf("  OTLP endpoint:    %s\n", otelEndpoint)
+			if otelHeaders != "" {
+				fmt.Printf("  OTLP headers:     (set; %d byte(s))\n", len(otelHeaders))
+			} else {
+				fmt.Println("  OTLP headers:     (none -- ok for unauthenticated sinks like the cloudflared tunnel)")
+			}
+			return nil
+		})
+
 	demo.Step("Deploy: provision a pod running the engine image, wait for RUNNING").ID("deploy").
 		Note("One step. CreateDeployment with no instance_id auto-provisions: the control plane rents a small-class pod whose container IS the engine image (image-as-pod). The engine port is reverse-proxied via the provider's HTTPS proxy (no publicIp allocated -- cheapest community capacity), and we HTTP-poll /health on the proxy URL until 2xx. No SSH, no docker-in-docker, no NAT. The instance + deployment are recorded 1:1 (two views -- GPU and model -- of the same pod). Want shell access for debugging? Re-run with --debug-shell (pays the publicIp fee + restricts placement).\n\nCLI form:\n  iplane deployment deploy " + deploymentID + " --provider runpod --class small --image " + engineImage + " --model <chosen> --service-url " + *url).
 		Arrow("Operator", "iplane", "CreateDeployment{image=vllm, model=qwen, class=small, wait=true}").
@@ -286,12 +319,23 @@ func runDemo() {
 			defer watchCancel()
 			go streamDeployProgress(watchCtx, deploymentClient, deploymentID)
 
+			depEnv := map[string]string{
+				"OTEL_EXPORTER_OTLP_ENDPOINT": otelEndpoint,
+				// vLLM ships traces via gRPC by default; force HTTP so the
+				// request survives a cloudflared quick tunnel (HTTP/1.1
+				// works universally; gRPC over HTTP/2 sometimes doesn't).
+				"OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf",
+			}
+			if otelHeaders != "" {
+				depEnv["OTEL_EXPORTER_OTLP_HEADERS"] = otelHeaders
+			}
 			resp, err := deploymentClient.CreateDeployment(rctx, connect.NewRequest(&provisionerv1.CreateDeploymentRequest{
 				Deployment: &provisionerv1.Deployment{
 					Id:         deploymentID,
 					Image:      engineImage,
 					Model:      opt.id,
 					EnginePort: defaultEnginePort,
+					Env:        depEnv,
 				},
 				Provider:     *provider,
 				Region:       *region,
@@ -434,6 +478,19 @@ func runDemo() {
 			fmt.Printf("  finish reason:   %s\n", parsed.Choices[0].FinishReason)
 			fmt.Printf("  tokens:          %d prompt + %d completion\n", parsed.Usage.PromptTokens, parsed.Usage.CompletionTokens)
 			fmt.Printf("  latency:         %s\n", elapsed)
+			return nil
+		})
+
+	demo.Step("Observe: where the OTel data landed").ID("observe").
+		Note("The query above shipped traces + metrics via OTLP to IPLANE_OTEL_ENDPOINT. Open your sink to see them. For Grafana Cloud Free, log in and navigate to Explore -> Tempo (traces) / Mimir (metrics). For the local stack, open http://localhost:3000 (default creds admin/admin) and use the 'inference-plane v0.1' dashboard. Subsequent /v1/chat/completions calls will surface as additional spans within a few seconds.").
+		Arrow("Engine", "OTel Collector", "OTLP/HTTP traces + metrics").
+		Arrow("OTel Collector", "Tempo / Mimir", "fan-out by signal type").
+		Arrow("Operator", "Grafana", "browse the dashboard").
+		Run(func(ctx demokit.StepContext) *demokit.StepResult {
+			fmt.Printf("  shipped to:      %s\n", otelEndpoint)
+			fmt.Printf("  local UI:        http://localhost:3000 (if running the local docker-compose stack)\n")
+			fmt.Printf("  hosted UI:       your provider's Explore page (Grafana Cloud, Honeycomb, etc.)\n")
+			fmt.Printf("  note:            traces may take 5-10s to materialize after the request\n")
 			return nil
 		})
 

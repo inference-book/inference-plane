@@ -3,6 +3,8 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -41,6 +43,8 @@ var (
 	deployMinDisk    int32
 	deployGPUCount   int32
 	deployDebugShell bool
+	deployOtelEndpoint string
+	deployOtelHeaders  map[string]string
 	deployWait       bool
 	deployTimeout    time.Duration
 	deployDryRun     bool
@@ -122,6 +126,13 @@ func runDeploymentDeploy(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// Merge OTel convenience flags + IPLANE_OTEL_* env fallbacks into
+	// the engine's env map. Explicit --env wins over flags; flags win
+	// over IPLANE_OTEL_* env fallbacks. The pod sees standard OTEL_*
+	// vars; engines (vLLM, Triton, anything OTel-instrumented) pick
+	// them up without iplane-specific knowledge.
+	engineEnv := mergeOtelEnv(deployEnv, deployOtelEndpoint, deployOtelHeaders)
+
 	dep := &provisionerv1.Deployment{
 		Id:         id,
 		InstanceId: deployInstanceID,
@@ -129,7 +140,7 @@ func runDeploymentDeploy(cmd *cobra.Command, args []string) error {
 		Model:      deployModel,
 		EnginePort: deployEnginePort,
 		EngineArgs: deployEngineArgs,
-		Env:        deployEnv,
+		Env:        engineEnv,
 		DebugShell: deployDebugShell,
 	}
 	req := &provisionerv1.CreateDeploymentRequest{
@@ -205,6 +216,10 @@ func init() {
 		`additional args passed to the engine entrypoint (comma-separated or repeated)`)
 	f.StringToStringVar(&deployEnv, "env", nil,
 		`env var to set in the engine container, KEY=VALUE (repeatable)`)
+	f.StringVar(&deployOtelEndpoint, "otel-endpoint", os.Getenv("IPLANE_OTEL_ENDPOINT"),
+		`OTLP endpoint URL for the engine to ship traces/metrics to (default: IPLANE_OTEL_ENDPOINT env). Sets OTEL_EXPORTER_OTLP_ENDPOINT on the pod. Examples: Grafana Cloud Free's OTLP HTTP URL, or 'iplane telemetry url' for a cloudflared tunnel to the local stack.`)
+	f.StringToStringVar(&deployOtelHeaders, "otel-headers", parseOtelHeadersEnv(os.Getenv("IPLANE_OTEL_HEADERS")),
+		`OTLP request headers, KEY=VALUE (repeatable; default: IPLANE_OTEL_HEADERS env, comma-separated). Sets OTEL_EXPORTER_OTLP_HEADERS on the pod. Grafana Cloud uses 'Authorization=Basic <token>'.`)
 	f.BoolVar(&deployDebugShell, "debug-shell", false,
 		`opt in to shell-level access to the engine pod (allocates a routable IP + ssh; costs more, narrows placement). Engine endpoint is unchanged either way.`)
 	f.BoolVar(&deployWait, "wait", true, `block until the engine reaches a terminal state`)
@@ -212,4 +227,61 @@ func init() {
 		`maximum time to wait for the engine to reach a terminal state (only with --wait)`)
 	f.BoolVar(&deployDryRun, "dry-run", false,
 		`print the planned action and exit without provisioning`)
+}
+
+// mergeOtelEnv overlays --otel-endpoint / --otel-headers (sourced
+// from flags or IPLANE_OTEL_* env fallbacks) onto the operator's
+// --env map. Explicit OTEL_EXPORTER_OTLP_* keys in --env win, so
+// power users can override what the convenience flags set.
+//
+// The pod sees the universal OTEL_EXPORTER_OTLP_ENDPOINT /
+// OTEL_EXPORTER_OTLP_HEADERS vars; any OTel-instrumented engine
+// (vLLM, Triton, anything using the OTel SDK) picks them up.
+func mergeOtelEnv(baseEnv map[string]string, endpoint string, headers map[string]string) map[string]string {
+	out := map[string]string{}
+	if endpoint != "" {
+		out["OTEL_EXPORTER_OTLP_ENDPOINT"] = endpoint
+	}
+	if len(headers) > 0 {
+		// OTLP headers wire format: comma-separated KEY=VALUE pairs.
+		parts := make([]string, 0, len(headers))
+		for k, v := range headers {
+			parts = append(parts, k+"="+v)
+		}
+		out["OTEL_EXPORTER_OTLP_HEADERS"] = strings.Join(parts, ",")
+	}
+	// --env overrides the convenience flags (operator's last word).
+	for k, v := range baseEnv {
+		out[k] = v
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// parseOtelHeadersEnv parses IPLANE_OTEL_HEADERS into the same
+// KEY=VALUE map shape that --otel-headers produces. Comma-separated,
+// trims whitespace, silently skips malformed entries (the env var is
+// best-effort -- power users use repeated --otel-headers flags).
+func parseOtelHeadersEnv(raw string) map[string]string {
+	if raw == "" {
+		return nil
+	}
+	out := map[string]string{}
+	for _, pair := range strings.Split(raw, ",") {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+		eq := strings.IndexByte(pair, '=')
+		if eq <= 0 {
+			continue
+		}
+		out[strings.TrimSpace(pair[:eq])] = strings.TrimSpace(pair[eq+1:])
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
