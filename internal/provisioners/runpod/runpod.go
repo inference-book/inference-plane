@@ -60,6 +60,33 @@ import (
 // available" because the cheap SKUs live in COMMUNITY. Leaving
 // cloudType empty lets RunPod schedule on whichever has capacity for
 // the requested gpuTypeIds.
+//
+// publicIp + cost interaction: SECURE pods get publicIp by default;
+// COMMUNITY pods do NOT (the cheaper tier). publicIp is a billed
+// resource on RunPod (~$0.01-0.03/hr) and demanding it restricts us
+// to publicIp-capable hosts -- so allocating one we don't need leaves
+// money on the table.
+//
+// Cost-aware default: the Deployer ships the engine port as /http
+// (proxied at <pod-id>-<port>.proxy.runpod.net) and DOES NOT request
+// supportPublicIp. The proxy URL is free, deterministic, and works
+// regardless of which cloud RunPod scheduled onto. Health probes hit
+// the proxy URL directly; no Stage-1 publicIp wait, no NAT lookup.
+//
+// Opt-in: Deployment.debug_shell=true (CLI: --debug-shell) flips the
+// deploy to declare 22/tcp + supportPublicIp=true. The operator pays
+// for the routable IP and the placement penalty in exchange for
+// shell access to the running engine pod (`iplane instance ssh`).
+//
+// Spawn (iplane instance create) does set supportPublicIp=true: that
+// path's purpose is provisioning an SSH-able VM-style instance, so
+// no publicIp = no usable instance.
+//
+// gpuTypePriority=availability (defaultGPUPriority below) tells
+// RunPod "land on any matching SKU on any host with capacity" --
+// which makes community placements more likely. Without the proxy
+// default, this would compound the publicIp variance; with the
+// proxy default, it's just "find the cheapest free GPU."
 const (
 	defaultBaseImage       = "runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04"
 	defaultContainerDiskGB = 20
@@ -79,14 +106,27 @@ type Provider struct {
 	client *Client
 	clock  func() time.Time
 
-	// sshReadyTimeout caps how long WaitForSSHReady waits for the pod's
-	// PublicIP to be assigned AND for sshd inside the pod to be
-	// reachable on tcp/22. Two sequential conditions; the timeout
-	// covers both. Defaults: 120s timeout (covers the worst RunPod
-	// scheduling tail PLUS container boot + sshd startup), 3s
-	// polling interval. Tests inject short values via WithSSHReadyWait.
-	sshReadyTimeout  time.Duration
-	sshReadyInterval time.Duration
+	// Two distinct readiness waits with very different timing profiles:
+	//
+	//   sshReadyTimeout    -- WaitForSSHReady: publicIp allocation +
+	//                          sshd accepting on tcp/22. Tail is
+	//                          dominated by IP allocation (~30s) and
+	//                          sshd startup (~15s). 120s is comfortable.
+	//
+	//   engineReadyTimeout -- waitForEngineReady: image-as-pod deploys
+	//                          HTTP-poll the engine /health on the
+	//                          provider's proxy URL. Tail is dominated
+	//                          by the container image pull (multi-GB,
+	//                          1-5 min on a fresh host) and engine model
+	//                          load (Qwen2.5-1.5B is ~3GB from HF).
+	//                          5min is the conservative default; image
+	//                          + model cache hits shrink it to ~60s.
+	//
+	// Polling interval is shared (the rate doesn't need different
+	// tuning per wait kind).
+	sshReadyTimeout    time.Duration
+	engineReadyTimeout time.Duration
+	sshReadyInterval   time.Duration
 
 	// sshProbe is the function used to verify tcp/22 is actually
 	// accepting connections (RunPod's publicIp can be assigned a few
@@ -94,18 +134,50 @@ type Provider struct {
 	// Default: net.DialTimeout. Tests inject a no-op via WithSSHProbe
 	// so they don't need a real listener.
 	sshProbe func(ctx context.Context, host string, port int32) error
+
+	// proxyBaseURL overrides the proxy.runpod.net base for tests --
+	// when set, the health probe dials <proxyBaseURL>/<pod-id>-<port>
+	// instead of https://<pod-id>-<port>.proxy.runpod.net. Empty in
+	// production. Tests stand up an httptest server to play the
+	// proxy's role.
+	proxyBaseURL string
 }
 
 // Option configures a Provider at construction.
 type Option func(*Provider)
 
-// WithSSHReadyWait overrides the default poll deadline + interval
-// used by WaitForSSHReady. Tests inject short values to keep them
-// fast.
+// WithSSHReadyWait overrides the poll deadline + interval used by
+// WaitForSSHReady. Tests inject short values to keep them fast.
+//
+// NOTE: this sets BOTH the ssh-ready timeout AND the engine-ready
+// timeout to the same value, for back-compat with existing tests
+// (most of which want one short timeout for everything). Production
+// callers wanting per-wait tuning should use WithEngineReadyTimeout
+// separately.
 func WithSSHReadyWait(timeout, interval time.Duration) Option {
 	return func(p *Provider) {
 		p.sshReadyTimeout = timeout
+		p.engineReadyTimeout = timeout
 		p.sshReadyInterval = interval
+	}
+}
+
+// WithEngineReadyTimeout overrides only the engine-ready timeout
+// (waitForEngineReady on the image-as-pod deploy path). Useful when
+// the engine image is large and cold-pulls regularly take longer
+// than the 5-minute default.
+func WithEngineReadyTimeout(timeout time.Duration) Option {
+	return func(p *Provider) {
+		p.engineReadyTimeout = timeout
+	}
+}
+
+// WithProxyBaseURL overrides the RunPod proxy URL base. Test-only;
+// production always uses https://proxy.runpod.net via the deterministic
+// per-pod subdomain.
+func WithProxyBaseURL(base string) Option {
+	return func(p *Provider) {
+		p.proxyBaseURL = base
 	}
 }
 
@@ -120,11 +192,12 @@ func WithSSHProbe(probe func(ctx context.Context, host string, port int32) error
 // New builds a RunPod Provider on top of a configured Client.
 func New(client *Client, opts ...Option) *Provider {
 	p := &Provider{
-		client:           client,
-		clock:            time.Now,
-		sshReadyTimeout:  120 * time.Second,
-		sshReadyInterval: 3 * time.Second,
-		sshProbe:         dialTCPProbe,
+		client:             client,
+		clock:              time.Now,
+		sshReadyTimeout:    120 * time.Second,
+		engineReadyTimeout: 10 * time.Minute,
+		sshReadyInterval:   5 * time.Second,
+		sshProbe:           dialTCPProbe,
 	}
 	for _, opt := range opts {
 		opt(p)
@@ -248,6 +321,9 @@ func (p *Provider) Spawn(ctx context.Context, spec *provisionerv1.Spec) (*provis
 		VolumeInGB:        defaultVolumeGB,
 		Ports:             defaultPortsList,
 		DataCenterIDs:     dataCenterIDs,
+		// Force publicIp allocation. See the cloudType comment block
+		// above for why this is required when cloudType is unpinned.
+		SupportPublicIP: true,
 	}
 
 	req, err := p.client.newReq("POST", "/pods", nil, createBody)
@@ -661,9 +737,15 @@ type createPodRequest struct {
 	VolumeInGB        int               `json:"volumeInGb,omitempty"`
 	NetworkVolumeID   string            `json:"networkVolumeId,omitempty"`
 	Ports             []string          `json:"ports,omitempty"`
-	Env               map[string]string `json:"env,omitempty"`               // RunPod's REST uses a flat key/value map.
-	DockerArgs        string            `json:"dockerArgs,omitempty"`        // appended to the image's ENTRYPOINT/CMD; how we pass `--model X` etc to vLLM.
-	Interruptible     bool              `json:"interruptible,omitempty"`
+	Env               map[string]string `json:"env,omitempty"` // RunPod's REST uses a flat key/value map.
+	// DockerStartCmd REPLACES the image's CMD with these argv tokens
+	// (ENTRYPOINT — the engine binary — stays). RunPod's REST API
+	// removed the legacy single-string `dockerArgs` in favor of these
+	// two array fields; we pass args as an argv slice, not a shell-split
+	// string.
+	DockerStartCmd   []string `json:"dockerStartCmd,omitempty"`
+	DockerEntrypoint []string `json:"dockerEntrypoint,omitempty"`
+	Interruptible    bool     `json:"interruptible,omitempty"`
 	TemplateID        string   `json:"templateId,omitempty"`
 	SupportPublicIP   bool     `json:"supportPublicIp,omitempty"`
 	DataCenterIDs     []string `json:"dataCenterIds,omitempty"` // best-effort; if rejected, RunPod schedules anywhere

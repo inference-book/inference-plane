@@ -601,10 +601,16 @@ type mockDeployerProvider struct {
 	*mockProvider
 	deployCalls  int
 	destroyCalls int
+	// deployFn overrides the default healthy emit-RUNNING behavior;
+	// nil means "use default."
+	deployFn func(emit func(provisioners.DeployStateUpdate)) error
 }
 
 func (m *mockDeployerProvider) Deploy(ctx context.Context, dep *provisionerv1.Deployment, inst *provisionerv1.Instance, key *sshkeys.KeyPair, emit func(provisioners.DeployStateUpdate)) error {
 	m.deployCalls++
+	if m.deployFn != nil {
+		return m.deployFn(emit)
+	}
 	emit(provisioners.DeployStateUpdate{
 		State:          provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING,
 		Phase:          "test:provider-deployer",
@@ -734,6 +740,239 @@ func TestDeployerDispatch_NoCapability_FallsBackToConfiguredExecutor(t *testing.
 	}
 	if fallback.deployCalls != 1 {
 		t.Errorf("fallback executor.Deploy calls = %d, want 1", fallback.deployCalls)
+	}
+}
+
+func TestCreateDeployment_AutoProvision_RecordsInstanceAnd1to1(t *testing.T) {
+	// No instance_id: the scheduler seam auto-provisions a fresh
+	// instance dedicated to this deployment. On an image-native (Deployer)
+	// provider this must succeed WITHOUT any pre-existing SSH endpoint --
+	// the dropped precondition. The synthesized instance shares the
+	// deployment id (1:1) and is promoted to ACTIVE once RUNNING.
+	deployer := &mockDeployerProvider{mockProvider: &mockProvider{name: "mock"}}
+
+	store, err := state.Open(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("state.Open: %v", err)
+	}
+	svc := provisioners.New([]provisioners.Provider{deployer},
+		store, "default",
+		provisioners.WithKeyStore(newKeyStore(t)))
+
+	resp, err := svc.CreateDeployment(context.Background(), &provisionerv1.CreateDeploymentRequest{
+		Deployment: &provisionerv1.Deployment{
+			Id:         "my-llama",
+			Image:      "vllm/vllm-openai:v0.7.0",
+			Model:      "Qwen/Qwen2.5-1.5B-Instruct",
+			EnginePort: 8000,
+		},
+		Provider: "mock",
+		Requirements: &provisionerv1.ResourceRequirements{
+			Class:    provisioners.GPUClassSmall,
+			GpuCount: 1,
+		},
+		Wait: true,
+	})
+	if err != nil {
+		t.Fatalf("CreateDeployment (auto-provision): %v", err)
+	}
+	if deployer.deployCalls != 1 {
+		t.Errorf("provider.Deploy calls = %d, want 1", deployer.deployCalls)
+	}
+	if deployer.spawnCalls != 0 {
+		t.Errorf("Spawn calls = %d, want 0 (image-native deploy provisions the pod itself, not via Spawn)", deployer.spawnCalls)
+	}
+	dep := resp.GetDeployment()
+	if dep.GetState() != provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING {
+		t.Errorf("deployment state = %v, want RUNNING", dep.GetState())
+	}
+	if dep.GetInstanceId() != "my-llama" {
+		t.Errorf("deployment.instance_id = %q, want my-llama (1:1)", dep.GetInstanceId())
+	}
+
+	file, _ := store.Read()
+	inst, ok := file.Instances["my-llama"]
+	if !ok {
+		t.Fatal("auto-provisioned instance was not recorded")
+	}
+	if inst.GetState() != provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE {
+		t.Errorf("instance state = %v, want ACTIVE after RUNNING deploy", inst.GetState())
+	}
+	if inst.GetProvider() != "mock" {
+		t.Errorf("instance provider = %q, want mock", inst.GetProvider())
+	}
+}
+
+func TestDestroyDeployment_AutoProvisioned_CascadesToInstance(t *testing.T) {
+	// Tearing down a 1:1 auto-provisioned deployment terminates the
+	// engine pod, which IS the instance -- so the instance record is
+	// terminated too (no orphaned ACTIVE instance left behind).
+	deployer := &mockDeployerProvider{mockProvider: &mockProvider{name: "mock"}}
+
+	store, err := state.Open(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("state.Open: %v", err)
+	}
+	svc := provisioners.New([]provisioners.Provider{deployer},
+		store, "default",
+		provisioners.WithKeyStore(newKeyStore(t)))
+
+	if _, err := svc.CreateDeployment(context.Background(), &provisionerv1.CreateDeploymentRequest{
+		Deployment: &provisionerv1.Deployment{
+			Id: "my-llama", Image: "vllm/vllm-openai:v0.7.0",
+			Model: "Qwen/Qwen2.5-1.5B-Instruct", EnginePort: 8000,
+		},
+		Provider:     "mock",
+		Requirements: &provisionerv1.ResourceRequirements{Class: provisioners.GPUClassSmall, GpuCount: 1},
+		Wait:         true,
+	}); err != nil {
+		t.Fatalf("CreateDeployment: %v", err)
+	}
+
+	if _, err := svc.DestroyDeployment(context.Background(), &provisionerv1.DestroyDeploymentRequest{Id: "my-llama"}); err != nil {
+		t.Fatalf("DestroyDeployment: %v", err)
+	}
+	if deployer.destroyCalls != 1 {
+		t.Errorf("provider.Destroy calls = %d, want 1", deployer.destroyCalls)
+	}
+
+	file, _ := store.Read()
+	if got := file.Deployments["my-llama"].GetState(); got != provisionerv1.DeploymentState_DEPLOYMENT_STATE_TERMINATED {
+		t.Errorf("deployment state = %v, want TERMINATED", got)
+	}
+	if got := file.Instances["my-llama"].GetState(); got != provisionerv1.InstanceState_INSTANCE_STATE_TERMINATED {
+		t.Errorf("instance state = %v, want TERMINATED (cascade)", got)
+	}
+}
+
+func TestDestroyInstance_AfterDeployFailure_StillTerminatesAtProvider(t *testing.T) {
+	// Regression: when Deploy POSTs a pod (emitting ContainerID) but
+	// then fails (e.g., engine /health never returns 2xx), finalize is
+	// skipped -- the instance stayed PENDING with empty provider_id and
+	// `iplane instance destroy` then skipped the provider.Terminate
+	// call, leaking the real pod at the provider.
+	//
+	// Fix: patchDeployment stamps the pod id onto the 1:1 instance's
+	// provider_id the moment we learn it (before finalize).
+	deployer := &mockDeployerProvider{mockProvider: &mockProvider{name: "mock"}}
+	deployer.deployFn = func(emit func(provisioners.DeployStateUpdate)) error {
+		// Pod created at provider -- emit ContainerID, then fail.
+		emit(provisioners.DeployStateUpdate{
+			State:       provisionerv1.DeploymentState_DEPLOYMENT_STATE_CONFIGURING,
+			Phase:       "test:pod-created",
+			ContainerID: "mock-pod-leaked",
+		})
+		emit(provisioners.DeployStateUpdate{
+			State:         provisionerv1.DeploymentState_DEPLOYMENT_STATE_FAILED,
+			Phase:         "test:health-timeout",
+			FailureReason: "engine /health never returned 2xx",
+		})
+		return errors.New("health timeout")
+	}
+
+	store, err := state.Open(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("state.Open: %v", err)
+	}
+	svc := provisioners.New([]provisioners.Provider{deployer},
+		store, "default",
+		provisioners.WithKeyStore(newKeyStore(t)))
+
+	// Deploy fails, but the pod exists at the provider.
+	_, _ = svc.CreateDeployment(context.Background(), &provisionerv1.CreateDeploymentRequest{
+		Deployment:   &provisionerv1.Deployment{Id: "my-llama", Image: "vllm/vllm-openai:v0.7.0", Model: "Qwen/Qwen2.5-1.5B-Instruct", EnginePort: 8000},
+		Provider:     "mock",
+		Requirements: &provisionerv1.ResourceRequirements{Class: provisioners.GPUClassSmall, GpuCount: 1},
+		Wait:         true,
+	})
+
+	// Sanity: instance now carries the leaked pod id (the fix).
+	file, _ := store.Read()
+	if got := file.Instances["my-llama"].GetProviderId(); got != "mock-pod-leaked" {
+		t.Fatalf("instance.provider_id = %q, want mock-pod-leaked (would leak the real pod if empty)", got)
+	}
+
+	// Destroy must reach provider.Terminate -- the whole point.
+	if _, err := svc.DestroyInstance(context.Background(), &provisionerv1.DestroyInstanceRequest{Id: "my-llama"}); err != nil {
+		t.Fatalf("DestroyInstance: %v", err)
+	}
+	if deployer.termCalls != 1 {
+		t.Errorf("provider.Terminate calls = %d, want 1 (instance destroy must reach the provider, not just patch local state)", deployer.termCalls)
+	}
+}
+
+func TestWaitForInstanceReady_NoSSHRequested_FailsFast(t *testing.T) {
+	// A 1:1 auto-provisioned instance whose deployment was created with
+	// debug_shell=false (the cost-aware default) was POSTed to the
+	// provider WITHOUT supportPublicIp -- the publicIp is never coming.
+	// WaitForInstanceReady must surface that as a permanent
+	// FailedPrecondition, not poll a doomed-to-fail provider for 120s.
+	mock := &mockProvider{name: "mock"}
+	store, err := state.Open(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("state.Open: %v", err)
+	}
+	svc := provisioners.New([]provisioners.Provider{mock},
+		store, "default",
+		provisioners.WithKeyStore(newKeyStore(t)))
+
+	_ = store.Update(func(f *state.File) error {
+		f.Instances["my-llama"] = &provisionerv1.Instance{
+			Id: "my-llama", Provider: "mock",
+			State: provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE,
+			// No Ssh -- never populated under proxy-only deploy.
+		}
+		f.Deployments["my-llama"] = &provisionerv1.Deployment{
+			Id: "my-llama", InstanceId: "my-llama",
+			DebugShell: false, // the cost-aware default
+			State:      provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING,
+		}
+		return nil
+	})
+
+	_, err = svc.WaitForInstanceReady(context.Background(), &provisionerv1.WaitForInstanceReadyRequest{Id: "my-llama"})
+	if err == nil {
+		t.Fatal("expected FailedPrecondition; got nil error")
+	}
+	if !strings.Contains(err.Error(), "debug_shell") {
+		t.Errorf("error message should mention debug_shell; got: %v", err)
+	}
+}
+
+func TestDestroyInstance_BackfillsProviderIDFromLinkedDeployment(t *testing.T) {
+	// Cleanup path for state files written by an older binary: an
+	// auto-provisioned instance with empty provider_id is paired (1:1
+	// id) with a deployment carrying the container_id. DestroyInstance
+	// must backfill provider_id from the deployment so the provider
+	// Terminate call actually fires.
+	mock := &mockProvider{name: "mock"}
+	store, err := state.Open(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("state.Open: %v", err)
+	}
+	svc := provisioners.New([]provisioners.Provider{mock},
+		store, "default",
+		provisioners.WithKeyStore(newKeyStore(t)))
+
+	// Seed: instance has NO provider_id; linked deployment has container_id.
+	_ = store.Update(func(f *state.File) error {
+		f.Instances["my-llama"] = &provisionerv1.Instance{
+			Id: "my-llama", Provider: "mock", ProviderId: "",
+			State: provisionerv1.InstanceState_INSTANCE_STATE_PENDING,
+		}
+		f.Deployments["my-llama"] = &provisionerv1.Deployment{
+			Id: "my-llama", InstanceId: "my-llama",
+			ContainerId: "mock-pod-orphan",
+			State:       provisionerv1.DeploymentState_DEPLOYMENT_STATE_FAILED,
+		}
+		return nil
+	})
+
+	if _, err := svc.DestroyInstance(context.Background(), &provisionerv1.DestroyInstanceRequest{Id: "my-llama"}); err != nil {
+		t.Fatalf("DestroyInstance: %v", err)
+	}
+	if mock.termCalls != 1 {
+		t.Errorf("provider.Terminate calls = %d, want 1 (backfill should make destroy reach the provider)", mock.termCalls)
 	}
 }
 

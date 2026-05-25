@@ -67,18 +67,20 @@ func (p *Provider) Deploy(ctx context.Context, dep *provisionerv1.Deployment, in
 	}
 	if created.ID == "" {
 		return failedf(emit, "runpod:create-pod",
-			fmt.Errorf("runpod returned empty pod id (likely no capacity for sku %q)", inst.GetGpu().GetSku()))
+			fmt.Errorf("runpod returned empty pod id (likely no capacity for any of skus %v)", podReq.GPUTypeIDs))
 	}
 
 	emit(provisioners.DeployStateUpdate{
 		State:           provisionerv1.DeploymentState_DEPLOYMENT_STATE_CONFIGURING,
 		Phase:           "runpod:scheduling",
-		ProgressMessage: "pod created; waiting for public IP + engine /health",
+		ProgressMessage: "pod created; waiting for engine /health via proxy URL",
 		ContainerID:     created.ID,
 	})
 
-	// Wait for the engine to be reachable. publicIp + port-mapped 22
-	// (for debug ssh) AND the engine port reachable via HTTP /health.
+	// Wait for the engine to be reachable via RunPod's HTTPS proxy.
+	// The proxy URL is deterministic from the pod id -- no Stage-1
+	// publicIp poll needed, no NAT port lookup. The proxy 502s while
+	// the container boots, then 200s once the engine answers.
 	endpoint, err := p.waitForEngineReady(ctx, created.ID, dep.GetEnginePort(), emit)
 	if err != nil {
 		return failedf(emit, "runpod:engine-ready", err)
@@ -131,9 +133,33 @@ func (p *Provider) Destroy(ctx context.Context, dep *provisionerv1.Deployment, _
 // picked the class when provisioning the instance record); the
 // engine image + model + env come from the Deployment.
 func buildEnginePodRequest(dep *provisionerv1.Deployment, inst *provisionerv1.Instance) (createPodRequest, error) {
-	gpuSKU := inst.GetGpu().GetSku()
-	if gpuSKU == "" {
-		return createPodRequest{}, fmt.Errorf("instance has no resolved GPU SKU; deploy must follow a successful instance create")
+	// SKU resolution. RunPod's `gpuTypeIds` accepts a SET of acceptable
+	// SKUs and lets the platform pick one with capacity, so we hand it
+	// the full cheapest-first match list (with `gpuTypePriority=AVAILABILITY`
+	// as a tie-breaker hint). Three cases:
+	//   - explicit instance with a resolved SKU: pin to it (the
+	//     operator picked this exact GPU at instance-create time).
+	//   - auto-provisioned instance with reqs.Sku set: also pin
+	//     (operator forced an exact SKU via --sku).
+	//   - auto-provisioned instance with class / min-vram: pass the
+	//     whole MatchSKUs list so RunPod can route to any SKU with
+	//     free capacity, not just the cheapest. Mitigates the common
+	//     "no capacity on A5000 right now" 500.
+	var gpuSKUs []string
+	if sku := inst.GetGpu().GetSku(); sku != "" {
+		gpuSKUs = []string{sku}
+	} else {
+		reqs := inst.GetSpec().GetRequirements()
+		if reqs == nil {
+			return createPodRequest{}, fmt.Errorf("instance has neither a resolved GPU SKU nor resource requirements to resolve one")
+		}
+		if sku := reqs.GetSku(); sku != "" {
+			gpuSKUs = []string{sku}
+		} else if matches := MatchSKUs(reqs); len(matches) > 0 {
+			gpuSKUs = matches
+		} else {
+			return createPodRequest{}, fmt.Errorf("no runpod SKU satisfies the deployment's requirements (min_vram_gb=%d)", reqs.GetMinVramGb())
+		}
 	}
 
 	enginePort := dep.GetEnginePort()
@@ -149,83 +175,119 @@ func buildEnginePodRequest(dep *provisionerv1.Deployment, inst *provisionerv1.In
 		env[k] = v
 	}
 
-	// Build the docker args. vLLM (and most OpenAI-compat engines)
-	// take `--model X --host 0.0.0.0 --port N` plus the operator's
-	// custom args. The image's ENTRYPOINT is the engine binary;
-	// dockerArgs is appended after it.
-	args := []string{
+	// Build the docker CMD. vLLM (and most OpenAI-compat engines) take
+	// `--model X --host 0.0.0.0 --port N` plus the operator's custom
+	// args. The image ENTRYPOINT is the engine binary; we REPLACE the
+	// image CMD with this argv via RunPod's dockerStartCmd field. The
+	// legacy single-string `dockerArgs` was removed from RunPod's REST
+	// schema; argv tokens go on the wire as a JSON array.
+	cmd := []string{
 		"--model", dep.GetModel(),
 		"--host", "0.0.0.0",
 		"--port", fmt.Sprintf("%d", enginePort),
 	}
-	args = append(args, dep.GetEngineArgs()...)
+	cmd = append(cmd, dep.GetEngineArgs()...)
+
+	// GPU count: from the resolved instance if present, else the
+	// requirements, else 1.
+	gpuCount := int(inst.GetGpu().GetCount())
+	if gpuCount <= 0 {
+		gpuCount = int(inst.GetSpec().GetRequirements().GetGpuCount())
+	}
+	if gpuCount <= 0 {
+		gpuCount = 1
+	}
 
 	return createPodRequest{
 		Name:              "iplane-engine-" + dep.GetId(),
 		ImageName:         dep.GetImage(),
-		GPUTypeIDs:        []string{gpuSKU},
-		GPUCount:          int(inst.GetGpu().GetCount()),
+		GPUTypeIDs:        gpuSKUs,
+		GPUTypePriority:   "availability",
+		GPUCount:          gpuCount,
 		ContainerDiskInGB: defaultContainerDiskGB,
 		VolumeInGB:        defaultVolumeGB,
 		ComputeType:       defaultComputeType,
-		Ports: []string{
-			fmt.Sprintf("%d/http", enginePort),
-			"22/tcp",
-		},
-		Env:        env,
-		DockerArgs: strings.Join(args, " "),
+		// RunPod port suffixes:
+		//   /http -> reverse-proxied at
+		//            https://<pod-id>-<port>.proxy.runpod.net.
+		//            No publicIp needed; absent from portMappings.
+		//            Free; works on community capacity.
+		//   /tcp  -> NAT-mapped onto pod.publicIp; appears in
+		//            pod.portMappings[<internal>] = <external>.
+		//            Needs supportPublicIp; bills extra; restricts
+		//            placement to publicIp-capable hosts.
+		// Cost-aware default: engine port is /http (proxy URL). SSH is
+		// /tcp but only added when the operator opts in via debug_shell
+		// -- otherwise we'd allocate a publicIp the workload doesn't
+		// need and lose the cheapest community capacity in the catalog.
+		Ports:          enginePodPorts(enginePort, dep.GetDebugShell()),
+		SupportPublicIP: dep.GetDebugShell(),
+		Env:             env,
+		DockerStartCmd:  cmd,
 	}, nil
 }
 
-// waitForEngineReady polls GET /pods/{id} for publicIp + portMapping,
-// then HTTP-polls the engine's /health endpoint until 2xx. Returns
-// the engine endpoint URL on success.
+// enginePodPorts returns the Ports list for POST /pods. Engine port is
+// always /http (proxy-routed); SSH is /tcp and only added when the
+// operator asked for debug-shell access.
+func enginePodPorts(enginePort int32, debugShell bool) []string {
+	ports := []string{fmt.Sprintf("%d/http", enginePort)}
+	if debugShell {
+		ports = append(ports, "22/tcp")
+	}
+	return ports
+}
+
+// proxyEndpointForPod returns the deterministic RunPod proxy URL for
+// a (pod, port) pair: https://<pod-id>-<port>.proxy.runpod.net. The
+// proxy is wired up the moment the pod is scheduled (before the
+// container is healthy) and 5xxs while the engine is still booting,
+// 2xxs once /health answers. Exported via the waitForEngineReady
+// constant so tests can override the base.
+func proxyEndpointForPod(podID string, port int32) string {
+	return fmt.Sprintf("https://%s-%d.proxy.runpod.net", podID, port)
+}
+
+// waitForEngineReady polls the engine's /health via the provider's
+// HTTPS proxy URL (deterministic from the pod id -- no publicIp / NAT
+// lookup needed). Returns the engine endpoint URL on success.
 func (p *Provider) waitForEngineReady(ctx context.Context, podID string, enginePort int32, emit func(provisioners.DeployStateUpdate)) (string, error) {
 	if enginePort == 0 {
 		enginePort = 8000
 	}
-	timeout := p.sshReadyTimeout
+	// Engine-ready uses its own timeout: model load + image pull is
+	// minutes, not the ~30s sshd allocation that sshReadyTimeout is
+	// tuned for. The fallback applies only if the engine timeout
+	// wasn't configured AND ssh timeout wasn't either (raw &Provider{}
+	// construction); both production New() and WithSSHReadyWait set
+	// engine-ready explicitly.
+	timeout := p.engineReadyTimeout
 	if timeout <= 0 {
-		timeout = 120 * time.Second
+		timeout = p.sshReadyTimeout // back-compat for raw constructions
+	}
+	if timeout <= 0 {
+		timeout = 5 * time.Minute
 	}
 	interval := p.sshReadyInterval
 	if interval <= 0 {
-		interval = 3 * time.Second
+		interval = 5 * time.Second
 	}
 	deadline := time.Now().Add(timeout)
 
-	// Stage 1: wait for publicIp.
-	var pod podBody
-	for {
-		if time.Now().After(deadline) {
-			return "", fmt.Errorf("publicIp not assigned within %s", timeout)
-		}
-		getReq, err := p.client.newReq("GET", "/pods/"+podID, nil, nil)
-		if err != nil {
-			return "", fmt.Errorf("build get request: %w", err)
-		}
-		fresh, err := skhttp.Call[podBody](ctx, getReq, p.client.callOpts()...)
-		if err == nil && fresh.PublicIP != "" {
-			pod = fresh
-			break
-		}
-		select {
-		case <-ctx.Done():
-			return "", ctx.Err()
-		case <-time.After(interval):
-		}
+	endpoint := proxyEndpointForPod(podID, enginePort)
+	if p.proxyBaseURL != "" {
+		// Test override -- inject a local httptest server in place of
+		// proxy.runpod.net.
+		endpoint = fmt.Sprintf("%s/%s-%d", strings.TrimRight(p.proxyBaseURL, "/"), podID, enginePort)
 	}
 
-	// Resolve the externally-dialable engine port via the NAT mapping
-	// (RunPod often NATs container:8000 to a random external port).
-	externalPort := enginePort
-	if mapped, ok := pod.PortMappings[fmt.Sprintf("%d", enginePort)]; ok && mapped > 0 {
-		externalPort = int32(mapped)
-	}
-	endpoint := fmt.Sprintf("http://%s:%d", pod.PublicIP, externalPort)
-
-	// Stage 2: HTTP-poll the engine's /health.
+	// HTTP-poll the engine's /health. Each tick re-emits a
+	// progress_message that carries elapsed-time + last HTTP status (or
+	// dial error) -- the only signal the operator gets during the cold
+	// image pull + model load window. WatchDeployment fires on
+	// progress_message changes so the CLI streams these to stdout.
 	healthURL := endpoint + "/health"
+	started := time.Now()
 	first := true
 	for {
 		if !first {
@@ -239,14 +301,21 @@ func (p *Provider) waitForEngineReady(ctx context.Context, podID string, engineP
 		if time.Now().After(deadline) {
 			return endpoint, fmt.Errorf("engine /health not reachable within %s", timeout)
 		}
-		ok, err := httpProbeHealth(ctx, healthURL)
+		elapsed := time.Since(started).Round(time.Second)
+		ok, statusText, err := httpProbeHealth(ctx, healthURL)
 		if ok {
 			return endpoint, nil
 		}
-		msg := "polling engine /health (not 2xx yet)"
-		if err != nil {
-			msg = fmt.Sprintf("polling engine /health: %v", err)
+		var detail string
+		switch {
+		case err != nil:
+			detail = fmt.Sprintf("dial error: %v", err)
+		case statusText != "":
+			detail = "HTTP " + statusText
+		default:
+			detail = "no response"
 		}
+		msg := fmt.Sprintf("waiting for engine /health (%s elapsed) -- %s", elapsed, detail)
 		emit(provisioners.DeployStateUpdate{
 			State:           provisionerv1.DeploymentState_DEPLOYMENT_STATE_CONFIGURING,
 			Phase:           "engine:waiting",
@@ -257,21 +326,22 @@ func (p *Provider) waitForEngineReady(ctx context.Context, podID string, engineP
 }
 
 // httpProbeHealth dials the endpoint with a tight timeout. Returns
-// (true, nil) on 2xx, (false, nil) on connect-but-not-2xx, (false,
-// err) on real failures.
-func httpProbeHealth(ctx context.Context, url string) (bool, error) {
+// (true, "200 OK", nil) on 2xx,
+// (false, "<status>", nil) on connect-but-not-2xx (e.g. "502 Bad Gateway"),
+// (false, "", err) on real failures (DNS, refused, timeout).
+func httpProbeHealth(ctx context.Context, url string) (bool, string, error) {
 	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, url, nil)
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
 	defer resp.Body.Close()
-	return resp.StatusCode/100 == 2, nil
+	return resp.StatusCode/100 == 2, resp.Status, nil
 }
 
 // failedf emits a FAILED state update with the wrapped error reason

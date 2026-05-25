@@ -64,9 +64,15 @@ var modelOptions = map[string]struct {
 	estCostUSD   float64
 	estDurationS int
 }{
-	"1.5B": {id: "Qwen/Qwen2.5-1.5B-Instruct", approxVRAM: "~3 GB", coldStartHi: "30-60s", estCostUSD: 0.02, estDurationS: 90},
-	"3B":   {id: "Qwen/Qwen2.5-3B-Instruct", approxVRAM: "~6 GB", coldStartHi: "60-90s", estCostUSD: 0.05, estDurationS: 150},
-	"7B":   {id: "Qwen/Qwen2.5-7B-Instruct", approxVRAM: "~14 GB", coldStartHi: "90-180s", estCostUSD: 0.12, estDurationS: 300},
+	// Cold-start estimates calibrated for image-as-pod: RunPod pulls
+	// the full vllm/vllm-openai image (~10-15 GB) on a fresh host
+	// before vLLM downloads the model from HF and loads it. Hot host
+	// (image cached) shrinks this dramatically; the estimates here
+	// are conservative upper bounds so the demo doesn't time out
+	// before the deploy genuinely completes.
+	"1.5B": {id: "Qwen/Qwen2.5-1.5B-Instruct", approxVRAM: "~3 GB", coldStartHi: "3-8 min cold / ~60s hot", estCostUSD: 0.05, estDurationS: 360},
+	"3B":   {id: "Qwen/Qwen2.5-3B-Instruct", approxVRAM: "~6 GB", coldStartHi: "5-10 min cold / ~90s hot", estCostUSD: 0.10, estDurationS: 480},
+	"7B":   {id: "Qwen/Qwen2.5-7B-Instruct", approxVRAM: "~14 GB", coldStartHi: "8-15 min cold / 2-3 min hot", estCostUSD: 0.25, estDurationS: 720},
 }
 
 const (
@@ -197,7 +203,6 @@ func runDemo() {
 	}()
 
 	stamp := time.Now().UTC().Format("20060102t150405")
-	instanceID := "demo-pod-" + stamp
 	deploymentID := "demo-llama-" + stamp
 
 	// Per-run state captured during steps. The chosen model size lands
@@ -218,11 +223,10 @@ func runDemo() {
 		)
 
 	demo.Section("Setup",
-		"This walkthrough exercises both the Provisioner and Deployment surfaces end-to-end. The deployment executor SSHes into the provisioned pod and runs docker -- no operator-side docker daemon required.",
+		"This walkthrough deploys a model with one command. The control plane provisions a GPU pod whose container IS the engine image (image-as-pod) -- no SSH, no docker-in-docker. The instance + deployment are recorded 1:1 (the instance shares the deployment id: two views, GPU and model, of the same pod).",
 		fmt.Sprintf("Target URL:    %s", *url),
 		fmt.Sprintf("Provider:      %s", *provider),
-		fmt.Sprintf("Instance id:   %s", instanceID),
-		fmt.Sprintf("Deployment id: %s", deploymentID),
+		fmt.Sprintf("Deployment id: %s (the instance shares this id)", deploymentID),
 		"Cost depends on chosen model size + cold-start. The 1.5B default is ~$0.02 for a full run; 7B is ~$0.12. Defer-terminates on exit / Ctrl-C.",
 	)
 
@@ -259,99 +263,54 @@ func runDemo() {
 			return nil
 		})
 
-	demo.Step("Provision a small-class pod").ID("create-instance").
-		Note("class=small => 24 GB VRAM floor. The RunPod resolver picks the cheapest matching SKU. The Service registers an SSH keypair with the RunPod account on first run (PR 24); the resulting pod has that key pre-installed.\n\nCLI form:\n  iplane instance create runpod " + instanceID + " --class small --service-url " + *url).
-		Arrow("Operator", "iplane", "CreateInstance{class=small}").
-		Arrow("iplane", "State", "write PENDING").
-		Arrow("iplane", "RunPod", "register pub key + spawn pod").
-		Arrow("iplane", "State", "patch to ACTIVE").
-		Run(func(ctx demokit.StepContext) *demokit.StepResult {
-			rctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
-			defer cancel()
-			resp, err := provisionerClient.CreateInstance(rctx, connect.NewRequest(&provisionerv1.CreateInstanceRequest{
-				Spec: &provisionerv1.Spec{
-					Id:       instanceID,
-					Provider: *provider,
-					Region:   *region,
-					Requirements: &provisionerv1.ResourceRequirements{
-						Class: provisioners.GPUClassSmall,
-					},
-				},
-			}))
-			if err != nil {
-				return abortDemo(cleanup, "CreateInstance: %v", err)
-			}
-			inst := resp.Msg.GetInstance()
-			mu.Lock()
-			spawnedInstance = inst.GetId()
-			mu.Unlock()
-			fmt.Printf("  iplane id:       %s\n", inst.GetId())
-			fmt.Printf("  provider id:     %s\n", inst.GetProviderId())
-			fmt.Printf("  resolved SKU:    %s\n", inst.GetGpu().GetSku())
-			fmt.Printf("  hourly rate:     $%.4f/hr\n", inst.GetHourlyRateUsd())
-			fmt.Printf("  state:           %s\n", inst.GetState())
-			ssh := inst.GetSsh()
-			fmt.Printf("  ssh endpoint:    %s@%s:%d\n", ssh.GetUser(), ssh.GetHost(), ssh.GetPort())
-			return nil
-		})
-
-	demo.Step("Wait for the pod's SSH endpoint to be assigned").ID("wait-ssh").
-		Note("RunPod assigns the public IP a few seconds AFTER the pod is scheduled ACTIVE. CreateInstance returns fast (no SSH yet); this step is the explicit 'Join' that blocks until the endpoint shows up. Providers without an SSH-readiness gap (local, future Lambda Labs) make this a no-op.\n\nCLI form:\n  iplane instance wait " + instanceID + " --service-url " + *url).
-		Arrow("Operator", "iplane", "WaitForInstanceReady{id}").
-		Arrow("iplane", "RunPod", "poll GET /pods/{id} until publicIp != \"\"").
-		Arrow("iplane", "State", "patch ssh.host / ssh.port / ssh.user").
-		Run(func(ctx demokit.StepContext) *demokit.StepResult {
-			rctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-			defer cancel()
-			resp, err := provisionerClient.WaitForInstanceReady(rctx, connect.NewRequest(&provisionerv1.WaitForInstanceReadyRequest{
-				Id:             instanceID,
-				TimeoutSeconds: 90,
-			}))
-			if err != nil {
-				return abortDemo(cleanup, "WaitForInstanceReady: %v", err)
-			}
-			ssh := resp.Msg.GetInstance().GetSsh()
-			if ssh == nil || ssh.GetHost() == "" {
-				return abortDemo(cleanup, "provider returned without populating ssh endpoint")
-			}
-			fmt.Printf("  ssh endpoint:    %s@%s:%d\n", ssh.GetUser(), ssh.GetHost(), ssh.GetPort())
-			fmt.Printf("  already_ready:   %v (true = endpoint was already in state; no provider call needed)\n", resp.Msg.GetAlreadyReady())
-			return nil
-		})
-
-	demo.Step("Deploy the engine and wait for RUNNING").ID("deploy").
-		Note("CreateDeployment with Wait=true blocks until the engine is healthy or the deploy fails. The Service's executor SSHes in, docker-pulls the image, docker-runs it with --gpus all, and polls localhost:8000/health from inside the pod until 2xx.\n\nCLI form:\n  iplane deployment deploy " + deploymentID + " --instance " + instanceID + " --image " + engineImage + " --model <chosen> --service-url " + *url).
-		Arrow("Operator", "iplane", "CreateDeployment{image=vllm, model=qwen, wait=true}").
-		Arrow("iplane", "Pod", "SSH in").
-		Arrow("iplane", "Engine", "docker pull + docker run").
-		Arrow("iplane", "Engine", "poll /health every 2s").
-		Arrow("iplane", "State", "patch transitions (STARTING -> CONFIGURING -> RUNNING)").
+	demo.Step("Deploy: provision a pod running the engine image, wait for RUNNING").ID("deploy").
+		Note("One step. CreateDeployment with no instance_id auto-provisions: the control plane rents a small-class pod whose container IS the engine image (image-as-pod). The engine port is reverse-proxied via the provider's HTTPS proxy (no publicIp allocated -- cheapest community capacity), and we HTTP-poll /health on the proxy URL until 2xx. No SSH, no docker-in-docker, no NAT. The instance + deployment are recorded 1:1 (two views -- GPU and model -- of the same pod). Want shell access for debugging? Re-run with --debug-shell (pays the publicIp fee + restricts placement).\n\nCLI form:\n  iplane deployment deploy " + deploymentID + " --provider runpod --class small --image " + engineImage + " --model <chosen> --service-url " + *url).
+		Arrow("Operator", "iplane", "CreateDeployment{image=vllm, model=qwen, class=small, wait=true}").
+		Arrow("iplane", "State", "write PENDING (instance + deployment)").
+		Arrow("iplane", "RunPod", "create pod with engine image + model").
+		Arrow("iplane", "Engine", "HTTP-poll /health until 2xx").
+		Arrow("iplane", "State", "patch RUNNING + engine endpoint").
 		Run(func(ctx demokit.StepContext) *demokit.StepResult {
 			opt := modelOptions[chosenSize]
-			rctx, cancel := context.WithTimeout(context.Background(), time.Duration(opt.estDurationS)*time.Second+2*time.Minute)
+			rctx, cancel := context.WithTimeout(context.Background(), time.Duration(opt.estDurationS)*time.Second+3*time.Minute)
 			defer cancel()
+
+			// Spawn a watcher in parallel with the blocking CreateDeployment.
+			// The deployer emits a progress_message every poll (elapsed
+			// time + last HTTP status); WatchDeployment streams those to
+			// us so the operator sees forward motion instead of a blank
+			// screen during the cold image pull + model load.
+			watchCtx, watchCancel := context.WithCancel(rctx)
+			defer watchCancel()
+			go streamDeployProgress(watchCtx, deploymentClient, deploymentID)
+
 			resp, err := deploymentClient.CreateDeployment(rctx, connect.NewRequest(&provisionerv1.CreateDeploymentRequest{
 				Deployment: &provisionerv1.Deployment{
 					Id:         deploymentID,
-					InstanceId: instanceID,
 					Image:      engineImage,
 					Model:      opt.id,
 					EnginePort: defaultEnginePort,
 				},
-				Wait: true,
+				Provider:     *provider,
+				Region:       *region,
+				Requirements: &provisionerv1.ResourceRequirements{Class: provisioners.GPUClassSmall},
+				Wait:         true,
 			}))
+			watchCancel() // stop the watcher as soon as CreateDeployment returns
 			if err != nil {
 				return abortDemo(cleanup, "CreateDeployment: %v", err)
 			}
 			dep := resp.Msg.GetDeployment()
 			mu.Lock()
 			spawnedDeploy = dep.GetId()
+			spawnedInstance = dep.GetInstanceId() // 1:1 -- the same pod
 			mu.Unlock()
 			if dep.GetState() != provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING {
 				return abortDemo(cleanup, "deploy reached %s, want RUNNING (reason: %s)",
 					dep.GetState(), dep.GetFailureReason())
 			}
 			fmt.Printf("  deployment id:   %s\n", dep.GetId())
+			fmt.Printf("  on instance:     %s\n", dep.GetInstanceId())
 			fmt.Printf("  state:           %s\n", dep.GetState())
 			fmt.Printf("  engine endpoint: %s\n", dep.GetEngineEndpoint())
 			if ts := dep.GetReadyAt(); ts != nil {
@@ -360,6 +319,11 @@ func runDemo() {
 			}
 			return nil
 		})
+
+	// No wait-ssh step in the default flow: the proxy-only deploy
+	// doesn't allocate publicIp or expose sshd. The SSH debug
+	// affordance lives in a follow-up walkthrough that re-runs deploy
+	// with --debug-shell.
 
 	demo.Step("Hit /v1/models to prove the engine serves").ID("verify").
 		Note("vLLM's OpenAI-compatible surface exposes /v1/models for the served-model list. A 2xx here means a real OpenAI SDK can hit /v1/chat/completions next.\n\nCLI form (no native verb; uses the engine_endpoint from `iplane deployment describe`):\n  endpoint=$(iplane deployment describe " + deploymentID + " --service-url " + *url + " -o json | jq -r .engine_endpoint)\n  curl -fsS \"${endpoint}/v1/models\"").
@@ -403,11 +367,11 @@ func runDemo() {
 			return nil
 		})
 
-	demo.Step("Destroy the deployment").ID("destroy-deploy").
-		Note("Stops + removes the engine container on the pod. The instance keeps running so a follow-up deploy could reuse it. Idempotent: already-TERMINATED is a no-op.\n\nCLI form:\n  iplane deployment destroy " + deploymentID + " --service-url " + *url).
+	demo.Step("Destroy the deployment (tears down the pod)").ID("destroy-deploy").
+		Note("Terminates the engine pod. Because this deployment auto-provisioned its instance (1:1), the pod IS the instance -- destroying the deployment terminates the pod and marks both records TERMINATED. (For an explicitly-placed deployment on a shared instance, the instance would survive.) Idempotent: already-TERMINATED is a no-op.\n\nCLI form:\n  iplane deployment destroy " + deploymentID + " --service-url " + *url).
 		Arrow("Operator", "iplane", "DestroyDeployment{id}").
-		Arrow("iplane", "Pod", "SSH: docker stop + docker rm").
-		Arrow("iplane", "State", "patch to TERMINATED").
+		Arrow("iplane", "RunPod", "terminate pod").
+		Arrow("iplane", "State", "patch deployment + instance to TERMINATED").
 		Run(func(ctx demokit.StepContext) *demokit.StepResult {
 			rctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 			defer cancel()
@@ -418,33 +382,15 @@ func runDemo() {
 			fmt.Printf("  final state:     %s\n", resp.Msg.GetDeployment().GetState())
 			mu.Lock()
 			spawnedDeploy = ""
-			mu.Unlock()
-			return nil
-		})
-
-	demo.Step("Destroy the instance").ID("destroy-instance").
-		Note("Tearing down the pod stops billing. The instance + deployment records remain in the state file as TERMINATED -- an audit trail of what ran.\n\nCLI form:\n  iplane instance destroy " + instanceID + " --service-url " + *url).
-		Arrow("Operator", "iplane", "DestroyInstance{id}").
-		Arrow("iplane", "RunPod", "terminate pod").
-		Arrow("iplane", "State", "patch to TERMINATED").
-		Run(func(ctx demokit.StepContext) *demokit.StepResult {
-			rctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-			defer cancel()
-			resp, err := provisionerClient.DestroyInstance(rctx, connect.NewRequest(&provisionerv1.DestroyInstanceRequest{Id: instanceID}))
-			if err != nil {
-				return abortDemo(cleanup, "DestroyInstance: %v", err)
-			}
-			fmt.Printf("  final state:     %s\n", resp.Msg.GetInstance().GetState())
-			mu.Lock()
-			spawnedInstance = ""
+			spawnedInstance = "" // 1:1 -- the pod is gone with the deployment
 			cleanupCalled = true
 			mu.Unlock()
 			return nil
 		})
 
 	demo.Section("Done",
-		"Instance and deployment both terminated. State file holds the audit trail (state=TERMINATED on both records).",
-		"Re-running this demo provisions a fresh pod -- ids are reusable but each run gets a new timestamped id by default.",
+		"Pod terminated -- billing stopped. Because the deployment auto-provisioned its instance (1:1), destroying the deployment tore down the pod; the instance record is marked TERMINATED in the same step.",
+		"The instance + deployment records remain in the state file as TERMINATED -- an audit trail of what ran. Re-running provisions a fresh pod (each run gets a new timestamped id).",
 	)
 
 	if demokit.IsTUI() {
@@ -452,6 +398,35 @@ func runDemo() {
 	}
 
 	demo.Execute()
+}
+
+// streamDeployProgress subscribes to WatchDeployment and prints each
+// state-transition / phase / progress_message change to stdout while
+// the main goroutine blocks on CreateDeployment{Wait: true}. The
+// operator sees forward motion ("waiting for engine /health (1m12s
+// elapsed) -- HTTP 502 Bad Gateway") instead of a blank screen.
+// Silently swallows the stream error -- the watcher is a UX nicety,
+// not a correctness path. The caller cancels watchCtx as soon as
+// CreateDeployment returns.
+func streamDeployProgress(ctx context.Context, client provisionerv1connect.DeploymentServiceClient, deploymentID string) {
+	stream, err := client.WatchDeployment(ctx, connect.NewRequest(&provisionerv1.WatchDeploymentRequest{Id: deploymentID}))
+	if err != nil {
+		return
+	}
+	for stream.Receive() {
+		ev := stream.Msg()
+		// Skip the initial fast-path event (from == UNSPECIFIED is the
+		// catch-up event the server fires when the watcher attaches);
+		// keep the body so we surface the current phase right away.
+		phase := ev.GetPhase()
+		msg := ev.GetProgressMessage()
+		switch {
+		case msg != "":
+			fmt.Printf("  ... %s\n", msg)
+		case phase != "":
+			fmt.Printf("  ... %s\n", phase)
+		}
+	}
 }
 
 // abortDemo is the fail-fast helper used by step Run callbacks in
