@@ -220,6 +220,11 @@ func resetDeploymentFlags() {
 
 	deploymentDestroyForce = false
 	deploymentDestroyDryRun = false
+
+	querySystem = ""
+	queryMaxTokens = 256
+	queryTemperature = 0.7
+	queryTimeout = 60 * time.Second
 }
 
 func TestDeploy_HappyPath(t *testing.T) {
