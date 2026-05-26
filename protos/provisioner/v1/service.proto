@@ -1,0 +1,302 @@
+syntax = "proto3";
+
+package provisioner.v1;
+
+import "google/protobuf/timestamp.proto";
+import "provisioner/v1/types.proto";
+
+// ProvisionerService is the operator-facing surface for instance
+// lifecycle. Implements the failure-mode contract from
+// docs/design/0001-provisioner.md: idempotency lookup before Spawn,
+// pending -> active state hygiene, list-with-self-heal, terminate
+// idempotency.
+//
+// The service struct that implements this interface is callable
+// directly in-process today (the v0.1 CLI instantiates it and calls
+// methods) and registers cleanly with a connect/grpc mux later (when
+// iplane serve grows the surface). Call signatures are identical
+// in both modes -- the only thing that changes is whether the caller
+// holds the struct or a generated ProvisionerServiceClient.
+//
+// Adapters for individual providers (RunPod, local, Lambda Labs) are
+// Go-internal -- they satisfy a separate Provider interface that the
+// service struct calls into. This matches the existing pattern in the
+// codebase: Backend is Go-internal, InferenceService is the gRPC
+// surface that consumes it.
+service ProvisionerService {
+  // CreateInstance runs the full idempotency + state-hygiene contract.
+  // Re-running with the same spec.id returns the existing instance if
+  // it is pending/active (already_existed=true), or spawns a fresh one
+  // if the previous record is terminated/failed (already_existed=false).
+  rpc CreateInstance(CreateInstanceRequest) returns (CreateInstanceResponse);
+
+  // DestroyInstance transitions an instance to terminating, calls the
+  // provider, then settles to terminated or failed. Idempotent: destroying
+  // an already-terminated id returns the existing record.
+  rpc DestroyInstance(DestroyInstanceRequest) returns (DestroyInstanceResponse);
+
+  // DescribeInstance returns the current view of one instance. SOURCE_LOCAL
+  // returns the local state-file record (fast, may be stale during a crash
+  // recovery window). SOURCE_REMOTE asks the provider directly and refreshes
+  // the local record.
+  rpc DescribeInstance(DescribeInstanceRequest) returns (DescribeInstanceResponse);
+
+  // ListInstances enumerates instances. SOURCE_LOCAL returns the
+  // state-file view and self-heals any pending/terminating records via
+  // a tag-filtered provider List. SOURCE_REMOTE returns the provider's
+  // view (under the operator tag) so the CLI can surface leaked
+  // instances the operator has no local record of.
+  rpc ListInstances(ListInstancesRequest) returns (ListInstancesResponse);
+
+  // WaitForInstanceReady is the explicit "Join" step for asynchronous
+  // Spawn paths (e.g. RunPod, where the public IP is assigned a few
+  // seconds after the pod is scheduled and ACTIVE). The Service
+  // dispatches to the provider's optional SSHReadyWaiter capability,
+  // patches the state file with the populated SshTarget on success,
+  // and returns the updated Instance.
+  //
+  // Providers without an SSH-readiness gap (local; future providers
+  // whose Spawn already blocks for full IP assignment) are a no-op --
+  // the response carries the unchanged Instance and the caller sees
+  // the same SshTarget already in state.
+  //
+  // Designed so callers explicitly drive the wait when they need the
+  // endpoint, rather than every CreateInstance paying for it: one-shot
+  // operators (interactive jupyter on the pod) skip it; deployment-
+  // bound flows call it before CreateDeployment.
+  rpc WaitForInstanceReady(WaitForInstanceReadyRequest) returns (WaitForInstanceReadyResponse);
+
+  // GetInstanceSSHKey returns the operator's iplane-managed private
+  // key bytes (PEM-encoded) for an instance, so the CLI can
+  // materialize them locally and run ssh against the pod when
+  // operating in remote mode (--service-url). The keystore lives on
+  // the server side, so in-process clients can read the key directly;
+  // remote clients need this RPC to bridge the gap.
+  //
+  // Security caveat: this returns private key bytes over the wire.
+  // v0.1 has no per-operator authentication on the gRPC surface --
+  // any caller with --service-url access can fetch any operator's
+  // key. Acceptable when the iplane serve is bound to localhost /
+  // a private network; not safe to expose publicly without an
+  // auth layer in front.
+  rpc GetInstanceSSHKey(GetInstanceSSHKeyRequest) returns (GetInstanceSSHKeyResponse);
+}
+
+// Source selects whether the service consults local state, the provider,
+// or both. Default (SOURCE_UNSPECIFIED) is SOURCE_LOCAL.
+enum Source {
+  SOURCE_UNSPECIFIED = 0;
+  // State-file view, with self-heal for pending/terminating records.
+  SOURCE_LOCAL = 1;
+  // Provider's view via the underlying List call. Used to detect
+  // leaked instances and to recover after a wiped state file.
+  SOURCE_REMOTE = 2;
+}
+
+message CreateInstanceRequest {
+  Spec spec = 1;
+}
+
+message CreateInstanceResponse {
+  Instance instance = 1;
+  // True when the idempotency lookup found a pending/active match and
+  // no Spawn was called. The CLI uses this to pick its output ("created"
+  // vs "already exists, returning existing").
+  bool already_existed = 2;
+}
+
+message DestroyInstanceRequest {
+  string id = 1;
+  // Skip the provider Terminate call and mark the record terminated
+  // anyway. Used by the recovery workflow when the provider has
+  // already confirmed the instance is gone but local state is stuck
+  // in terminating.
+  bool force = 2;
+}
+
+message DestroyInstanceResponse {
+  Instance instance = 1;
+}
+
+message DescribeInstanceRequest {
+  string id = 1;
+  Source source = 2;
+}
+
+message DescribeInstanceResponse {
+  Instance instance = 1;
+}
+
+message ListInstancesRequest {
+  Source source = 1;
+  // Optional. When non-empty, restrict the result to instances on this
+  // provider. Empty means all providers. Required when source=REMOTE
+  // (we cannot enumerate "all providers" remotely without iterating
+  // every configured adapter, which v0.1 declines to do silently).
+  string provider = 2;
+}
+
+message ListInstancesResponse {
+  repeated Instance instances = 1;
+}
+
+message WaitForInstanceReadyRequest {
+  string id = 1;
+  // Maximum time the caller is willing to wait, in seconds. Bounded
+  // above by the provider's own ceiling (runpod default 90s) so a
+  // generous caller doesn't keep the connection open indefinitely.
+  // Zero means use the provider's default.
+  int32 timeout_seconds = 2;
+}
+
+message WaitForInstanceReadyResponse {
+  Instance instance = 1;
+  // True when the SSH endpoint was already populated and the wait was
+  // a no-op. False when the provider's wait was actually exercised.
+  // Operators can branch on this when timing scripts.
+  bool already_ready = 2;
+}
+
+message GetInstanceSSHKeyRequest {
+  string id = 1;
+}
+
+message GetInstanceSSHKeyResponse {
+  // PEM-encoded private key bytes (Ed25519, OpenSSH-format). The CLI
+  // writes these to a 0600 temp file and exec's ssh against it.
+  bytes private_key_pem = 1;
+  // Authorized-keys-style line of the matching public key, for
+  // informational use (the operator can stash it in their own
+  // authorized_keys if they ever want to ssh-in via plain ssh
+  // from a different machine that doesn't have iplane installed).
+  bytes public_key_authorized = 2;
+  // The SSH user the iplane convention connects as (currently always
+  // "root" -- pod sshds expect root). Included so the CLI doesn't
+  // hard-code the user separately.
+  string user = 3;
+}
+
+// DeploymentService is the operator-facing surface for engine-on-
+// instance lifecycle. Locked by docs/design/0002-deploy.md.
+//
+// The verb is `deploy` (imperative name, declarative semantics):
+// re-running with the same (image, model) on a matching container is
+// a no-op. Drift triggers a re-deploy. The service implements the
+// failure-mode contract from the design doc: idempotency lookup, state-
+// file hygiene, instance-gone-is-hard-error.
+//
+// All five RPCs return UNIMPLEMENTED in the PR that introduces this
+// service -- the executor (SSH+docker) lands in a follow-up Phase 2
+// PR. The interface is committed here so subsequent PRs slot in
+// without proto churn.
+service DeploymentService {
+  // CreateDeployment runs the full idempotency + state-hygiene contract.
+  // Re-running with the same id against a matching container is a no-op
+  // (already_existed=true). If the container drifted or is missing,
+  // the executor reconciles.
+  rpc CreateDeployment(CreateDeploymentRequest) returns (CreateDeploymentResponse);
+
+  // DescribeDeployment returns the current view of one deployment. The
+  // record is the state-file view (the engine's live state is read via
+  // the executor's docker inspect when the operator queries via the CLI's
+  // status verb).
+  rpc DescribeDeployment(DescribeDeploymentRequest) returns (DescribeDeploymentResponse);
+
+  // ListDeployments enumerates deployments. Optional filter by
+  // instance_id (all deployments on a given Instance) or state.
+  rpc ListDeployments(ListDeploymentsRequest) returns (ListDeploymentsResponse);
+
+  // DestroyDeployment stops the container and patches the record to
+  // TERMINATED. Idempotent: destroying an already-terminated id is a
+  // no-op.
+  rpc DestroyDeployment(DestroyDeploymentRequest) returns (DestroyDeploymentResponse);
+
+  // WatchDeployment streams state transitions for one deployment until
+  // a terminal state (TERMINATED or FAILED) is reached or the client
+  // disconnects. Events carry the from/to states + a free-form phase
+  // string + progress message. Clients who need the full Deployment
+  // record at any point call DescribeDeployment between events.
+  //
+  // Logs are NOT carried on this stream -- they are a separate concern
+  // (see the followup issue for `iplane deployment logs <id> [-f]`).
+  rpc WatchDeployment(WatchDeploymentRequest) returns (stream DeploymentStateChangedEvent);
+}
+
+message CreateDeploymentRequest {
+  Deployment deployment = 1;
+  // When true, block until the deployment reaches RUNNING (or FAILED).
+  // Default false -- async-with-LRO. CLI's `--wait` flag sets this.
+  bool wait = 2;
+  // Resource requirements for the instance the deployment is placed on.
+  // Used when deployment.instance_id is empty: the scheduler provisions
+  // a fresh instance satisfying these constraints (image-as-pod
+  // providers run the engine image directly on it). Ignored when
+  // instance_id names an existing instance (the deployment lands on
+  // that instance's already-resolved hardware). Same three-layer shape
+  // as instance create: class shorthand, numeric floors, or exact sku.
+  ResourceRequirements requirements = 3;
+  // Provider to provision on when auto-provisioning (instance_id empty).
+  // Ignored when instance_id names an existing instance (its provider
+  // is used). v0.1: "runpod" is the image-native default.
+  string provider = 4;
+  // Region hint passed through to the provider when auto-provisioning.
+  string region = 5;
+}
+
+message CreateDeploymentResponse {
+  Deployment deployment = 1;
+  // True when the idempotency lookup found a pending/active match and
+  // no executor pass was needed. The CLI uses this to pick its output
+  // ("deployed" vs "already up-to-date").
+  bool already_existed = 2;
+}
+
+message DescribeDeploymentRequest {
+  string id = 1;
+}
+
+message DescribeDeploymentResponse {
+  Deployment deployment = 1;
+}
+
+message ListDeploymentsRequest {
+  // Optional. When non-empty, return only deployments targeting this
+  // instance. Empty means all instances.
+  string instance_id = 1;
+  // Optional. When set to a non-UNSPECIFIED value, return only
+  // deployments in this state.
+  DeploymentState state = 2;
+}
+
+message ListDeploymentsResponse {
+  repeated Deployment deployments = 1;
+}
+
+message DestroyDeploymentRequest {
+  string id = 1;
+  // Skip the executor's `docker stop` and mark TERMINATED locally only.
+  // Recovery path when the container has been killed out-of-band but
+  // local state is stuck in TERMINATING.
+  bool force = 2;
+}
+
+message DestroyDeploymentResponse {
+  Deployment deployment = 1;
+}
+
+message WatchDeploymentRequest {
+  string id = 1;
+}
+
+// DeploymentStateChangedEvent is what WatchDeployment streams. One per
+// state transition. Subsequent Phase 2 PRs may add transient progress
+// events (no state change, but `progress_message` updated); v0.1 keeps
+// it to one-event-per-transition for simplicity.
+message DeploymentStateChangedEvent {
+  string id = 1;
+  DeploymentState from = 2;
+  DeploymentState to = 3;
+  string phase = 4;
+  string progress_message = 5;
+  google.protobuf.Timestamp at = 6;
+}

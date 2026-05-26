@@ -1,8 +1,14 @@
-.PHONY: build up down pull smoke load logs dashboards clean check-pins help
+.PHONY: build up down pull smoke load logs dashboards clean check-pins help install
+
+PKG    := ./cmd/iplane
 
 # Default target: list available targets.
 help:
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+
+install:
+	go install $(PKG)
+	@echo "installed to $$(go env GOBIN || echo $$(go env GOPATH)/bin)/$(BINARY)"
 
 # ── Local code ──────────────────────────────────────────────────────────
 build: ## Compile the iplane binary into bin/
@@ -25,6 +31,10 @@ build-image: ## Build the controlplane Docker image without starting the stack
 # ── Verification ────────────────────────────────────────────────────────
 smoke: ## Run smoke tests against a live stack (assumes `make up` has run)
 	go test -tags=smoke -v -count=1 ./tests/smoke/...
+
+smoke-runpod: ## Provision a real RunPod pod ($0.05 ish) -- requires RUNPOD_API_KEY
+	@test -n "$$RUNPOD_API_KEY" || (echo "RUNPOD_API_KEY not set" && exit 1)
+	go test -tags=smoke_runpod -v -count=1 -timeout=5m ./tests/smoke-runpod/...
 
 load: ## Generate synthetic traffic against the running stack (safe with mock backend)
 	go run ./cmd/iplane load --url=http://localhost:8080

@@ -35,6 +35,8 @@ Reference implementation of the control plane for *Inference Is All You Need* (A
 - The gRPC server binds `127.0.0.1:9090` only. It's an in-process implementation detail, not a public surface. Public traffic hits the HTTP server on `:8080`.
 - `cd protos && buf generate` needs `buf.lock` populated — run `buf dep update` once after cloning.
 - `gen/go/google/api/` is generated via `include_imports: true`. Without it, the gateway code wouldn't compile.
+- **State-file flock**: `state.Store.lock()` returns `*os.File` (not `int`) — the runtime's finalizer will close the underlying FD if the `*os.File` goes out of scope, which silently releases the flock and can tear down recycled FDs (gRPC stream sockets, etc.). Regression-tested in `state/state_test.go`.
+- **RunPod machine field**: freshly-rented pods return `"machine": {}` empty from the follow-up GET; the populated record arrives a few seconds later. Adapter's `gpuSKU` / `gpuVRAMGB` helpers are nil-defensive.
 
 ## CLI surface
 
@@ -44,11 +46,15 @@ Single binary `iplane` with cobra subcommands. The Docker image
 | Subcommand           | Purpose                                                |
 | -------------------- | ------------------------------------------------------ |
 | `iplane serve`       | Run the control plane (gRPC + HTTP)                    |
+| `iplane instance`    | Create / list / describe / destroy GPU instances (in-process state file OR `--service-url <remote>`) |
 | `iplane load`        | Fire synthetic OpenAI traffic                          |
 | `iplane gen-names`   | Regenerate Go consts + book LaTeX from `metric-names.yaml` |
 
 `--config <path>` is a persistent flag. Each subcommand has its own
-flags; `iplane <cmd> --help` for the full list.
+flags; `iplane <cmd> --help` for the full list. State-changing
+subcommands (`instance create`, `instance destroy`) accept `--dry-run`
+to preview the action without provider calls or state-file writes —
+see [docs/cli-dry-run.md](docs/cli-dry-run.md) for the pattern.
 
 ## Env vars
 
@@ -59,10 +65,13 @@ flatten to underscore (so `deployment.provider` → `IPLANE_DEPLOYMENT_PROVIDER`
 | ---------------------------------- | ---------------------------------------- |
 | `IPLANE_BACKEND_ENGINE`            | `mock` (default) or `vllm`               |
 | `IPLANE_BACKEND_URL`               | Backend base URL (vllm only)             |
+| `IPLANE_SERVICE_URL`               | `iplane instance` remote transport (e.g., `http://localhost:9091`); in-process state file when unset |
+| `IPLANE_RUNPOD_DEBUG`              | `1` logs RunPod HTTP request/response bytes (sans Authorization) to stderr |
 | `IPLANE_DEPLOYMENT_PROVIDER` / `_GPU_TYPE` / `_BILLING_MODE` / `_INSTANCE_ID` | Cost-metric labels |
 | `OTEL_EXPORTER_OTLP_ENDPOINT`      | OTLP collector address                   |
+| `RUNPOD_API_KEY`                   | Required for `iplane instance create runpod ...` — must be a new-style scoped key (`rpa_...` prefix) with **Full** access (REST scope is NOT covered by legacy keys or `api.runpod.ai`-only scopes — both silently 401 on `rest.runpod.io/v1`) |
 
-Provider API keys for future `cmd/provision` tool (not used in v0.1): `RUNPOD_API_KEY`, `LAMBDA_API_KEY`, `VAST_API_KEY`, `EQUINIX_AUTH_TOKEN`, `EQUINIX_PROJECT_ID`. See `.env.local.example`.
+Future provider API keys (not used in v0.1): `LAMBDA_API_KEY`, `VAST_API_KEY`, `EQUINIX_AUTH_TOKEN`, `EQUINIX_PROJECT_ID`. See `.env.local.example`.
 
 ## Stack dependencies
 

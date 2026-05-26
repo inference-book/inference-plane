@@ -6,7 +6,7 @@
 # needs only ca-certificates (provided by distroless/static) and the
 # trusted system roots.
 
-FROM golang:1.26.2-alpine AS build
+FROM golang:1.26-alpine AS build
 WORKDIR /src
 
 # Cache module downloads independently of source changes.
