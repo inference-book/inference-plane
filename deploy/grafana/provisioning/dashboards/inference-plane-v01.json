@@ -2,189 +2,58 @@
   "title": "Inference Plane v0.1",
   "uid": "inference-plane-v01",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "editable": true,
   "tags": ["inference-plane", "v0.1"],
   "timezone": "browser",
   "time": { "from": "now-30m", "to": "now" },
   "refresh": "10s",
-  "templating": {
-    "list": [
-      {
-        "name": "model",
-        "label": "Model",
-        "type": "query",
-        "datasource": { "type": "prometheus", "uid": "mimir" },
-        "query": "label_values(inference_requests_total, model)",
-        "includeAll": true,
-        "multi": true,
-        "current": { "text": "All", "value": "$__all" },
-        "refresh": 2
-      }
-    ]
-  },
   "panels": [
     {
       "id": 1,
-      "title": "Request rate",
-      "description": "Requests per second across all models. Stacked by status. The error fraction surfaces backend issues vs validation issues separately.",
-      "type": "timeseries",
-      "datasource": { "type": "prometheus", "uid": "mimir" },
-      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum by (status) (rate(inference_requests_total{model=~\"$model\"}[5m]))",
-          "legendFormat": "{{status}}"
-        }
-      ],
-      "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "stacking": { "mode": "normal" } } } }
+      "title": "What this dashboard shows in v0.1",
+      "type": "text",
+      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 6 },
+      "options": {
+        "mode": "markdown",
+        "content": "**v0.1 ships traces, not engine metrics.**\n\nAfter the image-as-pod pivot, iplane is **not in the inference data path** — the operator's request goes laptop → provider proxy URL → engine, completely bypassing iplane. So the iplane self-metrics (`inference_requests_total`, latency histograms, etc.) that earlier drafts of this dashboard queried never tick under the current architecture.\n\nMeanwhile vLLM's metrics live at the pod's `/metrics` endpoint (Prometheus scrape) — not on OTLP. Reaching them from a remote pod needs an otel-collector scrape config that knows the per-deploy proxy URL, which is v0.2 work (tracked as a follow-up issue).\n\n**What works today:**\n\n- **Engine traces** flow over OTLP via the cloudflared tunnel (or your hosted sink) and land in Tempo. Open **Explore → Tempo → Search** to see spans from your latest `iplane deployment query` / `make demo` calls.\n- **The provider rate catalog** (panel below) shows the per-second $/hr cost iplane knows about for every provider in `providers.yaml`. Useful for the cost-economics chapter beat.\n\nThe iplane self-metric panels are deliberately removed pending v0.2's request-queue / scheduler, which will put iplane back into a position where its own metrics actually mean something."
+      }
     },
     {
       "id": 2,
-      "title": "Tokens generated per second",
-      "description": "The right load metric for LLM workloads. A high token rate at low request rate means long generations; a high request rate at low token rate means short outputs. Cost correlates with this, not request count.",
-      "type": "timeseries",
-      "datasource": { "type": "prometheus", "uid": "mimir" },
-      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum by (model) (rate(inference_tokens_generated{model=~\"$model\"}[5m]))",
-          "legendFormat": "{{model}}"
-        }
-      ],
-      "fieldConfig": { "defaults": { "unit": "short" } }
-    },
-    {
-      "id": 3,
-      "title": "Latency p50 / p95 / p99",
-      "description": "Three percentiles cover most operational decisions: p50 = typical user, p95 = users who notice and complain, p99 = tail experience that drives support tickets. Most teams over-watch p50 and under-watch p99.",
-      "type": "timeseries",
-      "datasource": { "type": "prometheus", "uid": "mimir" },
-      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
-      "targets": [
-        { "refId": "A", "expr": "histogram_quantile(0.50, sum by (le) (rate(inference_request_duration_bucket{model=~\"$model\"}[5m])))", "legendFormat": "p50" },
-        { "refId": "B", "expr": "histogram_quantile(0.95, sum by (le) (rate(inference_request_duration_bucket{model=~\"$model\"}[5m])))", "legendFormat": "p95" },
-        { "refId": "C", "expr": "histogram_quantile(0.99, sum by (le) (rate(inference_request_duration_bucket{model=~\"$model\"}[5m])))", "legendFormat": "p99" }
-      ],
-      "fieldConfig": { "defaults": { "unit": "s" } }
-    },
-    {
-      "id": 4,
-      "title": "Latency distribution",
-      "description": "Heatmap over the histogram bucket edges from chapter 6.6.4 (0.1, 0.5, 1, 2, 5, 10, 30, 60s). Bimodal LLM latency is a feature: a fast cluster (cached / short outputs) and a slow cluster (long generations) at opposite ends.",
-      "type": "heatmap",
-      "datasource": { "type": "prometheus", "uid": "mimir" },
-      "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum by (le) (rate(inference_request_duration_bucket{model=~\"$model\"}[5m]))",
-          "format": "heatmap",
-          "legendFormat": "{{le}}"
-        }
-      ],
-      "options": { "calculate": false, "yAxis": { "unit": "s" } }
-    },
-    {
-      "id": 5,
-      "title": "Backend healthy",
-      "description": "1 if the backend's /health probe succeeded on the most recent check; 0 otherwise. A healthy backend serving 30-second p99 latencies is a problem (see latency panel) -- but a different problem from a backend that's down.",
-      "type": "stat",
-      "datasource": { "type": "prometheus", "uid": "mimir" },
-      "gridPos": { "x": 0, "y": 16, "w": 6, "h": 4 },
-      "targets": [
-        { "refId": "A", "expr": "inference_backend_healthy" }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "thresholds": { "mode": "absolute", "steps": [
-            { "color": "red", "value": null },
-            { "color": "green", "value": 1 }
-          ]},
-          "mappings": [
-            { "type": "value", "options": { "0": { "text": "DOWN", "color": "red" }, "1": { "text": "UP", "color": "green" } } }
-          ]
-        }
-      }
-    },
-    {
-      "id": 6,
-      "title": "Utilization",
-      "description": "Active inference time as a fraction of wall-clock uptime. The chapter's central cost insight: self-hosted billing rewards keeping the GPU hot. 100% means 'every wall-clock second was spent on inference.' Persistent low utilization means you're paying for idle silicon -- consider downsizing or batching.",
-      "type": "gauge",
-      "datasource": { "type": "prometheus", "uid": "mimir" },
-      "gridPos": { "x": 6, "y": 16, "w": 6, "h": 4 },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum(rate(inference_active_seconds_total[5m])) / sum(rate(instance_uptime_seconds_total[5m]))"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percentunit",
-          "min": 0,
-          "max": 1,
-          "thresholds": { "mode": "absolute", "steps": [
-            { "color": "red", "value": null },
-            { "color": "yellow", "value": 0.3 },
-            { "color": "green", "value": 0.6 }
-          ]}
-        }
-      }
-    },
-    {
-      "id": 7,
-      "title": "Spend so far",
-      "description": "Cumulative cost since the control plane started, computed from uptime times the deployment's effective rate. In metered mode you pay this whether or not the GPU is busy; in reserved/owned modes the underlying cost is fixed and this is informational.",
-      "type": "stat",
-      "datasource": { "type": "prometheus", "uid": "mimir" },
-      "gridPos": { "x": 12, "y": 16, "w": 6, "h": 4 },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum(instance_uptime_seconds_total * on(provider, gpu_type, billing_mode) gpu_effective_rate_usd_per_second)"
-        }
-      ],
-      "fieldConfig": { "defaults": { "unit": "currencyUSD", "decimals": 4 } }
-    },
-    {
-      "id": 8,
-      "title": "Active inference time",
-      "description": "Cumulative seconds spent serving inference requests. Combined with uptime, gives the utilization metric above.",
-      "type": "stat",
-      "datasource": { "type": "prometheus", "uid": "mimir" },
-      "gridPos": { "x": 18, "y": 16, "w": 6, "h": 4 },
-      "targets": [
-        { "refId": "A", "expr": "sum(inference_active_seconds_total)" }
-      ],
-      "fieldConfig": { "defaults": { "unit": "s" } }
-    },
-    {
-      "id": 9,
-      "title": "Cross-provider monthly cost projection (at current utilization)",
-      "description": "Given the current rate of active inference, what would a month look like on each provider in providers.yaml? Cheapest entry is the right pick for the *workload* (active rate), even if it isn't the right pick for the *peak* (which the latency panel speaks to). Per-provider rates are static; the projection scales linearly with active-seconds rate. The chapter's cost-economics narrative is built around reading this panel against the latency one.",
+      "title": "Provider rate catalog (from providers.yaml)",
+      "description": "Per-second cost for every provider iplane knows about, converted to $/hr for readability. This is the static catalog — what each provider WOULD charge if you provisioned on it. The cost-economics chapter beat (Ch 6 §6.7) reads this against trace volume / cold-start cost to inform 'where should I run this workload.'",
       "type": "table",
       "datasource": { "type": "prometheus", "uid": "mimir" },
-      "gridPos": { "x": 0, "y": 20, "w": 24, "h": 8 },
+      "gridPos": { "x": 0, "y": 6, "w": 24, "h": 10 },
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (provider, gpu_type, billing_mode) (gpu_effective_rate_usd_per_second) * 86400 * 30 * scalar(sum(rate(inference_active_seconds_total[5m])))",
+          "expr": "sum by (provider, gpu_type, billing_mode) (gpu_effective_rate_usd_per_second) * 3600",
           "format": "table",
           "instant": true
         }
       ],
       "transformations": [
-        { "id": "organize", "options": { "renameByName": { "Value": "Projected monthly cost (USD)" } } }
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": { "Time": true },
+            "renameByName": {
+              "Value": "Rate (USD / hour)",
+              "provider": "Provider",
+              "gpu_type": "GPU",
+              "billing_mode": "Billing mode"
+            }
+          }
+        },
+        { "id": "sortBy", "options": { "fields": {}, "sort": [{ "field": "Rate (USD / hour)", "desc": false }] } }
       ],
       "fieldConfig": {
         "defaults": {
           "unit": "currencyUSD",
-          "decimals": 2,
-          "custom": { "displayMode": "color-text" }
+          "decimals": 4,
+          "custom": { "displayMode": "auto" }
         }
       }
     }
