@@ -3,12 +3,15 @@ package provisioners_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
 	"github.com/inference-book/inference-plane/internal/deployments/sshdocker"
+	"github.com/inference-book/inference-plane/internal/modelstores"
 	"github.com/inference-book/inference-plane/internal/provisioners"
 	"github.com/inference-book/inference-plane/internal/provisioners/state"
 	"github.com/inference-book/inference-plane/internal/sshkeys"
@@ -1155,6 +1158,103 @@ func okDep() *provisionerv1.Deployment {
 		Image:      "vllm/vllm-openai:0.7.0",
 		Model:      "Qwen/Qwen2.5-7B-Instruct",
 		EnginePort: 8000,
+	}
+}
+
+// stubModelStore records every Resolve call and returns whatever the
+// test programmed it to. Verifies the Service: (1) calls Resolve with
+// the right spec, (2) propagates the returned env into dep.Env,
+// (3) surfaces a Resolve error as InvalidArgument before any provider
+// touch.
+type stubModelStore struct {
+	called   atomic.Int32
+	lastSpec atomic.Value // string
+	respond  func(spec string) (modelstores.Resolved, error)
+}
+
+func (s *stubModelStore) Resolve(_ context.Context, spec string) (modelstores.Resolved, error) {
+	s.called.Add(1)
+	s.lastSpec.Store(spec)
+	if s.respond != nil {
+		return s.respond(spec)
+	}
+	return modelstores.Resolved{EngineModelArg: spec}, nil
+}
+
+func TestCreateDeployment_ResolveModelCalled_AndEnvMerged(t *testing.T) {
+	mock := &mockProvider{name: "runpod"}
+	store, err := state.Open(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("state.Open: %v", err)
+	}
+	ms := &stubModelStore{
+		respond: func(spec string) (modelstores.Resolved, error) {
+			return modelstores.Resolved{
+				EngineModelArg: spec,
+				EnvOverrides:   map[string]string{"HF_TOKEN": "secret"},
+			}, nil
+		},
+	}
+	exec := &fakeExecutor{}
+	svc := provisioners.New([]provisioners.Provider{mock}, store, "default",
+		provisioners.WithKeyStore(newKeyStore(t)),
+		provisioners.WithDeploymentExecutor(exec),
+		provisioners.WithModelStore(ms),
+	)
+	_ = store.Update(func(f *state.File) error {
+		f.Instances["my-pod"] = &provisionerv1.Instance{
+			Id: "my-pod", Provider: "runpod",
+			State: provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE,
+			Ssh:   &provisionerv1.SshTarget{Host: "1.2.3.4", Port: 22, User: "root"},
+		}
+		return nil
+	})
+
+	resp, err := svc.CreateDeployment(context.Background(), &provisionerv1.CreateDeploymentRequest{
+		Deployment: okDep(),
+		Wait:       true,
+	})
+	if err != nil {
+		t.Fatalf("CreateDeployment: %v", err)
+	}
+	if ms.called.Load() != 1 {
+		t.Errorf("Resolve called %d times, want 1", ms.called.Load())
+	}
+	if ms.lastSpec.Load() != "Qwen/Qwen2.5-7B-Instruct" {
+		t.Errorf("Resolve received %q, want the spec from okDep()", ms.lastSpec.Load())
+	}
+	// Env from ModelStore must land on the deployment record.
+	if resp.GetDeployment().GetEnv()["HF_TOKEN"] != "secret" {
+		t.Errorf("HF_TOKEN should be merged from Resolved.EnvOverrides; got %+v", resp.GetDeployment().GetEnv())
+	}
+}
+
+func TestCreateDeployment_ResolveError_FailsWithInvalidArgument(t *testing.T) {
+	mock := &mockProvider{name: "runpod"}
+	store, err := state.Open(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("state.Open: %v", err)
+	}
+	ms := &stubModelStore{
+		respond: func(_ string) (modelstores.Resolved, error) {
+			return modelstores.Resolved{}, fmt.Errorf("not found on huggingface.co (typo?)")
+		},
+	}
+	exec := &fakeExecutor{}
+	svc := provisioners.New([]provisioners.Provider{mock}, store, "default",
+		provisioners.WithKeyStore(newKeyStore(t)),
+		provisioners.WithDeploymentExecutor(exec),
+		provisioners.WithModelStore(ms),
+	)
+	_, err = svc.CreateDeployment(context.Background(), &provisionerv1.CreateDeploymentRequest{
+		Deployment: okDep(),
+		Wait:       true,
+	})
+	if err == nil {
+		t.Fatal("expected InvalidArgument from Resolve")
+	}
+	if exec.deployCalls != 0 {
+		t.Errorf("provider deploy must not run when Resolve fails; got %d calls", exec.deployCalls)
 	}
 }
 

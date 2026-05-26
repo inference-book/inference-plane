@@ -232,6 +232,7 @@ func buildClient() (provisionerClient, error) {
 	return provisioners.New(providers, store, instanceOperatorID,
 		provisioners.WithKeyStore(keyStore),
 		provisioners.WithDeploymentExecutor(executor),
+		provisioners.WithModelStore(modelStoreForCLI()),
 	), nil
 }
 

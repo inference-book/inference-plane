@@ -81,6 +81,13 @@ func init() {
 	// Subcommands that don't use config (load, gen-names) just ignore it.
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "",
 		"config file (default deploy/config.yaml; YAML)")
+
+	// --skip-model-validation bypasses the HF model-info pre-flight on
+	// deploy / up. Useful when offline, when the HF API is degraded,
+	// or for self-hosted models that aren't on the public Hub.
+	// Default off (validation catches typos before pod spin).
+	rootCmd.PersistentFlags().BoolVar(&skipModelValidation, "skip-model-validation", false,
+		"skip the pre-flight model-spec validation against huggingface.co (use when offline or for non-HF models)")
 }
 
 // initConfig sets up viper's config sources before any subcommand
