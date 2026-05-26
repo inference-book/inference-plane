@@ -10,8 +10,10 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
+	"github.com/inference-book/inference-plane/internal/provisioners"
 )
 
 // mockUpClient is a hand-built fake of the upClient interface. Keeps
@@ -223,6 +225,26 @@ func TestTeardown_CallsDestroyDeployment(t *testing.T) {
 // fires even if CreateDeployment returns an error mid-provision. This
 // is the leak-protection invariant: no path through `iplane up` leaves
 // a pod alive at the provider.
+// TestDefaultUpID_DoesNotUseReservedPrefix locks in the fix for the
+// reserved-prefix bug: `iplane up` without --id auto-generated
+// "iplane-up-<ts>", which ValidateID rejects because the "iplane-"
+// prefix is reserved for iplane-internal tags. Also asserts the id
+// passes the same ValidateID call the Service would run.
+func TestDefaultUpID_DoesNotUseReservedPrefix(t *testing.T) {
+	fixed := time.Date(2026, 5, 26, 4, 31, 39, 0, time.UTC)
+	got := defaultUpID(fixed)
+	if strings.HasPrefix(got, "iplane-") {
+		t.Errorf("default upID must not start with reserved prefix iplane-; got %q", got)
+	}
+	if !strings.HasPrefix(got, "up-") {
+		t.Errorf("default upID should start with 'up-'; got %q", got)
+	}
+	// The id must pass the same validation the Service applies.
+	if err := provisioners.ValidateID(got); err != nil {
+		t.Errorf("default upID %q failed ValidateID: %v", got, err)
+	}
+}
+
 func TestTeardown_AfterFailedCreate(t *testing.T) {
 	// Simulate CreateDeployment failing; teardown should still try.
 	cli := &mockUpClient{}

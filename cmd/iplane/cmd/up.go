@@ -106,7 +106,7 @@ func runUp(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("only --provider runpod is deployable in v0.1 (got %q); local instances have no engine endpoint", upProvider)
 	}
 	if upID == "" {
-		upID = fmt.Sprintf("iplane-up-%s", time.Now().UTC().Format("20060102t150405"))
+		upID = defaultUpID(time.Now())
 	}
 
 	// Telemetry: warn (don't fail) on missing endpoint. The demo's
@@ -150,12 +150,18 @@ func runUp(cmd *cobra.Command, _ []string) error {
 		}
 	}()
 
-	// Ensure tear-down runs whether we exit via signal, REPL exit, or
-	// an error mid-provision.
-	teardownDone := make(chan struct{})
+	// Tear-down fires only when CreateDeployment actually accepted the
+	// request. A pre-RPC validation error (e.g. reserved-id-prefix)
+	// means iplane never sent anything to the provider, so destroying
+	// would be a no-op that confusingly fails with the SAME validation
+	// error. Setting `deployCreated` true happens immediately after
+	// CreateDeployment returns nil, before any other failure path.
+	var deployCreated bool
 	defer func() {
+		if !deployCreated {
+			return
+		}
 		teardown(cli, upID)
-		close(teardownDone)
 	}()
 
 	// Provision phase: CreateDeployment{Wait: true} blocks until the
@@ -190,6 +196,9 @@ func runUp(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return fmt.Errorf("provision: %w", err)
 	}
+	// From here forward, the deployment record exists in iplane state
+	// (and possibly at the provider); teardown is required on any exit.
+	deployCreated = true
 	dep := resp.GetDeployment()
 	if dep.GetState() != provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING {
 		return fmt.Errorf("deploy reached %s, want RUNNING (reason: %s)",
@@ -224,8 +233,17 @@ func runUp(cmd *cobra.Command, _ []string) error {
 	if err := runChatREPL(rootCtx, cmd, endpoint, upModel); err != nil && !errors.Is(err, context.Canceled) {
 		return err
 	}
-	_ = teardownDone
 	return nil
+}
+
+// defaultUpID generates the deployment id used when --id isn't given.
+// The "iplane-" prefix is reserved (see ValidateID in
+// internal/provisioners/provider.go: ReservedIDPrefix) -- iplane uses
+// it for tags/labels on the provider side, so any id starting with it
+// is rejected at validation. Using "up-<ts>" instead keeps the id
+// descriptive (matches the verb name) and avoids the trap.
+func defaultUpID(now time.Time) string {
+	return "up-" + now.UTC().Format("20060102t150405")
 }
 
 // upClient is the subset of the in-process deployment client iplane up
