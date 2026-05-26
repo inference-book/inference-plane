@@ -115,6 +115,22 @@ services:
       - "127.0.0.1:4318:4318"   # OTLP/HTTP
     restart: unless-stopped
 
+  # ── Telemetry tunnel (opt-in) ───────────────────────────────────
+  # Exposes the local otel-collector to remote engine pods via a
+  # Cloudflare quick tunnel. The trycloudflare.com URL is ephemeral
+  # and rotates on restart; iplane discovers it from the container
+  # logs (see `iplane telemetry url`). Use COMPOSE_PROFILES=tunnel
+  # to activate. Alternative: a hosted sink like Grafana Cloud Free
+  # (no tunnel needed; export IPLANE_OTEL_ENDPOINT directly).
+  cloudflared-otel:
+    profiles: ["tunnel"]
+    image: cloudflare/cloudflared:latest
+    command: tunnel --url http://otel-collector:4318 --no-autoupdate --metrics 0.0.0.0:2000
+    depends_on:
+      otel-collector:
+        condition: service_started
+    restart: unless-stopped
+
   # ── Observability storage ────────────────────────────────────────
   # Each component owns one signal type. Local file storage means
   # `make clean` wipes them together. Production swaps each for a
