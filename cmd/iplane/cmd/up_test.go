@@ -12,6 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
 	"github.com/inference-book/inference-plane/internal/provisioners"
 )
@@ -178,6 +181,41 @@ func TestStreamUpProgress_PrintsPhaseAndMessage(t *testing.T) {
 	if !strings.Contains(got[1], "waiting for /health") {
 		t.Errorf("second invocation should use progress_message; got %q", got[1])
 	}
+}
+
+// TestStreamUpProgress_RetriesOnNotFound regression-locks the race
+// where streamUpProgress fires before CreateDeployment has written
+// the PENDING record. Without the retry, the watcher goroutine
+// exits silently and the operator stares at a blank terminal during
+// cold-start. The fix: retry NotFound for ~30s before giving up.
+func TestStreamUpProgress_RetriesOnNotFound(t *testing.T) {
+	var calls atomic.Int32
+	cli := &flakyWatchClient{
+		mockUpClient: &mockUpClient{},
+		watchFn: func() error {
+			n := calls.Add(1)
+			if n <= 2 {
+				return status.Errorf(codes.NotFound, "no deployment with id \"x\"")
+			}
+			return nil // third call: pretend the record now exists + terminal state reached
+		},
+	}
+	streamUpProgress(context.Background(), cli, "x")
+	if calls.Load() < 3 {
+		t.Errorf("watcher should have retried NotFound at least twice before succeeding; got %d calls", calls.Load())
+	}
+}
+
+// flakyWatchClient is mockUpClient with a custom WatchDeployment that
+// can return different errors per call -- used to exercise the
+// NotFound-retry loop.
+type flakyWatchClient struct {
+	*mockUpClient
+	watchFn func() error
+}
+
+func (f *flakyWatchClient) WatchDeployment(_ context.Context, _ *provisionerv1.WatchDeploymentRequest, _ func(*provisionerv1.DeploymentStateChangedEvent) error) error {
+	return f.watchFn()
 }
 
 // mockUpProgressClient is a test-local upClient impl that drives the

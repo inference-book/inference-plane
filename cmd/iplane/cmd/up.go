@@ -17,6 +17,8 @@ import (
 
 	"github.com/chzyer/readline"
 	"github.com/spf13/cobra"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
 	"github.com/inference-book/inference-plane/internal/deployments/sshdocker"
@@ -169,6 +171,15 @@ func runUp(cmd *cobra.Command, _ []string) error {
 	// parallel so the operator sees forward motion ("waiting for
 	// engine /health (Xs elapsed) -- HTTP 502") instead of a blank
 	// terminal for 5-10 minutes during cold-start.
+	//
+	// Print the deployment id immediately so the operator sees
+	// SOMETHING before the watcher's first event (which may take a
+	// few seconds because of the NotFound retry race -- see
+	// streamUpProgress comment). Without this, a cold pod can sit
+	// blank for ~5s + many minutes during image pull.
+	fmt.Fprintf(cmd.OutOrStdout(), "Provisioning %s on %s (model: %s, class: %s)...\n",
+		upID, upProvider, upModel, upClass)
+
 	provCtx, provCancel := context.WithTimeout(rootCtx, upTimeout)
 	defer provCancel()
 	watchCtx, watchCancel := context.WithCancel(provCtx)
@@ -309,21 +320,57 @@ func buildUpEngineEnv(endpoint string, headers map[string]string, noTelemetry bo
 // to WatchDeployment, prints each phase / progress_message change.
 // Cancelled the moment CreateDeployment returns. Stream errors are
 // swallowed (UX nicety, not a correctness path).
+// streamUpProgress watches the deployment for state / phase /
+// progress_message changes and prints them as they happen. Two race
+// concerns the loop has to survive:
+//
+//  1. The watcher goroutine fires before CreateDeployment has written
+//     the PENDING record, so the first poll returns NotFound. Without
+//     retry, the goroutine exits silently and the operator stares at
+//     a blank terminal for 5-10 minutes during cold-start. We retry
+//     NotFound for up to ~30s; after that, give up (CreateDeployment
+//     itself will surface the real error).
+//
+//  2. The Service-level WatchDeployment loop exits cleanly on terminal
+//     state (RUNNING / FAILED / TERMINATED). When that returns nil,
+//     we're done -- no retry.
 func streamUpProgress(ctx context.Context, cli upClient, depID string) {
-	_ = cli.WatchDeployment(ctx, &provisionerv1.WatchDeploymentRequest{Id: depID},
-		func(ev *provisionerv1.DeploymentStateChangedEvent) error {
-			if ctx.Err() != nil {
-				return errStopIteration
-			}
-			msg := ev.GetProgressMessage()
-			if msg == "" {
-				msg = ev.GetPhase()
-			}
-			if msg != "" {
-				fmt.Printf("  ... %s\n", msg)
-			}
-			return nil
-		})
+	const retryEvery = 200 * time.Millisecond
+	const giveUpAfter = 30 * time.Second
+	deadline := time.Now().Add(giveUpAfter)
+	for {
+		err := cli.WatchDeployment(ctx, &provisionerv1.WatchDeploymentRequest{Id: depID},
+			func(ev *provisionerv1.DeploymentStateChangedEvent) error {
+				if ctx.Err() != nil {
+					return errStopIteration
+				}
+				msg := ev.GetProgressMessage()
+				if msg == "" {
+					msg = ev.GetPhase()
+				}
+				if msg != "" {
+					fmt.Printf("  ... %s\n", msg)
+				}
+				return nil
+			})
+		if err == nil {
+			return // terminal state, clean exit
+		}
+		if ctx.Err() != nil {
+			return // caller cancelled
+		}
+		// Retry only the "not found yet" race; other errors are
+		// non-recoverable and we exit quietly (CreateDeployment will
+		// surface the real failure).
+		if status.Code(err) != codes.NotFound || time.Now().After(deadline) {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(retryEvery):
+		}
+	}
 }
 
 // runChatREPL is the prompt loop. Uses chzyer/readline for line editing
