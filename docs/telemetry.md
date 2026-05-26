@@ -108,17 +108,65 @@ The hosted-OTLP path supports both — most providers accept gRPC and
 HTTP. If you switch the demo to a hosted sink and want gRPC, drop
 the `OTEL_EXPORTER_OTLP_PROTOCOL` env or set it to `grpc`.
 
-## What the engine actually ships
+## What the engine actually ships (v0.1)
 
-vLLM v0.7+ exports:
+vLLM v0.7+'s OpenTelemetry wiring covers traces but **not metrics**.
+Specifically:
 
-- **Traces** for each `/v1/chat/completions` and `/v1/completions`
-  call: spans cover queue wait → prefill → decode → response.
-- **Metrics** for request count, queue depth, tokens generated,
-  cache hit rate, GPU memory.
+- **Traces** flow via OTLP to `OTEL_EXPORTER_OTLP_ENDPOINT`. Each
+  `/v1/chat/completions` call lands in Tempo as a span with the
+  request id, prompt + completion tokens, finish reason, etc.
+  Visible in Grafana → Explore → Tempo.
+- **Metrics** live only at the pod's `/metrics` endpoint
+  (Prometheus scrape). vLLM does not auto-wire an OTel meter
+  provider on `OTEL_EXPORTER_OTLP_ENDPOINT` in v0.7.x.
 
-The Grafana dashboard at `deploy/grafana/provisioning/dashboards/inference-plane-v01.json`
-renders the v0.1 selection (request rate, GPU memory, tokens/sec).
+Reaching `/metrics` from a remote pod would need an otel-collector
+`prometheusreceiver` scrape config that knows the per-deploy proxy
+URL — non-trivial because the URL changes every deploy. That
+integration is filed as a v0.2 follow-up (issue 51) and intentionally
+out of scope for the v0.1 chapter beat.
+
+## The dashboard's v0.1 shape
+
+`deploy/grafana/provisioning/dashboards/inference-plane-v01.json` has
+two panels:
+
+- **Header (markdown)** explaining the architectural reality: traces
+  work, engine metrics are v0.2, the iplane self-metric panels from
+  earlier drafts are deliberately removed.
+- **Provider rate catalog** — a table of every row in `providers.yaml`
+  with its per-hour cost. Static, but useful as the cost-economics
+  reference panel the chapter reads against trace volume.
+
+For request-level observability in v0.1, use **Tempo Explore**: search
+by service `vllm.api_server` or by trace id; spans surface prompt /
+completion token counts and end-to-end latency. The reading order for
+the chapter is "trace per request → table of provider rates → does
+this workload cost out cheaper somewhere else?"
+
+### Why iplane self-metrics were removed
+
+Earlier drafts of the dashboard queried `inference_requests_total`,
+`inference_request_duration_*`, etc. — these are emitted by iplane's
+`internal/metrics/` package, designed for a world where iplane proxied
+inference traffic. After the image-as-pod pivot (PR 45), **iplane is
+deliberately not in the data path**: the operator dials the engine
+directly via the provider proxy URL. So the counters never increment,
+and panels querying them always read zero.
+
+The cost-projection panel was particularly misleading:
+`instance_uptime_seconds_total` measures the **controlplane process's**
+wall-clock uptime (not any provisioned GPU instance's), so
+"Spend so far = uptime × static rate" climbed monotonically from
+`make up` onward regardless of what was deployed. Worse: the
+docker-compose controlplane and the demo's `iplane serve` are
+SEPARATE processes with SEPARATE state files, so the controlplane
+emitting metrics had no visibility into the demo's deploys anyway.
+
+Both pieces (the controlplane↔demo state split AND the request-path
+self-metrics) come back when v0.2 introduces a request queue / cost-
+aware scheduler that puts iplane back into a hot-path role.
 
 ## Troubleshooting
 
