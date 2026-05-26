@@ -413,29 +413,40 @@ func runDemo() {
 			return nil
 		})
 
-	demo.Step("Serve a real inference request").ID("serve").
-		Note("The chapter's payoff. Single-turn /v1/chat/completions: prompt in, tokens out. iplane is NOT in the data path -- this POST goes from the operator's laptop straight to the engine_endpoint (the provider's HTTPS proxy URL). What iplane delivered was 'a dialable endpoint serving an OpenAI-compat API'; this step proves the operator can use it.\n\nCLI form:\n  iplane deployment query " + deploymentID + " \"Say hello in one sentence.\" --service-url " + *url).
-		Arrow("Operator", "Engine", "POST /v1/chat/completions (single-turn)").
-		Arrow("Engine", "Operator", "{choices:[{message:{...}}], usage:{...}}").
+	demo.Step("Chat with the deployed model").ID("chat").
+		Note("The chapter's payoff. You're talking to a model running on a GPU pod you rented 5 minutes ago. Type a prompt; the demo POSTs it to /v1/chat/completions on the engine_endpoint and prints the response + token / latency stats. Hit enter on an empty line to move on to the observe step.\n\niplane is NOT in the data path -- the POST goes from this laptop straight to the engine's proxy URL. Each call also ships traces / metrics to your OTel sink (see the previous step's note), so you can watch your queries show up in Grafana as you type them.\n\nCLI equivalent for a single prompt:\n  iplane deployment query " + deploymentID + " \"<prompt>\" --service-url " + *url).
+		Arrow("Operator", "Engine", "POST /v1/chat/completions").
+		Arrow("Engine", "Operator", "response text + token counts + latency").
+		Arrow("Engine", "OTel sink", "spans + metrics (background)").
+		Input(demokit.String().
+			Named("prompt", "Enter a prompt (empty line = move on)")).
 		Run(func(ctx demokit.StepContext) *demokit.StepResult {
+			prompt, _ := ctx.Inputs["prompt"].(string)
+			prompt = strings.TrimSpace(prompt)
+			if prompt == "" {
+				fmt.Println("  done -- moving on")
+				return nil // fall through to "observe"
+			}
+
 			rctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 			defer cancel()
 			descResp, err := deploymentClient.DescribeDeployment(rctx, connect.NewRequest(&provisionerv1.DescribeDeploymentRequest{Id: deploymentID}))
 			if err != nil {
+				// Describe failure is fatal -- the endpoint is gone, no
+				// point looping.
 				return abortDemo(cleanup, "DescribeDeployment: %v", err)
 			}
 			dep := descResp.Msg.GetDeployment()
 			endpoint := dep.GetEngineEndpoint()
 			modelID := dep.GetModel()
-			prompt := "In one sentence, what is a transformer?"
 
 			reqBody := map[string]any{
 				"model": modelID,
 				"messages": []map[string]string{
 					{"role": "user", "content": prompt},
 				},
-				"max_tokens":  120,
-				"temperature": 0.2,
+				"max_tokens":  256,
+				"temperature": 0.7,
 			}
 			bodyBytes, _ := json.Marshal(reqBody)
 			fullURL := strings.TrimRight(endpoint, "/") + "/v1/chat/completions"
@@ -447,13 +458,17 @@ func runDemo() {
 			started := time.Now()
 			resp, err := http.DefaultClient.Do(httpReq)
 			if err != nil {
-				return abortDemo(cleanup, "POST %s: %v", fullURL, err)
+				// Transient network error -- print and loop so the
+				// operator can retry with another prompt.
+				fmt.Printf("  POST %s failed: %v (try another prompt)\n", fullURL, err)
+				return &demokit.StepResult{Next: "chat"}
 			}
 			defer resp.Body.Close()
 			respBytes, _ := io.ReadAll(resp.Body)
 			elapsed := time.Since(started).Round(time.Millisecond)
 			if resp.StatusCode/100 != 2 {
-				return abortDemo(cleanup, "%s -> %d: %s", fullURL, resp.StatusCode, strings.TrimSpace(string(respBytes)))
+				fmt.Printf("  engine returned %d: %s\n", resp.StatusCode, strings.TrimSpace(string(respBytes)))
+				return &demokit.StepResult{Next: "chat"}
 			}
 			var parsed struct {
 				Choices []struct {
@@ -467,18 +482,15 @@ func runDemo() {
 					CompletionTokens int `json:"completion_tokens"`
 				} `json:"usage"`
 			}
-			if err := json.Unmarshal(respBytes, &parsed); err != nil {
-				return abortDemo(cleanup, "decode response: %v (body: %s)", err, strings.TrimSpace(string(respBytes)))
+			if err := json.Unmarshal(respBytes, &parsed); err != nil || len(parsed.Choices) == 0 {
+				fmt.Printf("  unparseable response from engine: %s\n", strings.TrimSpace(string(respBytes)))
+				return &demokit.StepResult{Next: "chat"}
 			}
-			if len(parsed.Choices) == 0 {
-				return abortDemo(cleanup, "response had no choices: %s", strings.TrimSpace(string(respBytes)))
-			}
-			fmt.Printf("  prompt:          %q\n", prompt)
-			fmt.Printf("  response:        %q\n", strings.TrimSpace(parsed.Choices[0].Message.Content))
-			fmt.Printf("  finish reason:   %s\n", parsed.Choices[0].FinishReason)
-			fmt.Printf("  tokens:          %d prompt + %d completion\n", parsed.Usage.PromptTokens, parsed.Usage.CompletionTokens)
-			fmt.Printf("  latency:         %s\n", elapsed)
-			return nil
+			fmt.Printf("\n  > %s\n\n", strings.TrimSpace(parsed.Choices[0].Message.Content))
+			fmt.Printf("  (%s · %d prompt + %d completion tokens · finish %s)\n",
+				elapsed, parsed.Usage.PromptTokens, parsed.Usage.CompletionTokens, parsed.Choices[0].FinishReason)
+			// Loop: ask for another prompt.
+			return &demokit.StepResult{Next: "chat"}
 		})
 
 	demo.Step("Observe: where the OTel data landed").ID("observe").
