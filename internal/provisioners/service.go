@@ -8,6 +8,7 @@ import (
 	"time"
 
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
+	"github.com/inference-book/inference-plane/internal/modelstores"
 	"github.com/inference-book/inference-plane/internal/provisioners/state"
 	"github.com/inference-book/inference-plane/internal/sshkeys"
 	"google.golang.org/grpc/codes"
@@ -52,6 +53,7 @@ type Service struct {
 	store      *state.Store
 	keyStore   keyEnsurer
 	executor   DeploymentExecutor
+	modelStore modelstores.ModelStore
 	operatorID string
 	clock      func() time.Time
 }
@@ -84,6 +86,15 @@ func WithKeyStore(k keyEnsurer) Option {
 	return func(s *Service) { s.keyStore = k }
 }
 
+// WithModelStore configures the model-spec validation / resolution
+// layer the Service calls at CreateDeployment time. When unset the
+// Service uses modelstores.Passthrough (no validation; spec is
+// forwarded unchanged). Production callers pass a huggingface.Store
+// so typos / gated-access errors surface BEFORE a pod is provisioned.
+func WithModelStore(ms modelstores.ModelStore) Option {
+	return func(s *Service) { s.modelStore = ms }
+}
+
 // New constructs a Service. Providers are keyed by their Name() so the
 // service can dispatch by spec.provider without an interface assertion
 // at call time.
@@ -91,6 +102,7 @@ func New(providers []Provider, store *state.Store, operatorID string, opts ...Op
 	s := &Service{
 		providers:  make(map[string]Provider, len(providers)),
 		store:      store,
+		modelStore: modelstores.Passthrough{}, // safe default; overridden by WithModelStore
 		operatorID: operatorID,
 		clock:      time.Now,
 	}
@@ -828,6 +840,31 @@ func (s *Service) CreateDeployment(ctx context.Context, req *provisionerv1.Creat
 	}
 	if dep.GetModel() == "" {
 		return nil, status.Error(codes.InvalidArgument, "deployment.model is required")
+	}
+
+	// Pre-flight: resolve the model spec through the configured
+	// ModelStore. Default is Passthrough (no validation); production
+	// callers configure huggingface.Store which validates against HF's
+	// model-info API + propagates HF_TOKEN. Failing here costs us a
+	// network round-trip but saves a ~$0.10-0.50 misfire when the
+	// operator typo'd the model id.
+	resolved, err := s.modelStore.Resolve(ctx, dep.GetModel())
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "model spec: %v", err)
+	}
+	dep.Model = resolved.EngineModelArg
+	// Merge ModelStore env onto the deployment. Operator-supplied
+	// dep.Env wins over ModelStore overrides (HF_TOKEN can be
+	// overridden via --env if needed).
+	if len(resolved.EnvOverrides) > 0 {
+		merged := make(map[string]string, len(resolved.EnvOverrides)+len(dep.GetEnv()))
+		for k, v := range resolved.EnvOverrides {
+			merged[k] = v
+		}
+		for k, v := range dep.GetEnv() {
+			merged[k] = v
+		}
+		dep.Env = merged
 	}
 
 	// Resolve the target instance: place the deployment. v0.1's

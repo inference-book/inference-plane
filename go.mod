@@ -4,6 +4,7 @@ go 1.26.3
 
 require (
 	connectrpc.com/connect v1.19.2
+	github.com/chzyer/readline v1.5.1
 	github.com/go-viper/mapstructure/v2 v2.4.0
 	github.com/panyam/demokit v0.0.25
 	github.com/panyam/oneauth v0.0.83
@@ -36,7 +37,6 @@ require (
 	github.com/charmbracelet/x/term v0.2.2 // indirect
 	github.com/charmbracelet/x/termios v0.1.1 // indirect
 	github.com/charmbracelet/x/windows v0.2.2 // indirect
-	github.com/chzyer/readline v1.5.1 // indirect
 	github.com/clipperhouse/displaywidth v0.11.0 // indirect
 	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect

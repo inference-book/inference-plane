@@ -235,6 +235,7 @@ func buildDeploymentClient() (deploymentClient, error) {
 	svc := provisioners.New(providers, store, deploymentOperatorID,
 		provisioners.WithKeyStore(keyStore),
 		provisioners.WithDeploymentExecutor(sshdocker.NewExecutor()),
+		provisioners.WithModelStore(modelStoreForCLI()),
 	)
 	return &inProcessDeploymentClient{svc: svc}, nil
 }
