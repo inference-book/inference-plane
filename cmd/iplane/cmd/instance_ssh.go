@@ -4,7 +4,11 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -13,19 +17,23 @@ import (
 )
 
 var instanceSSHCmd = &cobra.Command{
-	Use:   "ssh <id>",
-	Short: "Materialize the SSH key and print the connect command",
-	Args:  cobra.ExactArgs(1),
+	Use:   "ssh <id> [-- <ssh args...>]",
+	Short: "Drop into the instance's SSH session in one step",
+	Args:  cobra.MinimumNArgs(1),
 	Long: `Materialize the operator's iplane-managed SSH key for the named
-instance into a 0600 temp file and print the ssh command an operator
-can copy-paste into their shell. Saves the operator from having to
-locate the key on disk or assemble the right '-i / -p / -o ...' flags
-by hand.
+instance, then exec-replace iplane with ssh -- the operator drops
+straight into the remote shell. Closing the session returns to the
+operator's original prompt; no iplane process sits in memory for the
+duration.
 
-The verb does NOT exec ssh itself -- the operator runs the printed
-command. That gives them their natural interactive shell (vim, htop,
-tmux, port-forwarding, anything ssh supports) without iplane sitting
-in the middle of the session.
+Args after the instance id are passed through to ssh verbatim, so
+flags like port-forwards and agent-forwarding work as on any normal
+ssh invocation:
+
+  iplane instance ssh my-pod                       # plain shell
+  iplane instance ssh my-pod -- -L 8080:localhost:8000   # local port-forward
+  iplane instance ssh my-pod -- -A                       # agent-forward
+  iplane instance ssh my-pod -- ls /workspace            # remote command
 
 Works in both transports:
 
@@ -34,8 +42,14 @@ Works in both transports:
   - Remote (--service-url): fetches the key via the GetInstanceSSHKey
     RPC and materializes it locally.
 
-The temp key file is NOT cleaned up automatically. The verb prints the
-cleanup command alongside the ssh command; rm when you're done.
+Key residency:
+
+The private key is materialized to a tmpfs-backed per-user directory
+when one is available (Linux: /run/user/$UID, RAM-backed and wiped at
+session end), falling back to the OS temp directory otherwise (macOS
+/tmp, swept by the 3-day periodic cleanup). Because syscall.Exec
+replaces the iplane process, the key file is NOT removed at session
+exit -- the OS sweep is the cleanup mechanism.
 
 Security note: --service-url mode causes private key bytes to traverse
 the gRPC connection. The v0.1 control plane has no per-operator auth;
@@ -45,6 +59,7 @@ rely on network isolation (localhost / private network) for safety.`,
 
 func runInstanceSSH(cmd *cobra.Command, args []string) error {
 	id := args[0]
+	extraArgs := args[1:] // pass-through to ssh
 
 	client, err := buildClient()
 	if err != nil {
@@ -72,17 +87,14 @@ func runInstanceSSH(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("fetch ssh key for %q: %w", id, err)
 	}
 
-	// Write the key under a per-run temp dir so concurrent invocations
-	// don't collide. The dir + key file deliberately survive the
-	// command -- the operator copy-pastes the ssh command and uses
-	// the file at their leisure, then cleans up via the printed rm.
-	tmpDir, err := os.MkdirTemp("", "iplane-ssh-*")
+	keyPath, err := materializeKey(keyResp.GetPrivateKeyPem())
 	if err != nil {
-		return fmt.Errorf("create temp dir: %w", err)
+		return fmt.Errorf("materialize key: %w", err)
 	}
-	keyPath := filepath.Join(tmpDir, "id_ed25519")
-	if err := os.WriteFile(keyPath, keyResp.GetPrivateKeyPem(), 0600); err != nil {
-		return fmt.Errorf("write temp key: %w", err)
+
+	sshBin, err := exec.LookPath("ssh")
+	if err != nil {
+		return fmt.Errorf("ssh not found on PATH: %w", err)
 	}
 
 	host := sshTarget.GetHost()
@@ -98,14 +110,71 @@ func runInstanceSSH(cmd *cobra.Command, args []string) error {
 		user = "root"
 	}
 
-	out := cmd.OutOrStdout()
-	fmt.Fprintf(out, "Wrote SSH key to:\n  %s\n\n", keyPath)
-	fmt.Fprintln(out, "Run this to connect:")
-	fmt.Fprintf(out, "  ssh -i %s -p %d -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR %s@%s\n\n",
-		keyPath, port, user, host)
-	fmt.Fprintln(out, "Clean up when done:")
-	fmt.Fprintf(out, "  rm -rf %s\n", tmpDir)
-	return nil
+	argv := buildSSHArgv(filepath.Base(sshBin), keyPath, user, host, port, extraArgs)
+
+	// Exec-replace the iplane process with ssh. On success this does
+	// NOT return; the operator's shell takes over from ssh's exit.
+	// The cleanup of the key file is left to the OS (see verb's
+	// Long doc).
+	return syscall.Exec(sshBin, argv, os.Environ())
+}
+
+// buildSSHArgv assembles the argv passed to syscall.Exec. The first
+// element is argv[0] (program name as seen by ssh, conventionally the
+// basename of the binary). Order matters: ssh options come BEFORE
+// the operator's pass-through args so the operator can override
+// anything iplane sets (e.g., add -i for an additional identity).
+// The user@host destination always comes last because ssh treats
+// everything after it as a remote command.
+//
+// Pure function so tests can assert the shape without invoking ssh.
+func buildSSHArgv(progName, keyPath, user, host string, port int, extraArgs []string) []string {
+	argv := []string{
+		progName,
+		"-i", keyPath,
+		"-p", strconv.Itoa(port),
+		"-o", "StrictHostKeyChecking=no",
+		"-o", "UserKnownHostsFile=/dev/null",
+		"-o", "LogLevel=ERROR",
+	}
+	argv = append(argv, extraArgs...)
+	argv = append(argv, fmt.Sprintf("%s@%s", user, host))
+	return argv
+}
+
+// materializeKey writes the supplied PEM bytes to a tmpfs-backed
+// per-user directory (Linux /run/user/$UID) when one is available,
+// or the OS temp directory otherwise. Returns the path to the key
+// file. The directory + file are deliberately NOT cleaned up at exit
+// -- syscall.Exec replaces the process so no defer would fire; the
+// OS sweep is the cleanup mechanism (see verb's Long doc).
+func materializeKey(pem []byte) (string, error) {
+	dir, err := os.MkdirTemp(preferredKeyDir(), "iplane-ssh-*")
+	if err != nil {
+		return "", err
+	}
+	keyPath := filepath.Join(dir, "id_ed25519")
+	if err := os.WriteFile(keyPath, pem, 0600); err != nil {
+		return "", err
+	}
+	return keyPath, nil
+}
+
+// preferredKeyDir returns the directory iplane should write the
+// short-lived private key into. On Linux with systemd, /run/user/$UID
+// is RAM-backed (tmpfs) and per-user — both better for key residency
+// than /tmp. Elsewhere (notably macOS, which has no equivalent
+// per-user tmpfs), fall back to the OS temp directory.
+func preferredKeyDir() string {
+	if runtime.GOOS == "linux" {
+		if uid := os.Getuid(); uid > 0 {
+			xdg := fmt.Sprintf("/run/user/%d", uid)
+			if info, err := os.Stat(xdg); err == nil && info.IsDir() {
+				return xdg
+			}
+		}
+	}
+	return os.TempDir()
 }
 
 func init() {
