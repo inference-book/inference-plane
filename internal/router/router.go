@@ -215,6 +215,17 @@ func (r *Router) forwardable(w http.ResponseWriter, dep *provisionerv1.Deploymen
 //     /v1/chat/completions.
 //   - serveFlat passes false: the inbound path is already
 //     /v1/chat/completions (no iplane-side prefix), forward as-is.
+//
+// SSE streaming (v0.2 ch7-beat1.4): non-streaming and streaming
+// (`stream: true`) responses both flow through this same path with
+// no special-casing in router code. httputil.ReverseProxy detects
+// `Content-Type: text/event-stream` on the engine's response and
+// auto-flushes after each write -- the client sees tokens in
+// real-time as the engine emits them. Client disconnect propagates
+// to upstream via context cancellation (also default ReverseProxy
+// behavior), so killing a chat REPL mid-stream terminates the
+// engine's compute rather than leaking it. Both properties are
+// asserted in stream_test.go.
 func (r *Router) proxyTo(w http.ResponseWriter, req *http.Request, dep *provisionerv1.Deployment, stripDeployPrefix bool) {
 	target, err := url.Parse(dep.GetEngineEndpoint())
 	if err != nil {

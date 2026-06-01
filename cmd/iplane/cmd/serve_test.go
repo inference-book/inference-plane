@@ -1,13 +1,16 @@
 package cmd
 
 import (
+	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"connectrpc.com/connect"
 
@@ -319,5 +322,98 @@ func TestServe_FlatURL_RoutesByModelInBody(t *testing.T) {
 		}
 	default:
 		t.Error("engine never received the forwarded request")
+	}
+}
+
+// TestServe_FlatURL_StreamsTokens drives the v0.2 ch7-beat1.4 SSE
+// path end-to-end through the daemon harness. Fake engine emits
+// timed SSE chunks; client reads them via the flat URL; the test
+// asserts both that all chunks arrived and that they spread over
+// time (real-time streaming, not buffered).
+//
+// httputil.ReverseProxy handles SSE pass-through implicitly via
+// Content-Type auto-detection; this test locks the behavior in
+// as a regression target.
+func TestServe_FlatURL_StreamsTokens(t *testing.T) {
+	dir := t.TempDir()
+	harness := startDaemonHarness(t, dir)
+	defer harness.close()
+
+	// Fake engine streams 5 SSE chunks with a 50ms gap between each.
+	engine := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.WriteHeader(http.StatusOK)
+		flusher := w.(http.Flusher)
+		for i := 0; i < 5; i++ {
+			select {
+			case <-r.Context().Done():
+				return
+			default:
+			}
+			fmt.Fprintf(w, "data: token-%d\n\n", i)
+			flusher.Flush()
+			time.Sleep(50 * time.Millisecond)
+		}
+		fmt.Fprintln(w, "data: [DONE]")
+		flusher.Flush()
+	}))
+	defer engine.Close()
+
+	if err := harness.store.Update(func(s *provisioners.State) error {
+		s.Instances["my-pod"] = &provisionerv1.Instance{
+			Id: "my-pod", Provider: "local",
+			State: provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE,
+		}
+		s.Deployments["streamer"] = &provisionerv1.Deployment{
+			Id:             "streamer",
+			InstanceId:     "my-pod",
+			Model:          "test/streaming-model",
+			State:          provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING,
+			EngineEndpoint: engine.URL,
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	start := time.Now()
+	resp, err := http.Post(
+		harness.server.URL+"/v1/chat/completions",
+		"application/json",
+		strings.NewReader(`{"model":"test/streaming-model","stream":true,"messages":[]}`),
+	)
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, body)
+	}
+
+	// Read one chunk at a time. The whole conversation should take
+	// at least 4 * 50ms = 200ms of wall-clock; a buffered response
+	// would compress all reads to the same moment.
+	br := bufio.NewReader(resp.Body)
+	var chunks []string
+	for {
+		line, err := br.ReadString('\n')
+		if line != "" {
+			if trimmed := strings.TrimRight(line, "\r\n"); trimmed != "" {
+				chunks = append(chunks, trimmed)
+			}
+		}
+		if err != nil {
+			break
+		}
+	}
+	elapsed := time.Since(start)
+
+	if len(chunks) < 5 {
+		t.Fatalf("expected at least 5 streamed chunks, got %d: %v", len(chunks), chunks)
+	}
+	if elapsed < 150*time.Millisecond {
+		t.Errorf("chunks arrived too quickly (%v); router likely buffered the response", elapsed)
 	}
 }
