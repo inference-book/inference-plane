@@ -93,7 +93,7 @@ The gRPC server is the source of truth for the API. The HTTP surface dials the g
 | `internal/web/server/`| HTTP layer: connect adapters wrapping a gRPC client, plus grpc-gateway with OpenAI-shaped marshaler and error handler. |
 | `internal/provisioners/` | Provisioner Service + state-file store + local + runpod adapters. The v0.1 control surface for acquiring/releasing GPU instances. See `docs/design/0001-provisioner.md`. |
 | `cmd/iplane/cmd/`    | Cobra subcommands. `instance.go` wires the `iplane instance {create,list,describe,destroy}` group with two transports (in-process Service or `--service-url` remote gRPC client). `dryrun.go` is the CLI-layer `--dry-run` helper. |
-| `examples/provisioning/` | Runnable demokit walkthroughs of the lifecycle: `01-end-to-end/` drives the gRPC client, `02-cli-end-to-end/` drives the `iplane` binary. |
+| `examples/` | Runnable demokit walkthroughs. `01-end-to-end/` drives the gRPC client; `02-cli-end-to-end/` drives the `iplane` binary; `03-deploy-end-to-end/` carries the full chapter-6 flow (provision → deploy → chat → destroy). |
 | `deploy/`            | docker-compose + observability configs (OTel collector, Tempo, Loki, Mimir, Grafana provisioning). |
 | `tests/smoke/`       | Go integration tests with `//go:build smoke` tag. Decode responses into the same `backends` types the production code uses. |
 | `metric-names.yaml`  | Canonical OTel name vocabulary (paired with book). |

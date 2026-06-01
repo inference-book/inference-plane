@@ -80,7 +80,7 @@ For each candidate commit / PR, check:
 - **Capability interface added/changed?** (`internal/provisioners/provider.go`'s `KeyRegistrar`, `SSHReadyWaiter`, `Deployer`, `DeploymentExecutor`) — these are the patterns the chapter teaches.
 - **CLI verb added/removed?** (`cmd/iplane/cmd/*.go`) — the operator-facing surface readers will run.
 - **Default behavior flipped?** (the chapter narrative depends on the default path; flipping it requires re-reading the chapter)
-- **Demokit walkthrough restructured?** (`examples/provisioning/*-end-to-end/main.go`) — the chapter's reproduction story.
+- **Demokit walkthrough restructured?** (`examples/*-end-to-end/main.go`) — the chapter's reproduction story.
 - **Design doc added or marked-superseded?** (`docs/design/*.md`) — explicit narrative shifts.
 - **Vocabulary in `ROADMAP.md` or `ARCHITECTURE.md` rewritten?** — usually paired with a real shift.
 
