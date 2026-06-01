@@ -13,7 +13,7 @@ import (
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
 	"github.com/inference-book/inference-plane/gen/go/provisioner/v1/provisionerv1connect"
 	"github.com/inference-book/inference-plane/internal/provisioners"
-	"github.com/inference-book/inference-plane/internal/provisioners/state"
+	"github.com/inference-book/inference-plane/internal/provisioners/stores/file"
 )
 
 // daemonHarness boots the daemon's RPC surface against a temp state
@@ -23,7 +23,7 @@ import (
 // restarts without paying the full runServe cost.
 type daemonHarness struct {
 	dir     string
-	store   *state.Store
+	store   *file.Store
 	svc     *provisioners.Service
 	server  *httptest.Server
 	release func()
@@ -34,9 +34,9 @@ type daemonHarness struct {
 // an httptest.Server. Returns the harness with a Close() helper.
 func startDaemonHarness(t *testing.T, dir string) *daemonHarness {
 	t.Helper()
-	store, err := state.Open(dir, "default")
+	store, err := file.Open(dir, "default")
 	if err != nil {
-		t.Fatalf("state.Open: %v", err)
+		t.Fatalf("file.Open: %v", err)
 	}
 	release, err := store.LockForLifetime()
 	if err != nil {
@@ -124,7 +124,7 @@ func TestServe_StateOfRecord_SurvivesRestart(t *testing.T) {
 // TestServe_RefusesSecondDaemon asserts the lifetime-lock contract:
 // two daemons against the same state directory cannot run
 // concurrently. The first holds the flock; the second sees
-// *state.ErrLockHeld with the first's PID populated.
+// *file.ErrLockHeld with the first's PID populated.
 func TestServe_RefusesSecondDaemon(t *testing.T) {
 	dir := t.TempDir()
 	first := startDaemonHarness(t, dir)
@@ -132,7 +132,7 @@ func TestServe_RefusesSecondDaemon(t *testing.T) {
 
 	// Try to open a second store + LockForLifetime against the same
 	// dir. This is what the second `iplane serve` would do at startup.
-	second, err := state.Open(dir, "default")
+	second, err := file.Open(dir, "default")
 	if err != nil {
 		t.Fatalf("Open second store: %v", err)
 	}
@@ -140,9 +140,9 @@ func TestServe_RefusesSecondDaemon(t *testing.T) {
 	if err == nil {
 		t.Fatal("second LockForLifetime: expected error, got nil")
 	}
-	var held *state.ErrLockHeld
+	var held *file.ErrLockHeld
 	if !errors.As(err, &held) {
-		t.Fatalf("expected *state.ErrLockHeld, got %T: %v", err, err)
+		t.Fatalf("expected *file.ErrLockHeld, got %T: %v", err, err)
 	}
 	if held.HolderPID == 0 {
 		t.Error("HolderPID should be populated from the lock-pid sidecar")

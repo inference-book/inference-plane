@@ -42,7 +42,7 @@ import (
 	"github.com/inference-book/inference-plane/internal/provisioners"
 	"github.com/inference-book/inference-plane/internal/provisioners/local"
 	"github.com/inference-book/inference-plane/internal/provisioners/runpod"
-	"github.com/inference-book/inference-plane/internal/provisioners/state"
+	"github.com/inference-book/inference-plane/internal/provisioners/stores/file"
 )
 
 func main() {
@@ -63,9 +63,9 @@ func serve() {
 	operatorID := flag.String("operator", "default", "operator id stamped on instances")
 	flag.CommandLine.Parse(demokit.FilterArgs(os.Args[1:], demokit.BoolFlag("--serve")))
 
-	store, err := state.Open(*stateDir, *operatorID)
+	store, err := file.Open(*stateDir, *operatorID)
 	if err != nil {
-		log.Fatalf("state.Open: %v", err)
+		log.Fatalf("file.Open: %v", err)
 	}
 
 	providers := []provisioners.Provider{local.New()}

@@ -14,7 +14,7 @@ import (
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
 	"github.com/inference-book/inference-plane/gen/go/provisioner/v1/provisionerv1connect"
 	"github.com/inference-book/inference-plane/internal/provisioners"
-	"github.com/inference-book/inference-plane/internal/provisioners/state"
+	"github.com/inference-book/inference-plane/internal/provisioners/stores/file"
 )
 
 // Shared flags on the instance group. Each subcommand reads them via
@@ -156,7 +156,7 @@ func init() {
 }
 
 // resolveStateDir returns the explicit --state-dir if set, else
-// ~/.iplane (creating it implicitly via state.Open). Fails fast when
+// ~/.iplane (creating it implicitly via file.Open). Fails fast when
 // the home dir is unavailable -- the alternative would be silently
 // landing state in $CWD, which is a worse surprise.
 func resolveStateDir() (string, error) {
@@ -193,7 +193,7 @@ func buildClient() (provisionerClient, error) {
 	if err != nil {
 		return nil, err
 	}
-	store, err := state.Open(dir, instanceOperatorID)
+	store, err := file.Open(dir, instanceOperatorID)
 	if err != nil {
 		return nil, fmt.Errorf("open state store: %w", err)
 	}
@@ -205,7 +205,7 @@ func buildClient() (provisionerClient, error) {
 	// because LockForLifetime checks the flock itself, not the
 	// sidecar; sidecar is informational only.
 	if _, err := store.LockForLifetime(); err != nil {
-		var held *state.ErrLockHeld
+		var held *file.ErrLockHeld
 		if errors.As(err, &held) {
 			if held.HolderPID != 0 {
 				return nil, fmt.Errorf("iplane serve is running at PID %d (state %s); pass --service-url to route through it or stop the daemon", held.HolderPID, held.Path)

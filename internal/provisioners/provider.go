@@ -14,7 +14,7 @@
 //	cmd/iplane  -->  provisioners.Service  -->  Provider (RunPod, Local)
 //	                       |
 //	                       v
-//	              provisioners/state (JSON state file with flock)
+//	              provisioners/stores/file (JSON state file with flock)
 //
 // The Service owns the failure-mode contract (idempotency lookup,
 // pending -> active hygiene, self-heal on next list). Provider

@@ -25,7 +25,7 @@ import (
 	"github.com/inference-book/inference-plane/internal/provisioners"
 	"github.com/inference-book/inference-plane/internal/provisioners/local"
 	"github.com/inference-book/inference-plane/internal/provisioners/runpod"
-	"github.com/inference-book/inference-plane/internal/provisioners/state"
+	"github.com/inference-book/inference-plane/internal/provisioners/stores/file"
 	"github.com/inference-book/inference-plane/internal/sshkeys"
 )
 
@@ -274,7 +274,7 @@ func newInProcessUpClient(apiKey string) (upClient, func(), error) {
 	if err != nil {
 		return nil, func() {}, err
 	}
-	store, err := state.Open(dir, deploymentOperatorID)
+	store, err := file.Open(dir, deploymentOperatorID)
 	if err != nil {
 		return nil, func() {}, fmt.Errorf("open state store: %w", err)
 	}

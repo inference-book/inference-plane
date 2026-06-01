@@ -28,7 +28,7 @@ import (
 	"github.com/inference-book/inference-plane/internal/config"
 	"github.com/inference-book/inference-plane/internal/metrics"
 	"github.com/inference-book/inference-plane/internal/provisioners"
-	"github.com/inference-book/inference-plane/internal/provisioners/state"
+	"github.com/inference-book/inference-plane/internal/provisioners/stores/file"
 	"github.com/inference-book/inference-plane/internal/services"
 	"github.com/inference-book/inference-plane/internal/telemetry"
 	"github.com/inference-book/inference-plane/internal/web/server"
@@ -203,13 +203,13 @@ func runServe(parent context.Context) error {
 	if err != nil {
 		return fmt.Errorf("resolve state dir: %w", err)
 	}
-	stateStore, err := state.Open(stateDir, "default")
+	stateStore, err := file.Open(stateDir, "default")
 	if err != nil {
 		return fmt.Errorf("open state store at %q: %w", stateDir, err)
 	}
 	releaseLock, err := stateStore.LockForLifetime()
 	if err != nil {
-		var held *state.ErrLockHeld
+		var held *file.ErrLockHeld
 		if errors.As(err, &held) {
 			if held.HolderPID != 0 {
 				return fmt.Errorf("another iplane serve is already running at PID %d (state %s); only one daemon per state dir", held.HolderPID, held.Path)

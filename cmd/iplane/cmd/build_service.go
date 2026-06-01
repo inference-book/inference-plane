@@ -9,7 +9,7 @@ import (
 	"github.com/inference-book/inference-plane/internal/provisioners"
 	"github.com/inference-book/inference-plane/internal/provisioners/local"
 	"github.com/inference-book/inference-plane/internal/provisioners/runpod"
-	"github.com/inference-book/inference-plane/internal/provisioners/state"
+	"github.com/inference-book/inference-plane/internal/provisioners/stores/file"
 	"github.com/inference-book/inference-plane/internal/sshkeys"
 )
 
@@ -29,7 +29,7 @@ import (
 //   - runpod: included only when RUNPOD_API_KEY is set in env. Same env
 //     contract as the v0.1 CLI so the daemon and one-shot CLIs see the
 //     same provider catalog without configuration drift.
-func buildLocalService(store *state.Store, operatorID string) (*provisioners.Service, error) {
+func buildLocalService(store *file.Store, operatorID string) (*provisioners.Service, error) {
 	keyStore, err := sshkeys.New(sshkeys.WithDir(filepath.Join(store.Dir(), "keys")))
 	if err != nil {
 		return nil, fmt.Errorf("open ssh key store: %w", err)

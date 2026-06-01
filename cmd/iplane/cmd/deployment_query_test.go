@@ -9,7 +9,8 @@ import (
 	"testing"
 
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
-	"github.com/inference-book/inference-plane/internal/provisioners/state"
+	"github.com/inference-book/inference-plane/internal/provisioners"
+	"github.com/inference-book/inference-plane/internal/provisioners/stores/file"
 )
 
 // fakeEngine stands in for vLLM's OpenAI-compat surface. Returns a
@@ -39,9 +40,9 @@ func (f *fakeEngine) handler() http.Handler {
 // state file, pointing engine_endpoint at the fakeEngine. Mirrors the
 // shape finalizeInstanceAfterDeploy + patchDeployment land for a
 // healthy deploy.
-func seedRunningDeployment(t *testing.T, store *state.Store, id, modelID, endpoint string) {
+func seedRunningDeployment(t *testing.T, store *file.Store, id, modelID, endpoint string) {
 	t.Helper()
-	if err := store.Update(func(f *state.File) error {
+	if err := store.Update(func(f *provisioners.State) error {
 		f.Deployments[id] = &provisionerv1.Deployment{
 			Id:             id,
 			InstanceId:     "my-pod",
@@ -147,7 +148,7 @@ func TestQuery_WithSystemPrompt_PrependsSystemMessage(t *testing.T) {
 func TestQuery_DeploymentNotRunning_Refuses(t *testing.T) {
 	env := newDeploymentTestEnv(t)
 	// Seed a PENDING deployment -- query must refuse before dialing.
-	_ = env.store.Update(func(f *state.File) error {
+	_ = env.store.Update(func(f *provisioners.State) error {
 		f.Deployments["my-llama"] = &provisionerv1.Deployment{
 			Id: "my-llama", InstanceId: "my-pod",
 			Model: "Qwen/Qwen2.5-1.5B-Instruct",
