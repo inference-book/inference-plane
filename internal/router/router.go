@@ -38,6 +38,8 @@ import (
 	"net/url"
 	"time"
 
+	"log/slog"
+
 	"connectrpc.com/connect"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -237,7 +239,29 @@ func (r *Router) handleWithObservability(w http.ResponseWriter, req *http.Reques
 	if !r.forwardable(tcw, dep) {
 		return
 	}
+	// v0.2 ch7-beat1.7: mark this deployment as actively serving
+	// traffic so the idle-TTL reaper doesn't clean it up while
+	// requests are still flowing. Best-effort -- a touch failure
+	// is logged but never blocks the proxy or fails the request.
+	r.touchActivity(ctx, dep.GetId())
 	r.proxyTo(tcw, req, dep, stripDeployPrefix)
+}
+
+// touchActivity fires a TouchDeployment RPC against the control
+// plane. Synchronous because the Connect roundtrip is a localhost-
+// loopback ~1ms hop on top of a 100ms+ chat-completion request --
+// the linear-flow code wins over the goroutine bookkeeping.
+//
+// Best-effort: a touch failure is logged but does NOT propagate to
+// the caller. last_activity is leak-protection metadata; missing one
+// touch causes at worst a one-tick-late reap.
+func (r *Router) touchActivity(ctx context.Context, deployID string) {
+	if _, err := r.client.TouchDeployment(ctx, connect.NewRequest(&provisionerv1.TouchDeploymentRequest{
+		Id: deployID,
+	})); err != nil {
+		slog.Default().Warn("router: TouchDeployment failed",
+			"deploy_id", deployID, "err", err)
+	}
 }
 
 // Handle returns the (pattern, handler) pairs the caller mounts on

@@ -144,6 +144,14 @@ func (a *ConnectDeploymentAdapter) WatchDeployment(ctx context.Context, req *con
 	return a.svc.WatchDeployment(req.Msg, connectbridge.NewConnectStreamBridge(ctx, stream))
 }
 
+func (a *ConnectDeploymentAdapter) TouchDeployment(ctx context.Context, req *connect.Request[provisionerv1.TouchDeploymentRequest]) (*connect.Response[provisionerv1.TouchDeploymentResponse], error) {
+	resp, err := a.svc.TouchDeployment(ctx, req.Msg)
+	if err != nil {
+		return nil, statusToConnectErr(err)
+	}
+	return connect.NewResponse(resp), nil
+}
+
 // statusToConnectErr translates a gRPC status.Error (which is what the
 // gRPC service returns) into a *connect.Error with the matching code.
 // Without this translation, connect-rpc receives a non-*connect.Error

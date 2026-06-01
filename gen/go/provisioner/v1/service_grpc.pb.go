@@ -442,6 +442,7 @@ const (
 	DeploymentService_ListDeployments_FullMethodName    = "/provisioner.v1.DeploymentService/ListDeployments"
 	DeploymentService_DestroyDeployment_FullMethodName  = "/provisioner.v1.DeploymentService/DestroyDeployment"
 	DeploymentService_WatchDeployment_FullMethodName    = "/provisioner.v1.DeploymentService/WatchDeployment"
+	DeploymentService_TouchDeployment_FullMethodName    = "/provisioner.v1.DeploymentService/TouchDeployment"
 )
 
 // DeploymentServiceClient is the client API for DeploymentService service.
@@ -488,6 +489,22 @@ type DeploymentServiceClient interface {
 	// Logs are NOT carried on this stream -- they are a separate concern
 	// (see the followup issue for `iplane deployment logs <id> [-f]`).
 	WatchDeployment(ctx context.Context, in *WatchDeploymentRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[DeploymentStateChangedEvent], error)
+	// TouchDeployment explicitly marks the deployment as active --
+	// updates last_activity_at to "now", resetting the idle-TTL
+	// reaper's clock. v0.2 ch7-beat1.7 callers:
+	//
+	//   - The router (per inference request, after the lookup picks
+	//     the target deployment). The router is the canonical data-
+	//     plane source of activity.
+	//   - The operator's `iplane deployment touch` CLI verb (#71),
+	//     for the "I'm still using this deployment; don't reap yet"
+	//     escape hatch when traffic is intermittent.
+	//
+	// Explicit-touch on its own RPC rather than as a side effect of
+	// DescribeDeployment or WatchDeployment: passive inspection
+	// (operator running `iplane deployment describe` to check state)
+	// must not extend the lease, or the reaper is useless.
+	TouchDeployment(ctx context.Context, in *TouchDeploymentRequest, opts ...grpc.CallOption) (*TouchDeploymentResponse, error)
 }
 
 type deploymentServiceClient struct {
@@ -557,6 +574,16 @@ func (c *deploymentServiceClient) WatchDeployment(ctx context.Context, in *Watch
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type DeploymentService_WatchDeploymentClient = grpc.ServerStreamingClient[DeploymentStateChangedEvent]
 
+func (c *deploymentServiceClient) TouchDeployment(ctx context.Context, in *TouchDeploymentRequest, opts ...grpc.CallOption) (*TouchDeploymentResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(TouchDeploymentResponse)
+	err := c.cc.Invoke(ctx, DeploymentService_TouchDeployment_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // DeploymentServiceServer is the server API for DeploymentService service.
 // All implementations should embed UnimplementedDeploymentServiceServer
 // for forward compatibility.
@@ -601,6 +628,22 @@ type DeploymentServiceServer interface {
 	// Logs are NOT carried on this stream -- they are a separate concern
 	// (see the followup issue for `iplane deployment logs <id> [-f]`).
 	WatchDeployment(*WatchDeploymentRequest, grpc.ServerStreamingServer[DeploymentStateChangedEvent]) error
+	// TouchDeployment explicitly marks the deployment as active --
+	// updates last_activity_at to "now", resetting the idle-TTL
+	// reaper's clock. v0.2 ch7-beat1.7 callers:
+	//
+	//   - The router (per inference request, after the lookup picks
+	//     the target deployment). The router is the canonical data-
+	//     plane source of activity.
+	//   - The operator's `iplane deployment touch` CLI verb (#71),
+	//     for the "I'm still using this deployment; don't reap yet"
+	//     escape hatch when traffic is intermittent.
+	//
+	// Explicit-touch on its own RPC rather than as a side effect of
+	// DescribeDeployment or WatchDeployment: passive inspection
+	// (operator running `iplane deployment describe` to check state)
+	// must not extend the lease, or the reaper is useless.
+	TouchDeployment(context.Context, *TouchDeploymentRequest) (*TouchDeploymentResponse, error)
 }
 
 // UnimplementedDeploymentServiceServer should be embedded to have
@@ -624,6 +667,9 @@ func (UnimplementedDeploymentServiceServer) DestroyDeployment(context.Context, *
 }
 func (UnimplementedDeploymentServiceServer) WatchDeployment(*WatchDeploymentRequest, grpc.ServerStreamingServer[DeploymentStateChangedEvent]) error {
 	return status.Error(codes.Unimplemented, "method WatchDeployment not implemented")
+}
+func (UnimplementedDeploymentServiceServer) TouchDeployment(context.Context, *TouchDeploymentRequest) (*TouchDeploymentResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method TouchDeployment not implemented")
 }
 func (UnimplementedDeploymentServiceServer) testEmbeddedByValue() {}
 
@@ -728,6 +774,24 @@ func _DeploymentService_WatchDeployment_Handler(srv interface{}, stream grpc.Ser
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type DeploymentService_WatchDeploymentServer = grpc.ServerStreamingServer[DeploymentStateChangedEvent]
 
+func _DeploymentService_TouchDeployment_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(TouchDeploymentRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DeploymentServiceServer).TouchDeployment(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: DeploymentService_TouchDeployment_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DeploymentServiceServer).TouchDeployment(ctx, req.(*TouchDeploymentRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // DeploymentService_ServiceDesc is the grpc.ServiceDesc for DeploymentService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -750,6 +814,10 @@ var DeploymentService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DestroyDeployment",
 			Handler:    _DeploymentService_DestroyDeployment_Handler,
+		},
+		{
+			MethodName: "TouchDeployment",
+			Handler:    _DeploymentService_TouchDeployment_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{
