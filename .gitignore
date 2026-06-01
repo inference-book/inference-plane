@@ -45,6 +45,7 @@ go.work.sum
 /01-end-to-end
 /02-cli-end-to-end
 /03-deploy-end-to-end
+/04-router-in-path
 
 # Local observability data (mounted into Grafana stack containers)
 /deploy/data/
