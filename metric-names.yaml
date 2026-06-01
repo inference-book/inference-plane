@@ -77,6 +77,10 @@ labels:
     value: model
   - key: status
     value: status
+  - key: deploy_id
+    value: deploy_id
+  - key: tenant_id
+    value: tenant_id
   - key: provider
     value: provider
   - key: gpu_type

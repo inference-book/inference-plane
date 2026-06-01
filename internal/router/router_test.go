@@ -36,7 +36,7 @@ func (f *fakeDeploymentClient) DescribeDeployment(_ context.Context, req *connec
 // Tests pass a describe func that returns whatever deployment record
 // (or error) the case needs.
 func newTestRouter(describe func(*provisionerv1.DescribeDeploymentRequest) (*provisionerv1.DescribeDeploymentResponse, error)) *Router {
-	return New(&fakeDeploymentClient{describe: describe})
+	return New(&fakeDeploymentClient{describe: describe}, nil)
 }
 
 // serveThroughMux mounts the router's patterns on a fresh ServeMux so

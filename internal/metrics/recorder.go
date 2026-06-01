@@ -141,3 +141,55 @@ func (r *Recorder) SetBackendHealth(ctx context.Context, healthy bool) {
 	}
 	r.backendHealthy.Record(ctx, v)
 }
+
+// RecordRouterRequest emits the request-rate counter and the
+// duration histogram for one inference request that flowed through
+// the v0.2 data-plane router. Reuses the v0.1 instruments
+// (inference.requests.total, inference.request.duration) so existing
+// dashboards and alert rules see the new traffic alongside any
+// remaining v0.1 emissions; the label set extends with deploy_id and
+// tenant_id so the router's flow can be filtered out separately.
+//
+// tenantID is the optional v0.2 Beat-2 scaffold field. v0.2 Beat-1
+// emits an empty string here so the label cardinality stays at one
+// value until Beat 2 wires per-tenant identification through the
+// router.
+//
+// status is the outcome label, mirroring RecordRequest's convention:
+// "success", "client_error", "backend_error", "client_closed", etc.
+//
+// nil-safe: handlers that hold a nil Recorder (tests, daemon
+// constructed without telemetry init) get a no-op rather than a
+// panic.
+func (r *Recorder) RecordRouterRequest(ctx context.Context, deployID, model, tenantID, status string, durationSec float64) {
+	if r == nil {
+		return
+	}
+	attrs := metric.WithAttributes(
+		attribute.String(telemetry.LabelDeployID, deployID),
+		attribute.String(telemetry.LabelModel, model),
+		attribute.String(telemetry.LabelTenantID, tenantID),
+		attribute.String(telemetry.LabelStatus, status),
+	)
+	r.requests.Add(ctx, 1, attrs)
+	r.duration.Record(ctx, durationSec, attrs)
+}
+
+// RecordRouterTokens adds n to the tokens-generated counter for a
+// router-mediated inference, labeled by deploy_id / model / tenant_id.
+// Same instrument as RecordTokens; the extra labels make the router's
+// contribution distinguishable from v0.1 inference-service emissions.
+//
+// Skip calling this when n is zero or unknown (e.g., a streaming
+// request whose engine did not emit a `usage` frame) -- recording
+// zeros pollutes the counter without adding signal.
+func (r *Recorder) RecordRouterTokens(ctx context.Context, deployID, model, tenantID string, n int64) {
+	if r == nil || n <= 0 {
+		return
+	}
+	r.tokens.Add(ctx, n, metric.WithAttributes(
+		attribute.String(telemetry.LabelDeployID, deployID),
+		attribute.String(telemetry.LabelModel, model),
+		attribute.String(telemetry.LabelTenantID, tenantID),
+	))
+}

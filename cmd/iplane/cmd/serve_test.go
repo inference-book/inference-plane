@@ -63,7 +63,7 @@ func startDaemonHarness(t *testing.T, dir string) *daemonHarness {
 	// Mount the v0.2 data-plane router. Its Connect client
 	// loopback-dials this same httptest.Server -- mirrors what
 	// `iplane serve` does in production.
-	deploymentRouter := router.New(provisionerv1connect.NewDeploymentServiceClient(http.DefaultClient, server.URL))
+	deploymentRouter := router.New(provisionerv1connect.NewDeploymentServiceClient(http.DefaultClient, server.URL), nil)
 	for pattern, h := range deploymentRouter.Handle() {
 		mux.Handle(pattern, h)
 	}
