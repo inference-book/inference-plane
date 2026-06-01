@@ -100,14 +100,16 @@ const DescribeTimeout = 5 * time.Second
 // nil-safe: tests that don't init telemetry can pass nil and the
 // router's emission becomes a no-op.
 //
-// The tracer is captured from the global TracerProvider at construction
-// time, matching the canonical OTel Go pattern (mirrors what
-// metrics.NewRecorder does for its meter). When no provider is set
-// the SDK returns a no-op tracer and Start calls become no-ops.
+// The tracer and propagator are captured from their globals at
+// construction time, matching the canonical OTel Go pattern (mirrors
+// what metrics.NewRecorder does for its meter). When no provider is
+// set the SDK returns no-op implementations and Start / Inject
+// become no-ops.
 type Router struct {
-	client   provisionerv1connect.DeploymentServiceClient
-	recorder *metrics.Recorder
-	tracer   trace.Tracer
+	client     provisionerv1connect.DeploymentServiceClient
+	recorder   *metrics.Recorder
+	tracer     trace.Tracer
+	propagator propagation.TextMapPropagator
 }
 
 // New constructs a Router backed by the supplied DeploymentService
@@ -124,9 +126,10 @@ type Router struct {
 // and RecordRouterTokens.
 func New(client provisionerv1connect.DeploymentServiceClient, recorder *metrics.Recorder) *Router {
 	return &Router{
-		client:   client,
-		recorder: recorder,
-		tracer:   otel.Tracer(tracerName),
+		client:     client,
+		recorder:   recorder,
+		tracer:     otel.Tracer(tracerName),
+		propagator: otel.GetTextMapPropagator(),
 	}
 }
 
@@ -373,7 +376,7 @@ func (r *Router) proxyTo(w http.ResponseWriter, req *http.Request, dep *provisio
 			// onto the pod) pick this up and chain their spans
 			// under ours, producing a single trace tree in Tempo.
 			// Engines without OTel just ignore the header.
-			otel.GetTextMapPropagator().Inject(
+			r.propagator.Inject(
 				pr.In.Context(),
 				propagation.HeaderCarrier(pr.Out.Header),
 			)
