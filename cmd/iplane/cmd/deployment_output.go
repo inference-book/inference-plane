@@ -76,6 +76,15 @@ func writeDeploymentDetail(w io.Writer, dep *provisionerv1.Deployment) {
 	if ts := dep.GetTerminatedAt(); ts != nil {
 		fmt.Fprintf(w, "terminated at:   %s\n", ts.AsTime().Format(time.RFC3339))
 	}
+	if ttl := dep.GetIdleTtlSeconds(); ttl > 0 {
+		fmt.Fprintf(w, "idle ttl:        %ds\n", ttl)
+	}
+	if ts := dep.GetLastActivityAt(); ts != nil {
+		fmt.Fprintf(w, "last activity:   %s\n", ts.AsTime().Format(time.RFC3339))
+	}
+	if dep.GetNoIdleDestroy() {
+		fmt.Fprintf(w, "pinned:          true (no idle destroy)\n")
+	}
 	if reason := dep.GetFailureReason(); reason != "" {
 		fmt.Fprintf(w, "failure:         %s\n", reason)
 	}

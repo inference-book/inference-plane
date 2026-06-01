@@ -290,6 +290,35 @@ message Deployment {
   // managed proxy (no publicIp on RunPod, in-cluster service URL on
   // k8s) -- cheapest capacity, no debug side-channel.
   bool debug_shell = 18;
+
+  // idle_ttl_seconds is the inactivity window after which v0.2's idle
+  // reaper destroys this deployment. Zero means "TTL not set by
+  // operator"; the reaper applies the profile default at evaluation
+  // time (demo profile is low single-digit minutes; dev and prod
+  // profiles longer). Mutated only at CreateDeployment time in v0.2.
+  // Reads land in the reaper ticket; this field is persistence-only
+  // until then.
+  int32 idle_ttl_seconds = 19;
+
+  // last_activity_at is the timestamp of the most recent activity
+  // against this deployment. Activity covers two sources:
+  //   - the data plane: an inference request entering the router.
+  //   - the control plane: an operator-facing RPC against this
+  //     deployment (describe, watch, touch).
+  // Nil means "never touched since creation"; the reaper treats nil
+  // with a non-zero TTL the same as last_activity_at = created_at.
+  // Written by the router and by DeploymentService RPC handlers;
+  // read by the reaper. Touch (v0.2 ch7-beat1.8) is the operator-
+  // facing reset.
+  google.protobuf.Timestamp last_activity_at = 20;
+
+  // no_idle_destroy pins the deployment: when true, the idle reaper
+  // skips it entirely. Operator sets it at CreateDeployment time
+  // (--no-idle-destroy flag in v0.2 ch7-beat1.9); flipping it later
+  // requires the unpin verb (system-hygiene). Use case: the shared
+  // deployment across Ch 7's demos is pinned at the start of the
+  // session so afk pauses do not tear it down.
+  bool no_idle_destroy = 21;
 }
 
 enum DeploymentState {
