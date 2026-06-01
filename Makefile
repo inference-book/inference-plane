@@ -69,6 +69,17 @@ check-names: ## Verify generated name files are up-to-date with the YAML schema 
 	fi
 	@echo "name files in sync with metric-names.yaml"
 
+# ── Architectural constraints ───────────────────────────────────────────
+check-constraints: ## Verify CONSTRAINTS.md architectural rules (CI runs this)
+	@matches=$$(grep -rln '"github.com/inference-book/inference-plane/internal/provisioners"' internal/router internal/dataplane 2>/dev/null || true); \
+	if [ -n "$$matches" ]; then \
+		echo "ERROR: CP/DP-1 violation -- data-plane code imports internal/provisioners directly."; \
+		echo "$$matches"; \
+		echo "See CONSTRAINTS.md for the rationale and the gRPC-client-only pattern."; \
+		exit 1; \
+	fi
+	@echo "CONSTRAINTS.md: CP/DP-1 satisfied"
+
 # ── Cleanup ─────────────────────────────────────────────────────────────
 clean: ## Remove build artifacts and local data volumes
 	rm -rf bin dist tmp deploy/data
