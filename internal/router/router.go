@@ -39,10 +39,47 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
 	"github.com/inference-book/inference-plane/gen/go/provisioner/v1/provisionerv1connect"
 	"github.com/inference-book/inference-plane/internal/metrics"
+)
+
+// tracerName is the instrumentation library name attached to every
+// span this package emits. Operators filter on this in Tempo to see
+// only iplane router spans (vs the v0.1 backend.generate spans, the
+// engine's own spans, etc.).
+const tracerName = "inference-plane/router"
+
+// Span attribute keys. Hardcoded rather than generated through
+// metric-names.yaml because chapter prose does not reference them by
+// name in v0.2; promote to the YAML pairing when the chapter starts
+// quoting specific attribute names in print.
+const (
+	AttrRouterMatch    = "iplane.router.match"     // "deploy_id" | "flat"
+	AttrRouterDeployID = "iplane.router.deploy_id" // chosen deployment id
+	AttrRouterModel    = "iplane.router.model"     // deployment.model
+	AttrRouterUpstream = "iplane.router.upstream"  // engine endpoint URL
+	AttrRouterStatus   = "iplane.router.status"    // status label string (success | engine_error | ...)
+)
+
+// Span name for the router's request-dispatch span. Single name across
+// both URL families; the AttrRouterMatch attribute disambiguates. Low
+// cardinality on purpose -- per-deploy or per-model cardinality on
+// span names blows up Tempo's index without giving operators useful
+// filtering they can't get from attributes.
+const spanNameDispatch = "iplane.router.dispatch"
+
+// routeMatchDeployID and routeMatchFlat are the values of
+// AttrRouterMatch for the two URL families.
+const (
+	routeMatchDeployID = "deploy_id"
+	routeMatchFlat     = "flat"
 )
 
 // DescribeTimeout caps the lookup of a deployment's engine endpoint.
@@ -117,30 +154,71 @@ func (r *Router) serveDeployID(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	r.handleWithMetrics(w, req, dep, true /* stripDeployPrefix */)
+	r.handleWithObservability(w, req, dep, true /* stripDeployPrefix */)
 }
 
-// handleWithMetrics is the shared instrumented tail used by both
-// serveDeployID and serveFlat. By the time it fires, the deployment
-// is resolved, so it can label the metrics with deploy_id and model.
+// handleWithObservability is the shared instrumented tail used by
+// both serveDeployID and serveFlat. By the time it fires, the
+// deployment is resolved, so it can label both metrics and the span
+// with deploy_id / model.
 //
-// Wraps the response writer in a tokenCountingWriter that captures
-// duration, status, and completion_tokens from the engine's
-// response (streaming or not). Emits the three router metric
-// families via the Recorder at handler exit; nil-safe when the
-// daemon was built without telemetry init.
+// Three pieces of instrumentation:
+//
+//   1. OTel span (v0.2 ch7-beat1.6). Wraps the dispatch with a span
+//      named iplane.router.dispatch. The span context flows down to
+//      proxyTo, which injects W3C traceparent into the engine
+//      request -- engines configured with OTel chain their spans
+//      under ours, producing a single trace tree in Tempo.
+//
+//   2. Metrics (v0.2 ch7-beat1.5). RecordRouterRequest + optional
+//      RecordRouterTokens at request close. Recording inside the
+//      span's ctx makes the OTel SDK attach trace_id exemplars to
+//      the metric observations -- operators can click a slow
+//      histogram bucket and jump straight to the trace.
+//
+//   3. Response wrap (v0.2 ch7-beat1.5). tokenCountingWriter
+//      observes bytes flowing through, exposes status code +
+//      completion-token count at handler exit.
 //
 // tenant_id is v0.2 Beat-1 scaffold: emitted as the empty string
-// until Beat 2 wires per-tenant identification through the router.
-func (r *Router) handleWithMetrics(w http.ResponseWriter, req *http.Request, dep *provisionerv1.Deployment, stripDeployPrefix bool) {
+// (both span attribute and metric label) until Beat 2 wires
+// per-tenant identification through the router.
+func (r *Router) handleWithObservability(w http.ResponseWriter, req *http.Request, dep *provisionerv1.Deployment, stripDeployPrefix bool) {
+	routeMatch := routeMatchDeployID
+	if !stripDeployPrefix {
+		routeMatch = routeMatchFlat
+	}
+	tracer := otel.Tracer(tracerName)
+	ctx, span := tracer.Start(req.Context(), spanNameDispatch,
+		trace.WithSpanKind(trace.SpanKindServer),
+		trace.WithAttributes(
+			attribute.String(AttrRouterMatch, routeMatch),
+			attribute.String(AttrRouterDeployID, dep.GetId()),
+			attribute.String(AttrRouterModel, dep.GetModel()),
+			attribute.String(AttrRouterUpstream, dep.GetEngineEndpoint()),
+		),
+	)
+	defer span.End()
+	req = req.WithContext(ctx)
+
 	start := time.Now()
 	tcw := newTokenCountingWriter(w)
 	defer func() {
-		r.recorder.RecordRouterRequest(req.Context(),
-			dep.GetId(), dep.GetModel(), "" /* tenant_id scaffold */, tcw.StatusLabel(),
+		// Reflect the outcome on the span first so test exporters
+		// observing span end see the final attribute set.
+		statusLabel := tcw.StatusLabel()
+		span.SetAttributes(attribute.String(AttrRouterStatus, statusLabel))
+		if tcw.statusCode >= 500 {
+			span.SetStatus(codes.Error, http.StatusText(tcw.statusCode))
+		} else if tcw.statusCode >= 200 && tcw.statusCode < 400 {
+			span.SetStatus(codes.Ok, "")
+		}
+
+		r.recorder.RecordRouterRequest(ctx,
+			dep.GetId(), dep.GetModel(), "" /* tenant_id scaffold */, statusLabel,
 			time.Since(start).Seconds())
 		if tokens := tcw.CompletionTokens(); tokens > 0 {
-			r.recorder.RecordRouterTokens(req.Context(),
+			r.recorder.RecordRouterTokens(ctx,
 				dep.GetId(), dep.GetModel(), "" /* tenant_id scaffold */, tokens)
 		}
 	}()
@@ -280,6 +358,16 @@ func (r *Router) proxyTo(w http.ResponseWriter, req *http.Request, dep *provisio
 			}
 			pr.Out.URL.RawPath = ""
 			pr.Out.Host = target.Host
+			// v0.2 ch7-beat1.6: inject W3C traceparent + baggage on
+			// the outbound request. Engines running with OTel SDK
+			// configured (Ch 6 phase 3 plumbs OTEL_EXPORTER_OTLP_*
+			// onto the pod) pick this up and chain their spans
+			// under ours, producing a single trace tree in Tempo.
+			// Engines without OTel just ignore the header.
+			otel.GetTextMapPropagator().Inject(
+				pr.In.Context(),
+				propagation.HeaderCarrier(pr.Out.Header),
+			)
 		},
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
 			writeOpenAIError(w, http.StatusBadGateway, fmt.Sprintf("upstream engine call failed: %v", err), "engine_unreachable")
