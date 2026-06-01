@@ -921,15 +921,18 @@ func (s *Service) CreateDeployment(ctx context.Context, req *provisionerv1.Creat
 		}
 		now := timestamppb.New(s.clock())
 		record = &provisionerv1.Deployment{
-			Id:         dep.GetId(),
-			InstanceId: dep.GetInstanceId(),
-			Image:      dep.GetImage(),
-			Model:      dep.GetModel(),
-			EngineArgs: dep.GetEngineArgs(),
-			Env:        dep.GetEnv(),
-			EnginePort: dep.GetEnginePort(),
-			State:      provisionerv1.DeploymentState_DEPLOYMENT_STATE_PENDING,
-			CreatedAt:  now,
+			Id:             dep.GetId(),
+			InstanceId:     dep.GetInstanceId(),
+			Image:          dep.GetImage(),
+			Model:          dep.GetModel(),
+			EngineArgs:     dep.GetEngineArgs(),
+			Env:            dep.GetEnv(),
+			EnginePort:     dep.GetEnginePort(),
+			State:          provisionerv1.DeploymentState_DEPLOYMENT_STATE_PENDING,
+			CreatedAt:      now,
+			DebugShell:     dep.GetDebugShell(),
+			IdleTtlSeconds: dep.GetIdleTtlSeconds(),
+			NoIdleDestroy:  dep.GetNoIdleDestroy(),
 		}
 		f.Deployments[dep.GetId()] = record
 		return nil

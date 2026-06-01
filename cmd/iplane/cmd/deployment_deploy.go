@@ -42,8 +42,9 @@ var (
 	deployMinRAM     int32
 	deployMinDisk    int32
 	deployGPUCount   int32
-	deployDebugShell bool
-	deployIdleTTL    time.Duration
+	deployDebugShell    bool
+	deployIdleTTL       time.Duration
+	deployNoIdleDestroy bool
 	deployOtelEndpoint string
 	deployOtelHeaders  map[string]string
 	deployWait       bool
@@ -144,6 +145,7 @@ func runDeploymentDeploy(cmd *cobra.Command, args []string) error {
 		Env:        engineEnv,
 		DebugShell:     deployDebugShell,
 		IdleTtlSeconds: int32(deployIdleTTL.Seconds()),
+		NoIdleDestroy:  deployNoIdleDestroy,
 	}
 	req := &provisionerv1.CreateDeploymentRequest{
 		Deployment: dep,
@@ -224,6 +226,8 @@ func init() {
 		`OTLP request headers, KEY=VALUE (repeatable; default: IPLANE_OTEL_HEADERS env, comma-separated). Sets OTEL_EXPORTER_OTLP_HEADERS on the pod. Grafana Cloud uses 'Authorization=Basic <token>'.`)
 	f.DurationVar(&deployIdleTTL, "idle-ttl", 0,
 		`destroy the deployment after this much idle time (no inference + no operator RPCs). Default 0 = no reaping. v0.2 ch7-beat1.7.`)
+	f.BoolVar(&deployNoIdleDestroy, "no-idle-destroy", false,
+		`pin the deployment against the idle-TTL reaper. Set when the deployment is the shared anchor for a demo session and afk pauses must not reap it. v0.2 ch7-beat1.9.`)
 
 	f.BoolVar(&deployDebugShell, "debug-shell", false,
 		`opt in to shell-level access to the engine pod (allocates a routable IP + ssh; costs more, narrows placement). Engine endpoint is unchanged either way.`)

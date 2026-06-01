@@ -202,6 +202,8 @@ func resetDeploymentFlags() {
 	deployMinDisk = 0
 	deployGPUCount = 0
 	deployDebugShell = false
+	deployIdleTTL = 0
+	deployNoIdleDestroy = false
 	deployEnginePort = 8000
 	deployEngineArgs = nil
 	deployEnv = nil
@@ -221,6 +223,7 @@ func resetDeploymentFlags() {
 
 	deploymentDestroyForce = false
 	deploymentDestroyDryRun = false
+	deploymentTouchDryRun = false
 
 	querySystem = ""
 	queryMaxTokens = 256
@@ -466,6 +469,83 @@ func TestDeploymentDescribe_NotFound(t *testing.T) {
 	out, err := runDeploymentCmd(t, env, "describe", "nope")
 	if err == nil {
 		t.Fatalf("expected error; got:\n%s", out)
+	}
+}
+
+// TestDeploymentTouch_HappyPath asserts the v0.2 ch7-beat1.8 touch
+// verb hits the TouchDeployment RPC end-to-end. After touch, the
+// deployment's last_activity_at is non-nil (was nil pre-touch since
+// the seed deploy doesn't fire traffic).
+func TestDeploymentTouch_HappyPath(t *testing.T) {
+	env := newDeploymentTestEnv(t)
+	if _, err := runDeploymentCmd(t, env,
+		"deploy", "my-llama",
+		"--instance", "my-pod",
+		"--image", "vllm/vllm-openai:0.7.0",
+		"--model", "Qwen/Qwen2.5-1.5B-Instruct",
+	); err != nil {
+		t.Fatalf("seed deploy: %v", err)
+	}
+	out, err := runDeploymentCmd(t, env, "touch", "my-llama")
+	if err != nil {
+		t.Fatalf("touch: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "last activity:") {
+		t.Errorf("touch output should include last activity line; got:\n%s", out)
+	}
+}
+
+func TestDeploymentTouch_NotFound(t *testing.T) {
+	env := newDeploymentTestEnv(t)
+	out, err := runDeploymentCmd(t, env, "touch", "nope")
+	if err == nil {
+		t.Fatalf("expected error; got:\n%s", out)
+	}
+}
+
+// TestDeploymentTouch_DryRun_ReportsPlan: dry-run on a real
+// deployment shows the would-touch plan without writing.
+func TestDeploymentTouch_DryRun_ReportsPlan(t *testing.T) {
+	env := newDeploymentTestEnv(t)
+	if _, err := runDeploymentCmd(t, env,
+		"deploy", "my-llama",
+		"--instance", "my-pod",
+		"--image", "vllm/vllm-openai:0.7.0",
+		"--model", "Qwen/Qwen2.5-1.5B-Instruct",
+		"--idle-ttl", "5m",
+	); err != nil {
+		t.Fatalf("seed deploy: %v", err)
+	}
+	out, err := runDeploymentCmd(t, env, "touch", "my-llama", "--dry-run")
+	if err != nil {
+		t.Fatalf("dry-run: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "[dry-run] would touch") {
+		t.Errorf("dry-run output missing would-touch plan; got:\n%s", out)
+	}
+}
+
+// TestDeploy_NoIdleDestroyFlag_Plumbs verifies the --no-idle-destroy
+// flag lands on the persisted deployment record. Reads back via
+// describe and asserts the pinned line appears in the human output.
+func TestDeploy_NoIdleDestroyFlag_Plumbs(t *testing.T) {
+	env := newDeploymentTestEnv(t)
+	if _, err := runDeploymentCmd(t, env,
+		"deploy", "pinned-llama",
+		"--instance", "my-pod",
+		"--image", "vllm/vllm-openai:0.7.0",
+		"--model", "Qwen/Qwen2.5-1.5B-Instruct",
+		"--idle-ttl", "5m",
+		"--no-idle-destroy",
+	); err != nil {
+		t.Fatalf("seed deploy: %v", err)
+	}
+	out, err := runDeploymentCmd(t, env, "describe", "pinned-llama")
+	if err != nil {
+		t.Fatalf("describe: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "pinned:") {
+		t.Errorf("describe should report pinned: true; got:\n%s", out)
 	}
 }
 

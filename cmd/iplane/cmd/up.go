@@ -62,9 +62,10 @@ var (
 	upID           string
 	upTimeout      time.Duration
 	upNoChat       bool
-	upDebugShell   bool
-	upIdleTTL      time.Duration
-	upMaxTokens    int32
+	upDebugShell    bool
+	upIdleTTL       time.Duration
+	upNoIdleDestroy bool
+	upMaxTokens     int32
 	upTemperature  float64
 )
 
@@ -220,6 +221,7 @@ func runUp(cmd *cobra.Command, _ []string) error {
 			Env:            depEnv,
 			DebugShell:     upDebugShell,
 			IdleTtlSeconds: int32(upIdleTTL.Seconds()),
+			NoIdleDestroy:  upNoIdleDestroy,
 		},
 		Provider: upProvider,
 		Region:   upRegion,
@@ -634,6 +636,8 @@ func init() {
 		`opt in to publicIp + sshd on the engine pod (costs more, narrows placement)`)
 	f.DurationVar(&upIdleTTL, "idle-ttl", 30*time.Minute,
 		`destroy the deployment after this much idle time. The reaper protects against forgotten 'iplane up' sessions billing all night. Default 30m balances demo runs and afk pauses; set 0 to disable.`)
+	f.BoolVar(&upNoIdleDestroy, "no-idle-destroy", false,
+		`pin the deployment against the reaper. Overrides --idle-ttl: when set, the deployment survives regardless of idle time. For the smoke-demo / shared-deployment scenario where afk pauses must not reap.`)
 	f.Int32Var(&upMaxTokens, "max-tokens", 256,
 		`max completion tokens per chat turn`)
 	f.Float64Var(&upTemperature, "temperature", 0.7,
