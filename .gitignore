@@ -37,6 +37,15 @@ go.work.sum
 /dist/
 /tmp/
 
+# Stray `go build` artifacts: running `go build ./examples/...` from
+# the repo root drops the resulting binary at the root, named after
+# the example's directory. Match the existing examples explicitly so
+# we don't accidentally ignore real source folders that share the
+# layout (rare, but possible).
+/01-end-to-end
+/02-cli-end-to-end
+/03-deploy-end-to-end
+
 # Local observability data (mounted into Grafana stack containers)
 /deploy/data/
 

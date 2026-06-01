@@ -2,27 +2,22 @@
 
 Runnable walkthroughs of iplane capabilities. Each example pairs a `main.go` (runnable via `go run`) with a `RUN.md` (rendered from a recorded trace; readable offline). Built on [demokit](https://github.com/panyam/demokit) so they branch on user choice and emit reproducible transcripts.
 
-Organized by topic, not by chapter — these are the product surface, not chapter exercises. Number prefixes order examples within a topic.
+Numbered in roughly chronological order — earlier examples walk smaller capabilities, later ones build on them. New examples land as the matching capabilities ship; see [ROADMAP.md](../ROADMAP.md) for the version-by-version scope.
 
-## Topics
+## What's here
 
-- **[provisioning/](provisioning/)** — Acquire and release GPU instances. Provider adapters (RunPod, Local), the failure-mode contract, idempotency, the state file.
-- _deploy/_ (not yet) — Push the engine container onto a provisioned instance.
-- _serving/_ (not yet) — Request queue, batching, OpenAI-compat surface.
-- _scaling/_ (not yet) — Multi-instance fleets, ClusterManager.
-- _routing/_ (not yet) — Backend router (workload-aware, cost-aware).
-- _cost/_ (not yet) — Cost guardrail, cross-provider snapshot.
+- **[01-end-to-end/](01-end-to-end/)** — Full instance lifecycle (create → describe → idempotent re-create → list → destroy) via a demokit walkthrough against the programmatic `provisioners.Service`. Two providers wired: `local` (default, $0, no API key) and `runpod` (real pod, ~$0.02 per run, requires `RUNPOD_API_KEY`). Exercises the failure-mode contract (idempotency, state-file hygiene, list with self-heal) against either backend.
+- **[02-cli-end-to-end/](02-cli-end-to-end/)** — Same instance lifecycle, but driven through the `iplane instance ...` CLI verbs against a running `iplane serve`. Shows the operator-facing surface; same providers, same cost shape as 01.
+- **[03-deploy-end-to-end/](03-deploy-end-to-end/)** — Full deployment lifecycle on top of an instance: provision → interactive model-size choice (1.5B / 3B / 7B Qwen) → wire-telemetry (OTel endpoint discovery) → CreateDeployment with `Wait=true` → verify `/v1/models` → interactive chat REPL → observe (Grafana / hosted UI) → destroy. RunPod-only (local instances have no SSH endpoint so v0.1 cannot deploy to them). Cost depends on model size (~$0.05 for 1.5B up to ~$0.25 for 7B).
 
-New topics land as the matching capabilities ship. See [ROADMAP.md](../ROADMAP.md) for the version-by-version scope.
+## Running
 
-## Running examples
-
-Each example's README explains its prerequisites (API keys, env vars, expected cost). Most provisioning examples cost real money — typically pennies, but the README is explicit. Always set the env vars first; the demo refuses to start without them.
+Each example's README explains its prerequisites (API keys, env vars, expected cost). Most examples cost real money — typically pennies, but the README is explicit. Always set the env vars first; the demo refuses to start without them.
 
 ```bash
-go run ./examples/<topic>/<NN-name>/                       # interactive
-go run ./examples/<topic>/<NN-name>/ --record /tmp/r.json  # save the run
-go run ./examples/<topic>/<NN-name>/ --doc md --from /tmp/r.json  # render to markdown
+go run ./examples/<NN-name>/                       # interactive
+go run ./examples/<NN-name>/ --record /tmp/r.json  # save the run
+go run ./examples/<NN-name>/ --doc md --from /tmp/r.json  # render to markdown
 ```
 
 The committed `RUN.md` in each example folder is the rendered output of one such recorded run. Readers who do not want to spend money can read it instead.

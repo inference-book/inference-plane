@@ -1,0 +1,346 @@
+# What actually shipped at each chNN-final tag.
+#
+# This file is forward-only (snapshots are immutable once their tag is
+# cut). The ROADMAP is forward-looking; this file is what we delivered.
+# The book renders a per-chapter capability table from these snapshots
+# so readers see, at the tag for the chapter they're on, exactly which
+# capabilities are alive and which got deferred.
+#
+# Schema notes:
+#   - One YAML doc, top-level `snapshots` list.
+#   - Each snapshot covers one ch{NN}-final tag.
+#   - `status` on a capability is `shipped` | `deferred` | `partial`.
+#   - `deferred` capabilities carry `moved_to` so the chapter can
+#     forward-link the reader correctly.
+#   - `prs` / `commits` / `docs` are operator-facing references.
+#   - Add a new snapshot above the previous one when the next tag cuts;
+#     newest snapshot at the top of the list.
+
+snapshots:
+
+  - tag: ch06-final
+    alias: v0.1.0
+    chapter: 6
+    chapter_title: Building the Control Plane (v0.1)
+    branch: release/v0.1
+    date: 2026-05-31
+
+    summary: |
+      Single-instance control plane. From an empty laptop with a RunPod
+      API key, the operator runs `iplane up --model <hf-id>` and is
+      chatting with the model on a remote GPU pod within minutes;
+      Ctrl-C tears everything down. The five capability phases land:
+      Provisioner subsystem (two providers + state-file hygiene),
+      image-as-pod deploy (cost-aware proxy default, debug_shell opt-in),
+      OTel endpoint propagation (hosted-OTLP OR cloudflared-tunneled
+      local stack), ModelStore HF pre-flight validation, and the
+      flagship `iplane up` one-liner. iplane is NOT in the inference
+      data path in v0.1 — the operator's request goes laptop → engine
+      proxy URL directly. The data-plane router is the first beat of
+      chapter 7.
+
+    capabilities:
+
+      - name: Provisioner subsystem
+        status: shipped
+        notes: |
+          `internal/provisioners/` Service + state-file store + RunPod
+          adapter + local adapter. Failure-mode contract: idempotency
+          on (operator, id), state-file under flock, PENDING → ACTIVE
+          hygiene, list-with-self-heal, terminate idempotency. CLI:
+          `iplane instance {create,list,describe,destroy,ssh,wait}`
+          with `--service-url` remote transport or in-process default,
+          `--output table|json`, `--dry-run` with cost preview.
+        prs: [6, 7, 8, 9, 16]
+        docs: ["docs/design/0001-provisioner.md", "examples/01-end-to-end/", "examples/02-cli-end-to-end/"]
+
+      - name: Image-as-pod deploy primitive
+        status: shipped
+        notes: |
+          `iplane deployment deploy --provider runpod --class small
+          --image <engine-image> --model <hf-id>` auto-provisions a
+          1:1 instance via the `placeDeployment` scheduler seam. The
+          provider runs the engine image directly as the pod (no SSH,
+          no docker-in-docker). Health is HTTP-polled on the provider's
+          free HTTPS proxy URL. Cost-aware default: no publicIp, no
+          SSH port — `Deployment.debug_shell: true` is the opt-in that
+          flips both back on, named as provider-neutral operator
+          intent each adapter translates differently. State-file
+          hygiene: `provider_id` stamped onto the instance at
+          emit-time so destroy reaches the provider even after a
+          failed deploy. Streaming progress via `WatchDeployment` so
+          the operator sees forward motion through the 5–10min cold
+          image pull.
+        prs: [44, 45]
+        docs: ["docs/design/0002-deploy.md"]
+
+      - name: "First served request — `iplane deployment query`"
+        status: shipped
+        notes: |
+          Single-turn `POST /v1/chat/completions` to the engine's proxy
+          URL directly. Demonstrates that inference traffic does NOT
+          pass through the control plane — the verb dials engine_endpoint
+          read from Describe. iplane stays out of the data path. Text
+          mode prints assistant response on stdout + tokens+latency on
+          stderr; JSON mode pretty-prints the raw engine body.
+        prs: [46]
+
+      - name: Telemetry seeding — OTel endpoint propagation
+        status: shipped
+        notes: |
+          Two operator-pickable sinks both work via the same propagation
+          mechanism: (a) hosted OTLP (Grafana Cloud Free, Honeycomb, etc.)
+          — zero local infra; (b) local docker-compose stack
+          (otel-collector + tempo + loki + mimir + grafana) exposed to
+          remote pods via a cloudflared quick tunnel
+          (`COMPOSE_PROFILES=tunnel`). Both reduce to "set
+          OTEL_EXPORTER_OTLP_ENDPOINT on the pod"; iplane just
+          propagates. New `iplane deployment deploy --otel-endpoint
+          --otel-headers` flags with `IPLANE_OTEL_*` env fallbacks;
+          new `iplane telemetry url` discovers the cloudflared tunnel
+          URL. Demo 03's wire-telemetry step hard-fails on missing
+          endpoint as a chapter teaching beat. Engine ships TRACES
+          only — metrics live at `/metrics` Prometheus scrape, not
+          OTLP (vLLM v0.7.x limitation; v0.2 work).
+        prs: [49]
+        docs: ["docs/telemetry.md"]
+
+      - name: Honest observability dashboard
+        status: shipped
+        notes: |
+          Two panels, intentionally. Markdown header explaining what
+          v0.1 actually emits and why; provider rate catalog table
+          rendering `gpu_effective_rate_usd_per_second × 3600` per row
+          in `providers.yaml`. Earlier drafts had request-rate / latency-
+          histogram / utilization / spend panels; they all queried iplane
+          self-metrics that never tick after the image-as-pod pivot
+          (iplane is out of the data path). Removed deliberately,
+          documented honestly. Chapter teaches this as architectural
+          truth-telling, same energy as `docs/design/0002-deploy.md`'s
+          SUPERSEDED banner.
+        prs: [52]
+        related_issues: [51]
+
+      - name: ModelStore pre-flight validation + HF impl
+        status: shipped
+        notes: |
+          `Service.CreateDeployment` calls `ModelStore.Resolve(spec)`
+          between proto validation and the placement seam. HF impl
+          GETs `huggingface.co/api/models/<id>` with 5s timeout; maps
+          HTTP status to actionable errors (404 → typo; 401/403 →
+          gated; 5xx → `--skip-model-validation` bypass). Propagates
+          `$HF_TOKEN` env from operator's shell into `Resolved.EnvOverrides`
+          so the engine pod can pull gated weights. Pattern: "validation
+          at the edge" — iplane catches what it can catch cheaply,
+          leaves what only the engine can determine to the engine.
+          Interface carries `Resolved.Mounts []Mount` field unused in
+          v0.1 but sized for v0.2's `CachedStore` / `RunPodVolumeStore`
+          to drop in without proto or Service-code changes ("build the
+          seam now, fill it later").
+        prs: [54]
+        docs: ["docs/modelstore.md"]
+
+      - name: "Flagship one-liner — `iplane up`"
+        status: shipped
+        notes: |
+          `iplane up --model <hf-id>` provisions a GPU pod, runs the
+          engine image-as-pod, waits for `/health`, drops the operator
+          into a readline-backed chat REPL with arrow-key history, tears
+          everything down on empty prompt OR Ctrl-C OR provision
+          failure (deferred `DestroyDeployment` is the leak-protection
+          invariant). ~360 lines of pure orchestration over existing
+          primitives — `CreateDeployment{auto-provision, wait=true}` +
+          `WatchDeployment` for cold-start progress + `POST /v1/chat/completions`
+          direct to engine + `DestroyDeployment`. Zero new proto
+          fields. `--no-chat` mode for "give me the endpoint and block
+          on Ctrl-C"; `--debug-shell` forwards from the deploy verb.
+          Single-instance / single-model in v0.1 (multi-replica is
+          chapter 7; multi-model is v1.0).
+        prs: [53]
+        docs: ["docs/iplane-up.md"]
+
+      - name: "`iplane instance ssh` one-step UX"
+        status: shipped
+        notes: |
+          `syscall.Exec`-replaces iplane with `ssh` directly. Same PID;
+          `ps` shows ssh only during session. Pass-through args land
+          before destination so `iplane instance ssh my-pod -- -L
+          8080:localhost:8000` works. Key materializes to `/run/user/$UID`
+          tmpfs (Linux) or `os.TempDir()` (macOS); OS sweep is the
+          cleanup mechanism. Path 1 of three options sketched in the
+          issue; stronger residency (memfd, ssh-agent) deferred unless
+          chapter audience needs it.
+        prs: [55]
+
+      - name: Data plane / inference router
+        status: deferred
+        moved_to: ch07-final
+        notes: |
+          Original v0.1 ROADMAP listed "Serve the OpenAI-compat API
+          from `iplane serve`, proxying inference to the remote engine"
+          as a v0.1 capability. After the image-as-pod pivot
+          (PR 45) and during chapter-6 prose work, this work was
+          reframed: a request router (OpenAI-compat HTTP server +
+          path-based deployment lookup + request-metric instrumentation)
+          is the first beat of chapter 7. v0.1 operators see the engine
+          proxy URL directly; that's the gap the chapter 7 router closes.
+          The "metrics that matter" panels (request rate, latency
+          histograms, throughput) come back into the dashboard once
+          the router emits them server-side.
+        related_prs: [56]
+
+      - name: "Engine `/metrics` scrape into the dashboard"
+        status: deferred
+        moved_to: v0.2
+        notes: |
+          vLLM v0.7.x's OTel wiring ships traces, not metrics. Engine
+          metrics live at `/metrics` (Prometheus scrape format) on the
+          engine pod. Reaching that from a remote pod needs an
+          otel-collector `prometheusreceiver` scrape config that knows
+          the per-deploy proxy URL — non-trivial discovery story.
+          Three approaches sketched (static per-deploy config; iplane
+          writes a file_sd discovery file; iplane proxies metrics
+          itself). Defers to v0.2 alongside the router work.
+        related_issues: [51]
+
+      - name: Engine pod log tailing
+        status: deferred
+        moved_to: v0.2
+        notes: |
+          RunPod's REST API at rest.runpod.io/v1 has no logs endpoint;
+          only the web UI surfaces them, or sshd inside the pod (which
+          the cost-aware default deliberately doesn't allocate). The
+          proposed v0.2 path SSHes in when `debug_shell: true` is set
+          and tails `docker logs -f <container>`. Not blocking for
+          chapter 6.
+        related_issues: [47]
+
+    providers_supported:
+      - name: runpod
+        status: full
+        notes: |
+          `Provider` + `Deployer` + `KeyRegistrar` + `SSHReadyWaiter`
+          capabilities all implemented. REST API at rest.runpod.io/v1
+          (image-native Deployer path). New scoped API key required
+          (rpa_... prefix with REST scope). gpuTypeIds accepts a SET
+          for cost-aware fallback when the cheapest SKU is saturated.
+      - name: local
+        status: zero-cost on-ramp
+        notes: |
+          `Provider` only (no Deployer — local instances have no engine
+          endpoint). Useful for testing the failure-mode contract and
+          exercising the CLI without any provider API key. No real
+          deploy; the chapter uses this for the `instance` walkthrough.
+      - name: lambda_labs
+        status: deferred
+        moved_to: v0.2
+        notes: |
+          v0.2 work; VM-style provider that uses the sshdocker.Executor
+          fallback path. Same `Deployer` interface, different mechanics.
+        related_issues: [18]
+
+    cli_surface:
+      - iplane instance {create,list,describe,destroy,ssh,wait}
+      - iplane deployment {deploy,describe,destroy,list,query,wait,watch,models,status}
+      - iplane telemetry {url}
+      - iplane up
+      - iplane serve
+      - iplane load
+      - iplane gen-names
+      # Persistent root flags:
+      - --config
+      - --skip-model-validation
+
+    environment_variables:
+      required_for_runpod:
+        - name: RUNPOD_API_KEY
+          notes: Required for any RunPod operation. Must be a scoped key (rpa_... prefix) with REST scope.
+      recommended:
+        - name: IPLANE_OTEL_ENDPOINT
+          notes: OTLP endpoint URL for engine traces. Either a hosted OTLP URL or `$(iplane telemetry url)` for the cloudflared tunnel.
+        - name: IPLANE_OTEL_HEADERS
+          notes: Comma-separated KEY=VALUE auth headers for the OTLP endpoint. Required for hosted providers; unused for unauthenticated tunnels.
+      optional:
+        - name: HF_TOKEN
+          notes: Propagated to the engine pod for gated-model fetches. Pre-flight validation also uses it for gated-model existence checks.
+        - name: IPLANE_SKIP_MODEL_VALIDATION
+          notes: "Set to `1` to bypass the HF pre-flight check (offline / firewalled / self-hosted models)."
+        - name: IPLANE_RUNPOD_DEBUG
+          notes: "Set to `1` to log RunPod HTTP request/response bytes (sans Authorization) to stderr."
+      future:
+        - name: LAMBDA_API_KEY
+          notes: Not used in v0.1.
+        - name: VAST_API_KEY
+          notes: Not used in v0.1.
+
+    known_limitations:
+      - id: single-instance-per-deploy
+        notes: One GPU pod per deployment. Multi-replica + load balancing land in chapter 7 (queue + scheduler).
+      - id: single-model-per-up
+        notes: "`iplane up` provisions one model. Multi-model serving from one pod is v1.0 (lab mode)."
+      - id: operator-sees-engine-url
+        notes: |
+          Without a data-plane router (chapter 7), the operator-facing
+          URL is the engine's HTTPS proxy URL directly. Chapter 7 closes
+          this gap by routing through an iplane-stable URL.
+      - id: engine-metrics-not-in-dashboard
+        notes: |
+          Traces flow correctly; engine metrics live at the pod's
+          `/metrics` endpoint and require Prometheus scraping that v0.1
+          doesn't do (issue 51).
+      - id: unix-only
+        notes: |
+          macOS + Linux supported. Windows not tested; `iplane instance
+          ssh`'s `syscall.Exec` approach assumes Unix.
+      - id: in-process-service-only
+        notes: |
+          `iplane serve` exists for backend traffic but doesn't yet
+          host the provisioner Service over the wire — CLI verbs run
+          in-process by default. `--service-url` mode forwards to a
+          long-running iplane serve but is in-process for the
+          provisioner side.
+
+    patterns_introduced:
+      - name: validation-at-the-edge
+        notes: |
+          Catch what you can cheaply, leave what only the next layer
+          knows to that layer. ModelStore pre-flight (HF) is the v0.1
+          example; v0.2 extends with image / GPU class / engine config
+          validation.
+      - name: build-the-seam-now-fill-it-later
+        notes: |
+          Define interfaces sized for future implementations so adding
+          them doesn't require touching Service code. `Resolved.Mounts`
+          (v0.2 caching) and `placeDeployment` (v1.0 bin-packing) are
+          the v0.1 examples.
+      - name: capability-discovery-at-runtime
+        notes: |
+          Provider impls satisfy optional Go interfaces
+          (`Deployer`, `KeyRegistrar`, `SSHReadyWaiter`); Service
+          interface-asserts at call sites to dispatch. Image-native vs
+          VM-style providers share one `Provider` slot but differ in
+          satisfied capabilities.
+      - name: cost-aware-defaults
+        notes: |
+          v0.1's concrete instance is `debug_shell: false` (no publicIp,
+          no SSH port allocated). Operators opt INTO the more
+          expensive shape, not out of it. v0.2's `--replicas N` will
+          extend this pattern (default 1, fan-out is opt-in).
+
+    metric_vocabulary:
+      # Set in stone at this tag; v0.2 may add but won't rename.
+      reliably_emitted:
+        - name: gpu_effective_rate_usd_per_second
+          type: observable gauge
+          source: providers.yaml + `internal/metrics/cost.go`
+          notes: One observation per (provider, gpu_type, billing_mode) row in `providers.yaml`. The only iplane self-metric the dashboard queries in v0.1.
+      removed_pending_v0.2:
+        # These instruments are defined in `internal/metrics/` but
+        # never increment in v0.1 because iplane is out of the data
+        # path. They will tick again when chapter 7's router lands.
+        - inference_requests_total
+        - inference_request_duration_seconds_*
+        - inference_tokens_generated
+        - inference_active_seconds_total
+        - inference_backend_healthy
+        - instance_uptime_seconds_total
