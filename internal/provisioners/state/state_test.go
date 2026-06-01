@@ -1,6 +1,7 @@
 package state
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -346,6 +347,127 @@ func TestRead_ForwardCompat_UnknownFieldsTolerated(t *testing.T) {
 	}
 	if inst, ok := f.Instances["my-pod"]; !ok || inst.GetState() != provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE {
 		t.Errorf("instance not parsed correctly: %+v", inst)
+	}
+}
+
+// TestLockForLifetime_AllowsConcurrentUpdates verifies Update calls
+// inside an active LockForLifetime session do not self-deadlock on a
+// second flock against the already-held lock. Without the in-session
+// skip, the daemon's Update calls would block forever.
+func TestLockForLifetime_AllowsConcurrentUpdates(t *testing.T) {
+	s := newStore(t)
+	release, err := s.LockForLifetime()
+	if err != nil {
+		t.Fatalf("LockForLifetime: %v", err)
+	}
+	defer release()
+
+	for i := range 5 {
+		id := "pod-" + itoa(i)
+		if err := s.Update(func(f *File) error {
+			f.Instances[id] = &provisionerv1.Instance{Id: id}
+			return nil
+		}); err != nil {
+			t.Fatalf("Update %d: %v", i, err)
+		}
+	}
+	f, err := s.Read()
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if got := len(f.Instances); got != 5 {
+		t.Errorf("instance count = %d, want 5", got)
+	}
+}
+
+// TestLockForLifetime_RefusesSecondHolder verifies the non-blocking
+// flock semantics: a second LockForLifetime against the same store
+// directory returns *ErrLockHeld immediately, with the first holder's
+// PID populated from the lock-pid sidecar.
+func TestLockForLifetime_RefusesSecondHolder(t *testing.T) {
+	dir := t.TempDir()
+	first, err := Open(dir, "default")
+	if err != nil {
+		t.Fatalf("Open first: %v", err)
+	}
+	release, err := first.LockForLifetime()
+	if err != nil {
+		t.Fatalf("first LockForLifetime: %v", err)
+	}
+	defer release()
+
+	second, err := Open(dir, "default")
+	if err != nil {
+		t.Fatalf("Open second: %v", err)
+	}
+	_, err = second.LockForLifetime()
+	if err == nil {
+		t.Fatal("second LockForLifetime: expected error, got nil")
+	}
+	var held *ErrLockHeld
+	if !errors.As(err, &held) {
+		t.Fatalf("expected *ErrLockHeld, got %T: %v", err, err)
+	}
+	if held.HolderPID != os.Getpid() {
+		t.Errorf("HolderPID = %d, want our own PID %d", held.HolderPID, os.Getpid())
+	}
+	if held.Path != dir {
+		t.Errorf("Path = %q, want %q", held.Path, dir)
+	}
+}
+
+// TestLockForLifetime_ReleaseAllowsReacquisition verifies the release
+// func actually frees the flock and clears the sidecar. After release,
+// another Open + LockForLifetime succeeds with no error.
+func TestLockForLifetime_ReleaseAllowsReacquisition(t *testing.T) {
+	dir := t.TempDir()
+	s1, _ := Open(dir, "default")
+	release1, err := s1.LockForLifetime()
+	if err != nil {
+		t.Fatalf("first LockForLifetime: %v", err)
+	}
+	release1()
+
+	s2, _ := Open(dir, "default")
+	release2, err := s2.LockForLifetime()
+	if err != nil {
+		t.Fatalf("second LockForLifetime after release: %v", err)
+	}
+	defer release2()
+}
+
+// TestLockForLifetime_ReleaseIsIdempotent guards against double-defer
+// patterns in callers. Release must not panic, error, or otherwise
+// misbehave when called twice.
+func TestLockForLifetime_ReleaseIsIdempotent(t *testing.T) {
+	s := newStore(t)
+	release, err := s.LockForLifetime()
+	if err != nil {
+		t.Fatalf("LockForLifetime: %v", err)
+	}
+	release()
+	release()
+	if s.heldLock != nil {
+		t.Error("heldLock should be nil after release")
+	}
+}
+
+// TestLockForLifetime_PIDSidecarRemovedOnRelease verifies the sidecar
+// file is removed on release so the next LockForLifetime against the
+// same dir does not report a stale PID.
+func TestLockForLifetime_PIDSidecarRemovedOnRelease(t *testing.T) {
+	s := newStore(t)
+	release, err := s.LockForLifetime()
+	if err != nil {
+		t.Fatalf("LockForLifetime: %v", err)
+	}
+	sidecar := filepath.Join(s.dir, ".lock-pid")
+	if _, err := os.Stat(sidecar); err != nil {
+		t.Fatalf("sidecar should exist while lock is held: %v", err)
+	}
+	release()
+	if _, err := os.Stat(sidecar); !os.IsNotExist(err) {
+		t.Errorf("sidecar should be removed after release; stat err = %v", err)
 	}
 }
 

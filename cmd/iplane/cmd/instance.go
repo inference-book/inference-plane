@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -13,11 +14,7 @@ import (
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
 	"github.com/inference-book/inference-plane/gen/go/provisioner/v1/provisionerv1connect"
 	"github.com/inference-book/inference-plane/internal/provisioners"
-	"github.com/inference-book/inference-plane/internal/provisioners/local"
-	"github.com/inference-book/inference-plane/internal/provisioners/runpod"
-	"github.com/inference-book/inference-plane/internal/deployments/sshdocker"
 	"github.com/inference-book/inference-plane/internal/provisioners/state"
-	"github.com/inference-book/inference-plane/internal/sshkeys"
 )
 
 // Shared flags on the instance group. Each subcommand reads them via
@@ -200,40 +197,24 @@ func buildClient() (provisionerClient, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open state store: %w", err)
 	}
-
-	// Open the SSH key store alongside the state store. iplane's
-	// chapter narrative keeps key management invisible: the CLI
-	// generates a per-(operator, provider) Ed25519 key on first
-	// `iplane instance create runpod ...` and registers it with
-	// RunPod's account so newly-created pods get it auto-installed.
-	// Operators never type ssh-keygen, never see the file.
-	//
-	// Layout: <state-dir>/keys/signing_keys/<safeClientID>.json,
-	// 0600 perms (oneauth's FSKeyStore handles both). Filesystem
-	// permissions are the encryption-at-rest model for v0.1; same
-	// trust model as ~/.ssh/id_rsa.
-	keyStore, err := sshkeys.New(sshkeys.WithDir(filepath.Join(dir, "keys")))
-	if err != nil {
-		return nil, fmt.Errorf("open ssh key store: %w", err)
+	// Acquire the lifetime lock so a running iplane serve daemon
+	// surfaces as a clear error instead of a silent hang. The release
+	// func is dropped on purpose: the CLI process exits within
+	// seconds, and the kernel reclaims the FD (and therefore the
+	// flock) on exit. The PID sidecar is left behind but is harmless
+	// because LockForLifetime checks the flock itself, not the
+	// sidecar; sidecar is informational only.
+	if _, err := store.LockForLifetime(); err != nil {
+		var held *state.ErrLockHeld
+		if errors.As(err, &held) {
+			if held.HolderPID != 0 {
+				return nil, fmt.Errorf("iplane serve is running at PID %d (state %s); pass --service-url to route through it or stop the daemon", held.HolderPID, held.Path)
+			}
+			return nil, fmt.Errorf("state directory %q is locked by another process; pass --service-url to route through it or stop the holder", held.Path)
+		}
+		return nil, fmt.Errorf("acquire state lock: %w", err)
 	}
-
-	providers := []provisioners.Provider{local.New()}
-	if key := os.Getenv("RUNPOD_API_KEY"); key != "" {
-		providers = append(providers, runpod.New(runpod.NewClient(key)))
-	}
-
-	// Wire the SSH+docker deployment executor. Production uses the
-	// real SSH dial; the executor reads Instance.ssh + the loaded
-	// key pair to dial each deployment's target pod. Local provider
-	// instances have no ssh.host so deployments against them are
-	// rejected at the Service layer before the executor is invoked.
-	executor := sshdocker.NewExecutor()
-
-	return provisioners.New(providers, store, instanceOperatorID,
-		provisioners.WithKeyStore(keyStore),
-		provisioners.WithDeploymentExecutor(executor),
-		provisioners.WithModelStore(modelStoreForCLI()),
-	), nil
+	return buildLocalService(store, instanceOperatorID)
 }
 
 // checkProviderAvailable surfaces the "you asked for runpod but
