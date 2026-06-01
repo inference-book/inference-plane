@@ -63,6 +63,7 @@ var (
 	upTimeout      time.Duration
 	upNoChat       bool
 	upDebugShell   bool
+	upIdleTTL      time.Duration
 	upMaxTokens    int32
 	upTemperature  float64
 )
@@ -212,12 +213,13 @@ func runUp(cmd *cobra.Command, _ []string) error {
 	depEnv := buildUpEngineEnv(upOtelEndpoint, upOtelHeaders, upNoTelemetry)
 	resp, err := cli.CreateDeployment(provCtx, &provisionerv1.CreateDeploymentRequest{
 		Deployment: &provisionerv1.Deployment{
-			Id:         upID,
-			Image:      upImage,
-			Model:      upModel,
-			EnginePort: 8000,
-			Env:        depEnv,
-			DebugShell: upDebugShell,
+			Id:             upID,
+			Image:          upImage,
+			Model:          upModel,
+			EnginePort:     8000,
+			Env:            depEnv,
+			DebugShell:     upDebugShell,
+			IdleTtlSeconds: int32(upIdleTTL.Seconds()),
 		},
 		Provider: upProvider,
 		Region:   upRegion,
@@ -630,6 +632,8 @@ func init() {
 		`skip the chat REPL; print endpoint and block on Ctrl-C instead`)
 	f.BoolVar(&upDebugShell, "debug-shell", false,
 		`opt in to publicIp + sshd on the engine pod (costs more, narrows placement)`)
+	f.DurationVar(&upIdleTTL, "idle-ttl", 30*time.Minute,
+		`destroy the deployment after this much idle time. The reaper protects against forgotten 'iplane up' sessions billing all night. Default 30m balances demo runs and afk pauses; set 0 to disable.`)
 	f.Int32Var(&upMaxTokens, "max-tokens", 256,
 		`max completion tokens per chat turn`)
 	f.Float64Var(&upTemperature, "temperature", 0.7,

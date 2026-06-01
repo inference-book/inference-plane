@@ -1216,6 +1216,12 @@ func (s *Service) patchDeployment(id string, u DeployStateUpdate) error {
 }
 
 // DescribeDeployment returns the local-state record for one deployment.
+//
+// Side effect (v0.2 ch7-beat1.7): touches last_activity_at on the
+// returned deployment. Both the router and operator-facing CLI verbs
+// land here; either constitutes "engagement" with the deployment and
+// resets the idle-TTL reaper's clock. Best-effort -- a touch failure
+// does not fail the Describe RPC.
 func (s *Service) DescribeDeployment(ctx context.Context, req *provisionerv1.DescribeDeploymentRequest) (*provisionerv1.DescribeDeploymentResponse, error) {
 	id := req.GetId()
 	if err := ValidateID(id); err != nil {
@@ -1229,7 +1235,34 @@ func (s *Service) DescribeDeployment(ctx context.Context, req *provisionerv1.Des
 	if !ok {
 		return nil, status.Errorf(codes.NotFound, "no deployment with id %q", id)
 	}
+	s.touchDeployment(id)
 	return &provisionerv1.DescribeDeploymentResponse{Deployment: rec}, nil
+}
+
+// touchDeployment updates last_activity_at on the named deployment to
+// "now" via the service clock. Used as a side effect of operator
+// interest -- the v0.2 ch7-beat1.7 reaper reads last_activity_at to
+// decide whether a deployment is idle.
+//
+// Best-effort by design: a state-store write failure is logged but
+// doesn't propagate to the RPC caller. last_activity is a leak-
+// protection signal, not load-bearing for the operator's request. A
+// missed touch at worst causes a one-tick-late reap, which is fine.
+//
+// Performance note: every router request flows through
+// DescribeDeployment which flows through this. For v0.2 demo
+// workloads (1-100 req/s) the per-request state.Update is fine
+// (atomic temp+rename ~1ms on SSD). Future: batch touches in-memory
+// + flush periodically when this becomes a hot path.
+func (s *Service) touchDeployment(id string) {
+	_ = s.store.Update(func(state *State) error {
+		dep, ok := state.Deployments[id]
+		if !ok || dep == nil {
+			return nil
+		}
+		dep.LastActivityAt = timestamppb.New(s.clock())
+		return nil
+	})
 }
 
 // ListDeployments returns deployments with optional instance_id +
@@ -1356,6 +1389,11 @@ func (s *Service) WatchDeployment(req *provisionerv1.WatchDeploymentRequest, str
 	if err := ValidateID(id); err != nil {
 		return status.Error(codes.InvalidArgument, err.Error())
 	}
+	// v0.2 ch7-beat1.7: watch is operator interest -- touch
+	// last_activity_at once at subscription. Per-event touches are
+	// redundant within the same watch session and would just add
+	// state-store churn.
+	s.touchDeployment(id)
 	pollEvery := 500 * time.Millisecond
 
 	ticker := time.NewTicker(pollEvery)

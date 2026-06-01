@@ -29,6 +29,7 @@ import (
 	"github.com/inference-book/inference-plane/internal/config"
 	"github.com/inference-book/inference-plane/internal/metrics"
 	"github.com/inference-book/inference-plane/internal/provisioners"
+	"github.com/inference-book/inference-plane/internal/provisioners/lifecycle"
 	"github.com/inference-book/inference-plane/internal/provisioners/stores/file"
 	"github.com/inference-book/inference-plane/internal/router"
 	"github.com/inference-book/inference-plane/internal/services"
@@ -248,6 +249,20 @@ func runServe(parent context.Context) error {
 		return fmt.Errorf("build provisioner service: %w", err)
 	}
 	logger.Info("daemon state-of-record initialized", "state_dir", stateDir)
+
+	// v0.2 ch7-beat1.7: launch the idle-TTL reaper goroutine. Sweeps
+	// every 30s, destroys deployments whose idle TTL has elapsed
+	// (state==RUNNING && idle_ttl_seconds > 0 && !no_idle_destroy).
+	// Default TTL is 0 (no reap) so v0.1 deployments are unaffected;
+	// operators opt in via `--idle-ttl` on deploy or `iplane up`.
+	//
+	// Lifecycle: ctx-cancelled on daemon shutdown so the goroutine
+	// exits cleanly before telemetry shutdown flushes spans.
+	reaperCtx, reaperCancel := context.WithCancel(parent)
+	defer reaperCancel()
+	reaper := lifecycle.New(provisionerSvc, lifecycle.WithRecorder(recorder), lifecycle.WithLogger(logger))
+	go reaper.Run(reaperCtx)
+	logger.Info("idle-TTL reaper started", "interval", lifecycle.DefaultInterval)
 
 	grpcSrv, grpcLis, err := startGRPCServer(be, recorder, costRecorder, logger)
 	if err != nil {

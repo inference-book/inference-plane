@@ -21,6 +21,9 @@ const MetricInferenceActiveSeconds = "inference.active.seconds.total"
 // MetricInstanceUptimeSeconds -- Counter of wall-clock seconds since the control plane started. Base for billed-time cost calculations.
 const MetricInstanceUptimeSeconds = "instance.uptime.seconds.total"
 
+// MetricReaperDestroysTotal -- Counter of deployments destroyed by the idle-TTL reaper, labeled by reason (idle, etc.). Operator-facing signal of leak protection working.
+const MetricReaperDestroysTotal = "iplane.reaper.destroys.total"
+
 // MetricRequestDuration -- Histogram of request duration in seconds. Bucket edges tuned for the bimodal LLM latency distribution (Chapter 6.6.4).
 const MetricRequestDuration = "inference.request.duration"
 
@@ -58,6 +61,7 @@ const (
 	LabelGPUType = "gpu_type"
 	LabelModel = "model"
 	LabelProvider = "provider"
+	LabelReason = "reason"
 	LabelStatus = "status"
 	LabelTenantID = "tenant_id"
 )

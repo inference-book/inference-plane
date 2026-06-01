@@ -48,6 +48,10 @@ metrics:
     value: gpu.effective_rate.usd_per_second
     description: Gauge of per-second cost rate for each provider/gpu_type/billing_mode combination loaded from providers.yaml. One series per provider for the cross-provider cost-projection panel.
 
+  - key: reaper_destroys_total
+    value: iplane.reaper.destroys.total
+    description: Counter of deployments destroyed by the idle-TTL reaper, labeled by reason (idle, etc.). Operator-facing signal of leak protection working.
+
 inference_attributes:
   - key: model
     value: inference.model
@@ -81,6 +85,8 @@ labels:
     value: deploy_id
   - key: tenant_id
     value: tenant_id
+  - key: reason
+    value: reason
   - key: provider
     value: provider
   - key: gpu_type

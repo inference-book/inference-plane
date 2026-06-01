@@ -33,6 +33,7 @@ type Recorder struct {
 	duration       metric.Float64Histogram
 	tokens         metric.Int64Counter
 	backendHealthy metric.Int64Gauge
+	reaperDestroys metric.Int64Counter
 }
 
 // NewRecorder builds the four instruments via the global MeterProvider.
@@ -88,11 +89,21 @@ func NewRecorder() (*Recorder, error) {
 		return nil, fmt.Errorf("metrics: health gauge: %w", err)
 	}
 
+	reaperDestroys, err := meter.Int64Counter(
+		telemetry.MetricReaperDestroysTotal,
+		metric.WithDescription("Deployments destroyed by the idle-TTL reaper, labeled by reason."),
+		metric.WithUnit("{deployment}"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("metrics: reaper counter: %w", err)
+	}
+
 	return &Recorder{
 		requests:       requests,
 		duration:       duration,
 		tokens:         tokens,
 		backendHealthy: healthy,
+		reaperDestroys: reaperDestroys,
 	}, nil
 }
 
@@ -173,6 +184,21 @@ func (r *Recorder) RecordRouterRequest(ctx context.Context, deployID, model, ten
 	)
 	r.requests.Add(ctx, 1, attrs)
 	r.duration.Record(ctx, durationSec, attrs)
+}
+
+// RecordReaperDestroy bumps the reaper-destroys counter for a single
+// reap event. reason labels the cause -- "idle" for idle-TTL expiry,
+// "explicit" if a future cost-aware sweep adds richer reasons.
+//
+// nil-safe so daemons constructed without telemetry init (some test
+// harnesses) get a no-op rather than a panic.
+func (r *Recorder) RecordReaperDestroy(ctx context.Context, reason string) {
+	if r == nil {
+		return
+	}
+	r.reaperDestroys.Add(ctx, 1, metric.WithAttributes(
+		attribute.String(telemetry.LabelReason, reason),
+	))
 }
 
 // RecordRouterTokens adds n to the tokens-generated counter for a
