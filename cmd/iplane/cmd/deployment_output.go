@@ -48,12 +48,16 @@ func writeDeploymentDetail(w io.Writer, dep *provisionerv1.Deployment) {
 	if endpoint := dep.GetEngineEndpoint(); endpoint != "" {
 		fmt.Fprintf(w, "engine endpoint: %s\n", endpoint)
 	}
-	// v0.2 ch7-beat1.3: when a running daemon is the data source,
-	// render the iplane router URL alongside the engine endpoint.
-	// The chapter narrative teaches operators to dial the iplane URL;
-	// engine endpoint becomes the internal implementation detail.
+	// v0.2 ch7-beat1.3b: when a running daemon is the data source,
+	// render the OpenAI-compat base URL (the flat /v1 endpoint that
+	// routes by model-in-body). This is what operators paste into
+	// OpenAI SDKs. The deploy-id form lives as an explicit-deployment
+	// escape hatch and is documented in CLI help rather than shouted
+	// in every describe.
 	if dep.GetState() == provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING && deploymentServiceURL != "" {
-		fmt.Fprintf(w, "iplane url:      %s/v1/%s/v1\n", deploymentServiceURL, dep.GetId())
+		fmt.Fprintf(w, "openai base url: %s/v1\n", deploymentServiceURL)
+		fmt.Fprintf(w, "  (model field in request body selects this deployment when set to %q)\n", dep.GetModel())
+		fmt.Fprintf(w, "  (explicit-dispatch URL: %s/v1/%s/v1)\n", deploymentServiceURL, dep.GetId())
 	}
 	if cid := dep.GetContainerId(); cid != "" {
 		fmt.Fprintf(w, "container:       %s\n", cid)

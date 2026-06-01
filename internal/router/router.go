@@ -71,16 +71,19 @@ func New(client provisionerv1connect.DeploymentServiceClient) *Router {
 	return &Router{client: client}
 }
 
-// ServeHTTP dispatches OpenAI-shaped requests. Recognized patterns
-// (registered by the caller; see the comment on Handle for the mount
-// shape):
+// serveDeployID handles the explicit-deployment URL family:
 //
 //	POST /v1/{deploy-id}/v1/chat/completions
 //	POST /v1/{deploy-id}/v1/completions
 //
-// Path parsing uses Go 1.22's PathValue so the deploy-id is extracted
-// by the ServeMux before reaching this handler.
-func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+// The deploy-id is extracted via Go 1.22's PathValue (ServeMux does
+// the extraction before this handler fires). The path's iplane prefix
+// is stripped before forwarding so the engine sees the OpenAI tail.
+//
+// This URL family is the escape hatch for explicit-deployment routing
+// (A/B testing, debugging). The default operator-facing URL is the
+// flat OpenAI shape served by serveFlat.
+func (r *Router) serveDeployID(w http.ResponseWriter, req *http.Request) {
 	deployID := req.PathValue("deploy_id")
 	if deployID == "" {
 		writeOpenAIError(w, http.StatusBadRequest, "deploy_id missing from request path", "invalid_request_error")
@@ -105,12 +108,19 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	if !r.forwardable(w, dep) {
 		return
 	}
-	r.proxyTo(w, req, dep)
+	r.proxyTo(w, req, dep, true /* stripDeployPrefix */)
 }
 
-// Handle returns the (pattern, handler) pairs the caller should mount
-// on its ServeMux. Two patterns; both forward through the same
-// http.Handler (the Router itself).
+// Handle returns the (pattern, handler) pairs the caller mounts on
+// its ServeMux. Four patterns covering two URL families:
+//
+//   - Flat (OpenAI exact): /v1/chat/completions and /v1/completions
+//     keyed on the `model` field in the request body. This is the
+//     primary operator-facing URL; existing OpenAI SDKs work with
+//     `base_url=http://<iplane>/v1` unchanged.
+//   - Explicit-deployment: /v1/{deploy-id}/v1/... where the operator
+//     wants deterministic dispatch to a specific deployment (A/B
+//     testing, debugging). Escape hatch, not the default.
 //
 // Mounting pattern from the daemon's perspective:
 //
@@ -121,12 +131,16 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 //	}
 //
 // Patterns use Go 1.22+ method+wildcard syntax. ServeMux extracts
-// {deploy_id} into PathValue; the handler does not parse the path
-// itself.
+// {deploy_id} into PathValue; handlers do not parse the path
+// themselves.
 func (r *Router) Handle() map[string]http.Handler {
+	deployIDHandler := http.HandlerFunc(r.serveDeployID)
+	flatHandler := http.HandlerFunc(r.serveFlat)
 	return map[string]http.Handler{
-		"POST /v1/{deploy_id}/v1/chat/completions": r,
-		"POST /v1/{deploy_id}/v1/completions":      r,
+		"POST /v1/{deploy_id}/v1/chat/completions": deployIDHandler,
+		"POST /v1/{deploy_id}/v1/completions":      deployIDHandler,
+		"POST /v1/chat/completions":                flatHandler,
+		"POST /v1/completions":                     flatHandler,
 	}
 }
 
@@ -193,10 +207,26 @@ func (r *Router) forwardable(w http.ResponseWriter, dep *provisionerv1.Deploymen
 }
 
 // proxyTo reverse-proxies the inbound request to the deployment's
-// engine endpoint. The path on the engine side is "/v1/chat/completions"
-// or "/v1/completions" (whatever the OpenAI surface uses); the
-// {deploy-id} prefix is consumed by iplane and not forwarded.
-func (r *Router) proxyTo(w http.ResponseWriter, req *http.Request, dep *provisionerv1.Deployment) {
+// engine endpoint. stripDeployPrefix tells the proxy whether to
+// remove the /v1/<deploy-id>/ prefix before forwarding:
+//
+//   - serveDeployID passes true: the inbound path is
+//     /v1/<deploy-id>/v1/chat/completions and the engine wants only
+//     /v1/chat/completions.
+//   - serveFlat passes false: the inbound path is already
+//     /v1/chat/completions (no iplane-side prefix), forward as-is.
+//
+// SSE streaming (v0.2 ch7-beat1.4): non-streaming and streaming
+// (`stream: true`) responses both flow through this same path with
+// no special-casing in router code. httputil.ReverseProxy detects
+// `Content-Type: text/event-stream` on the engine's response and
+// auto-flushes after each write -- the client sees tokens in
+// real-time as the engine emits them. Client disconnect propagates
+// to upstream via context cancellation (also default ReverseProxy
+// behavior), so killing a chat REPL mid-stream terminates the
+// engine's compute rather than leaking it. Both properties are
+// asserted in stream_test.go.
+func (r *Router) proxyTo(w http.ResponseWriter, req *http.Request, dep *provisionerv1.Deployment, stripDeployPrefix bool) {
 	target, err := url.Parse(dep.GetEngineEndpoint())
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadGateway, fmt.Sprintf("deployment %q has malformed engine endpoint %q: %v", dep.GetId(), dep.GetEngineEndpoint(), err), "engine_unreachable")
@@ -206,10 +236,9 @@ func (r *Router) proxyTo(w http.ResponseWriter, req *http.Request, dep *provisio
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(target)
-			// SetURL preserves the inbound path. The engine wants
-			// only the OpenAI-shaped tail ("/v1/chat/completions"),
-			// not the /v1/<deploy-id>/ prefix.
-			pr.Out.URL.Path = openAITail(pr.In.URL.Path)
+			if stripDeployPrefix {
+				pr.Out.URL.Path = openAITail(pr.In.URL.Path)
+			}
 			pr.Out.URL.RawPath = ""
 			pr.Out.Host = target.Host
 		},
