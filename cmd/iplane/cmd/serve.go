@@ -24,11 +24,13 @@ import (
 	skmw "github.com/panyam/servicekit/middleware"
 
 	inferencev1 "github.com/inference-book/inference-plane/gen/go/inferenceplane/v1"
+	"github.com/inference-book/inference-plane/gen/go/provisioner/v1/provisionerv1connect"
 	"github.com/inference-book/inference-plane/internal/backends"
 	"github.com/inference-book/inference-plane/internal/config"
 	"github.com/inference-book/inference-plane/internal/metrics"
 	"github.com/inference-book/inference-plane/internal/provisioners"
 	"github.com/inference-book/inference-plane/internal/provisioners/stores/file"
+	"github.com/inference-book/inference-plane/internal/router"
 	"github.com/inference-book/inference-plane/internal/services"
 	"github.com/inference-book/inference-plane/internal/telemetry"
 	"github.com/inference-book/inference-plane/internal/web/server"
@@ -116,6 +118,27 @@ func registerServeDefaults() {
 	viper.SetDefault("telemetry.service_name", "inference-plane")
 	viper.SetDefault("telemetry.environment", "dev")
 	viper.SetDefault("telemetry.sample_ratio", 1.0)
+}
+
+// loopbackURL turns the daemon's HTTP bind address into a fully-qualified
+// URL the in-daemon router can dial. Forms:
+//
+//	":8080"           -> "http://localhost:8080"
+//	"0.0.0.0:8080"    -> "http://localhost:8080" (rewrite to loopback)
+//	"127.0.0.1:8080"  -> "http://127.0.0.1:8080"
+//	"host:8080"       -> "http://host:8080"
+//
+// The loopback rewrite for 0.0.0.0 matters because the router's
+// Connect client needs a routable address; a literal 0.0.0.0 client
+// dial would fail on most platforms.
+func loopbackURL(addr string) string {
+	if len(addr) > 0 && addr[0] == ':' {
+		return "http://localhost" + addr
+	}
+	if len(addr) >= 8 && addr[:8] == "0.0.0.0:" {
+		return "http://localhost:" + addr[8:]
+	}
+	return "http://" + addr
 }
 
 // resolveServeStateDir picks the directory holding state.json + the
@@ -232,9 +255,17 @@ func runServe(parent context.Context) error {
 	}
 	defer grpcLis.Close()
 
+	// Construct the v0.2 data-plane router. Per CONSTRAINTS.md's
+	// CP/DP-1, the router reaches deployment state only through the
+	// generated DeploymentService Connect client; in `iplane serve`
+	// that client loopback-dials this same HTTP listener.
+	daemonBaseURL := loopbackURL(cfg.Server.Addr)
+	deploymentRouter := router.New(provisionerv1connect.NewDeploymentServiceClient(http.DefaultClient, daemonBaseURL))
+
 	api, err := server.New(parent, grpcAddr, logger,
 		server.WithProvisionerHandler(provisioners.NewConnectProvisionerAdapter(provisionerSvc)),
 		server.WithDeploymentHandler(provisioners.NewConnectDeploymentAdapter(provisionerSvc)),
+		server.WithDataPlaneRoutes(deploymentRouter.Handle()),
 	)
 	if err != nil {
 		return fmt.Errorf("HTTP API: %w", err)
