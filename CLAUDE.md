@@ -16,6 +16,7 @@ Reference implementation of the control plane for *Inference Is All You Need* (A
 | `make build-image` | Build the controlplane Docker image without starting |
 | `make check-pins`  | Verify `pinned-versions.env` matches book's `.tex`   |
 | `make check-names` | Verify generated names match `metric-names.yaml`     |
+| `make check-constraints` | Verify architectural constraints (CP/DP-1, ...) |
 | `make gen-names` | Regenerate `internal/telemetry/names.go` + book `.tex` |
 | `cd protos && make gen` | Regenerate proto code into `gen/`               |
 
@@ -36,8 +37,10 @@ Reference implementation of the control plane for *Inference Is All You Need* (A
 - The gRPC server binds `127.0.0.1:9090` only. It's an in-process implementation detail, not a public surface. Public traffic hits the HTTP server on `:8080`.
 - `cd protos && buf generate` needs `buf.lock` populated — run `buf dep update` once after cloning.
 - `gen/go/google/api/` is generated via `include_imports: true`. Without it, the gateway code wouldn't compile.
-- **State-file flock**: `state.Store.lock()` returns `*os.File` (not `int`) — the runtime's finalizer will close the underlying FD if the `*os.File` goes out of scope, which silently releases the flock and can tear down recycled FDs (gRPC stream sockets, etc.). Regression-tested in `state/state_test.go`.
+- **State-file flock**: `internal/provisioners/stores/file/file.go`'s `lock()` returns `*os.File` (not `int`) — the runtime's finalizer will close the underlying FD if the `*os.File` goes out of scope, which silently releases the flock and can tear down recycled FDs (gRPC stream sockets, etc.). Regression-tested in `internal/provisioners/stores/file/file_test.go`.
 - **RunPod machine field**: freshly-rented pods return `"machine": {}` empty from the follow-up GET; the populated record arrives a few seconds later. Adapter's `gpuSKU` / `gpuVRAMGB` helpers are nil-defensive.
+- **`make check-names` false-positive locally**: when the sibling `../book/` checkout exists, `git diff --quiet -- internal/X ../book/Y` flips into compare-two-files mode and trips spuriously. CI (no book checkout) is unaffected. Tracked as issue #108; do not chase the diff it prints unless `make gen-names` actually changed `internal/telemetry/names.go`.
+- **Examples that build the iplane CLI**: anchor the source path via `runtime.Caller` rather than a literal `../../cmd/iplane`. See `examples/04-router-in-path/main.go`'s `buildIplane()`. The relative-path form in `examples/02-cli-end-to-end/main.go` is buggy from any cwd today; do not copy it.
 
 ## CLI surface
 
@@ -46,8 +49,11 @@ Single binary `iplane` with cobra subcommands. The Docker image
 
 | Subcommand           | Purpose                                                |
 | -------------------- | ------------------------------------------------------ |
-| `iplane serve`       | Run the control plane (gRPC + HTTP)                    |
-| `iplane instance`    | Create / list / describe / destroy GPU instances (in-process state file OR `--service-url <remote>`) |
+| `iplane serve`       | Run the control plane (gRPC + HTTP + v0.2 router on :8080) |
+| `iplane up`          | One-shot: provision + deploy + chat REPL + teardown (the Ch 6 flagship) |
+| `iplane instance`    | `create` / `list` / `describe` / `destroy` / `ssh` / `wait` (in-process state file OR `--service-url <remote>`) |
+| `iplane deployment`  | `deploy` / `describe` / `destroy` / `list` / `query` / `wait` / `watch` / `models` / `status` / `touch` |
+| `iplane telemetry`   | `url` — discover the cloudflared tunnel URL (for engine OTLP propagation) |
 | `iplane load`        | Fire synthetic OpenAI traffic                          |
 | `iplane gen-names`   | Regenerate Go consts + book LaTeX from `metric-names.yaml` |
 
@@ -66,10 +72,14 @@ flatten to underscore (so `deployment.provider` → `IPLANE_DEPLOYMENT_PROVIDER`
 | ---------------------------------- | ---------------------------------------- |
 | `IPLANE_BACKEND_ENGINE`            | `mock` (default) or `vllm`               |
 | `IPLANE_BACKEND_URL`               | Backend base URL (vllm only)             |
-| `IPLANE_SERVICE_URL`               | `iplane instance` remote transport (e.g., `http://localhost:9091`); in-process state file when unset |
+| `IPLANE_SERVICE_URL`               | `iplane instance` / `iplane deployment` remote transport (e.g., `http://localhost:8080`); in-process state file when unset |
 | `IPLANE_RUNPOD_DEBUG`              | `1` logs RunPod HTTP request/response bytes (sans Authorization) to stderr |
+| `IPLANE_SKIP_MODEL_VALIDATION`     | `1` bypasses the HF pre-flight check on `CreateDeployment` (offline / firewalled / non-HF models) |
+| `IPLANE_OTEL_ENDPOINT`             | OTLP URL **propagated to the engine pod** as `OTEL_EXPORTER_OTLP_ENDPOINT`. Either a hosted OTLP URL or `$(iplane telemetry url)` for the cloudflared tunnel. |
+| `IPLANE_OTEL_HEADERS`              | Comma-separated `KEY=VALUE` auth headers paired with `IPLANE_OTEL_ENDPOINT`. Required for hosted providers; unused for the tunnel. |
 | `IPLANE_DEPLOYMENT_PROVIDER` / `_GPU_TYPE` / `_BILLING_MODE` / `_INSTANCE_ID` | Cost-metric labels |
-| `OTEL_EXPORTER_OTLP_ENDPOINT`      | OTLP collector address                   |
+| `OTEL_EXPORTER_OTLP_ENDPOINT`      | OTLP collector address for `iplane serve` itself (control-plane traces/metrics) |
+| `HF_TOKEN`                         | Propagated to engine pods for gated-model fetches; HF pre-flight check also uses it for gated-model existence probes |
 | `RUNPOD_API_KEY`                   | Required for `iplane instance create runpod ...` — must be a new-style scoped key (`rpa_...` prefix) with **Full** access (REST scope is NOT covered by legacy keys or `api.runpod.ai`-only scopes — both silently 401 on `rest.runpod.io/v1`) |
 
 Future provider API keys (not used in v0.1): `LAMBDA_API_KEY`, `VAST_API_KEY`, `EQUINIX_AUTH_TOKEN`, `EQUINIX_PROJECT_ID`. See `.env.local.example`.

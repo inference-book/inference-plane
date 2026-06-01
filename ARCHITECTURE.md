@@ -35,7 +35,7 @@ iplane is **not** an inference engine, a model server, or a competitor to Ray / 
 
 ## Topology (v0.1)
 
-One process, two listeners.
+One process, two listeners. (v0.2 Beat 1 added the router inside the `:8080` HTTP server box — see [ROADMAP.md](ROADMAP.md) for the v0.2 surface; the rest of the topology is unchanged.)
 
 ```
                               ┌────────────────────────┐
@@ -172,10 +172,11 @@ Combined with per-provider `gpu.effective_rate.usd_per_second` gauges (loaded fr
 
 Captured here so the architecture's intentional gaps are obvious:
 
-- **Streaming** (`stream: true` on completion requests) — left as a chapter problem.
-- **Auth, rate limiting, caching, queueing** — Part II (v0.2).
+- **Streaming** (`stream: true` on completion requests) — landed in v0.2 Beat 1 (SSE pass-through on the router); v0.1 didn't ship it.
+- **Auth, rate limiting** — Part III (v0.3).
+- **Queueing, multi-replica** — Beats 2 & 3 of Ch 7 (v0.2); router (Beat 1) is the prerequisite and now in place.
 - **Multi-tenancy, billing, multi-backend routing** — Part III (v0.3).
-- **Stores** — no persistence layer in v0.1; first store appears in Ch 7 (auth) under `stores/` (or `internal/stores/` per the in-flight Go-internal convention).
+- **Stores** — v0.1 had no persistence layer beyond the JSON state file. v0.2 Beat 1 introduced the storage tier as `internal/provisioners/stores/{file}/` with a `Store` interface sized for the `gorm` / `gae` siblings (oneauth-style). File backend is the only impl today; queue stores are a Beat 2 follow-up.
 - **Programmatic provider bring-up/shutdown** — `cmd/provision` planned as a separate concern from the control plane proper.
 
 ## Testing strategy
