@@ -42,6 +42,7 @@ import (
 
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
 	"github.com/inference-book/inference-plane/gen/go/provisioner/v1/provisionerv1connect"
+	"github.com/inference-book/inference-plane/internal/metrics"
 )
 
 // DescribeTimeout caps the lookup of a deployment's engine endpoint.
@@ -55,8 +56,15 @@ const DescribeTimeout = 5 * time.Second
 // Router forwards OpenAI-compatible HTTP requests to the engine
 // endpoint of the named deployment. Construct with New and mount the
 // returned *Router as an http.Handler.
+//
+// The optional *metrics.Recorder is the v0.2 ch7-beat1.5 metrics
+// surface: when supplied, each request records duration, status, and
+// completion-token counts via the inference.* instrument family.
+// nil-safe: tests that don't init telemetry can pass nil and the
+// router's emission becomes a no-op.
 type Router struct {
-	client provisionerv1connect.DeploymentServiceClient
+	client   provisionerv1connect.DeploymentServiceClient
+	recorder *metrics.Recorder
 }
 
 // New constructs a Router backed by the supplied DeploymentService
@@ -67,8 +75,12 @@ type Router struct {
 // In `iplane serve` the client loopback-dials the daemon's own HTTP
 // URL; in a future split-plane topology it can dial a remote
 // control plane unchanged.
-func New(client provisionerv1connect.DeploymentServiceClient) *Router {
-	return &Router{client: client}
+//
+// recorder may be nil for tests or daemons that omit telemetry init.
+// When set, the router instruments each request via RecordRouterRequest
+// and RecordRouterTokens.
+func New(client provisionerv1connect.DeploymentServiceClient, recorder *metrics.Recorder) *Router {
+	return &Router{client: client, recorder: recorder}
 }
 
 // serveDeployID handles the explicit-deployment URL family:
@@ -105,10 +117,37 @@ func (r *Router) serveDeployID(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	if !r.forwardable(w, dep) {
+	r.handleWithMetrics(w, req, dep, true /* stripDeployPrefix */)
+}
+
+// handleWithMetrics is the shared instrumented tail used by both
+// serveDeployID and serveFlat. By the time it fires, the deployment
+// is resolved, so it can label the metrics with deploy_id and model.
+//
+// Wraps the response writer in a tokenCountingWriter that captures
+// duration, status, and completion_tokens from the engine's
+// response (streaming or not). Emits the three router metric
+// families via the Recorder at handler exit; nil-safe when the
+// daemon was built without telemetry init.
+//
+// tenant_id is v0.2 Beat-1 scaffold: emitted as the empty string
+// until Beat 2 wires per-tenant identification through the router.
+func (r *Router) handleWithMetrics(w http.ResponseWriter, req *http.Request, dep *provisionerv1.Deployment, stripDeployPrefix bool) {
+	start := time.Now()
+	tcw := newTokenCountingWriter(w)
+	defer func() {
+		r.recorder.RecordRouterRequest(req.Context(),
+			dep.GetId(), dep.GetModel(), "" /* tenant_id scaffold */, tcw.StatusLabel(),
+			time.Since(start).Seconds())
+		if tokens := tcw.CompletionTokens(); tokens > 0 {
+			r.recorder.RecordRouterTokens(req.Context(),
+				dep.GetId(), dep.GetModel(), "" /* tenant_id scaffold */, tokens)
+		}
+	}()
+	if !r.forwardable(tcw, dep) {
 		return
 	}
-	r.proxyTo(w, req, dep, true /* stripDeployPrefix */)
+	r.proxyTo(tcw, req, dep, stripDeployPrefix)
 }
 
 // Handle returns the (pattern, handler) pairs the caller mounts on

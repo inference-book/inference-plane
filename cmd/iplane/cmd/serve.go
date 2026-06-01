@@ -260,7 +260,10 @@ func runServe(parent context.Context) error {
 	// generated DeploymentService Connect client; in `iplane serve`
 	// that client loopback-dials this same HTTP listener.
 	daemonBaseURL := loopbackURL(cfg.Server.Addr)
-	deploymentRouter := router.New(provisionerv1connect.NewDeploymentServiceClient(http.DefaultClient, daemonBaseURL))
+	deploymentRouter := router.New(
+		provisionerv1connect.NewDeploymentServiceClient(http.DefaultClient, daemonBaseURL),
+		recorder,
+	)
 
 	api, err := server.New(parent, grpcAddr, logger,
 		server.WithProvisionerHandler(provisioners.NewConnectProvisionerAdapter(provisionerSvc)),

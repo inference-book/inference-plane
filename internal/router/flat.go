@@ -74,10 +74,6 @@ func (r *Router) serveFlat(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	if !r.forwardable(w, dep) {
-		return
-	}
-
 	// Replay the buffered body for the reverse-proxy. ReverseProxy
 	// reads req.Body to forward; we drained it for the model peek so
 	// we re-seat it with a NopCloser-wrapped Reader. ContentLength
@@ -87,7 +83,7 @@ func (r *Router) serveFlat(w http.ResponseWriter, req *http.Request) {
 
 	// stripDeployPrefix=false: the flat URL has no iplane-side prefix
 	// to strip; /v1/chat/completions forwards as-is to the engine.
-	r.proxyTo(w, req, dep, false)
+	r.handleWithMetrics(w, req, dep, false)
 }
 
 // pickDeploymentForModel returns the deployment that should serve a

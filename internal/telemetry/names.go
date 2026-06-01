@@ -54,8 +54,10 @@ const (
 // Metric label keys (the dimensions on counter/histogram/gauge instruments).
 const (
 	LabelBillingMode = "billing_mode"
+	LabelDeployID = "deploy_id"
 	LabelGPUType = "gpu_type"
 	LabelModel = "model"
 	LabelProvider = "provider"
 	LabelStatus = "status"
+	LabelTenantID = "tenant_id"
 )

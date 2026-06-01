@@ -35,7 +35,7 @@ func newFlatTestRouter(list func(*provisionerv1.ListDeploymentsRequest) (*provis
 	return New(&flatFakeClient{
 		fakeDeploymentClient: &fakeDeploymentClient{},
 		list:                 list,
-	})
+	}, nil)
 }
 
 func TestRouter_Flat_RunningDeployment_ReverseProxies(t *testing.T) {
@@ -251,7 +251,7 @@ func TestRouter_Flat_DeployIDRouteStillWorks(t *testing.T) {
 			t.Error("ListDeployments should not fire when client uses the explicit-deploy-id URL")
 			return nil, nil
 		},
-	})
+	}, nil)
 	srv := httptest.NewServer(serveThroughMux(r))
 	defer srv.Close()
 
