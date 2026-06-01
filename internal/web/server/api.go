@@ -34,17 +34,45 @@ import (
 
 	inferencev1 "github.com/inference-book/inference-plane/gen/go/inferenceplane/v1"
 	"github.com/inference-book/inference-plane/gen/go/inferenceplane/v1/inferenceplanev1connect"
+	"github.com/inference-book/inference-plane/gen/go/provisioner/v1/provisionerv1connect"
 )
 
 // API holds the HTTP mux that serves both the OpenAI REST surface and
 // the Connect-RPC handlers. Construct with New(), then call Handler()
 // to get the composed http.Handler for the entrypoint.
+//
+// Provisioner and deployment handlers are optional -- they mount only
+// when the daemon supplies a wired Service (via WithProvisionerHandler
+// and WithDeploymentHandler). v0.1 didn't expose these on the daemon
+// at all; v0.2 ch7-beat1.2 turns them on inside `iplane serve`.
 type API struct {
-	mux             *http.ServeMux
-	logger          *slog.Logger
-	grpcEnd         string // local gRPC server address (e.g. "127.0.0.1:9090")
-	inferenceClient inferencev1.InferenceServiceClient
-	healthClient    inferencev1.HealthServiceClient
+	mux                 *http.ServeMux
+	logger              *slog.Logger
+	grpcEnd             string // local gRPC server address (e.g. "127.0.0.1:9090")
+	inferenceClient     inferencev1.InferenceServiceClient
+	healthClient        inferencev1.HealthServiceClient
+	provisionerHandler  provisionerv1connect.ProvisionerServiceHandler
+	deploymentHandler   provisionerv1connect.DeploymentServiceHandler
+}
+
+// Option configures optional API surfaces at construction time.
+type Option func(*API)
+
+// WithProvisionerHandler mounts the ProvisionerService Connect handler
+// on /provisioner.v1.ProvisionerService/{Method}. v0.1 callers omit
+// this; v0.2 daemons supply the wired Service so CLI verbs reach the
+// daemon over Connect.
+func WithProvisionerHandler(h provisionerv1connect.ProvisionerServiceHandler) Option {
+	return func(a *API) { a.provisionerHandler = h }
+}
+
+// WithDeploymentHandler mounts the DeploymentService Connect handler
+// on /provisioner.v1.DeploymentService/{Method}. Paired with
+// WithProvisionerHandler; together they expose the in-daemon Service
+// over the same Connect transport `iplane instance --service-url`
+// already uses.
+func WithDeploymentHandler(h provisionerv1connect.DeploymentServiceHandler) Option {
+	return func(a *API) { a.deploymentHandler = h }
 }
 
 // New constructs an API serving:
@@ -58,7 +86,7 @@ type API struct {
 // grpcAddr is the address of the in-process gRPC server (typically
 // 127.0.0.1:9090). Both the OpenAI handlers and the connect adapters
 // dial it via local gRPC clients.
-func New(_ context.Context, grpcAddr string, logger *slog.Logger) (*API, error) {
+func New(_ context.Context, grpcAddr string, logger *slog.Logger, opts ...Option) (*API, error) {
 	conn, err := grpc.NewClient(grpcAddr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
@@ -71,6 +99,9 @@ func New(_ context.Context, grpcAddr string, logger *slog.Logger) (*API, error) 
 		grpcEnd:         grpcAddr,
 		inferenceClient: inferencev1.NewInferenceServiceClient(conn),
 		healthClient:    inferencev1.NewHealthServiceClient(conn),
+	}
+	for _, opt := range opts {
+		opt(a)
 	}
 
 	a.registerOpenAIHandlers()
@@ -100,6 +131,19 @@ func (a *API) registerOpenAIHandlers() {
 // generated paths. Each handler wraps a gRPC client (which dials the
 // same in-process gRPC server the OpenAI handlers dial). Adapters
 // convert connect.Request <-> gRPC bare types.
+//
+// ProvisionerService and DeploymentService mount only when the daemon
+// supplied handlers via WithProvisionerHandler / WithDeploymentHandler.
+// These do NOT dial the in-process gRPC server; the handlers passed in
+// are direct Connect adapters around the in-daemon *provisioners.Service.
+// Two reasons:
+//
+//  1. The provisioner Service is not registered on the loopback gRPC
+//     server today (v0.1 only registers Inference + Health there).
+//     Adding it would mean a second source of truth for the wiring.
+//  2. CP/DP-1 (CONSTRAINTS.md) puts data-plane code behind a gRPC
+//     interface anyway; the daemon's own internal calls go through the
+//     same handler, just without the network hop.
 func (a *API) registerConnectHandlers() error {
 	inferenceAdapter := NewConnectInferenceServiceAdapter(a.inferenceClient)
 	healthAdapter := NewConnectHealthServiceAdapter(a.healthClient)
@@ -109,5 +153,14 @@ func (a *API) registerConnectHandlers() error {
 
 	a.mux.Handle(inferencePath, inferenceHandler)
 	a.mux.Handle(healthPath, healthHandler)
+
+	if a.provisionerHandler != nil {
+		path, handler := provisionerv1connect.NewProvisionerServiceHandler(a.provisionerHandler)
+		a.mux.Handle(path, handler)
+	}
+	if a.deploymentHandler != nil {
+		path, handler := provisionerv1connect.NewDeploymentServiceHandler(a.deploymentHandler)
+		a.mux.Handle(path, handler)
+	}
 	return nil
 }

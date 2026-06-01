@@ -500,12 +500,13 @@ func TestDeploymentDescribe_NewFields_JSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("describe: %v\n%s", err, out)
 	}
-	// protojson multiline output writes `"key":  value` (two spaces after
-	// the colon); match that, not single-space JSON.
+	// Match key/value pieces independently so the test stays robust to
+	// protojson's whitespace-between-colon-and-value (which has shifted
+	// between library versions).
 	for _, want := range []string{
-		`"idle_ttl_seconds":  300`,
-		`"last_activity_at":  "2026-05-31T12:34:56Z"`,
-		`"no_idle_destroy":  true`,
+		`"idle_ttl_seconds":`, `300`,
+		`"last_activity_at":`, `"2026-05-31T12:34:56Z"`,
+		`"no_idle_destroy":`, `true`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("describe json missing %q; got:\n%s", want, out)

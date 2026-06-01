@@ -29,6 +29,9 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
 	"syscall"
 
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
@@ -79,12 +82,26 @@ type File struct {
 }
 
 // Store owns the file path and the flock. One Store per CLI invocation
-// is the expected usage; Update is safe to call multiple times on the
-// same Store from one process.
+// is the expected usage. Two lifecycle patterns:
+//
+//   - One-shot: call Update(fn) directly. Each Update acquires the
+//     flock, runs fn, writes, releases. Backward-compatible with the
+//     pre-v0.2 caller.
+//   - Lifetime: call LockForLifetime() at startup, defer the release.
+//     Subsequent Update calls skip flock acquisition (the lock is
+//     already held at the process level). This is the daemon pattern
+//     iplane serve uses so the flock is held for the daemon's lifetime
+//     and Update calls inside the daemon do not self-deadlock on a
+//     second flock against the same already-held lock.
 type Store struct {
 	dir        string // directory holding state.json (and the flock file)
 	path       string // <dir>/state.json
 	operatorID string
+
+	// heldLock is non-nil while LockForLifetime is active. Update
+	// checks this field to skip re-acquiring the flock from the same
+	// process (the syscall would deadlock against the already-held FD).
+	heldLock *os.File
 }
 
 // Open prepares a Store rooted at dir. Creates dir if it does not exist.
@@ -110,6 +127,12 @@ func Open(dir, operatorID string) (*Store, error) {
 // messages and tests.
 func (s *Store) Path() string { return s.path }
 
+// Dir returns the directory that holds state.json and the flock file.
+// Callers that need to place sibling artifacts (SSH key store, future
+// caches) under the same root use this; passing `Path` + filepath.Dir
+// would work but invites the path-string-manipulation footgun.
+func (s *Store) Dir() string { return s.dir }
+
 // Read returns the current contents of the state file without taking
 // the write lock. Suitable for read-only callers (the `list` command
 // without --remote). Returns an empty file with the right header if
@@ -125,12 +148,18 @@ func (s *Store) Read() (*File, error) {
 //
 // If fn returns a non-nil error, the file is NOT written; the error
 // propagates to the caller and the on-disk state is unchanged.
+//
+// If LockForLifetime is currently active on this Store, Update reuses
+// that lock instead of acquiring a second one (the same-process double
+// flock would deadlock).
 func (s *Store) Update(fn func(*File) error) error {
-	lockFile, err := s.lock()
-	if err != nil {
-		return err
+	if s.heldLock == nil {
+		lockFile, err := s.lock()
+		if err != nil {
+			return err
+		}
+		defer s.unlock(lockFile)
 	}
-	defer s.unlock(lockFile)
 
 	file, err := s.readFromDisk()
 	if err != nil {
@@ -140,6 +169,129 @@ func (s *Store) Update(fn func(*File) error) error {
 		return err
 	}
 	return s.writeToDisk(file)
+}
+
+// ErrLockHeld is returned by LockForLifetime when another process
+// already holds the state-dir flock. HolderPID carries the PID read
+// from the lock-pid sidecar file (best-effort; zero if the sidecar
+// was unreadable or stale). Callers can errors.As against it to
+// surface an actionable message.
+type ErrLockHeld struct {
+	Path      string // the state directory whose flock is held
+	HolderPID int    // 0 if the PID could not be determined
+}
+
+func (e *ErrLockHeld) Error() string {
+	if e.HolderPID == 0 {
+		return fmt.Sprintf("state directory %q is locked by another process", e.Path)
+	}
+	return fmt.Sprintf("state directory %q is locked by another process at PID %d", e.Path, e.HolderPID)
+}
+
+// LockForLifetime takes the exclusive flock and holds it until the
+// returned release func runs. Non-blocking: if another process holds
+// the lock, returns *ErrLockHeld immediately with the holder's PID
+// (read from the lock-pid sidecar; best-effort).
+//
+// After successful acquisition, subsequent Update calls on this Store
+// skip flock acquisition (the lock is already held). The release func
+// is idempotent -- calling it twice is safe -- and clears the
+// heldLock field, removes the lock-pid sidecar, and releases the
+// flock. Always defer the release.
+//
+// Daemon pattern:
+//
+//	store, _ := state.Open(dir, operatorID)
+//	release, err := store.LockForLifetime()
+//	if err != nil { ... }
+//	defer release()
+//	// ... use store.Update freely; flock stays held the whole time ...
+//
+// One-shot CLI pattern: same shape, but the release runs as the CLI
+// exits. The fail-fast non-blocking acquisition is what makes "iplane
+// serve is running" surface as a clean error rather than the CLI
+// hanging on the flock.
+func (s *Store) LockForLifetime() (release func(), err error) {
+	if s.heldLock != nil {
+		return func() {}, fmt.Errorf("state: LockForLifetime called twice without release on %q", s.dir)
+	}
+	lockPath := filepath.Join(s.dir, ".lock")
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open lock file %q: %w", lockPath, err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		f.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, &ErrLockHeld{Path: s.dir, HolderPID: readHolderPID(s.dir)}
+		}
+		return nil, fmt.Errorf("flock %q: %w", lockPath, err)
+	}
+	// Write our PID into the sidecar so the next contender can name
+	// us in their error. Best-effort: a write failure doesn't undo
+	// the lock acquisition (the flock is the truth; the sidecar is
+	// informational).
+	_ = writeHolderPID(s.dir, os.Getpid())
+	s.heldLock = f
+
+	var releaseOnce sync.Once
+	return func() {
+		releaseOnce.Do(func() {
+			_ = removeHolderPID(s.dir)
+			s.heldLock = nil
+			s.unlock(f)
+		})
+	}, nil
+}
+
+// holderPIDPath returns the path to the lock-pid sidecar.
+func holderPIDPath(dir string) string {
+	return filepath.Join(dir, ".lock-pid")
+}
+
+// writeHolderPID stamps the current PID into the lock-pid sidecar.
+// Atomic write via temp + rename so a contender either sees the old
+// PID or the new one, never a torn write.
+func writeHolderPID(dir string, pid int) error {
+	tmp, err := os.CreateTemp(dir, ".lock-pid-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	if _, err := fmt.Fprintf(tmp, "%d\n", pid); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	return os.Rename(tmpPath, holderPIDPath(dir))
+}
+
+// readHolderPID returns the PID recorded in the lock-pid sidecar, or
+// zero if the file is missing, empty, malformed, or unreadable. The
+// flock itself is the source of truth for "is the lock held"; this
+// is only for error-message attribution.
+func readHolderPID(dir string) int {
+	raw, err := os.ReadFile(holderPIDPath(dir))
+	if err != nil {
+		return 0
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		return 0
+	}
+	return pid
+}
+
+func removeHolderPID(dir string) error {
+	err := os.Remove(holderPIDPath(dir))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	return err
 }
 
 // lock acquires the exclusive directory flock. Returns the *os.File so

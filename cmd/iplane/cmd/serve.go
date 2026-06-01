@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/go-viper/mapstructure/v2"
@@ -26,6 +27,8 @@ import (
 	"github.com/inference-book/inference-plane/internal/backends"
 	"github.com/inference-book/inference-plane/internal/config"
 	"github.com/inference-book/inference-plane/internal/metrics"
+	"github.com/inference-book/inference-plane/internal/provisioners"
+	"github.com/inference-book/inference-plane/internal/provisioners/state"
 	"github.com/inference-book/inference-plane/internal/services"
 	"github.com/inference-book/inference-plane/internal/telemetry"
 	"github.com/inference-book/inference-plane/internal/web/server"
@@ -66,6 +69,7 @@ func init() {
 // IPLANE_<UPPER_SNAKE> via the prefix + replacer set in initConfig.
 func bindServeFlags(c *cobra.Command) {
 	c.Flags().String("server-addr", ":8080", "HTTP server bind address")
+	c.Flags().String("state-dir", "", "directory holding state.json + .lock (default ~/.iplane; IPLANE_STATE_DIR env also honored)")
 	c.Flags().String("backend-engine", "mock", "backend engine (mock | vllm)")
 	c.Flags().String("backend-url", "", "backend base URL (ignored by mock)")
 	c.Flags().String("backend-name", "mock", "backend name label for metrics/logs")
@@ -80,6 +84,7 @@ func bindServeFlags(c *cobra.Command) {
 	// Bind kebab-case flags onto dotted viper keys matching the YAML.
 	for flagName, key := range map[string]string{
 		"server-addr":     "server.addr",
+		"state-dir":       "state.dir",
 		"backend-engine":  "backend.engine",
 		"backend-url":     "backend.url",
 		"backend-name":    "backend.name",
@@ -111,6 +116,25 @@ func registerServeDefaults() {
 	viper.SetDefault("telemetry.service_name", "inference-plane")
 	viper.SetDefault("telemetry.environment", "dev")
 	viper.SetDefault("telemetry.sample_ratio", 1.0)
+}
+
+// resolveServeStateDir picks the directory holding state.json + the
+// flock. Precedence: --state-dir flag (via viper "state.dir"), then
+// IPLANE_STATE_DIR env, then ~/.iplane. Matches the one-shot CLI's
+// resolveStateDir so the daemon and CLI agree on the canonical path
+// without coordination.
+func resolveServeStateDir() (string, error) {
+	if dir := viper.GetString("state.dir"); dir != "" {
+		return dir, nil
+	}
+	if dir := os.Getenv("IPLANE_STATE_DIR"); dir != "" {
+		return dir, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve home dir: %w", err)
+	}
+	return filepath.Join(home, ".iplane"), nil
 }
 
 // loadConfig assembles a *config.Config from viper's resolved view.
@@ -153,22 +177,54 @@ func runServe(parent context.Context) error {
 		return fmt.Errorf("metrics: %w", err)
 	}
 
-	providers, err := metrics.LoadProviders("providers.yaml")
+	costProviders, err := metrics.LoadProviders("providers.yaml")
 	if err != nil {
 		// Non-fatal: a deployment without providers.yaml emits the
 		// uptime + active counters but skips the cross-provider snapshot.
 		logger.Warn("providers.yaml not loaded; cross-provider snapshot disabled", "err", err)
-		providers = nil
+		costProviders = nil
 	}
 	costRecorder, err := metrics.NewCostRecorder(metrics.Deployment{
 		Provider:    cfg.Deployment.Provider,
 		GPUType:     cfg.Deployment.GPUType,
 		BillingMode: cfg.Deployment.BillingMode,
 		InstanceID:  cfg.Deployment.InstanceID,
-	}, providers)
+	}, costProviders)
 	if err != nil {
 		return fmt.Errorf("cost recorder: %w", err)
 	}
+
+	// Daemon state-of-record. Open the state store, acquire the
+	// lifetime flock (non-blocking -- fail-fast if another daemon
+	// already holds it), and build the provisioners Service. The
+	// release func runs on graceful shutdown; deferred so even a
+	// startup-mid-failure tears down the lock cleanly.
+	stateDir, err := resolveServeStateDir()
+	if err != nil {
+		return fmt.Errorf("resolve state dir: %w", err)
+	}
+	stateStore, err := state.Open(stateDir, "default")
+	if err != nil {
+		return fmt.Errorf("open state store at %q: %w", stateDir, err)
+	}
+	releaseLock, err := stateStore.LockForLifetime()
+	if err != nil {
+		var held *state.ErrLockHeld
+		if errors.As(err, &held) {
+			if held.HolderPID != 0 {
+				return fmt.Errorf("another iplane serve is already running at PID %d (state %s); only one daemon per state dir", held.HolderPID, held.Path)
+			}
+			return fmt.Errorf("state directory %q is locked by another process; only one daemon per state dir", held.Path)
+		}
+		return fmt.Errorf("acquire state lock: %w", err)
+	}
+	defer releaseLock()
+
+	provisionerSvc, err := buildLocalService(stateStore, "default")
+	if err != nil {
+		return fmt.Errorf("build provisioner service: %w", err)
+	}
+	logger.Info("daemon state-of-record initialized", "state_dir", stateDir)
 
 	grpcSrv, grpcLis, err := startGRPCServer(be, recorder, costRecorder, logger)
 	if err != nil {
@@ -176,7 +232,10 @@ func runServe(parent context.Context) error {
 	}
 	defer grpcLis.Close()
 
-	api, err := server.New(parent, grpcAddr, logger)
+	api, err := server.New(parent, grpcAddr, logger,
+		server.WithProvisionerHandler(provisioners.NewConnectProvisionerAdapter(provisionerSvc)),
+		server.WithDeploymentHandler(provisioners.NewConnectDeploymentAdapter(provisionerSvc)),
+	)
 	if err != nil {
 		return fmt.Errorf("HTTP API: %w", err)
 	}

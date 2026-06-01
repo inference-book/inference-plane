@@ -15,12 +15,8 @@ import (
 
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
 	"github.com/inference-book/inference-plane/gen/go/provisioner/v1/provisionerv1connect"
-	"github.com/inference-book/inference-plane/internal/deployments/sshdocker"
 	"github.com/inference-book/inference-plane/internal/provisioners"
-	"github.com/inference-book/inference-plane/internal/provisioners/local"
-	"github.com/inference-book/inference-plane/internal/provisioners/runpod"
 	"github.com/inference-book/inference-plane/internal/provisioners/state"
-	"github.com/inference-book/inference-plane/internal/sshkeys"
 )
 
 // Shared flags on the deployment group. The in-process state file is
@@ -222,21 +218,23 @@ func buildDeploymentClient() (deploymentClient, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open state store: %w", err)
 	}
-	keyStore, err := sshkeys.New(sshkeys.WithDir(filepath.Join(dir, "keys")))
+	// Same lifetime-lock-at-startup pattern as instance.go's
+	// buildClient. Fail-fast on contention; rely on OS FD cleanup
+	// to release the lock when the CLI process exits.
+	if _, err := store.LockForLifetime(); err != nil {
+		var held *state.ErrLockHeld
+		if errors.As(err, &held) {
+			if held.HolderPID != 0 {
+				return nil, fmt.Errorf("iplane serve is running at PID %d (state %s); pass --service-url to route through it or stop the daemon", held.HolderPID, held.Path)
+			}
+			return nil, fmt.Errorf("state directory %q is locked by another process; pass --service-url to route through it or stop the holder", held.Path)
+		}
+		return nil, fmt.Errorf("acquire state lock: %w", err)
+	}
+	svc, err := buildLocalService(store, deploymentOperatorID)
 	if err != nil {
-		return nil, fmt.Errorf("open ssh key store: %w", err)
+		return nil, err
 	}
-
-	providers := []provisioners.Provider{local.New()}
-	if key := os.Getenv("RUNPOD_API_KEY"); key != "" {
-		providers = append(providers, runpod.New(runpod.NewClient(key)))
-	}
-
-	svc := provisioners.New(providers, store, deploymentOperatorID,
-		provisioners.WithKeyStore(keyStore),
-		provisioners.WithDeploymentExecutor(sshdocker.NewExecutor()),
-		provisioners.WithModelStore(modelStoreForCLI()),
-	)
 	return &inProcessDeploymentClient{svc: svc}, nil
 }
 
