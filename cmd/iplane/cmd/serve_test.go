@@ -257,3 +257,67 @@ func TestServe_RouterForwardsToEngine(t *testing.T) {
 		t.Error("engine never received the forwarded request")
 	}
 }
+
+// TestServe_FlatURL_RoutesByModelInBody asserts the v0.2 ch7-beat1.3b
+// OpenAI-flat URL works end-to-end: client POSTs to
+// /v1/chat/completions with `model` in the body; daemon's router
+// looks up the deployment serving that model and forwards. Same
+// daemon harness as the deploy-id test; the only differences are
+// the URL the client hits and what the router uses as the routing key.
+func TestServe_FlatURL_RoutesByModelInBody(t *testing.T) {
+	dir := t.TempDir()
+	harness := startDaemonHarness(t, dir)
+	defer harness.close()
+
+	engineReceived := make(chan string, 1)
+	engine := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		engineReceived <- r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"chatcmpl-flat-e2e","choices":[{"message":{"content":"flat ok"}}]}`)
+	}))
+	defer engine.Close()
+
+	// Seed a RUNNING deployment whose model is what the request will
+	// claim. The router has to find it via ListDeployments and route
+	// solely on the model match.
+	if err := harness.store.Update(func(s *provisioners.State) error {
+		s.Instances["my-pod"] = &provisionerv1.Instance{
+			Id:       "my-pod",
+			Provider: "local",
+			State:    provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE,
+		}
+		s.Deployments["any-id"] = &provisionerv1.Deployment{
+			Id:             "any-id",
+			InstanceId:     "my-pod",
+			Model:          "Qwen/Qwen2.5-7B-Instruct",
+			State:          provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING,
+			EngineEndpoint: engine.URL,
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	body := `{"model":"Qwen/Qwen2.5-7B-Instruct","messages":[{"role":"user","content":"hi"}]}`
+	resp, err := http.Post(harness.server.URL+"/v1/chat/completions", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, b)
+	}
+	respBody, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(respBody), "flat ok") {
+		t.Errorf("response body should pass through engine; got: %s", respBody)
+	}
+	select {
+	case got := <-engineReceived:
+		if got != "/v1/chat/completions" {
+			t.Errorf("engine received %q; flat URL should forward path as-is (want /v1/chat/completions)", got)
+		}
+	default:
+		t.Error("engine never received the forwarded request")
+	}
+}
