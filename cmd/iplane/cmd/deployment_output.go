@@ -48,6 +48,13 @@ func writeDeploymentDetail(w io.Writer, dep *provisionerv1.Deployment) {
 	if endpoint := dep.GetEngineEndpoint(); endpoint != "" {
 		fmt.Fprintf(w, "engine endpoint: %s\n", endpoint)
 	}
+	// v0.2 ch7-beat1.3: when a running daemon is the data source,
+	// render the iplane router URL alongside the engine endpoint.
+	// The chapter narrative teaches operators to dial the iplane URL;
+	// engine endpoint becomes the internal implementation detail.
+	if dep.GetState() == provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING && deploymentServiceURL != "" {
+		fmt.Fprintf(w, "iplane url:      %s/v1/%s/v1\n", deploymentServiceURL, dep.GetId())
+	}
 	if cid := dep.GetContainerId(); cid != "" {
 		fmt.Fprintf(w, "container:       %s\n", cid)
 	}

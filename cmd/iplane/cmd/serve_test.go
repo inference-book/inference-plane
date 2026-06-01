@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"github.com/inference-book/inference-plane/gen/go/provisioner/v1/provisionerv1connect"
 	"github.com/inference-book/inference-plane/internal/provisioners"
 	"github.com/inference-book/inference-plane/internal/provisioners/stores/file"
+	"github.com/inference-book/inference-plane/internal/router"
 )
 
 // daemonHarness boots the daemon's RPC surface against a temp state
@@ -54,6 +56,14 @@ func startDaemonHarness(t *testing.T, dir string) *daemonHarness {
 	depPath, depHandler := provisionerv1connect.NewDeploymentServiceHandler(provisioners.NewConnectDeploymentAdapter(svc))
 	mux.Handle(depPath, depHandler)
 	server := httptest.NewServer(mux)
+
+	// Mount the v0.2 data-plane router. Its Connect client
+	// loopback-dials this same httptest.Server -- mirrors what
+	// `iplane serve` does in production.
+	deploymentRouter := router.New(provisionerv1connect.NewDeploymentServiceClient(http.DefaultClient, server.URL))
+	for pattern, h := range deploymentRouter.Handle() {
+		mux.Handle(pattern, h)
+	}
 
 	return &daemonHarness{
 		dir:     dir,
@@ -177,5 +187,73 @@ func TestInstance_NoServiceURL_WhileDaemonHolds(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "--service-url") {
 		t.Errorf("error should point at --service-url remedy; got: %v", err)
+	}
+}
+
+// TestServe_RouterForwardsToEngine drives the v0.2 ch7-beat1.3
+// data-path end-to-end through the daemon harness: register a
+// deployment whose engine endpoint points at a httptest fake engine,
+// then POST /v1/<deploy-id>/v1/chat/completions to the daemon's URL
+// and assert the engine receives the request and the response flows
+// back. Same wire path Ch 7's demo 04 exercises with a real engine.
+func TestServe_RouterForwardsToEngine(t *testing.T) {
+	dir := t.TempDir()
+	harness := startDaemonHarness(t, dir)
+	defer harness.close()
+
+	// Stand up a fake engine. Assert it received the unwrapped path
+	// (the /v1/<id>/ prefix is iplane-side; the engine should see
+	// only the OpenAI tail).
+	engineReceived := make(chan string, 1)
+	engine := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		engineReceived <- r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"chatcmpl-e2e","choices":[{"message":{"content":"e2e ok"}}]}`)
+	}))
+	defer engine.Close()
+
+	// Seed an instance and a RUNNING deployment whose engine endpoint
+	// is the fake engine's URL. Skip provider Spawn / executor by
+	// writing directly into the state of record; the daemon's router
+	// only cares about (state, engine_endpoint).
+	if err := harness.store.Update(func(s *provisioners.State) error {
+		s.Instances["my-pod"] = &provisionerv1.Instance{
+			Id:       "my-pod",
+			Provider: "local",
+			State:    provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE,
+		}
+		s.Deployments["e2e-llama"] = &provisionerv1.Deployment{
+			Id:             "e2e-llama",
+			InstanceId:     "my-pod",
+			State:          provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING,
+			EngineEndpoint: engine.URL,
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// Drive the request through the daemon's router.
+	resp, err := http.Post(harness.server.URL+"/v1/e2e-llama/v1/chat/completions", "application/json", strings.NewReader(`{"messages":[]}`))
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, body)
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "e2e ok") {
+		t.Errorf("response body should pass through engine; got: %s", body)
+	}
+	select {
+	case got := <-engineReceived:
+		if got != "/v1/chat/completions" {
+			t.Errorf("engine received %q; deploy-id prefix should have been stripped (want /v1/chat/completions)", got)
+		}
+	default:
+		t.Error("engine never received the forwarded request")
 	}
 }

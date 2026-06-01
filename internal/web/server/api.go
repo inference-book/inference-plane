@@ -46,13 +46,19 @@ import (
 // and WithDeploymentHandler). v0.1 didn't expose these on the daemon
 // at all; v0.2 ch7-beat1.2 turns them on inside `iplane serve`.
 type API struct {
-	mux                 *http.ServeMux
-	logger              *slog.Logger
-	grpcEnd             string // local gRPC server address (e.g. "127.0.0.1:9090")
-	inferenceClient     inferencev1.InferenceServiceClient
-	healthClient        inferencev1.HealthServiceClient
-	provisionerHandler  provisionerv1connect.ProvisionerServiceHandler
-	deploymentHandler   provisionerv1connect.DeploymentServiceHandler
+	mux                *http.ServeMux
+	logger             *slog.Logger
+	grpcEnd            string // local gRPC server address (e.g. "127.0.0.1:9090")
+	inferenceClient    inferencev1.InferenceServiceClient
+	healthClient       inferencev1.HealthServiceClient
+	provisionerHandler provisionerv1connect.ProvisionerServiceHandler
+	deploymentHandler  provisionerv1connect.DeploymentServiceHandler
+
+	// dataPlaneRoutes is the deployment-routed surface mounted by the
+	// daemon: pattern -> handler pairs from router.Router.Handle().
+	// Each pattern is something like "POST /v1/{deploy_id}/v1/chat/completions".
+	// nil = no data-plane router mounted (v0.1 mode).
+	dataPlaneRoutes map[string]http.Handler
 }
 
 // Option configures optional API surfaces at construction time.
@@ -73,6 +79,19 @@ func WithProvisionerHandler(h provisionerv1connect.ProvisionerServiceHandler) Op
 // already uses.
 func WithDeploymentHandler(h provisionerv1connect.DeploymentServiceHandler) Option {
 	return func(a *API) { a.deploymentHandler = h }
+}
+
+// WithDataPlaneRoutes mounts a set of (pattern, handler) pairs on the
+// HTTP mux for the data-plane router (v0.2 ch7-beat1.3). The patterns
+// use Go 1.22+ method+wildcard syntax, e.g.
+// "POST /v1/{deploy_id}/v1/chat/completions"; the router package
+// provides these via router.Router.Handle().
+//
+// This option exists to keep internal/web/server's import graph clean
+// of internal/router (CP/DP-1: the data plane is its own package and
+// the web server just mounts whatever handlers the daemon hands it).
+func WithDataPlaneRoutes(routes map[string]http.Handler) Option {
+	return func(a *API) { a.dataPlaneRoutes = routes }
 }
 
 // New constructs an API serving:
@@ -108,7 +127,18 @@ func New(_ context.Context, grpcAddr string, logger *slog.Logger, opts ...Option
 	if err := a.registerConnectHandlers(); err != nil {
 		return nil, fmt.Errorf("server: connect handlers: %w", err)
 	}
+	a.registerDataPlaneRoutes()
 	return a, nil
+}
+
+// registerDataPlaneRoutes mounts the per-deployment router patterns
+// supplied via WithDataPlaneRoutes. v0.1 callers omit the option and
+// this method becomes a no-op; v0.2 daemons pass the router.Router's
+// Handle() map, putting iplane back into the inference data path.
+func (a *API) registerDataPlaneRoutes() {
+	for pattern, h := range a.dataPlaneRoutes {
+		a.mux.Handle(pattern, h)
+	}
 }
 
 // Handler returns the composed http.Handler. The entrypoint wraps it
