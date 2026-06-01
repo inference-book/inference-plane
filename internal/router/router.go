@@ -99,9 +99,15 @@ const DescribeTimeout = 5 * time.Second
 // completion-token counts via the inference.* instrument family.
 // nil-safe: tests that don't init telemetry can pass nil and the
 // router's emission becomes a no-op.
+//
+// The tracer is captured from the global TracerProvider at construction
+// time, matching the canonical OTel Go pattern (mirrors what
+// metrics.NewRecorder does for its meter). When no provider is set
+// the SDK returns a no-op tracer and Start calls become no-ops.
 type Router struct {
 	client   provisionerv1connect.DeploymentServiceClient
 	recorder *metrics.Recorder
+	tracer   trace.Tracer
 }
 
 // New constructs a Router backed by the supplied DeploymentService
@@ -117,7 +123,11 @@ type Router struct {
 // When set, the router instruments each request via RecordRouterRequest
 // and RecordRouterTokens.
 func New(client provisionerv1connect.DeploymentServiceClient, recorder *metrics.Recorder) *Router {
-	return &Router{client: client, recorder: recorder}
+	return &Router{
+		client:   client,
+		recorder: recorder,
+		tracer:   otel.Tracer(tracerName),
+	}
 }
 
 // serveDeployID handles the explicit-deployment URL family:
@@ -188,8 +198,7 @@ func (r *Router) handleWithObservability(w http.ResponseWriter, req *http.Reques
 	if !stripDeployPrefix {
 		routeMatch = routeMatchFlat
 	}
-	tracer := otel.Tracer(tracerName)
-	ctx, span := tracer.Start(req.Context(), spanNameDispatch,
+	ctx, span := r.tracer.Start(req.Context(), spanNameDispatch,
 		trace.WithSpanKind(trace.SpanKindServer),
 		trace.WithAttributes(
 			attribute.String(AttrRouterMatch, routeMatch),
