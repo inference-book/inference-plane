@@ -48,7 +48,7 @@ import (
 	"github.com/inference-book/inference-plane/internal/provisioners"
 	"github.com/inference-book/inference-plane/internal/provisioners/local"
 	"github.com/inference-book/inference-plane/internal/provisioners/runpod"
-	"github.com/inference-book/inference-plane/internal/provisioners/state"
+	"github.com/inference-book/inference-plane/internal/provisioners/stores/file"
 	"github.com/inference-book/inference-plane/internal/sshkeys"
 )
 
@@ -105,9 +105,9 @@ func serve() {
 		log.Fatal("RUNPOD_API_KEY is required (this example deploys to a real RunPod pod). Set it in the server's env before `make serve`.")
 	}
 
-	store, err := state.Open(*stateDir, *operatorID)
+	store, err := file.Open(*stateDir, *operatorID)
 	if err != nil {
-		log.Fatalf("state.Open: %v", err)
+		log.Fatalf("file.Open: %v", err)
 	}
 	keyStore, err := sshkeys.New(sshkeys.WithDir(*stateDir + "/keys"))
 	if err != nil {

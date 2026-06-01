@@ -1,4 +1,4 @@
-package state
+package file
 
 import (
 	"errors"
@@ -12,6 +12,7 @@ import (
 	"time"
 
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
+	"github.com/inference-book/inference-plane/internal/provisioners"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -44,20 +45,29 @@ func TestRead_EmptyFileReturnsDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Read: %v", err)
 	}
-	if f.SchemaVersion != SchemaVersion {
-		t.Errorf("SchemaVersion = %q, want %q", f.SchemaVersion, SchemaVersion)
-	}
-	if f.Backend != BackendLocalFile {
-		t.Errorf("Backend = %q, want %q", f.Backend, BackendLocalFile)
-	}
-	if f.OperatorID != "default" {
-		t.Errorf("OperatorID = %q, want default", f.OperatorID)
-	}
 	if len(f.Instances) != 0 {
 		t.Errorf("Instances should be empty, got %d", len(f.Instances))
 	}
 	if len(f.Deployments) != 0 {
 		t.Errorf("Deployments should be empty, got %d", len(f.Deployments))
+	}
+
+	// File-format envelope fields (SchemaVersion, Backend, OperatorID)
+	// are file-backend-specific and not part of provisioners.State.
+	// Reach into the internal readFromDisk to verify the envelope
+	// stamps correctly on an empty-file read.
+	env, err := s.readFromDisk()
+	if err != nil {
+		t.Fatalf("readFromDisk: %v", err)
+	}
+	if env.SchemaVersion != SchemaVersion {
+		t.Errorf("envelope SchemaVersion = %q, want %q", env.SchemaVersion, SchemaVersion)
+	}
+	if env.Backend != BackendLocalFile {
+		t.Errorf("envelope Backend = %q, want %q", env.Backend, BackendLocalFile)
+	}
+	if env.OperatorID != "default" {
+		t.Errorf("envelope OperatorID = %q, want default", env.OperatorID)
 	}
 }
 
@@ -76,7 +86,7 @@ func TestDeployment_RoundTripPersistence(t *testing.T) {
 		ContainerId:    "abc1234",
 		EngineEndpoint: "http://1.2.3.4:8000",
 	}
-	if err := s.Update(func(f *File) error {
+	if err := s.Update(func(f *provisioners.State) error {
 		f.Deployments["my-llama"] = want
 		return nil
 	}); err != nil {
@@ -126,7 +136,7 @@ func TestDeployment_NewFields_RoundTrip(t *testing.T) {
 		LastActivityAt: timestamppb.New(activity),
 		NoIdleDestroy:  true,
 	}
-	if err := s.Update(func(f *File) error {
+	if err := s.Update(func(f *provisioners.State) error {
 		f.Deployments["pinned-llama"] = want
 		return nil
 	}); err != nil {
@@ -199,7 +209,7 @@ func TestDeployment_ForwardCompat_OldRecordLoadsAsZero(t *testing.T) {
 
 func TestSchemaVersion_BumpedTo1Dot2(t *testing.T) {
 	s := newStore(t)
-	if err := s.Update(func(f *File) error { return nil }); err != nil {
+	if err := s.Update(func(f *provisioners.State) error { return nil }); err != nil {
 		t.Fatalf("Update: %v", err)
 	}
 	raw, err := os.ReadFile(s.Path())
@@ -218,7 +228,7 @@ func TestUpdate_WriteThenRead(t *testing.T) {
 		Provider: "local",
 		State:    provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE,
 	}
-	if err := s.Update(func(f *File) error {
+	if err := s.Update(func(f *provisioners.State) error {
 		f.Instances["my-pod"] = want
 		return nil
 	}); err != nil {
@@ -243,7 +253,7 @@ func TestUpdate_WriteThenRead(t *testing.T) {
 func TestUpdate_AbortOnFnError(t *testing.T) {
 	s := newStore(t)
 	wantErr := "boom"
-	err := s.Update(func(f *File) error {
+	err := s.Update(func(f *provisioners.State) error {
 		f.Instances["should-not-persist"] = &provisionerv1.Instance{Id: "ghost"}
 		return errFromString(wantErr)
 	})
@@ -264,7 +274,7 @@ func TestUpdate_AtomicWrite_NoTornFiles(t *testing.T) {
 	// the file is always valid by reading it back after every Update.
 	for i := range 25 {
 		id := "pod-" + itoa(i)
-		err := s.Update(func(f *File) error {
+		err := s.Update(func(f *provisioners.State) error {
 			f.Instances[id] = &provisionerv1.Instance{Id: id, State: provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE}
 			return nil
 		})
@@ -286,7 +296,7 @@ func TestUpdate_FlockSerializesConcurrentWriters(t *testing.T) {
 	// serialize them so the final state has BOTH increments, not one
 	// (which would happen if read-modify-write was non-atomic).
 	s := newStore(t)
-	if err := s.Update(func(f *File) error {
+	if err := s.Update(func(f *provisioners.State) error {
 		f.Instances["counter"] = &provisionerv1.Instance{Id: "counter"}
 		return nil
 	}); err != nil {
@@ -299,7 +309,7 @@ func TestUpdate_FlockSerializesConcurrentWriters(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			err := s.Update(func(f *File) error {
+			err := s.Update(func(f *provisioners.State) error {
 				existing := f.Instances["counter"]
 				existing.HourlyRateUsd++
 				counter.Add(1)
@@ -364,7 +374,7 @@ func TestLockForLifetime_AllowsConcurrentUpdates(t *testing.T) {
 
 	for i := range 5 {
 		id := "pod-" + itoa(i)
-		if err := s.Update(func(f *File) error {
+		if err := s.Update(func(f *provisioners.State) error {
 			f.Instances[id] = &provisionerv1.Instance{Id: id}
 			return nil
 		}); err != nil {
@@ -513,7 +523,7 @@ func TestLock_FDSurvivesGC(t *testing.T) {
 func TestUpdate_SurvivesGCPressure(t *testing.T) {
 	s := newStore(t)
 	for i := 0; i < 32; i++ {
-		err := s.Update(func(f *File) error {
+		err := s.Update(func(f *provisioners.State) error {
 			// Force GC inside the locked section. If lock's *os.File
 			// were collectable here, this is exactly when the
 			// finalizer would fire and close the lock FD.

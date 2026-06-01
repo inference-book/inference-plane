@@ -15,7 +15,7 @@ import (
 	"github.com/inference-book/inference-plane/gen/go/provisioner/v1/provisionerv1connect"
 	"github.com/inference-book/inference-plane/internal/deployments/sshdocker"
 	"github.com/inference-book/inference-plane/internal/provisioners"
-	"github.com/inference-book/inference-plane/internal/provisioners/state"
+	"github.com/inference-book/inference-plane/internal/provisioners/stores/file"
 	"github.com/inference-book/inference-plane/internal/sshkeys"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -89,7 +89,7 @@ func (f *fakeDeploymentExecutor) Destroy(_ context.Context, _ *provisionerv1.Dep
 type deploymentTestEnv struct {
 	server   *httptest.Server
 	svc      *provisioners.Service
-	store    *state.Store
+	store    *file.Store
 	executor *fakeDeploymentExecutor
 	stateDir string
 }
@@ -98,9 +98,9 @@ type deploymentTestEnv struct {
 // the state file, bypassing the provider's Spawn path. Used to set up
 // preconditions for deployment tests without exercising the CreateInstance
 // verb (which is a separate test surface).
-func seedActiveInstance(t *testing.T, store *state.Store, id string) {
+func seedActiveInstance(t *testing.T, store *file.Store, id string) {
 	t.Helper()
-	if err := store.Update(func(f *state.File) error {
+	if err := store.Update(func(f *provisioners.State) error {
 		f.Instances[id] = seedInstance(id)
 		return nil
 	}); err != nil {
@@ -111,9 +111,9 @@ func seedActiveInstance(t *testing.T, store *state.Store, id string) {
 func newDeploymentTestEnv(t *testing.T) *deploymentTestEnv {
 	t.Helper()
 	dir := t.TempDir()
-	store, err := state.Open(dir, "default")
+	store, err := file.Open(dir, "default")
 	if err != nil {
-		t.Fatalf("state.Open: %v", err)
+		t.Fatalf("file.Open: %v", err)
 	}
 	keyStore, err := sshkeys.New(sshkeys.WithDir(dir + "/keys"))
 	if err != nil {
@@ -480,7 +480,7 @@ func TestDeploymentDescribe_NewFields_JSON(t *testing.T) {
 	// doesn't exist in this PR.
 	env := newDeploymentTestEnv(t)
 	activity := time.Date(2026, 5, 31, 12, 34, 56, 0, time.UTC)
-	if err := env.store.Update(func(f *state.File) error {
+	if err := env.store.Update(func(f *provisioners.State) error {
 		f.Deployments["pinned-llama"] = &provisionerv1.Deployment{
 			Id:             "pinned-llama",
 			InstanceId:     "my-pod",

@@ -16,7 +16,7 @@ import (
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
 	"github.com/inference-book/inference-plane/gen/go/provisioner/v1/provisionerv1connect"
 	"github.com/inference-book/inference-plane/internal/provisioners"
-	"github.com/inference-book/inference-plane/internal/provisioners/state"
+	"github.com/inference-book/inference-plane/internal/provisioners/stores/file"
 )
 
 // Shared flags on the deployment group. The in-process state file is
@@ -214,7 +214,7 @@ func buildDeploymentClient() (deploymentClient, error) {
 	if err != nil {
 		return nil, err
 	}
-	store, err := state.Open(dir, deploymentOperatorID)
+	store, err := file.Open(dir, deploymentOperatorID)
 	if err != nil {
 		return nil, fmt.Errorf("open state store: %w", err)
 	}
@@ -222,7 +222,7 @@ func buildDeploymentClient() (deploymentClient, error) {
 	// buildClient. Fail-fast on contention; rely on OS FD cleanup
 	// to release the lock when the CLI process exits.
 	if _, err := store.LockForLifetime(); err != nil {
-		var held *state.ErrLockHeld
+		var held *file.ErrLockHeld
 		if errors.As(err, &held) {
 			if held.HolderPID != 0 {
 				return nil, fmt.Errorf("iplane serve is running at PID %d (state %s); pass --service-url to route through it or stop the daemon", held.HolderPID, held.Path)

@@ -9,7 +9,6 @@ import (
 
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
 	"github.com/inference-book/inference-plane/internal/modelstores"
-	"github.com/inference-book/inference-plane/internal/provisioners/state"
 	"github.com/inference-book/inference-plane/internal/sshkeys"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -50,7 +49,7 @@ type Service struct {
 	provisionerv1.UnimplementedDeploymentServiceServer
 
 	providers  map[string]Provider
-	store      *state.Store
+	store      Store
 	keyStore   keyEnsurer
 	executor   DeploymentExecutor
 	modelStore modelstores.ModelStore
@@ -98,7 +97,7 @@ func WithModelStore(ms modelstores.ModelStore) Option {
 // New constructs a Service. Providers are keyed by their Name() so the
 // service can dispatch by spec.provider without an interface assertion
 // at call time.
-func New(providers []Provider, store *state.Store, operatorID string, opts ...Option) *Service {
+func New(providers []Provider, store Store, operatorID string, opts ...Option) *Service {
 	s := &Service{
 		providers:  make(map[string]Provider, len(providers)),
 		store:      store,
@@ -151,7 +150,7 @@ func (s *Service) CreateInstance(ctx context.Context, req *provisionerv1.CreateI
 	var record *provisionerv1.Instance
 	var alreadyExisted bool
 	var claimedPending bool
-	err := s.store.Update(func(f *state.File) error {
+	err := s.store.Update(func(f *State) error {
 		if existing, ok := f.Instances[spec.GetId()]; ok {
 			switch existing.GetState() {
 			case provisionerv1.InstanceState_INSTANCE_STATE_PENDING, provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE:
@@ -261,7 +260,7 @@ func (s *Service) DestroyInstance(ctx context.Context, req *provisionerv1.Destro
 	var record *provisionerv1.Instance
 	var providerID string
 	var providerName string
-	err := s.store.Update(func(f *state.File) error {
+	err := s.store.Update(func(f *State) error {
 		existing, ok := f.Instances[id]
 		if !ok {
 			return fmt.Errorf("no instance with id %q", id)
@@ -310,7 +309,7 @@ func (s *Service) DestroyInstance(ctx context.Context, req *provisionerv1.Destro
 
 	// Step 3: patch.
 	now := timestamppb.New(s.clock())
-	patchErr := s.store.Update(func(f *state.File) error {
+	patchErr := s.store.Update(func(f *State) error {
 		existing, ok := f.Instances[id]
 		if !ok {
 			return nil
@@ -574,7 +573,7 @@ func (s *Service) ListInstances(ctx context.Context, req *provisionerv1.ListInst
 			// If we are pending, leave it -- user inspects and decides.
 			if st == provisionerv1.InstanceState_INSTANCE_STATE_TERMINATING {
 				now := timestamppb.New(s.clock())
-				_ = s.store.Update(func(f *state.File) error {
+				_ = s.store.Update(func(f *State) error {
 					if rec, ok := f.Instances[id]; ok {
 						rec.State = provisionerv1.InstanceState_INSTANCE_STATE_TERMINATED
 						rec.TerminatedAt = now
@@ -614,7 +613,7 @@ func (s *Service) ListInstances(ctx context.Context, req *provisionerv1.ListInst
 // given id, taking the flock for the duration. Idempotent: if the
 // record was removed concurrently, the patch silently re-creates it.
 func (s *Service) patchRecord(id string, inst *provisionerv1.Instance) error {
-	return s.store.Update(func(f *state.File) error {
+	return s.store.Update(func(f *State) error {
 		f.Instances[id] = inst
 		return nil
 	})
@@ -792,7 +791,7 @@ func refToInstance(ref *provisionerv1.InstanceRef, providerName string) *provisi
 //
 // Phase 2's deployment surface. The same Service struct implements both
 // gRPC servers (ProvisionerServiceServer + DeploymentServiceServer)
-// sharing state.Store + provider registry + key store. The
+// sharing the Store + provider registry + key store. The
 // instance<->deployment cross-reference via instance_id is a same-
 // package map lookup.
 
@@ -897,7 +896,7 @@ func (s *Service) CreateDeployment(ctx context.Context, req *provisionerv1.Creat
 	// Idempotency on (operator, deployment id).
 	var record *provisionerv1.Deployment
 	var alreadyExisted bool
-	err = s.store.Update(func(f *state.File) error {
+	err = s.store.Update(func(f *State) error {
 		if existing, ok := f.Deployments[dep.GetId()]; ok {
 			switch existing.GetState() {
 			case provisionerv1.DeploymentState_DEPLOYMENT_STATE_PENDING,
@@ -1169,7 +1168,7 @@ func (e executorAsDeployer) Destroy(ctx context.Context, dep *provisionerv1.Depl
 // terminal state observers will see whatever last successfully
 // wrote.
 func (s *Service) patchDeployment(id string, u DeployStateUpdate) error {
-	return s.store.Update(func(f *state.File) error {
+	return s.store.Update(func(f *State) error {
 		rec, ok := f.Deployments[id]
 		if !ok {
 			return nil
@@ -1264,7 +1263,7 @@ func (s *Service) DestroyDeployment(ctx context.Context, req *provisionerv1.Dest
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 	var rec *provisionerv1.Deployment
-	err := s.store.Update(func(f *state.File) error {
+	err := s.store.Update(func(f *State) error {
 		existing, ok := f.Deployments[id]
 		if !ok {
 			return fmt.Errorf("no deployment with id %q", id)

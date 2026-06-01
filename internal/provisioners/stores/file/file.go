@@ -1,7 +1,7 @@
-// Package state holds the iplane state file and the read-modify-write
-// loop the Service runs under. The file lives at <dir>/state.json (in
-// production, ~/.iplane/state.json) and is the persistent intent log
-// for every Spawn / Terminate the operator runs.
+// Package file is the file-backed impl of provisioners.Store. The
+// state lives at <dir>/state.json (in production, ~/.iplane/state.json)
+// and is the persistent intent log for every Spawn / Terminate the
+// operator runs.
 //
 // Two contracts the rest of the codebase relies on:
 //
@@ -20,7 +20,13 @@
 // UseProtoNames so the on-disk field names (provider_id, etc.) match
 // what the design doc's state-file example shows. The envelope itself
 // is plain stdlib JSON.
-package state
+//
+// file.Store satisfies provisioners.Store. The envelope type, schema
+// version, lock-pid sidecar, and lifetime-flock semantics are all
+// file-backend-specific concerns and live here, not on the Store
+// interface -- other backends (GORM/SQLite, GAE) have different
+// atomicity primitives.
+package file
 
 import (
 	"encoding/json"
@@ -35,6 +41,7 @@ import (
 	"syscall"
 
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
+	"github.com/inference-book/inference-plane/internal/provisioners"
 	"google.golang.org/protobuf/encoding/protojson"
 )
 
@@ -66,14 +73,12 @@ const SchemaVersion = "1.2"
 // writer last touched the file.
 const BackendLocalFile = "local-file"
 
-// File is the in-memory representation of state.json. Two top-level
-// tables: instances (Phase 1) and deployments (Phase 2). Both are
-// keyed by tenant-global id; the two id namespaces are independent
-// (a Deployment.id and an Instance.id can match, they're looked up in
-// different maps). Deployments cross-reference instances by
-// Deployment.instance_id -- not embedded as sub-records, so v0.2's
-// multi-deployment-per-instance scales without restructuring.
-type File struct {
+// envelope is the on-disk shape of state.json. SchemaVersion, Backend,
+// and OperatorID are file-format metadata not part of the cross-backend
+// contract (provisioners.Store / provisioners.State). The Service sees
+// only the Instances + Deployments tables via provisioners.State; the
+// envelope wraps them on disk along with the version stamp.
+type envelope struct {
 	SchemaVersion string
 	Backend       string
 	OperatorID    string
@@ -133,18 +138,25 @@ func (s *Store) Path() string { return s.path }
 // would work but invites the path-string-manipulation footgun.
 func (s *Store) Dir() string { return s.dir }
 
-// Read returns the current contents of the state file without taking
-// the write lock. Suitable for read-only callers (the `list` command
-// without --remote). Returns an empty file with the right header if
-// state.json does not yet exist.
-func (s *Store) Read() (*File, error) {
-	return s.readFromDisk()
+// Read returns the current state snapshot. Suitable for read-only
+// callers; mutations through Read are not persisted (use Update for
+// that). Returns an empty state with no instances/deployments if the
+// state file does not yet exist.
+//
+// Satisfies provisioners.Store.Read.
+func (s *Store) Read() (*provisioners.State, error) {
+	env, err := s.readFromDisk()
+	if err != nil {
+		return nil, err
+	}
+	return envelopeToState(env), nil
 }
 
-// Update runs fn under the exclusive flock. fn receives the loaded
-// File; any modification fn makes to it is persisted on return. fn
-// must return quickly (it should NOT perform network IO -- the lock
-// is held for its entire duration and blocks other CLI invocations).
+// Update runs fn under the exclusive flock. fn receives the current
+// state snapshot; any modification fn makes is persisted on return.
+// fn must return quickly (it should NOT perform network IO -- the
+// lock is held for its entire duration and blocks other CLI
+// invocations).
 //
 // If fn returns a non-nil error, the file is NOT written; the error
 // propagates to the caller and the on-disk state is unchanged.
@@ -152,7 +164,9 @@ func (s *Store) Read() (*File, error) {
 // If LockForLifetime is currently active on this Store, Update reuses
 // that lock instead of acquiring a second one (the same-process double
 // flock would deadlock).
-func (s *Store) Update(fn func(*File) error) error {
+//
+// Satisfies provisioners.Store.Update.
+func (s *Store) Update(fn func(*provisioners.State) error) error {
 	if s.heldLock == nil {
 		lockFile, err := s.lock()
 		if err != nil {
@@ -161,14 +175,33 @@ func (s *Store) Update(fn func(*File) error) error {
 		defer s.unlock(lockFile)
 	}
 
-	file, err := s.readFromDisk()
+	env, err := s.readFromDisk()
 	if err != nil {
 		return err
 	}
-	if err := fn(file); err != nil {
+	state := envelopeToState(env)
+	if err := fn(state); err != nil {
 		return err
 	}
-	return s.writeToDisk(file)
+	// State and envelope share map references (envelopeToState
+	// does not copy), so map mutations fn made are already visible
+	// in env.Instances / env.Deployments. The defensive reassignment
+	// here handles the edge case of fn replacing the maps entirely
+	// (state.Instances = newMap).
+	env.Instances = state.Instances
+	env.Deployments = state.Deployments
+	return s.writeToDisk(env)
+}
+
+// envelopeToState exposes the cross-backend slice of the envelope --
+// just the two record tables. SchemaVersion / Backend / OperatorID
+// stay in the envelope; they are file-format metadata and not part
+// of the Store interface contract.
+func envelopeToState(env *envelope) *provisioners.State {
+	return &provisioners.State{
+		Instances:   env.Instances,
+		Deployments: env.Deployments,
+	}
 }
 
 // ErrLockHeld is returned by LockForLifetime when another process
@@ -201,7 +234,7 @@ func (e *ErrLockHeld) Error() string {
 //
 // Daemon pattern:
 //
-//	store, _ := state.Open(dir, operatorID)
+//	store, _ := file.Open(dir, operatorID)
 //	release, err := store.LockForLifetime()
 //	if err != nil { ... }
 //	defer release()
@@ -326,7 +359,7 @@ func (s *Store) unlock(f *os.File) {
 	_ = f.Close()
 }
 
-func (s *Store) readFromDisk() (*File, error) {
+func (s *Store) readFromDisk() (*envelope, error) {
 	raw, err := os.ReadFile(s.path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -347,7 +380,7 @@ func (s *Store) readFromDisk() (*File, error) {
 	if err := json.Unmarshal(raw, &env); err != nil {
 		return nil, fmt.Errorf("parse state file %q: %w", s.path, err)
 	}
-	file := &File{
+	file := &envelope{
 		SchemaVersion: env.SchemaVersion,
 		Backend:       env.Backend,
 		OperatorID:    env.OperatorID,
@@ -375,7 +408,7 @@ func (s *Store) readFromDisk() (*File, error) {
 	return file, nil
 }
 
-func (s *Store) writeToDisk(file *File) error {
+func (s *Store) writeToDisk(file *envelope) error {
 	if file.SchemaVersion == "" {
 		file.SchemaVersion = SchemaVersion
 	}
@@ -451,8 +484,8 @@ func (s *Store) writeToDisk(file *File) error {
 	return nil
 }
 
-func (s *Store) emptyFile() *File {
-	return &File{
+func (s *Store) emptyFile() *envelope {
+	return &envelope{
 		SchemaVersion: SchemaVersion,
 		Backend:       BackendLocalFile,
 		OperatorID:    s.operatorID,

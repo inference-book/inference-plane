@@ -13,7 +13,7 @@ import (
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
 	"github.com/inference-book/inference-plane/gen/go/provisioner/v1/provisionerv1connect"
 	"github.com/inference-book/inference-plane/internal/provisioners"
-	"github.com/inference-book/inference-plane/internal/provisioners/state"
+	"github.com/inference-book/inference-plane/internal/provisioners/stores/file"
 )
 
 // CLI tests run against a real Service over a real httptest.Server,
@@ -92,9 +92,9 @@ type testEnv struct {
 
 func newTestEnv(t *testing.T, providerName string) *testEnv {
 	t.Helper()
-	store, err := state.Open(t.TempDir(), "default")
+	store, err := file.Open(t.TempDir(), "default")
 	if err != nil {
-		t.Fatalf("state.Open: %v", err)
+		t.Fatalf("file.Open: %v", err)
 	}
 	mp := &mockProvider{name: providerName}
 	svc := provisioners.New([]provisioners.Provider{mp}, store, "default")

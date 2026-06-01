@@ -13,7 +13,7 @@ import (
 	"github.com/inference-book/inference-plane/internal/deployments/sshdocker"
 	"github.com/inference-book/inference-plane/internal/modelstores"
 	"github.com/inference-book/inference-plane/internal/provisioners"
-	"github.com/inference-book/inference-plane/internal/provisioners/state"
+	"github.com/inference-book/inference-plane/internal/provisioners/stores/file"
 	"github.com/inference-book/inference-plane/internal/sshkeys"
 	"github.com/panyam/oneauth/keys"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -101,11 +101,11 @@ func (m *mockProvider) List(ctx context.Context, filter map[string]string) ([]*p
 	return nil, nil
 }
 
-func newSvc(t *testing.T, provs ...provisioners.Provider) (*provisioners.Service, *state.Store) {
+func newSvc(t *testing.T, provs ...provisioners.Provider) (*provisioners.Service, *file.Store) {
 	t.Helper()
-	store, err := state.Open(t.TempDir(), "default")
+	store, err := file.Open(t.TempDir(), "default")
 	if err != nil {
-		t.Fatalf("state.Open: %v", err)
+		t.Fatalf("file.Open: %v", err)
 	}
 	clock := func() time.Time { return time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC) }
 	svc := provisioners.New(provs, store, "default", provisioners.WithClock(clock))
@@ -386,7 +386,7 @@ func TestListInstances_SelfHealsPending(t *testing.T) {
 	svc, store := newSvc(t, mock)
 
 	// Hand-seed the pending record.
-	if err := store.Update(func(f *state.File) error {
+	if err := store.Update(func(f *provisioners.State) error {
 		f.Instances["my-pod"] = &provisionerv1.Instance{
 			Id:        "my-pod",
 			Provider:  "mock",
@@ -445,7 +445,7 @@ func TestWaitForInstanceReady_AlreadyReady(t *testing.T) {
 	// short-circuit without touching the provider so retries are cheap.
 	waiter := &mockSSHWaiter{mockProvider: &mockProvider{name: "mock"}}
 	svc, store := newSvc(t, waiter)
-	_ = store.Update(func(f *state.File) error {
+	_ = store.Update(func(f *provisioners.State) error {
 		f.Instances["my-pod"] = &provisionerv1.Instance{
 			Id: "my-pod", Provider: "mock", ProviderId: "mock:my-pod",
 			State: provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE,
@@ -469,7 +469,7 @@ func TestWaitForInstanceReady_ProviderWithoutCapability_NoOp(t *testing.T) {
 	// Provider doesn't implement SSHReadyWaiter (e.g. local). The
 	// Service returns the current Instance unchanged; not an error.
 	svc, store := newSvc(t, &mockProvider{name: "mock"})
-	_ = store.Update(func(f *state.File) error {
+	_ = store.Update(func(f *provisioners.State) error {
 		f.Instances["my-pod"] = &provisionerv1.Instance{
 			Id: "my-pod", Provider: "mock", ProviderId: "mock:my-pod",
 			State: provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE,
@@ -492,7 +492,7 @@ func TestWaitForInstanceReady_PopulatesSSH(t *testing.T) {
 		waitTarget:   &provisionerv1.SshTarget{Host: "5.6.7.8", Port: 22, User: "root"},
 	}
 	svc, store := newSvc(t, waiter)
-	_ = store.Update(func(f *state.File) error {
+	_ = store.Update(func(f *provisioners.State) error {
 		f.Instances["my-pod"] = &provisionerv1.Instance{
 			Id: "my-pod", Provider: "mock", ProviderId: "mock:my-pod",
 			State: provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE,
@@ -525,7 +525,7 @@ func TestWaitForInstanceReady_ProviderError_Surfaces(t *testing.T) {
 		waitErr:      errors.New("transient runpod failure"),
 	}
 	svc, store := newSvc(t, waiter)
-	_ = store.Update(func(f *state.File) error {
+	_ = store.Update(func(f *provisioners.State) error {
 		f.Instances["my-pod"] = &provisionerv1.Instance{
 			Id: "my-pod", Provider: "mock", ProviderId: "mock:my-pod",
 			State: provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE,
@@ -561,15 +561,15 @@ func TestGetInstanceSSHKey_NoKeyStoreConfigured(t *testing.T) {
 }
 
 func TestGetInstanceSSHKey_HappyPath(t *testing.T) {
-	store, err := state.Open(t.TempDir(), "default")
+	store, err := file.Open(t.TempDir(), "default")
 	if err != nil {
-		t.Fatalf("state.Open: %v", err)
+		t.Fatalf("file.Open: %v", err)
 	}
 	svc := provisioners.New([]provisioners.Provider{&mockProvider{name: "mock"}},
 		store, "default",
 		provisioners.WithKeyStore(newKeyStore(t)))
 
-	_ = store.Update(func(f *state.File) error {
+	_ = store.Update(func(f *provisioners.State) error {
 		f.Instances["my-pod"] = &provisionerv1.Instance{
 			Id: "my-pod", Provider: "mock", ProviderId: "mock:my-pod",
 			State: provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE,
@@ -659,9 +659,9 @@ func TestDeployerDispatch_ProviderCapability_TakesPrecedence(t *testing.T) {
 	deployer := &mockDeployerProvider{mockProvider: &mockProvider{name: "mock"}}
 	fallback := &recordingExecutor{}
 
-	store, err := state.Open(t.TempDir(), "default")
+	store, err := file.Open(t.TempDir(), "default")
 	if err != nil {
-		t.Fatalf("state.Open: %v", err)
+		t.Fatalf("file.Open: %v", err)
 	}
 	svc := provisioners.New([]provisioners.Provider{deployer},
 		store, "default",
@@ -669,7 +669,7 @@ func TestDeployerDispatch_ProviderCapability_TakesPrecedence(t *testing.T) {
 		provisioners.WithDeploymentExecutor(fallback))
 
 	// Seed an active instance the deployment can reference.
-	_ = store.Update(func(f *state.File) error {
+	_ = store.Update(func(f *provisioners.State) error {
 		f.Instances["my-pod"] = &provisionerv1.Instance{
 			Id: "my-pod", Provider: "mock", ProviderId: "mock:my-pod",
 			State: provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE,
@@ -709,16 +709,16 @@ func TestDeployerDispatch_NoCapability_FallsBackToConfiguredExecutor(t *testing.
 	plain := &mockProvider{name: "mock"}
 	fallback := &recordingExecutor{}
 
-	store, err := state.Open(t.TempDir(), "default")
+	store, err := file.Open(t.TempDir(), "default")
 	if err != nil {
-		t.Fatalf("state.Open: %v", err)
+		t.Fatalf("file.Open: %v", err)
 	}
 	svc := provisioners.New([]provisioners.Provider{plain},
 		store, "default",
 		provisioners.WithKeyStore(newKeyStore(t)),
 		provisioners.WithDeploymentExecutor(fallback))
 
-	_ = store.Update(func(f *state.File) error {
+	_ = store.Update(func(f *provisioners.State) error {
 		f.Instances["my-pod"] = &provisionerv1.Instance{
 			Id: "my-pod", Provider: "mock", ProviderId: "mock:my-pod",
 			State: provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE,
@@ -754,9 +754,9 @@ func TestCreateDeployment_AutoProvision_RecordsInstanceAnd1to1(t *testing.T) {
 	// deployment id (1:1) and is promoted to ACTIVE once RUNNING.
 	deployer := &mockDeployerProvider{mockProvider: &mockProvider{name: "mock"}}
 
-	store, err := state.Open(t.TempDir(), "default")
+	store, err := file.Open(t.TempDir(), "default")
 	if err != nil {
-		t.Fatalf("state.Open: %v", err)
+		t.Fatalf("file.Open: %v", err)
 	}
 	svc := provisioners.New([]provisioners.Provider{deployer},
 		store, "default",
@@ -812,9 +812,9 @@ func TestDestroyDeployment_AutoProvisioned_CascadesToInstance(t *testing.T) {
 	// terminated too (no orphaned ACTIVE instance left behind).
 	deployer := &mockDeployerProvider{mockProvider: &mockProvider{name: "mock"}}
 
-	store, err := state.Open(t.TempDir(), "default")
+	store, err := file.Open(t.TempDir(), "default")
 	if err != nil {
-		t.Fatalf("state.Open: %v", err)
+		t.Fatalf("file.Open: %v", err)
 	}
 	svc := provisioners.New([]provisioners.Provider{deployer},
 		store, "default",
@@ -873,9 +873,9 @@ func TestDestroyInstance_AfterDeployFailure_StillTerminatesAtProvider(t *testing
 		return errors.New("health timeout")
 	}
 
-	store, err := state.Open(t.TempDir(), "default")
+	store, err := file.Open(t.TempDir(), "default")
 	if err != nil {
-		t.Fatalf("state.Open: %v", err)
+		t.Fatalf("file.Open: %v", err)
 	}
 	svc := provisioners.New([]provisioners.Provider{deployer},
 		store, "default",
@@ -911,15 +911,15 @@ func TestWaitForInstanceReady_NoSSHRequested_FailsFast(t *testing.T) {
 	// WaitForInstanceReady must surface that as a permanent
 	// FailedPrecondition, not poll a doomed-to-fail provider for 120s.
 	mock := &mockProvider{name: "mock"}
-	store, err := state.Open(t.TempDir(), "default")
+	store, err := file.Open(t.TempDir(), "default")
 	if err != nil {
-		t.Fatalf("state.Open: %v", err)
+		t.Fatalf("file.Open: %v", err)
 	}
 	svc := provisioners.New([]provisioners.Provider{mock},
 		store, "default",
 		provisioners.WithKeyStore(newKeyStore(t)))
 
-	_ = store.Update(func(f *state.File) error {
+	_ = store.Update(func(f *provisioners.State) error {
 		f.Instances["my-llama"] = &provisionerv1.Instance{
 			Id: "my-llama", Provider: "mock",
 			State: provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE,
@@ -949,16 +949,16 @@ func TestDestroyInstance_BackfillsProviderIDFromLinkedDeployment(t *testing.T) {
 	// must backfill provider_id from the deployment so the provider
 	// Terminate call actually fires.
 	mock := &mockProvider{name: "mock"}
-	store, err := state.Open(t.TempDir(), "default")
+	store, err := file.Open(t.TempDir(), "default")
 	if err != nil {
-		t.Fatalf("state.Open: %v", err)
+		t.Fatalf("file.Open: %v", err)
 	}
 	svc := provisioners.New([]provisioners.Provider{mock},
 		store, "default",
 		provisioners.WithKeyStore(newKeyStore(t)))
 
 	// Seed: instance has NO provider_id; linked deployment has container_id.
-	_ = store.Update(func(f *state.File) error {
+	_ = store.Update(func(f *provisioners.State) error {
 		f.Instances["my-llama"] = &provisionerv1.Instance{
 			Id: "my-llama", Provider: "mock", ProviderId: "",
 			State: provisionerv1.InstanceState_INSTANCE_STATE_PENDING,
@@ -1004,9 +1004,9 @@ func TestValidateID(t *testing.T) {
 
 func TestCreateInstance_KeyRegistrar_CalledBeforeSpawn(t *testing.T) {
 	reg := &mockKeyRegistrarProvider{mockProvider: &mockProvider{name: "mock"}}
-	store, err := state.Open(t.TempDir(), "default")
+	store, err := file.Open(t.TempDir(), "default")
 	if err != nil {
-		t.Fatalf("state.Open: %v", err)
+		t.Fatalf("file.Open: %v", err)
 	}
 	svc := provisioners.New([]provisioners.Provider{reg}, store, "default",
 		provisioners.WithKeyStore(newKeyStore(t)),
@@ -1034,9 +1034,9 @@ func TestCreateInstance_KeyRegistrar_CalledBeforeSpawn(t *testing.T) {
 
 func TestCreateInstance_KeyRegistrar_SkippedWhenInterfaceAbsent(t *testing.T) {
 	mock := &mockProvider{name: "mock"} // does NOT implement KeyRegistrar
-	store, err := state.Open(t.TempDir(), "default")
+	store, err := file.Open(t.TempDir(), "default")
 	if err != nil {
-		t.Fatalf("state.Open: %v", err)
+		t.Fatalf("file.Open: %v", err)
 	}
 	svc := provisioners.New([]provisioners.Provider{mock}, store, "default",
 		provisioners.WithKeyStore(newKeyStore(t)),
@@ -1051,9 +1051,9 @@ func TestCreateInstance_KeyRegistrar_SkippedWhenInterfaceAbsent(t *testing.T) {
 
 func TestCreateInstance_KeyRegistrar_SkippedWhenStoreAbsent(t *testing.T) {
 	reg := &mockKeyRegistrarProvider{mockProvider: &mockProvider{name: "mock"}}
-	store, err := state.Open(t.TempDir(), "default")
+	store, err := file.Open(t.TempDir(), "default")
 	if err != nil {
-		t.Fatalf("state.Open: %v", err)
+		t.Fatalf("file.Open: %v", err)
 	}
 	svc := provisioners.New([]provisioners.Provider{reg}, store, "default") // no WithKeyStore
 
@@ -1073,9 +1073,9 @@ func TestCreateInstance_KeyRegistrar_ErrorAbortsBeforeSpawn(t *testing.T) {
 		mockProvider: &mockProvider{name: "mock"},
 		registrarErr: errors.New("forbidden: scoped key cannot mutate user settings"),
 	}
-	store, err := state.Open(t.TempDir(), "default")
+	store, err := file.Open(t.TempDir(), "default")
 	if err != nil {
-		t.Fatalf("state.Open: %v", err)
+		t.Fatalf("file.Open: %v", err)
 	}
 	svc := provisioners.New([]provisioners.Provider{reg}, store, "default",
 		provisioners.WithKeyStore(newKeyStore(t)),
@@ -1124,12 +1124,12 @@ func (f *fakeExecutor) Destroy(ctx context.Context, dep *provisionerv1.Deploymen
 // newSvcWithDeploy builds a Service wired with: an InstanceRef-style
 // runpod mock, a key store, a fake executor. Also seeds an ACTIVE
 // instance "my-pod" so deployment tests have something to target.
-func newSvcWithDeploy(t *testing.T) (*provisioners.Service, *state.Store, *fakeExecutor) {
+func newSvcWithDeploy(t *testing.T) (*provisioners.Service, *file.Store, *fakeExecutor) {
 	t.Helper()
 	mock := &mockProvider{name: "runpod"}
-	store, err := state.Open(t.TempDir(), "default")
+	store, err := file.Open(t.TempDir(), "default")
 	if err != nil {
-		t.Fatalf("state.Open: %v", err)
+		t.Fatalf("file.Open: %v", err)
 	}
 	exec := &fakeExecutor{}
 	svc := provisioners.New([]provisioners.Provider{mock}, store, "default",
@@ -1137,7 +1137,7 @@ func newSvcWithDeploy(t *testing.T) (*provisioners.Service, *state.Store, *fakeE
 		provisioners.WithDeploymentExecutor(exec),
 	)
 	// Seed an ACTIVE instance with SSH endpoint.
-	if err := store.Update(func(f *state.File) error {
+	if err := store.Update(func(f *provisioners.State) error {
 		f.Instances["my-pod"] = &provisionerv1.Instance{
 			Id:       "my-pod",
 			Provider: "runpod",
@@ -1183,9 +1183,9 @@ func (s *stubModelStore) Resolve(_ context.Context, spec string) (modelstores.Re
 
 func TestCreateDeployment_ResolveModelCalled_AndEnvMerged(t *testing.T) {
 	mock := &mockProvider{name: "runpod"}
-	store, err := state.Open(t.TempDir(), "default")
+	store, err := file.Open(t.TempDir(), "default")
 	if err != nil {
-		t.Fatalf("state.Open: %v", err)
+		t.Fatalf("file.Open: %v", err)
 	}
 	ms := &stubModelStore{
 		respond: func(spec string) (modelstores.Resolved, error) {
@@ -1201,7 +1201,7 @@ func TestCreateDeployment_ResolveModelCalled_AndEnvMerged(t *testing.T) {
 		provisioners.WithDeploymentExecutor(exec),
 		provisioners.WithModelStore(ms),
 	)
-	_ = store.Update(func(f *state.File) error {
+	_ = store.Update(func(f *provisioners.State) error {
 		f.Instances["my-pod"] = &provisionerv1.Instance{
 			Id: "my-pod", Provider: "runpod",
 			State: provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE,
@@ -1231,9 +1231,9 @@ func TestCreateDeployment_ResolveModelCalled_AndEnvMerged(t *testing.T) {
 
 func TestCreateDeployment_ResolveError_FailsWithInvalidArgument(t *testing.T) {
 	mock := &mockProvider{name: "runpod"}
-	store, err := state.Open(t.TempDir(), "default")
+	store, err := file.Open(t.TempDir(), "default")
 	if err != nil {
-		t.Fatalf("state.Open: %v", err)
+		t.Fatalf("file.Open: %v", err)
 	}
 	ms := &stubModelStore{
 		respond: func(_ string) (modelstores.Resolved, error) {
@@ -1313,7 +1313,7 @@ func TestCreateDeployment_InstanceMissing_Rejects(t *testing.T) {
 func TestCreateDeployment_InstanceNoSSH_Rejects(t *testing.T) {
 	svc, store, _ := newSvcWithDeploy(t)
 	// Strip SSH from the seeded instance.
-	if err := store.Update(func(f *state.File) error {
+	if err := store.Update(func(f *provisioners.State) error {
 		f.Instances["my-pod"].Ssh = nil
 		return nil
 	}); err != nil {
@@ -1377,7 +1377,7 @@ func TestDescribeDeployment_NotFound(t *testing.T) {
 func TestListDeployments_FiltersByInstance(t *testing.T) {
 	svc, store, _ := newSvcWithDeploy(t)
 	// Add a second instance + a deployment on it.
-	if err := store.Update(func(f *state.File) error {
+	if err := store.Update(func(f *provisioners.State) error {
 		f.Instances["other-pod"] = &provisionerv1.Instance{
 			Id:       "other-pod",
 			Provider: "runpod",
