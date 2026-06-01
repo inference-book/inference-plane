@@ -55,7 +55,7 @@ This document tracks the feature scope of `inference_plane` against the chapters
 
 ## v0.2 — Serving Real Workloads (medium detail)
 
-**Chapters:** Ch 7 (Continuous Batching), Ch 8 (KV / Prefix Caching), Ch 9 (Scaling to 30B)
+**Chapters:** Ch 7 (Routing, Queueing, Replicas), Ch 8 (KV / Prefix Caching), Ch 9 (Scaling to 30B)
 **Branch:** `release/v0.2` · **Tags:** `ch07-final`, `ch08-final`, `ch09-final`
 
 ### Features by chapter
