@@ -220,6 +220,23 @@ service DeploymentService {
   // Logs are NOT carried on this stream -- they are a separate concern
   // (see the followup issue for `iplane deployment logs <id> [-f]`).
   rpc WatchDeployment(WatchDeploymentRequest) returns (stream DeploymentStateChangedEvent);
+
+  // TouchDeployment explicitly marks the deployment as active --
+  // updates last_activity_at to "now", resetting the idle-TTL
+  // reaper's clock. v0.2 ch7-beat1.7 callers:
+  //
+  //   - The router (per inference request, after the lookup picks
+  //     the target deployment). The router is the canonical data-
+  //     plane source of activity.
+  //   - The operator's `iplane deployment touch` CLI verb (#71),
+  //     for the "I'm still using this deployment; don't reap yet"
+  //     escape hatch when traffic is intermittent.
+  //
+  // Explicit-touch on its own RPC rather than as a side effect of
+  // DescribeDeployment or WatchDeployment: passive inspection
+  // (operator running `iplane deployment describe` to check state)
+  // must not extend the lease, or the reaper is useless.
+  rpc TouchDeployment(TouchDeploymentRequest) returns (TouchDeploymentResponse);
 }
 
 message CreateDeploymentRequest {
@@ -299,4 +316,15 @@ message DeploymentStateChangedEvent {
   string phase = 4;
   string progress_message = 5;
   google.protobuf.Timestamp at = 6;
+}
+
+message TouchDeploymentRequest {
+  string id = 1;
+}
+
+message TouchDeploymentResponse {
+  // Echo of the post-touch record for caller convenience. Operators
+  // running `iplane deployment touch` (v0.2 ch7-beat1.8) can see the
+  // new last_activity_at without a follow-up Describe.
+  Deployment deployment = 1;
 }

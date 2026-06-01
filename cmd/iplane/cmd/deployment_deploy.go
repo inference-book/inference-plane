@@ -43,6 +43,7 @@ var (
 	deployMinDisk    int32
 	deployGPUCount   int32
 	deployDebugShell bool
+	deployIdleTTL    time.Duration
 	deployOtelEndpoint string
 	deployOtelHeaders  map[string]string
 	deployWait       bool
@@ -141,7 +142,8 @@ func runDeploymentDeploy(cmd *cobra.Command, args []string) error {
 		EnginePort: deployEnginePort,
 		EngineArgs: deployEngineArgs,
 		Env:        engineEnv,
-		DebugShell: deployDebugShell,
+		DebugShell:     deployDebugShell,
+		IdleTtlSeconds: int32(deployIdleTTL.Seconds()),
 	}
 	req := &provisionerv1.CreateDeploymentRequest{
 		Deployment: dep,
@@ -220,6 +222,9 @@ func init() {
 		`OTLP endpoint URL for the engine to ship traces/metrics to (default: IPLANE_OTEL_ENDPOINT env). Sets OTEL_EXPORTER_OTLP_ENDPOINT on the pod. Examples: Grafana Cloud Free's OTLP HTTP URL, or 'iplane telemetry url' for a cloudflared tunnel to the local stack.`)
 	f.StringToStringVar(&deployOtelHeaders, "otel-headers", parseOtelHeadersEnv(os.Getenv("IPLANE_OTEL_HEADERS")),
 		`OTLP request headers, KEY=VALUE (repeatable; default: IPLANE_OTEL_HEADERS env, comma-separated). Sets OTEL_EXPORTER_OTLP_HEADERS on the pod. Grafana Cloud uses 'Authorization=Basic <token>'.`)
+	f.DurationVar(&deployIdleTTL, "idle-ttl", 0,
+		`destroy the deployment after this much idle time (no inference + no operator RPCs). Default 0 = no reaping. v0.2 ch7-beat1.7.`)
+
 	f.BoolVar(&deployDebugShell, "debug-shell", false,
 		`opt in to shell-level access to the engine pod (allocates a routable IP + ssh; costs more, narrows placement). Engine endpoint is unchanged either way.`)
 	f.BoolVar(&deployWait, "wait", true, `block until the engine reaches a terminal state`)

@@ -1216,6 +1216,11 @@ func (s *Service) patchDeployment(id string, u DeployStateUpdate) error {
 }
 
 // DescribeDeployment returns the local-state record for one deployment.
+// Pure read -- no side effects. v0.2 ch7-beat1.7 callers that want to
+// mark this deployment as active (the router's per-request lookup,
+// the operator's `iplane deployment touch` verb) call TouchDeployment
+// explicitly; passive inspection via this RPC does not extend the
+// idle-TTL reaper's lease.
 func (s *Service) DescribeDeployment(ctx context.Context, req *provisionerv1.DescribeDeploymentRequest) (*provisionerv1.DescribeDeploymentResponse, error) {
 	id := req.GetId()
 	if err := ValidateID(id); err != nil {
@@ -1230,6 +1235,67 @@ func (s *Service) DescribeDeployment(ctx context.Context, req *provisionerv1.Des
 		return nil, status.Errorf(codes.NotFound, "no deployment with id %q", id)
 	}
 	return &provisionerv1.DescribeDeploymentResponse{Deployment: rec}, nil
+}
+
+// TouchDeployment marks the deployment as active -- bumps
+// last_activity_at to "now", resetting the idle-TTL reaper's clock.
+// Returns the updated record.
+//
+// v0.2 ch7-beat1.7 callers:
+//
+//   - The router (per inference request, after the lookup picks the
+//     target deployment). Canonical data-plane source of activity.
+//   - The operator's `iplane deployment touch` CLI verb (#71), the
+//     "I'm still using this thing, do not reap yet" escape hatch.
+//
+// NotFound surfaces normally (so the operator's touch verb prints a
+// useful error). The touch itself is in the locked Update path; the
+// returned record reflects the post-touch state.
+func (s *Service) TouchDeployment(ctx context.Context, req *provisionerv1.TouchDeploymentRequest) (*provisionerv1.TouchDeploymentResponse, error) {
+	id := req.GetId()
+	if err := ValidateID(id); err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	var rec *provisionerv1.Deployment
+	err := s.store.Update(func(state *State) error {
+		dep, ok := state.Deployments[id]
+		if !ok {
+			return status.Errorf(codes.NotFound, "no deployment with id %q", id)
+		}
+		dep.LastActivityAt = timestamppb.New(s.clock())
+		rec = dep
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &provisionerv1.TouchDeploymentResponse{Deployment: rec}, nil
+}
+
+// touchDeployment updates last_activity_at on the named deployment to
+// "now" via the service clock. Used as a side effect of operator
+// interest -- the v0.2 ch7-beat1.7 reaper reads last_activity_at to
+// decide whether a deployment is idle.
+//
+// Best-effort by design: a state-store write failure is logged but
+// doesn't propagate to the RPC caller. last_activity is a leak-
+// protection signal, not load-bearing for the operator's request. A
+// missed touch at worst causes a one-tick-late reap, which is fine.
+//
+// Performance note: every router request flows through
+// DescribeDeployment which flows through this. For v0.2 demo
+// workloads (1-100 req/s) the per-request state.Update is fine
+// (atomic temp+rename ~1ms on SSD). Future: batch touches in-memory
+// + flush periodically when this becomes a hot path.
+func (s *Service) touchDeployment(id string) {
+	_ = s.store.Update(func(state *State) error {
+		dep, ok := state.Deployments[id]
+		if !ok || dep == nil {
+			return nil
+		}
+		dep.LastActivityAt = timestamppb.New(s.clock())
+		return nil
+	})
 }
 
 // ListDeployments returns deployments with optional instance_id +
@@ -1356,6 +1422,9 @@ func (s *Service) WatchDeployment(req *provisionerv1.WatchDeploymentRequest, str
 	if err := ValidateID(id); err != nil {
 		return status.Error(codes.InvalidArgument, err.Error())
 	}
+	// Watch is pure read -- callers that need to mark activity call
+	// TouchDeployment explicitly. (Same reasoning as DescribeDeployment:
+	// passive observation must not extend the reaper's lease.)
 	pollEvery := 500 * time.Millisecond
 
 	ticker := time.NewTicker(pollEvery)

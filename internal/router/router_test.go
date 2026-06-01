@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"connectrpc.com/connect"
@@ -16,12 +17,15 @@ import (
 )
 
 // fakeDeploymentClient is the minimum surface Router needs from the
-// generated DeploymentServiceClient: just DescribeDeployment. Other
-// methods are unused by Router today; if Router grows new dependencies
-// the compiler will surface them and we can extend the fake.
+// generated DeploymentServiceClient. Lets tests override Describe
+// behavior + observe Touch calls. Other methods are not used by the
+// router today; if Router grows new dependencies the compiler will
+// surface them and we can extend the fake.
 type fakeDeploymentClient struct {
 	provisionerv1connect.DeploymentServiceClient // embedded so the unimplemented methods exist
 	describe                                     func(*provisionerv1.DescribeDeploymentRequest) (*provisionerv1.DescribeDeploymentResponse, error)
+	touchCalls                                   atomic.Int32
+	touchLastID                                  atomic.Pointer[string]
 }
 
 func (f *fakeDeploymentClient) DescribeDeployment(_ context.Context, req *connect.Request[provisionerv1.DescribeDeploymentRequest]) (*connect.Response[provisionerv1.DescribeDeploymentResponse], error) {
@@ -30,6 +34,16 @@ func (f *fakeDeploymentClient) DescribeDeployment(_ context.Context, req *connec
 		return nil, err
 	}
 	return connect.NewResponse(resp), nil
+}
+
+// TouchDeployment captures calls so tests can assert the router
+// touched activity after a successful lookup. Returns an empty
+// response synchronously -- the router doesn't depend on the body.
+func (f *fakeDeploymentClient) TouchDeployment(_ context.Context, req *connect.Request[provisionerv1.TouchDeploymentRequest]) (*connect.Response[provisionerv1.TouchDeploymentResponse], error) {
+	f.touchCalls.Add(1)
+	id := req.Msg.GetId()
+	f.touchLastID.Store(&id)
+	return connect.NewResponse(&provisionerv1.TouchDeploymentResponse{}), nil
 }
 
 // newTestRouter wires a Router against a fake DescribeDeployment.
@@ -257,6 +271,66 @@ func TestRouter_CompletionsPathAlsoForwarded(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("status = %d, want 200", resp.StatusCode)
+	}
+}
+
+// TestRouter_SuccessfulDispatch_TouchesActivity locks in the v0.2
+// ch7-beat1.7 contract: a successful request through the router
+// triggers TouchDeployment on the dispatched id. Without this, the
+// reaper would falsely reap deployments serving live traffic.
+func TestRouter_SuccessfulDispatch_TouchesActivity(t *testing.T) {
+	engine := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	defer engine.Close()
+
+	client := &fakeDeploymentClient{
+		describe: func(_ *provisionerv1.DescribeDeploymentRequest) (*provisionerv1.DescribeDeploymentResponse, error) {
+			return &provisionerv1.DescribeDeploymentResponse{Deployment: &provisionerv1.Deployment{
+				Id:             "served",
+				State:          provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING,
+				EngineEndpoint: engine.URL,
+			}}, nil
+		},
+	}
+	r := New(client, nil)
+	srv := httptest.NewServer(serveThroughMux(r))
+	defer srv.Close()
+
+	resp, _ := http.Post(srv.URL+"/v1/served/v1/chat/completions", "application/json", strings.NewReader(`{}`))
+	resp.Body.Close()
+
+	if got := client.touchCalls.Load(); got != 1 {
+		t.Errorf("TouchDeployment call count = %d, want 1 (live traffic must mark activity)", got)
+	}
+	if id := client.touchLastID.Load(); id == nil || *id != "served" {
+		t.Errorf("touched id = %v, want \"served\"", id)
+	}
+}
+
+// TestRouter_UnforwardableDeployment_DoesNotTouch asserts the
+// inverse: a request that lands on a deployment NOT in RUNNING
+// state (e.g. PENDING -> 503) does not touch activity. The reaper
+// must not be misled into keeping a wedged deployment alive forever
+// just because clients keep retrying against it.
+func TestRouter_UnforwardableDeployment_DoesNotTouch(t *testing.T) {
+	client := &fakeDeploymentClient{
+		describe: func(_ *provisionerv1.DescribeDeploymentRequest) (*provisionerv1.DescribeDeploymentResponse, error) {
+			return &provisionerv1.DescribeDeploymentResponse{Deployment: &provisionerv1.Deployment{
+				Id:    "pending",
+				State: provisionerv1.DeploymentState_DEPLOYMENT_STATE_PENDING,
+			}}, nil
+		},
+	}
+	r := New(client, nil)
+	srv := httptest.NewServer(serveThroughMux(r))
+	defer srv.Close()
+
+	resp, _ := http.Post(srv.URL+"/v1/pending/v1/chat/completions", "application/json", strings.NewReader(`{}`))
+	resp.Body.Close()
+
+	if got := client.touchCalls.Load(); got != 0 {
+		t.Errorf("TouchDeployment call count = %d, want 0 (unforwardable deployment must not extend lease)", got)
 	}
 }
 
