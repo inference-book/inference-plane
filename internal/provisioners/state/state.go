@@ -49,10 +49,13 @@ import (
 //	PATCH bump (X.Y.Z) -- cosmetic / comment / on-disk-formatting
 //	                      change. Field set unchanged.
 //
-// v0.1 Phase 1 shipped "1". This bumps to "1.1" -- the envelope gains
-// the deployments map (purely additive, no Instance changes). A future
-// breaking schema change would go to "2.0".
-const SchemaVersion = "1.1"
+// v0.1 Phase 1 shipped "1". v0.1 Phase 2 bumped to "1.1" -- the envelope
+// gained the deployments map (purely additive). v0.2 ch7-beat1.1 bumps
+// to "1.2" -- the Deployment message gains idle_ttl_seconds /
+// last_activity_at / no_idle_destroy for the long-lived-daemon's idle
+// reaper. Still additive; old records load with zero values via
+// protojson DiscardUnknown.
+const SchemaVersion = "1.2"
 
 // BackendLocalFile is the value written into the file's `backend` field.
 // v1.0's remote backend will write its own value here and may fall back

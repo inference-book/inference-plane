@@ -844,7 +844,34 @@ type Deployment struct {
 	// Default false: the engine port goes through the provider's
 	// managed proxy (no publicIp on RunPod, in-cluster service URL on
 	// k8s) -- cheapest capacity, no debug side-channel.
-	DebugShell    bool `protobuf:"varint,18,opt,name=debug_shell,json=debugShell,proto3" json:"debug_shell,omitempty"`
+	DebugShell bool `protobuf:"varint,18,opt,name=debug_shell,json=debugShell,proto3" json:"debug_shell,omitempty"`
+	// idle_ttl_seconds is the inactivity window after which v0.2's idle
+	// reaper destroys this deployment. Zero means "TTL not set by
+	// operator"; the reaper applies the profile default at evaluation
+	// time (demo profile is low single-digit minutes; dev and prod
+	// profiles longer). Mutated only at CreateDeployment time in v0.2.
+	// Reads land in the reaper ticket; this field is persistence-only
+	// until then.
+	IdleTtlSeconds int32 `protobuf:"varint,19,opt,name=idle_ttl_seconds,json=idleTtlSeconds,proto3" json:"idle_ttl_seconds,omitempty"`
+	// last_activity_at is the timestamp of the most recent activity
+	// against this deployment. Activity covers two sources:
+	//   - the data plane: an inference request entering the router.
+	//   - the control plane: an operator-facing RPC against this
+	//     deployment (describe, watch, touch).
+	//
+	// Nil means "never touched since creation"; the reaper treats nil
+	// with a non-zero TTL the same as last_activity_at = created_at.
+	// Written by the router and by DeploymentService RPC handlers;
+	// read by the reaper. Touch (v0.2 ch7-beat1.8) is the operator-
+	// facing reset.
+	LastActivityAt *timestamppb.Timestamp `protobuf:"bytes,20,opt,name=last_activity_at,json=lastActivityAt,proto3" json:"last_activity_at,omitempty"`
+	// no_idle_destroy pins the deployment: when true, the idle reaper
+	// skips it entirely. Operator sets it at CreateDeployment time
+	// (--no-idle-destroy flag in v0.2 ch7-beat1.9); flipping it later
+	// requires the unpin verb (system-hygiene). Use case: the shared
+	// deployment across Ch 7's demos is pinned at the start of the
+	// session so afk pauses do not tear it down.
+	NoIdleDestroy bool `protobuf:"varint,21,opt,name=no_idle_destroy,json=noIdleDestroy,proto3" json:"no_idle_destroy,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1005,6 +1032,27 @@ func (x *Deployment) GetDebugShell() bool {
 	return false
 }
 
+func (x *Deployment) GetIdleTtlSeconds() int32 {
+	if x != nil {
+		return x.IdleTtlSeconds
+	}
+	return 0
+}
+
+func (x *Deployment) GetLastActivityAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.LastActivityAt
+	}
+	return nil
+}
+
+func (x *Deployment) GetNoIdleDestroy() bool {
+	if x != nil {
+		return x.NoIdleDestroy
+	}
+	return false
+}
+
 var File_provisioner_v1_types_proto protoreflect.FileDescriptor
 
 const file_provisioner_v1_types_proto_rawDesc = "" +
@@ -1066,7 +1114,7 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"created_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x1a7\n" +
 	"\tTagsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xa3\x06\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xbb\a\n" +
 	"\n" +
 	"Deployment\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1f\n" +
@@ -1093,7 +1141,10 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"\fcontainer_id\x18\x10 \x01(\tR\vcontainerId\x12'\n" +
 	"\x0fengine_endpoint\x18\x11 \x01(\tR\x0eengineEndpoint\x12\x1f\n" +
 	"\vdebug_shell\x18\x12 \x01(\bR\n" +
-	"debugShell\x1a6\n" +
+	"debugShell\x12(\n" +
+	"\x10idle_ttl_seconds\x18\x13 \x01(\x05R\x0eidleTtlSeconds\x12D\n" +
+	"\x10last_activity_at\x18\x14 \x01(\v2\x1a.google.protobuf.TimestampR\x0elastActivityAt\x12&\n" +
+	"\x0fno_idle_destroy\x18\x15 \x01(\bR\rnoIdleDestroy\x1a6\n" +
 	"\bEnvEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01*\xc0\x01\n" +
@@ -1164,11 +1215,12 @@ var file_provisioner_v1_types_proto_depIdxs = []int32{
 	12, // 14: provisioner.v1.Deployment.started_at:type_name -> google.protobuf.Timestamp
 	12, // 15: provisioner.v1.Deployment.ready_at:type_name -> google.protobuf.Timestamp
 	12, // 16: provisioner.v1.Deployment.terminated_at:type_name -> google.protobuf.Timestamp
-	17, // [17:17] is the sub-list for method output_type
-	17, // [17:17] is the sub-list for method input_type
-	17, // [17:17] is the sub-list for extension type_name
-	17, // [17:17] is the sub-list for extension extendee
-	0,  // [0:17] is the sub-list for field type_name
+	12, // 17: provisioner.v1.Deployment.last_activity_at:type_name -> google.protobuf.Timestamp
+	18, // [18:18] is the sub-list for method output_type
+	18, // [18:18] is the sub-list for method input_type
+	18, // [18:18] is the sub-list for extension type_name
+	18, // [18:18] is the sub-list for extension extendee
+	0,  // [0:18] is the sub-list for field type_name
 }
 
 func init() { file_provisioner_v1_types_proto_init() }

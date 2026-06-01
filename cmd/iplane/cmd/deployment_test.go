@@ -17,6 +17,7 @@ import (
 	"github.com/inference-book/inference-plane/internal/provisioners"
 	"github.com/inference-book/inference-plane/internal/provisioners/state"
 	"github.com/inference-book/inference-plane/internal/sshkeys"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // CLI deployment tests run against a real Service over a real
@@ -465,6 +466,50 @@ func TestDeploymentDescribe_NotFound(t *testing.T) {
 	out, err := runDeploymentCmd(t, env, "describe", "nope")
 	if err == nil {
 		t.Fatalf("expected error; got:\n%s", out)
+	}
+}
+
+func TestDeploymentDescribe_NewFields_JSON(t *testing.T) {
+	// Verifies that v0.2 ch7-beat1.1's three new Deployment fields
+	// (idle_ttl_seconds, last_activity_at, no_idle_destroy) round-trip
+	// through `iplane deployment describe --output json`. Seeds the
+	// deployment directly into the state file: the CreateDeployment
+	// flow doesn't expose these fields yet (the --no-idle-destroy
+	// flag is its own follow-up ticket), so we exercise the persistence
+	// + describe-render path without depending on flag wiring that
+	// doesn't exist in this PR.
+	env := newDeploymentTestEnv(t)
+	activity := time.Date(2026, 5, 31, 12, 34, 56, 0, time.UTC)
+	if err := env.store.Update(func(f *state.File) error {
+		f.Deployments["pinned-llama"] = &provisionerv1.Deployment{
+			Id:             "pinned-llama",
+			InstanceId:     "my-pod",
+			Image:          "vllm/vllm-openai:0.7.0",
+			Model:          "Qwen/Qwen2.5-7B-Instruct",
+			State:          provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING,
+			IdleTtlSeconds: 300,
+			LastActivityAt: timestamppb.New(activity),
+			NoIdleDestroy:  true,
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	out, err := runDeploymentCmd(t, env, "describe", "pinned-llama", "--output", "json")
+	if err != nil {
+		t.Fatalf("describe: %v\n%s", err, out)
+	}
+	// protojson multiline output writes `"key":  value` (two spaces after
+	// the colon); match that, not single-space JSON.
+	for _, want := range []string{
+		`"idle_ttl_seconds":  300`,
+		`"last_activity_at":  "2026-05-31T12:34:56Z"`,
+		`"no_idle_destroy":  true`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("describe json missing %q; got:\n%s", want, out)
+		}
 	}
 }
 

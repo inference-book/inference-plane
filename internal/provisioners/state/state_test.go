@@ -8,8 +8,10 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 func newStore(t *testing.T) *Store {
@@ -110,7 +112,91 @@ func TestDeployment_RoundTripPersistence(t *testing.T) {
 	}
 }
 
-func TestSchemaVersion_BumpedTo1Dot1(t *testing.T) {
+func TestDeployment_NewFields_RoundTrip(t *testing.T) {
+	s := newStore(t)
+	activity := time.Date(2026, 5, 31, 12, 34, 56, 0, time.UTC)
+	want := &provisionerv1.Deployment{
+		Id:             "pinned-llama",
+		InstanceId:     "my-pod",
+		Image:          "vllm/vllm-openai:0.7.0",
+		Model:          "Qwen/Qwen2.5-7B-Instruct",
+		State:          provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING,
+		IdleTtlSeconds: 300,
+		LastActivityAt: timestamppb.New(activity),
+		NoIdleDestroy:  true,
+	}
+	if err := s.Update(func(f *File) error {
+		f.Deployments["pinned-llama"] = want
+		return nil
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	got, err := s.Read()
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	dep, ok := got.Deployments["pinned-llama"]
+	if !ok {
+		t.Fatal("deployment pinned-llama missing after round-trip")
+	}
+	if dep.GetIdleTtlSeconds() != 300 {
+		t.Errorf("IdleTtlSeconds = %d, want 300", dep.GetIdleTtlSeconds())
+	}
+	if !dep.GetNoIdleDestroy() {
+		t.Errorf("NoIdleDestroy = false, want true")
+	}
+	if dep.GetLastActivityAt() == nil {
+		t.Fatal("LastActivityAt = nil, want non-nil")
+	}
+	if !dep.GetLastActivityAt().AsTime().Equal(activity) {
+		t.Errorf("LastActivityAt = %v, want %v", dep.GetLastActivityAt().AsTime(), activity)
+	}
+}
+
+func TestDeployment_ForwardCompat_OldRecordLoadsAsZero(t *testing.T) {
+	// A state file written before v0.2 ch7-beat1.1 has no idle_ttl_seconds /
+	// last_activity_at / no_idle_destroy on the Deployment. A v0.2 reader
+	// must load it with zero values for those fields (the reaper's
+	// "TTL not set / pin not set" path), no error.
+	s := newStore(t)
+	raw := `{
+  "schema_version": "1.1",
+  "backend": "local-file",
+  "operator_id": "default",
+  "instances": {},
+  "deployments": {
+    "old-llama": {
+      "id": "old-llama",
+      "instance_id": "my-pod",
+      "image": "vllm/vllm-openai:0.7.0",
+      "model": "Qwen/Qwen2.5-7B-Instruct",
+      "state": "DEPLOYMENT_STATE_RUNNING"
+    }
+  }
+}`
+	if err := os.WriteFile(s.Path(), []byte(raw), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	f, err := s.Read()
+	if err != nil {
+		t.Fatalf("Read should tolerate v0.1-shaped Deployment: %v", err)
+	}
+	dep, ok := f.Deployments["old-llama"]
+	if !ok {
+		t.Fatal("deployment old-llama missing")
+	}
+	if dep.GetIdleTtlSeconds() != 0 {
+		t.Errorf("IdleTtlSeconds = %d, want 0 (zero default)", dep.GetIdleTtlSeconds())
+	}
+	if dep.GetNoIdleDestroy() {
+		t.Errorf("NoIdleDestroy = true, want false (zero default)")
+	}
+	if dep.GetLastActivityAt() != nil {
+		t.Errorf("LastActivityAt = %v, want nil (zero default)", dep.GetLastActivityAt())
+	}
+}
+
+func TestSchemaVersion_BumpedTo1Dot2(t *testing.T) {
 	s := newStore(t)
 	if err := s.Update(func(f *File) error { return nil }); err != nil {
 		t.Fatalf("Update: %v", err)
@@ -119,8 +205,8 @@ func TestSchemaVersion_BumpedTo1Dot1(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
 	}
-	if !strings.Contains(string(raw), `"schema_version": "1.1"`) {
-		t.Errorf("on-disk envelope missing schema_version=1.1; got:\n%s", raw)
+	if !strings.Contains(string(raw), `"schema_version": "1.2"`) {
+		t.Errorf("on-disk envelope missing schema_version=1.2; got:\n%s", raw)
 	}
 }
 
