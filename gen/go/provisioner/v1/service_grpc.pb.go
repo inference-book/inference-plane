@@ -443,6 +443,7 @@ const (
 	DeploymentService_DestroyDeployment_FullMethodName  = "/provisioner.v1.DeploymentService/DestroyDeployment"
 	DeploymentService_WatchDeployment_FullMethodName    = "/provisioner.v1.DeploymentService/WatchDeployment"
 	DeploymentService_TouchDeployment_FullMethodName    = "/provisioner.v1.DeploymentService/TouchDeployment"
+	DeploymentService_ScaleDeployment_FullMethodName    = "/provisioner.v1.DeploymentService/ScaleDeployment"
 )
 
 // DeploymentServiceClient is the client API for DeploymentService service.
@@ -505,6 +506,18 @@ type DeploymentServiceClient interface {
 	// (operator running `iplane deployment describe` to check state)
 	// must not extend the lease, or the reaper is useless.
 	TouchDeployment(ctx context.Context, in *TouchDeploymentRequest, opts ...grpc.CallOption) (*TouchDeploymentResponse, error)
+	// ScaleDeployment changes the replica count of a running deployment.
+	// v0.2 ch7-beat3.8 (#86) ships scale-up only: target_replicas > the
+	// current count appends new replicas by extending the slot numbering
+	// (deployment with r0,r1,r2 scaled to 5 gains r3,r4 -- existing slots
+	// are not touched, even if they're DEGRADED tombstones from a prior
+	// fan-out partial failure). Scale-down (target < current) returns
+	// UNIMPLEMENTED with a pointer to #145 where the drain-and-destroy
+	// semantics get designed.
+	//
+	// target == current is a no-op and returns the current record
+	// unchanged. target <= 0 is invalid.
+	ScaleDeployment(ctx context.Context, in *ScaleDeploymentRequest, opts ...grpc.CallOption) (*ScaleDeploymentResponse, error)
 }
 
 type deploymentServiceClient struct {
@@ -584,6 +597,16 @@ func (c *deploymentServiceClient) TouchDeployment(ctx context.Context, in *Touch
 	return out, nil
 }
 
+func (c *deploymentServiceClient) ScaleDeployment(ctx context.Context, in *ScaleDeploymentRequest, opts ...grpc.CallOption) (*ScaleDeploymentResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ScaleDeploymentResponse)
+	err := c.cc.Invoke(ctx, DeploymentService_ScaleDeployment_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // DeploymentServiceServer is the server API for DeploymentService service.
 // All implementations should embed UnimplementedDeploymentServiceServer
 // for forward compatibility.
@@ -644,6 +667,18 @@ type DeploymentServiceServer interface {
 	// (operator running `iplane deployment describe` to check state)
 	// must not extend the lease, or the reaper is useless.
 	TouchDeployment(context.Context, *TouchDeploymentRequest) (*TouchDeploymentResponse, error)
+	// ScaleDeployment changes the replica count of a running deployment.
+	// v0.2 ch7-beat3.8 (#86) ships scale-up only: target_replicas > the
+	// current count appends new replicas by extending the slot numbering
+	// (deployment with r0,r1,r2 scaled to 5 gains r3,r4 -- existing slots
+	// are not touched, even if they're DEGRADED tombstones from a prior
+	// fan-out partial failure). Scale-down (target < current) returns
+	// UNIMPLEMENTED with a pointer to #145 where the drain-and-destroy
+	// semantics get designed.
+	//
+	// target == current is a no-op and returns the current record
+	// unchanged. target <= 0 is invalid.
+	ScaleDeployment(context.Context, *ScaleDeploymentRequest) (*ScaleDeploymentResponse, error)
 }
 
 // UnimplementedDeploymentServiceServer should be embedded to have
@@ -670,6 +705,9 @@ func (UnimplementedDeploymentServiceServer) WatchDeployment(*WatchDeploymentRequ
 }
 func (UnimplementedDeploymentServiceServer) TouchDeployment(context.Context, *TouchDeploymentRequest) (*TouchDeploymentResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method TouchDeployment not implemented")
+}
+func (UnimplementedDeploymentServiceServer) ScaleDeployment(context.Context, *ScaleDeploymentRequest) (*ScaleDeploymentResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ScaleDeployment not implemented")
 }
 func (UnimplementedDeploymentServiceServer) testEmbeddedByValue() {}
 
@@ -792,6 +830,24 @@ func _DeploymentService_TouchDeployment_Handler(srv interface{}, ctx context.Con
 	return interceptor(ctx, in, info, handler)
 }
 
+func _DeploymentService_ScaleDeployment_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ScaleDeploymentRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DeploymentServiceServer).ScaleDeployment(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: DeploymentService_ScaleDeployment_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DeploymentServiceServer).ScaleDeployment(ctx, req.(*ScaleDeploymentRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // DeploymentService_ServiceDesc is the grpc.ServiceDesc for DeploymentService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -818,6 +874,10 @@ var DeploymentService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "TouchDeployment",
 			Handler:    _DeploymentService_TouchDeployment_Handler,
+		},
+		{
+			MethodName: "ScaleDeployment",
+			Handler:    _DeploymentService_ScaleDeployment_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

@@ -237,6 +237,61 @@ service DeploymentService {
   // (operator running `iplane deployment describe` to check state)
   // must not extend the lease, or the reaper is useless.
   rpc TouchDeployment(TouchDeploymentRequest) returns (TouchDeploymentResponse);
+
+  // ScaleDeployment changes the replica count of a running deployment.
+  // v0.2 ch7-beat3.8 (#86) ships scale-up only: target_replicas > the
+  // current count appends new replicas by extending the slot numbering
+  // (deployment with r0,r1,r2 scaled to 5 gains r3,r4 -- existing slots
+  // are not touched, even if they're DEGRADED tombstones from a prior
+  // fan-out partial failure). Scale-down (target < current) returns
+  // UNIMPLEMENTED with a pointer to #145 where the drain-and-destroy
+  // semantics get designed.
+  //
+  // target == current is a no-op and returns the current record
+  // unchanged. target <= 0 is invalid.
+  rpc ScaleDeployment(ScaleDeploymentRequest) returns (ScaleDeploymentResponse);
+}
+
+message ScaleDeploymentRequest {
+  // Deployment id to scale. Must reference a RUNNING or DEGRADED
+  // deployment; PENDING / STARTING / CONFIGURING / TERMINATING /
+  // TERMINATED / FAILED records are rejected (the scale verb is for
+  // operator capacity-tuning of an already-serving deployment).
+  string id = 1;
+
+  // Target replica count. Must be > 0. v0.2 ch7-beat3.8 supports
+  // target >= current (scale-up + no-op); target < current returns
+  // UNIMPLEMENTED until #145 lands.
+  int32 target_replicas = 2;
+
+  // Wait=true blocks until the new replicas reach a terminal aggregate
+  // state (RUNNING / DEGRADED / FAILED). wait=false returns after the
+  // append starts, before the new replicas finish provisioning -- the
+  // operator polls via DescribeDeployment.
+  bool wait = 3;
+
+  // Dry-run prints what the server would do without actually
+  // provisioning. The response carries the planned new slot ids in
+  // planned_instance_ids but no state-file mutations occur. The CLI
+  // surfaces these to the operator for confirmation before re-running
+  // without --dry-run.
+  bool dry_run = 4;
+}
+
+message ScaleDeploymentResponse {
+  // The deployment record. On wait=true, reflects the terminal
+  // aggregate state after the append. On wait=false, reflects the
+  // pre-append state plus the new slot ids stamped into instance_ids
+  // (engine_endpoints still empty for the new slots).
+  //
+  // On dry_run=true, the record is the current state (not mutated);
+  // the planned slot ids appear in planned_instance_ids below.
+  Deployment deployment = 1;
+
+  // For dry_run=true: the instance_ids the server would synthesize
+  // for the new slots. Empty list when the request is a no-op or
+  // dry_run=false.
+  repeated string planned_instance_ids = 2;
 }
 
 message CreateDeploymentRequest {
