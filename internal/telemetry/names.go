@@ -30,11 +30,17 @@ const MetricQueueWaitSeconds = "iplane.queue.wait.seconds"
 // MetricReaperDestroysTotal -- Counter of deployments destroyed by the idle-TTL reaper, labeled by reason (idle, etc.). Operator-facing signal of leak protection working.
 const MetricReaperDestroysTotal = "iplane.reaper.destroys.total"
 
+// MetricReplicaInFlight -- Synchronous gauge of current in-flight requests per (deploy_id, replica_id). Emitted on dispatch + on response so the value tracks live load. Demo 06's "watch replicas equalize under round-robin" panel reads this (v0.2 ch7-beat3.6,
+const MetricReplicaInFlight = "iplane.replica.in_flight"
+
 // MetricRequestDuration -- Histogram of request duration in seconds. Bucket edges tuned for the bimodal LLM latency distribution (Chapter 6.6.4).
 const MetricRequestDuration = "inference.request.duration"
 
 // MetricRequestsTotal -- Counter of inference requests, labeled by model and status.
 const MetricRequestsTotal = "inference.requests.total"
+
+// MetricRouterDecisionsTotal -- Counter of routing decisions, labeled by deploy_id / replica_id / outcome. Outcomes -- "picked" when a replica was selected, "no_replicas" when all were empty/quarantined (the 503 replica_unavailable path). Complementary to inference.requests.total which counts completed requests with downstream status (v0.2 ch7-beat3.6,
+const MetricRouterDecisionsTotal = "iplane.router.decisions.total"
 
 // MetricTokensGenerated -- Counter of tokens generated. The right load metric for LLM workloads -- correlates with cost in a way request count never can.
 const MetricTokensGenerated = "inference.tokens.generated"
@@ -66,6 +72,7 @@ const (
 	LabelDeployID = "deploy_id"
 	LabelGPUType = "gpu_type"
 	LabelModel = "model"
+	LabelOutcome = "outcome"
 	LabelPriority = "priority"
 	LabelProvider = "provider"
 	LabelReason = "reason"

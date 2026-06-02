@@ -78,6 +78,26 @@ func findHistogram(t *testing.T, rm metricdata.ResourceMetrics, name string) []m
 	return nil
 }
 
+// findGauge is the synchronous-gauge analogue of findCounter,
+// returning observations as Int64 data points. Used for the
+// iplane.replica.in_flight gauge from #88.
+func findGauge(t *testing.T, rm metricdata.ResourceMetrics, name string) []metricdata.DataPoint[int64] {
+	t.Helper()
+	for _, scope := range rm.ScopeMetrics {
+		for _, m := range scope.Metrics {
+			if m.Name != name {
+				continue
+			}
+			g, ok := m.Data.(metricdata.Gauge[int64])
+			if !ok {
+				t.Fatalf("metric %q is not a Gauge[int64]: %T", name, m.Data)
+			}
+			return g.DataPoints
+		}
+	}
+	return nil
+}
+
 // attrValue extracts the string value of attr key from a data point.
 func attrValue(set attribute.Set, key string) string {
 	if v, ok := set.Value(attribute.Key(key)); ok {

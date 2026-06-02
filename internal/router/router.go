@@ -149,6 +149,15 @@ type Router struct {
 	// in v0.2 (the leaked entry is a few bytes and the deployment
 	// id won't be reused). #88+ can layer cleanup if/when it matters.
 	rrCounters sync.Map
+
+	// inFlight tracks per-(deploy, replica) in-flight request count
+	// for the iplane.replica.in_flight gauge (v0.2 ch7-beat3.6, #88).
+	// Keyed by deployID + "/" + replicaID; each value is *atomic.Int64
+	// incremented on dispatch and decremented on response. The gauge
+	// is recorded on both transitions so dashboards see live load.
+	// Like rrCounters, entries leak on DestroyDeployment in v0.2 --
+	// bounded and cheap; cleanup is a follow-up.
+	inFlight sync.Map
 }
 
 // pendingSchedCfg gathers per-option mutations before New
@@ -496,12 +505,30 @@ func (r *Router) handleWithObservability(w http.ResponseWriter, req *http.Reques
 		// scheduler to bring instances online. Retry-After is set
 		// BEFORE writeOpenAIError flushes headers; setting it
 		// after would no-op (response already committed).
+		//
+		// v0.2 ch7-beat3.6 (#88): emit the no_replicas decision so
+		// operators see "router rejected before reaching the engine"
+		// distinct from inference.requests.total's downstream-status
+		// breakdown. replica_id label is empty here since no replica
+		// was chosen.
+		r.recorder.RecordRouterDecision(ctx, dep.GetId(), "", "no_replicas")
 		tcw.Header().Set("Retry-After", "5")
 		writeOpenAIError(tcw, http.StatusServiceUnavailable,
 			fmt.Sprintf("deployment %q has no healthy replicas; retry shortly", dep.GetId()),
 			"replica_unavailable")
 		return
 	}
+	// v0.2 ch7-beat3.6 (#88): emit the picked decision. Paired with
+	// the no_replicas branch above, the counter answers "how often
+	// does the router successfully dispatch?" without needing to
+	// join against engine-status outcomes.
+	r.recorder.RecordRouterDecision(ctx, dep.GetId(), replicaID, "picked")
+	// v0.2 ch7-beat3.6 (#88): bracket the engine-facing portion of
+	// the request with the in-flight gauge transitions. The defer
+	// runs after proxyTo returns -- after streaming completes (or
+	// after the upstream error path unwinds), which is the right
+	// moment to decrement.
+	defer r.trackInFlight(ctx, dep.GetId(), replicaID)()
 	// v0.2 ch7-beat1.7: mark this deployment as actively serving
 	// traffic so the idle-TTL reaper doesn't clean it up while
 	// requests are still flowing. Best-effort -- a touch failure
