@@ -91,10 +91,12 @@ func multiReplicaCreateReq(depID string, replicas int32) *provisionerv1.CreateDe
 			Model:      "Qwen/Qwen2.5-1.5B-Instruct",
 			EnginePort: 8000,
 		},
-		Provider:     "mockfan",
-		Requirements: &provisionerv1.ResourceRequirements{Sku: "mock-sku"},
-		Replicas:     replicas,
-		Wait:         true,
+		ReplicasSpec: []*provisionerv1.ReplicaSpec{{
+			Provider:     "mockfan",
+			Requirements: &provisionerv1.ResourceRequirements{Sku: "mock-sku"},
+			Replicas:     replicas,
+		}},
+		Wait: true,
 	}
 }
 
@@ -253,7 +255,7 @@ func TestFanOut_RejectsInstanceIdWithReplicas(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected InvalidArgument for instance_id + replicas>1")
 	}
-	if !strings.Contains(err.Error(), "instance_id cannot be combined with multi-replica") {
+	if !strings.Contains(err.Error(), "instance_id cannot be combined with replicas_spec") {
 		t.Errorf("error should explain the conflict: %v", err)
 	}
 }

@@ -337,10 +337,13 @@ func runDemo() {
 					EnginePort: defaultEnginePort,
 					Env:        depEnv,
 				},
-				Provider:     *provider,
-				Region:       *region,
-				Requirements: &provisionerv1.ResourceRequirements{Class: provisioners.GPUClassSmall},
-				Wait:         true,
+				ReplicasSpec: []*provisionerv1.ReplicaSpec{{
+					Provider:     *provider,
+					Region:       *region,
+					Requirements: &provisionerv1.ResourceRequirements{Class: provisioners.GPUClassSmall},
+					Replicas:     1,
+				}},
+				Wait: true,
 			}))
 			watchCancel() // stop the watcher as soon as CreateDeployment returns
 			if err != nil {

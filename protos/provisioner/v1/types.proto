@@ -435,25 +435,50 @@ message Deployment {
   repeated ReplicaSpec replica_specs = 27;
 }
 
-// ReplicaSpec carries one replica's per-slot provisioning shape.
-// Used in `replicas_spec` on CreateDeploymentRequest, `add_replicas`
-// on ScaleDeploymentRequest, AND on Deployment.replica_specs (the
-// persisted operator-intent form per slot). Each spec is validated
-// and placed independently; a heterogeneous fan-out is N parallel
-// placements of N different specs.
+// ReplicaSpec describes one *instance group* in the fleet: N units
+// of one (provider, region, requirements) shape. Used in two ways:
+//
+//   - Request form: CreateDeploymentRequest.replicas_spec /
+//     ScaleDeploymentRequest.add_replicas. The operator submits a
+//     compact list -- e.g., [{runpod, small, replicas=3}] for "three
+//     small RunPods" or [{runpod, small, 2}, {vast, medium, 1}] for
+//     "two small RunPods plus one medium Vast." replicas defaults to
+//     1 when omitted (proto3 zero-value semantics; Service normalizes
+//     on receive).
+//
+//   - Persisted form: Deployment.replica_specs is the *expanded*
+//     per-slot view: one entry per actual slot, always replicas=1.
+//     resolveCreateReplicaSpecs expands a request's compressed form
+//     into the per-slot list. The expansion direction is fixed: the
+//     parallel-arrays invariant (instance_ids[i] <-> replica_specs[i])
+//     stays clean, and #93's reconciliation reads one spec per slot
+//     without having to do count arithmetic.
+//
+// The instance-group framing is the architectural seam that #147's
+// cloud-native delegation reads: one ReplicaSpec entry with
+// replicas=N is literally a fleet description that can map directly
+// to AWS ASGs / GCP MIGs / RunPod fleet APIs (when providers ship
+// the corresponding GroupProvisioner capability). Heterogeneous
+// requests stay on iplane-side fan-out because no single cloud's
+// group primitive spans clouds.
 //
 // Lives in types.proto (not service.proto) because Deployment
 // references it -- types.proto can't import service.proto, so the
 // shared message belongs here.
 message ReplicaSpec {
-  // Provider to provision this replica on. Required.
+  // Provider to provision this group's replicas on. Required.
   string provider = 1;
   // Region hint passed to the provider when supported. Optional.
   string region = 2;
-  // Resource requirements for this replica's underlying Instance.
-  // Same three-layer shape as the homogeneous `requirements` field:
+  // Resource requirements shared by all replicas in this group.
+  // Same three-layer shape as the original homogeneous form:
   // class shorthand, numeric floors, or exact sku. Required.
   ResourceRequirements requirements = 3;
+  // Number of replicas in this group. Default 0 means 1 (proto3
+  // zero-value normalization). On the persisted Deployment.replica_specs
+  // view this is always 1 (the request's compressed N expands to
+  // N one-each entries).
+  int32 replicas = 4;
 }
 
 // Priority is the lane an inbound request joins on its way to the
