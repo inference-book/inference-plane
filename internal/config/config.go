@@ -24,27 +24,30 @@ type RouterConfig struct {
 }
 
 // QueueConfig parameterizes the M/M/k waiting room in front of the
-// engine. Beat 2.3 split a single global queue into two priority
-// lanes (interactive | batch); each lane has its own servicers +
-// capacity.
+// engine. Beat 2.4 consolidated the two-pool model into a single
+// scheduler that holds both lanes. Servicers is the global worker
+// count (shared across lanes); Interactive.Capacity and
+// Batch.Capacity are per-lane bounded waiting-room sizes.
 //
-// Backward-compat: the top-level Servicers/Capacity fields keep
-// Beat 2.1's API. When set with no Interactive/Batch sub-blocks,
-// they apply to BOTH lanes (convenience for operators who don't
-// want per-lane tuning). When the Interactive or Batch sub-blocks
-// are populated, those override the top-level values for that lane.
+// Backward-compat: when only the top-level Capacity is set (Beat 2.1
+// shape), both lanes inherit that capacity.
 //
-// All zero values (no Servicers anywhere) is the Beat 1 path:
-// direct forward, no queue.
+// InFlightCap (Beat 2.4) is the per-deployment in-flight bound
+// the scheduler enforces -- mirrors the engine's max-num-seqs so
+// iplane doesn't outpace the engine's batcher.
+//
+// All zero values is the Beat 1 path: direct forward, no scheduler.
 type QueueConfig struct {
 	Servicers   int       `yaml:"servicers"`
 	Capacity    int       `yaml:"capacity"`
+	InFlightCap int       `yaml:"in_flight_cap"`
 	Interactive LaneQueue `yaml:"interactive"`
 	Batch       LaneQueue `yaml:"batch"`
 }
 
-// LaneQueue is the per-priority-lane configuration. Same shape as
-// QueueConfig's top-level fields.
+// LaneQueue is the per-priority-lane configuration. Beat 2.4
+// honors only Capacity (the per-lane bounded waiting room);
+// Servicers is shared across lanes via QueueConfig.Servicers.
 type LaneQueue struct {
 	Servicers int `yaml:"servicers"`
 	Capacity  int `yaml:"capacity"`
@@ -118,6 +121,9 @@ func Validate(cfg *Config) error {
 	}
 	if cfg.Router.Queue.Batch.Servicers > 0 && cfg.Router.Queue.Batch.Capacity <= 0 {
 		return errors.New("config: router.queue.batch.capacity must be > 0 when servicers > 0")
+	}
+	if cfg.Router.Queue.InFlightCap < 0 {
+		return errors.New("config: router.queue.in_flight_cap must be >= 0 (0 = unlimited)")
 	}
 	return nil
 }

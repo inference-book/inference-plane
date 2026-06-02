@@ -13,6 +13,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
+	"github.com/inference-book/inference-plane/internal/scheduler"
 )
 
 func TestPriorityFromHeader(t *testing.T) {
@@ -152,22 +153,26 @@ func TestRouter_PriorityRoutesToCorrectLane(t *testing.T) {
 				},
 			}, nil
 		},
-	}, nil, WithInteractiveQueue(2, 8), WithBatchQueue(2, 8))
+	}, nil /* scheduler installed below */)
 
-	// Replace each pool's handler with one that records which lane
-	// the entry hit. Same swap-the-handler pattern Beat 2.2's
-	// QueuedPath_CapturesTenantOnEntry test uses.
+	// Install a scheduler with a wrapping handler that records
+	// which lane each entry hit. The wrapping handler reads the
+	// entry's priority label, increments the matching counter,
+	// then delegates to the real dispatch.
 	var interactiveHits, batchHits atomic.Int32
-	if r.interactivePool == nil || r.batchPool == nil {
-		t.Fatalf("expected both pools configured")
-	}
-	r.interactivePool = newPool(2, 8, func(e *queueEntry) {
-		interactiveHits.Add(1)
-		r.dispatchEntry(e)
-	})
-	r.batchPool = newPool(2, 8, func(e *queueEntry) {
-		batchHits.Add(1)
-		r.dispatchEntry(e)
+	r.scheduler = scheduler.NewInteractiveFirst(scheduler.InteractiveFirstConfig{
+		Workers:             2,
+		InteractiveCapacity: 8,
+		BatchCapacity:       8,
+		Handler: func(ctx context.Context, e scheduler.Entry) {
+			switch e.Priority() {
+			case scheduler.LaneInteractive:
+				interactiveHits.Add(1)
+			case scheduler.LaneBatch:
+				batchHits.Add(1)
+			}
+			r.dispatchEntry(ctx, e)
+		},
 	})
 	r.Start(context.Background())
 	defer r.Shutdown()
@@ -224,16 +229,22 @@ func TestRouter_PriorityFallbacksToInteractiveDefault(t *testing.T) {
 				},
 			}, nil
 		},
-	}, nil, WithInteractiveQueue(2, 8), WithBatchQueue(2, 8))
+	}, nil /* scheduler installed below */)
 
 	var interactiveHits, batchHits atomic.Int32
-	r.interactivePool = newPool(2, 8, func(e *queueEntry) {
-		interactiveHits.Add(1)
-		r.dispatchEntry(e)
-	})
-	r.batchPool = newPool(2, 8, func(e *queueEntry) {
-		batchHits.Add(1)
-		r.dispatchEntry(e)
+	r.scheduler = scheduler.NewInteractiveFirst(scheduler.InteractiveFirstConfig{
+		Workers:             2,
+		InteractiveCapacity: 8,
+		BatchCapacity:       8,
+		Handler: func(ctx context.Context, e scheduler.Entry) {
+			switch e.Priority() {
+			case scheduler.LaneInteractive:
+				interactiveHits.Add(1)
+			case scheduler.LaneBatch:
+				batchHits.Add(1)
+			}
+			r.dispatchEntry(ctx, e)
+		},
 	})
 	r.Start(context.Background())
 	defer r.Shutdown()
@@ -310,13 +321,13 @@ func TestRouter_LaneDepth_VisibleViaPoolLen(t *testing.T) {
 		}()
 	}
 
-	// Poll until batch.Len reaches >= 1 (some requests queued behind
-	// the in-flight one). The exact count depends on goroutine
-	// scheduling; >=1 is the meaningful assertion.
-	if !waitFor(func() bool { return r.batchPool.Len() >= 1 }) {
+	// Poll until batch lane reaches >= 1 (some requests queued
+	// behind the in-flight one). The exact count depends on
+	// goroutine scheduling; >=1 is the meaningful assertion.
+	if !waitFor(func() bool { return r.scheduler.Len(scheduler.LaneBatch) >= 1 }) {
 		t.Fatalf("batch lane never reached non-zero depth within poll budget")
 	}
-	if got := r.interactivePool.Len(); got != 0 {
+	if got := r.scheduler.Len(scheduler.LaneInteractive); got != 0 {
 		t.Errorf("interactive lane depth=%d, want 0", got)
 	}
 }

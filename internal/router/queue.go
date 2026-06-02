@@ -6,28 +6,28 @@ import (
 	"net/http"
 
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
+	"github.com/inference-book/inference-plane/internal/scheduler"
 	"github.com/inference-book/inference-plane/internal/stores/queue"
-	"github.com/inference-book/inference-plane/internal/stores/queue/inmem"
 )
 
-// queueEntry is the payload pushed onto the M/M/k waiting room when
-// the router is configured with at least one lane. The HTTP handler
-// goroutine resolves the deployment + priority, then submits an
-// entry and blocks on done; the servicer goroutine pops, runs the
-// full instrumented dispatch (`handleWithObservability`), and closes
-// done.
+// queueEntry is the payload submitted to the scheduler when the
+// router has a scheduler configured. The HTTP handler goroutine
+// resolves the deployment + priority, then submits an entry and
+// blocks on done; the scheduler worker pops, runs the full
+// instrumented dispatch (`handleWithObservability`), and closes done.
 //
 // The ResponseWriter and Request are owned exclusively by whichever
 // goroutine holds them at any given moment: handler owns them until
-// Submit, servicer owns them after Pop. The handler's blocking on
-// done keeps the underlying http.Server goroutine alive so the
-// ResponseWriter stays valid for the servicer's writes.
+// Submit, scheduler worker owns them after dispatch starts. The
+// handler's blocking on done keeps the underlying http.Server
+// goroutine alive so the ResponseWriter stays valid for the worker's
+// writes.
 //
 // TenantID + Priority are captured into struct fields (in addition
-// to living on req's context) so Beat 2.4+ scheduler logic that
-// reads the queue without invoking the handler (e.g., shedding
-// decisions, per-tenant/per-lane queue-depth metrics) can read them
-// without unmarshaling the context.
+// to living on req's context) so Beat 2.5+ scheduler logic that
+// inspects the queue without invoking the handler (e.g., shedding
+// decisions, per-tenant/per-lane metrics) can read them without
+// unmarshaling the context.
 type queueEntry struct {
 	w                 http.ResponseWriter
 	req               *http.Request
@@ -38,23 +38,59 @@ type queueEntry struct {
 	Priority          provisionerv1.Priority
 }
 
-// dispatchEntry is the handler the worker pool runs for each item.
-// The pool's root context is intentionally NOT propagated into the
-// proxy call — the per-request context lives on entry.req and is
-// what the proxy + tracer use. Pool ctx would cancel mid-request on
-// daemon shutdown, mangling streaming responses; relying on the
-// request ctx means client-disconnect cancels the upstream and
-// server-shutdown drains in-flight cleanly.
-func (r *Router) dispatchEntry(entry *queueEntry) {
-	defer close(entry.done)
-	r.handleWithObservability(entry.w, entry.req, entry.dep, entry.stripDeployPrefix)
+// DeploymentID satisfies scheduler.Entry. The scheduler's
+// in-flight cap uses this as the bucket key.
+func (e *queueEntry) DeploymentID() string {
+	if e.dep == nil {
+		return ""
+	}
+	return e.dep.GetId()
+}
+
+// PriorityLabel satisfies scheduler.Entry's Priority() string
+// method. Named PriorityLabel here so it doesn't shadow the
+// queueEntry.Priority field (the typed proto enum).
+func (e *queueEntry) priorityLabelString() string {
+	return priorityLabel(e.Priority)
+}
+
+// Priority satisfies scheduler.Entry. Returns the string label
+// (LaneInteractive | LaneBatch).
+func (e *queueEntry) PriorityLabel() string {
+	return e.priorityLabelString()
+}
+
+// schedulerEntry adapts queueEntry to scheduler.Entry. Doing it on
+// the type itself would conflict with queueEntry.Priority (the proto
+// enum field); a thin wrapper that exposes the right method names
+// keeps the field naming clean. Method receivers, not pointer
+// shenanigans, do the adaptation.
+type schedulerEntry struct {
+	*queueEntry
+}
+
+func (s schedulerEntry) Priority() string     { return s.priorityLabelString() }
+func (s schedulerEntry) DeploymentID() string { return s.queueEntry.DeploymentID() }
+
+// dispatchEntry is the scheduler-facing handler. Closes done after
+// the proxy call returns. The scheduler's root context is
+// intentionally NOT propagated into the proxy call -- the per-request
+// context lives on entry.req and is what the proxy + tracer use.
+// Scheduler ctx would cancel mid-request on daemon shutdown, mangling
+// streaming responses; relying on the request ctx means
+// client-disconnect cancels the upstream and server-shutdown drains
+// in-flight cleanly.
+func (r *Router) dispatchEntry(_ context.Context, e scheduler.Entry) {
+	se := e.(schedulerEntry).queueEntry
+	defer close(se.done)
+	r.handleWithObservability(se.w, se.req, se.dep, se.stripDeployPrefix)
 }
 
 // enqueueOrServe is the fork point. It first resolves the effective
 // priority for this request (header > deployment default >
 // INTERACTIVE), stashes it on the request ctx + entry, then routes:
-// if the matching lane pool is configured, Submit + block on done;
-// otherwise dispatch inline (Beat 1 direct-forward path).
+// if a scheduler is configured, Submit + block on done; otherwise
+// dispatch inline (Beat 1 direct-forward path).
 //
 // On ErrQueueFull, returns 503 + Retry-After: 1. The chapter teaches
 // this as the bounded-buffer backpressure shape (M/M/k/N -- arrivals
@@ -68,8 +104,7 @@ func (r *Router) enqueueOrServe(w http.ResponseWriter, req *http.Request, dep *p
 	ctx := context.WithValue(req.Context(), priorityCtxKey{}, priority)
 	req = req.WithContext(ctx)
 
-	pool := r.poolFor(priority)
-	if pool == nil {
+	if r.scheduler == nil {
 		r.handleWithObservability(w, req, dep, stripDeployPrefix)
 		return
 	}
@@ -82,13 +117,14 @@ func (r *Router) enqueueOrServe(w http.ResponseWriter, req *http.Request, dep *p
 		TenantID:          tenantFromContext(req.Context()),
 		Priority:          priority,
 	}
-	if err := pool.Submit(entry); err != nil {
+	if err := r.scheduler.Submit(schedulerEntry{entry}); err != nil {
 		switch {
 		case errors.Is(err, queue.ErrQueueFull):
 			w.Header().Set("Retry-After", "1")
 			writeOpenAIError(w, http.StatusServiceUnavailable,
 				"router queue is full; retry shortly", "queue_full")
-		case errors.Is(err, queue.ErrClosed):
+		case errors.Is(err, queue.ErrClosed),
+			errors.Is(err, scheduler.ErrSchedulerClosed):
 			writeOpenAIError(w, http.StatusServiceUnavailable,
 				"router is shutting down", "router_shutting_down")
 		default:
@@ -98,15 +134,4 @@ func (r *Router) enqueueOrServe(w http.ResponseWriter, req *http.Request, dep *p
 		return
 	}
 	<-entry.done
-}
-
-// newPool constructs the worker pool that satisfies the M/M/k/N
-// shape: a bounded inmem queue (capacity = waiting room) drained by
-// servicers concurrent goroutines. Caller is responsible for Start
-// and Stop lifecycle.
-func newPool(servicers, capacity int, handler func(*queueEntry)) *queue.Pool[*queueEntry] {
-	q := inmem.New[*queueEntry](capacity)
-	return queue.NewPool[*queueEntry](q, servicers, func(_ context.Context, e *queueEntry) {
-		handler(e)
-	})
 }

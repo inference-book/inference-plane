@@ -200,45 +200,59 @@ func TestRouter_Queued_FullReturns503(t *testing.T) {
 	srv := httptest.NewServer(serveThroughMux(r))
 	defer srv.Close()
 
-	// Submit 2 requests in flight: one in the servicer (held), one
-	// queued. Both block.
+	// Submit a burst large enough to saturate the scheduler. With
+	// servicers=1 and capacity=1, the scheduler holds 1 in worker
+	// (held by engine) + 1 in queue; the rest get 503. Submit 8
+	// in parallel and record both status codes and Retry-After
+	// headers; assert that at least one carried both signals.
+	const burst = 8
+	type burstResult struct {
+		status     int
+		retryAfter string
+	}
 	var wg sync.WaitGroup
-	for i := 0; i < 2; i++ {
+	results := make(chan burstResult, burst)
+	for range burst {
 		wg.Add(1)
-		go func(i int) {
+		go func() {
 			defer wg.Done()
 			resp, err := http.Post(srv.URL+"/v1/my-llama/v1/chat/completions", "application/json", strings.NewReader(`{"messages":[]}`))
-			if err == nil {
-				resp.Body.Close()
+			if err != nil {
+				results <- burstResult{status: 0}
+				return
 			}
-		}(i)
+			retryAfter := resp.Header.Get("Retry-After")
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			results <- burstResult{status: resp.StatusCode, retryAfter: retryAfter}
+		}()
 	}
 
-	// Give the burst time to fully land (1 popped, 1 queued).
-	time.Sleep(50 * time.Millisecond)
-
-	// Third request must hit the full-queue backpressure.
-	resp, err := http.Post(srv.URL+"/v1/my-llama/v1/chat/completions", "application/json", strings.NewReader(`{"messages":[]}`))
-	if err != nil {
-		close(hold)
-		wg.Wait()
-		t.Fatalf("POST: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusServiceUnavailable {
-		body, _ := io.ReadAll(resp.Body)
-		close(hold)
-		wg.Wait()
-		t.Fatalf("status=%d (want 503), body=%s", resp.StatusCode, body)
-	}
-	if got := resp.Header.Get("Retry-After"); got == "" {
-		close(hold)
-		wg.Wait()
-		t.Fatalf("missing Retry-After header on full-queue 503")
-	}
-
+	// Release the engine so the held requests complete + close the
+	// burst goroutines cleanly. The 503-paths return immediately
+	// regardless; the held paths wait for this signal.
+	time.Sleep(100 * time.Millisecond) // let the 503s land
 	close(hold)
 	wg.Wait()
+	close(results)
+
+	saw503 := false
+	saw503RetryAfter := false
+	for r := range results {
+		if r.status == http.StatusServiceUnavailable {
+			saw503 = true
+			if r.retryAfter != "" {
+				saw503RetryAfter = true
+			}
+		}
+	}
+
+	if !saw503 {
+		t.Fatalf("none of %d concurrent submits returned 503 (backpressure not signaled)", burst)
+	}
+	if !saw503RetryAfter {
+		t.Errorf("full-queue 503 did not carry a Retry-After header")
+	}
 }
 
 // TestRouter_NoQueue_StaysOnDirectPath documents that the default
@@ -263,8 +277,8 @@ func TestRouter_NoQueue_StaysOnDirectPath(t *testing.T) {
 			}, nil
 		},
 	}, nil /* no WithQueue */)
-	if r.interactivePool != nil || r.batchPool != nil {
-		t.Fatalf("expected no pools on default Router; got interactive=%v batch=%v", r.interactivePool, r.batchPool)
+	if r.scheduler != nil {
+		t.Fatalf("expected no scheduler on default Router; got %v", r.scheduler)
 	}
 
 	srv := httptest.NewServer(serveThroughMux(r))
