@@ -1334,6 +1334,69 @@ func (s *Service) touchDeployment(id string) {
 	})
 }
 
+// Quarantine adds instanceID to the deployment's unhealthy_instance_ids
+// set. The router (#85's pickReplica) skips endpoints whose instance_id
+// is in this set, removing the replica from rotation until Restore is
+// called. v0.2 ch7-beat3.5 (#87).
+//
+// Idempotent: calling on a replica that is already in the set is a
+// no-op. Silently no-ops if the deployment was destroyed concurrently
+// (the health-poll loop snapshots the deployment list and can race
+// against Destroy). Returns nil in that case rather than NotFound --
+// the caller is internal, doesn't bubble up to an operator, and the
+// next tick will not find this deployment to quarantine again.
+//
+// Mutation is performed under the state-file flock via store.Update,
+// matching the rest of the service. The endpoint URL in
+// engine_endpoints[i] is preserved across quarantine; restoration is
+// set-removal, not endpoint-rediscovery.
+func (s *Service) Quarantine(deployID, instanceID string) error {
+	if deployID == "" || instanceID == "" {
+		return nil
+	}
+	return s.store.Update(func(state *State) error {
+		dep, ok := state.Deployments[deployID]
+		if !ok || dep == nil {
+			return nil
+		}
+		for _, id := range dep.UnhealthyInstanceIds {
+			if id == instanceID {
+				return nil
+			}
+		}
+		dep.UnhealthyInstanceIds = append(dep.UnhealthyInstanceIds, instanceID)
+		return nil
+	})
+}
+
+// Restore removes instanceID from the deployment's unhealthy_instance_ids
+// set, returning the replica to the router's rotation. Idempotent: a
+// no-op if the instance is not currently quarantined, and a silent
+// no-op if the deployment has been destroyed.
+//
+// Pairs with Quarantine; called by the health-poll loop after K
+// consecutive successful /health probes on a previously-quarantined
+// replica.
+func (s *Service) Restore(deployID, instanceID string) error {
+	if deployID == "" || instanceID == "" {
+		return nil
+	}
+	return s.store.Update(func(state *State) error {
+		dep, ok := state.Deployments[deployID]
+		if !ok || dep == nil {
+			return nil
+		}
+		ids := dep.UnhealthyInstanceIds
+		for i, id := range ids {
+			if id == instanceID {
+				dep.UnhealthyInstanceIds = append(ids[:i], ids[i+1:]...)
+				return nil
+			}
+		}
+		return nil
+	})
+}
+
 // ListDeployments returns deployments with optional instance_id +
 // state filters.
 func (s *Service) ListDeployments(ctx context.Context, req *provisionerv1.ListDeploymentsRequest) (*provisionerv1.ListDeploymentsResponse, error) {

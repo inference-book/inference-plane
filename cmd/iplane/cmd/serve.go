@@ -27,6 +27,7 @@ import (
 	"github.com/inference-book/inference-plane/gen/go/provisioner/v1/provisionerv1connect"
 	"github.com/inference-book/inference-plane/internal/backends"
 	"github.com/inference-book/inference-plane/internal/config"
+	"github.com/inference-book/inference-plane/internal/healthcheck"
 	"github.com/inference-book/inference-plane/internal/metrics"
 	"github.com/inference-book/inference-plane/internal/provisioners"
 	"github.com/inference-book/inference-plane/internal/provisioners/lifecycle"
@@ -132,6 +133,15 @@ func registerServeDefaults() {
 	viper.SetDefault("router.queue.interactive.capacity", 256)
 	viper.SetDefault("router.queue.batch.servicers", 0)
 	viper.SetDefault("router.queue.batch.capacity", 256)
+
+	// health: per-replica health-poll loop (#87). Defaults match
+	// healthcheck.DefaultConfig() so operators who omit the block
+	// see the same behavior the package documents.
+	viper.SetDefault("health.poll_interval", 10*time.Second)
+	viper.SetDefault("health.failure_threshold", 3)
+	viper.SetDefault("health.success_threshold", 3)
+	viper.SetDefault("health.probe_timeout", 2*time.Second)
+	viper.SetDefault("health.max_concurrent", 32)
 }
 
 // loopbackURL turns the daemon's HTTP bind address into a fully-qualified
@@ -276,6 +286,33 @@ func runServe(parent context.Context) error {
 	reaper := lifecycle.New(provisionerSvc, lifecycle.WithRecorder(recorder), lifecycle.WithLogger(logger))
 	go reaper.Run(reaperCtx)
 	logger.Info("idle-TTL reaper started", "interval", lifecycle.DefaultInterval)
+
+	// v0.2 ch7-beat3.5 (#87): launch the per-replica health-poll
+	// goroutine. Probes each replica's <engine_endpoint>/health on a
+	// tick; K-of-K consecutive failures push the replica into the
+	// deployment's unhealthy_instance_ids set (where the router
+	// skips it). K-of-K consecutive passes on a quarantined replica
+	// restore it. Defaults yield ~30s to first quarantine on a hung
+	// replica.
+	//
+	// Lifecycle: ctx-cancelled on daemon shutdown so the goroutine
+	// exits cleanly before telemetry flush.
+	healthCtx, healthCancel := context.WithCancel(parent)
+	defer healthCancel()
+	healthCfg := healthcheck.Config{
+		PollInterval:     viper.GetDuration("health.poll_interval"),
+		FailureThreshold: viper.GetInt("health.failure_threshold"),
+		SuccessThreshold: viper.GetInt("health.success_threshold"),
+		ProbeTimeout:     viper.GetDuration("health.probe_timeout"),
+		MaxConcurrent:    viper.GetInt("health.max_concurrent"),
+	}
+	healthAdapter := healthcheck.NewServiceAdapter(provisionerSvc)
+	healthRunner := healthcheck.New(healthCfg, healthAdapter, healthAdapter, logger)
+	go healthRunner.Run(healthCtx)
+	logger.Info("health-poll runner started",
+		"poll_interval", healthCfg.PollInterval,
+		"failure_threshold", healthCfg.FailureThreshold,
+		"success_threshold", healthCfg.SuccessThreshold)
 
 	grpcSrv, grpcLis, err := startGRPCServer(be, recorder, costRecorder, logger)
 	if err != nil {

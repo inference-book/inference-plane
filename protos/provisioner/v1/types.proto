@@ -384,6 +384,36 @@ message Deployment {
   // future cache invalidator (#88+) layers on top without
   // restructuring this field.
   repeated string engine_endpoints = 25;
+
+  // unhealthy_instance_ids is the parallel set of Instance IDs that
+  // the health-poll loop has currently marked unhealthy. Position-
+  // independent: the router treats membership in this set as the
+  // signal to skip the corresponding entry in instance_ids /
+  // engine_endpoints. v0.2 ch7-beat3.5 (#87).
+  //
+  // Why a parallel set, not a state flag on each instance: the
+  // router already does an effective_endpoints lookup per request;
+  // adding a small set membership check is O(k) where k = number
+  // of replicas (small). A per-instance state enum would have
+  // required a proto restructure to `repeated Replica` and would
+  // have invalidated the parallel-arrays shape #84/#85 just
+  // landed on.
+  //
+  // Mutation contract: only the health-poll loop writes this field.
+  // It calls Quarantine(deploy, instance) on the deployment service
+  // after K consecutive /health failures, and Restore(deploy,
+  // instance) after K consecutive successes when previously
+  // quarantined. The engine endpoint in engine_endpoints[i] is
+  // preserved across quarantine; restore is set-removal, not
+  // re-discovery.
+  //
+  // Persistence: this field is persisted to the state file so
+  // operator-visible quarantine state survives daemon restart. The
+  // K-of-K streak counters are in-memory only; a restart resets
+  // them, which means a quarantined replica may take an extra K
+  // ticks to restore after the daemon comes back -- acceptable
+  // since restart is rare.
+  repeated string unhealthy_instance_ids = 26;
 }
 
 // Priority is the lane an inbound request joins on its way to the

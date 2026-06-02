@@ -84,6 +84,74 @@ func TestPickReplica_AllEmpty(t *testing.T) {
 	}
 }
 
+// TestPickReplica_SkipsQuarantined: a deployment whose
+// unhealthy_instance_ids set contains one of three replicas keeps
+// routing exclusively to the other two. v0.2 ch7-beat3.5 acceptance
+// per #87 -- the router stops routing to the unhealthy replica even
+// though its engine_endpoints[i] URL is still populated (quarantine
+// is non-destructive).
+func TestPickReplica_SkipsQuarantined(t *testing.T) {
+	r := New(&fakeDeploymentClient{}, nil)
+	dep := &provisionerv1.Deployment{
+		Id:                   "d",
+		InstanceIds:          []string{"a", "b", "c"},
+		EngineEndpoints:      []string{"http://a", "http://b", "http://c"},
+		UnhealthyInstanceIds: []string{"b"},
+	}
+	seen := map[string]int{}
+	for range 60 {
+		id, ep, ok := r.pickReplica(dep)
+		if !ok {
+			t.Fatalf("pickReplica !ok despite 2 healthy replicas")
+		}
+		if ep == "http://b" || id == "b" {
+			t.Fatalf("picked the quarantined replica: id=%q ep=%q", id, ep)
+		}
+		seen[id]++
+	}
+	if seen["b"] != 0 {
+		t.Errorf("quarantined replica b was picked %d times", seen["b"])
+	}
+	if seen["a"] == 0 || seen["c"] == 0 {
+		t.Errorf("healthy replicas a,c should share traffic: got a=%d c=%d", seen["a"], seen["c"])
+	}
+}
+
+// TestPickReplica_AllQuarantined: every replica in the unhealthy
+// set returns ok=false; pairs with the AllEmpty case from #85 --
+// router callers map this to 503 replica_unavailable.
+func TestPickReplica_AllQuarantined(t *testing.T) {
+	r := New(&fakeDeploymentClient{}, nil)
+	dep := &provisionerv1.Deployment{
+		Id:                   "d",
+		InstanceIds:          []string{"a", "b"},
+		EngineEndpoints:      []string{"http://a", "http://b"},
+		UnhealthyInstanceIds: []string{"a", "b"},
+	}
+	if _, _, ok := r.pickReplica(dep); ok {
+		t.Fatalf("pickReplica returned ok=true with every replica quarantined")
+	}
+}
+
+// TestPickReplica_QuarantinedDoesNotSkipEmptyInstanceID: a replica
+// padded with an empty instance_id (test fixture or pre-Beat-3
+// record) cannot be matched by the unhealthy_instance_ids set --
+// there is no key to put it under. The router falls back to
+// "route if endpoint is non-empty," matching the #85 pad-with-
+// empty-IDs invariant.
+func TestPickReplica_QuarantinedDoesNotSkipEmptyInstanceID(t *testing.T) {
+	r := New(&fakeDeploymentClient{}, nil)
+	dep := &provisionerv1.Deployment{
+		Id:                   "d",
+		EngineEndpoints:      []string{"http://only"},
+		UnhealthyInstanceIds: []string{""}, // shouldn't match the empty padded id
+	}
+	id, ep, ok := r.pickReplica(dep)
+	if !ok || ep != "http://only" || id != "" {
+		t.Fatalf("expected router to forward to the unkeyed endpoint, got id=%q ep=%q ok=%v", id, ep, ok)
+	}
+}
+
 // TestPickReplica_SingleInstance_Beat1Compat: a Beat 1+2 deployment
 // shape (singular instance_id + engine_endpoint, no list fields)
 // works unchanged. Beat 1 tests should keep passing through the
