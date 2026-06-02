@@ -292,18 +292,16 @@ func TestRouter_QueuedPath_CapturesTenantOnEntry(t *testing.T) {
 		},
 	}, nil, WithQueue(1, 4))
 
-	// Swap the pool's handler for one that captures the entry's
-	// TenantID before delegating to the real dispatch. This is the
-	// least-invasive way to peek inside the queued path; production
-	// code paths through the real handler.
-	originalHandler := r.pool
-	if originalHandler == nil {
-		t.Fatalf("pool not constructed")
+	// Swap the interactive pool's handler for one that captures the
+	// entry's TenantID before delegating to the real dispatch. With
+	// no X-IPlane-Priority header (and no deployment default), the
+	// effective priority resolves to INTERACTIVE, so all submits
+	// land on the interactive pool. Beat 2.3+'s priority test
+	// covers the batch lane separately.
+	if r.interactivePool == nil {
+		t.Fatalf("interactive pool not constructed")
 	}
-	// Build a fresh pool that delegates to the original handler
-	// after capturing TenantID. The queue used here matches the
-	// pool default size from WithQueue(1, 4).
-	r.pool = newPool(1, 4, func(e *queueEntry) {
+	r.interactivePool = newPool(1, 4, func(e *queueEntry) {
 		v := e.TenantID
 		capturedTenant.Store(&v)
 		r.dispatchEntry(e)

@@ -11,10 +11,11 @@ import (
 )
 
 // queueEntry is the payload pushed onto the M/M/k waiting room when
-// the router is configured with servicers > 0. The HTTP handler
-// goroutine resolves the deployment, then submits an entry and
-// blocks on done; the servicer goroutine pops, runs the full
-// instrumented dispatch (`handleWithObservability`), and closes done.
+// the router is configured with at least one lane. The HTTP handler
+// goroutine resolves the deployment + priority, then submits an
+// entry and blocks on done; the servicer goroutine pops, runs the
+// full instrumented dispatch (`handleWithObservability`), and closes
+// done.
 //
 // The ResponseWriter and Request are owned exclusively by whichever
 // goroutine holds them at any given moment: handler owns them until
@@ -22,10 +23,11 @@ import (
 // done keeps the underlying http.Server goroutine alive so the
 // ResponseWriter stays valid for the servicer's writes.
 //
-// TenantID is captured into a struct field (in addition to living on
-// req's context) so Beat 2.3+ scheduler logic that reads the queue
-// without invoking the handler (e.g., shedding decisions, per-tenant
-// queue-depth metrics) can read it without unmarshaling the context.
+// TenantID + Priority are captured into struct fields (in addition
+// to living on req's context) so Beat 2.4+ scheduler logic that
+// reads the queue without invoking the handler (e.g., shedding
+// decisions, per-tenant/per-lane queue-depth metrics) can read them
+// without unmarshaling the context.
 type queueEntry struct {
 	w                 http.ResponseWriter
 	req               *http.Request
@@ -33,6 +35,7 @@ type queueEntry struct {
 	stripDeployPrefix bool
 	done              chan struct{}
 	TenantID          string
+	Priority          provisionerv1.Priority
 }
 
 // dispatchEntry is the handler the worker pool runs for each item.
@@ -47,16 +50,26 @@ func (r *Router) dispatchEntry(entry *queueEntry) {
 	r.handleWithObservability(entry.w, entry.req, entry.dep, entry.stripDeployPrefix)
 }
 
-// enqueueOrServe is the fork point. When the pool is configured
-// (servicers > 0), the entry is submitted to the queue and the
-// handler goroutine blocks on done. Otherwise the entry is dispatched
-// inline -- the Beat 1 direct-forward path.
+// enqueueOrServe is the fork point. It first resolves the effective
+// priority for this request (header > deployment default >
+// INTERACTIVE), stashes it on the request ctx + entry, then routes:
+// if the matching lane pool is configured, Submit + block on done;
+// otherwise dispatch inline (Beat 1 direct-forward path).
 //
 // On ErrQueueFull, returns 503 + Retry-After: 1. The chapter teaches
 // this as the bounded-buffer backpressure shape (M/M/k/N -- arrivals
 // beyond the buffer are rejected).
 func (r *Router) enqueueOrServe(w http.ResponseWriter, req *http.Request, dep *provisionerv1.Deployment, stripDeployPrefix bool) {
-	if r.pool == nil {
+	priority := effectivePriority(req.Context(), dep)
+	// Re-stash on ctx so handleWithObservability reads the effective
+	// (post-fallback) value, not the bare header value the middleware
+	// stored. The two-write pattern matches withTenant + the inline
+	// effectivePriority resolver.
+	ctx := context.WithValue(req.Context(), priorityCtxKey{}, priority)
+	req = req.WithContext(ctx)
+
+	pool := r.poolFor(priority)
+	if pool == nil {
 		r.handleWithObservability(w, req, dep, stripDeployPrefix)
 		return
 	}
@@ -67,8 +80,9 @@ func (r *Router) enqueueOrServe(w http.ResponseWriter, req *http.Request, dep *p
 		stripDeployPrefix: stripDeployPrefix,
 		done:              make(chan struct{}),
 		TenantID:          tenantFromContext(req.Context()),
+		Priority:          priority,
 	}
-	if err := r.pool.Submit(entry); err != nil {
+	if err := pool.Submit(entry); err != nil {
 		switch {
 		case errors.Is(err, queue.ErrQueueFull):
 			w.Header().Set("Retry-After", "1")

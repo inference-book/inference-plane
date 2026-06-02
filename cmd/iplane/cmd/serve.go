@@ -121,9 +121,15 @@ func registerServeDefaults() {
 	viper.SetDefault("telemetry.sample_ratio", 1.0)
 
 	// router.queue: 0 servicers = Beat 1 behavior (no queue). Capacity
-	// has a default but only kicks in when servicers > 0.
+	// has a default but only kicks in when servicers > 0. Beat 2.3
+	// adds per-lane sub-blocks; default both to 0 so behavior is
+	// "use the top-level setting if any, otherwise no queue."
 	viper.SetDefault("router.queue.servicers", 0)
 	viper.SetDefault("router.queue.capacity", 256)
+	viper.SetDefault("router.queue.interactive.servicers", 0)
+	viper.SetDefault("router.queue.interactive.capacity", 256)
+	viper.SetDefault("router.queue.batch.servicers", 0)
+	viper.SetDefault("router.queue.batch.capacity", 256)
 }
 
 // loopbackURL turns the daemon's HTTP bind address into a fully-qualified
@@ -281,13 +287,20 @@ func runServe(parent context.Context) error {
 	// that client loopback-dials this same HTTP listener.
 	//
 	// router.queue.servicers > 0 activates the v0.2 Beat 2 M/M/k
-	// waiting room; 0 (the default in deploy/config.yaml) keeps
-	// Beat 1's direct-forward path.
+	// waiting room. Beat 2.3 added per-lane sub-blocks so operators
+	// can tune interactive and batch independently; if those are
+	// unset, the top-level (servicers, capacity) applies to both
+	// lanes (Beat 2.1 backward-compat).
 	daemonBaseURL := loopbackURL(cfg.Server.Addr)
+	routerOpts := []router.Option{
+		router.WithQueue(cfg.Router.Queue.Servicers, cfg.Router.Queue.Capacity),
+		router.WithInteractiveQueue(cfg.Router.Queue.Interactive.Servicers, cfg.Router.Queue.Interactive.Capacity),
+		router.WithBatchQueue(cfg.Router.Queue.Batch.Servicers, cfg.Router.Queue.Batch.Capacity),
+	}
 	deploymentRouter := router.New(
 		provisionerv1connect.NewDeploymentServiceClient(http.DefaultClient, daemonBaseURL),
 		recorder,
-		router.WithQueue(cfg.Router.Queue.Servicers, cfg.Router.Queue.Capacity),
+		routerOpts...,
 	)
 	deploymentRouter.Start(parent)
 

@@ -24,13 +24,28 @@ type RouterConfig struct {
 }
 
 // QueueConfig parameterizes the M/M/k waiting room in front of the
-// engine. Servicers is k (number of parallel dispatcher goroutines);
-// Capacity is the bounded waiting-room size N.
+// engine. Beat 2.3 split a single global queue into two priority
+// lanes (interactive | batch); each lane has its own servicers +
+// capacity.
 //
-// Servicers == 0 is the Beat 1 path: no queue, no concurrency cap;
-// requests forward inline. Servicers > 0 activates the queue and
-// caps engine concurrency.
+// Backward-compat: the top-level Servicers/Capacity fields keep
+// Beat 2.1's API. When set with no Interactive/Batch sub-blocks,
+// they apply to BOTH lanes (convenience for operators who don't
+// want per-lane tuning). When the Interactive or Batch sub-blocks
+// are populated, those override the top-level values for that lane.
+//
+// All zero values (no Servicers anywhere) is the Beat 1 path:
+// direct forward, no queue.
 type QueueConfig struct {
+	Servicers   int       `yaml:"servicers"`
+	Capacity    int       `yaml:"capacity"`
+	Interactive LaneQueue `yaml:"interactive"`
+	Batch       LaneQueue `yaml:"batch"`
+}
+
+// LaneQueue is the per-priority-lane configuration. Same shape as
+// QueueConfig's top-level fields.
+type LaneQueue struct {
 	Servicers int `yaml:"servicers"`
 	Capacity  int `yaml:"capacity"`
 }
@@ -90,6 +105,19 @@ func Validate(cfg *Config) error {
 	}
 	if cfg.Router.Queue.Servicers > 0 && cfg.Router.Queue.Capacity <= 0 {
 		return errors.New("config: router.queue.capacity must be > 0 when servicers > 0")
+	}
+	// Per-lane sub-blocks: same invariants as the top-level fields.
+	if cfg.Router.Queue.Interactive.Servicers < 0 {
+		return errors.New("config: router.queue.interactive.servicers must be >= 0")
+	}
+	if cfg.Router.Queue.Interactive.Servicers > 0 && cfg.Router.Queue.Interactive.Capacity <= 0 {
+		return errors.New("config: router.queue.interactive.capacity must be > 0 when servicers > 0")
+	}
+	if cfg.Router.Queue.Batch.Servicers < 0 {
+		return errors.New("config: router.queue.batch.servicers must be >= 0")
+	}
+	if cfg.Router.Queue.Batch.Servicers > 0 && cfg.Router.Queue.Batch.Capacity <= 0 {
+		return errors.New("config: router.queue.batch.capacity must be > 0 when servicers > 0")
 	}
 	return nil
 }

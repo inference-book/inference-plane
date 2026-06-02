@@ -90,6 +90,73 @@ func (InstanceState) EnumDescriptor() ([]byte, []int) {
 	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{0}
 }
 
+// Priority is the lane an inbound request joins on its way to the
+// engine. Two values in v0.2: interactive (low-latency, user-facing)
+// and batch (high-throughput, bulk). The scheduler that decides
+// which lane to drain when lands in v0.2 ch7-beat2.4; this enum
+// just labels the request so the lane structure can be plumbed.
+//
+// Priority is a request-level concept -- the router maps inbound
+// requests onto lanes based on the X-IPlane-Priority header (or a
+// router-level default for unannotated traffic). No Deployment-side
+// proto field carries a priority; the engine itself is
+// priority-blind.
+//
+// Forward-compat: numeric values are stable; appending future
+// priorities (e.g., BACKGROUND, REALTIME) does not break readers
+// pinned to ch07-final.
+type Priority int32
+
+const (
+	Priority_PRIORITY_UNSPECIFIED Priority = 0
+	// User-facing traffic; should not wait behind bulk work.
+	Priority_PRIORITY_INTERACTIVE Priority = 1
+	// Bulk traffic; tolerates higher tail latency in exchange for
+	// throughput.
+	Priority_PRIORITY_BATCH Priority = 2
+)
+
+// Enum value maps for Priority.
+var (
+	Priority_name = map[int32]string{
+		0: "PRIORITY_UNSPECIFIED",
+		1: "PRIORITY_INTERACTIVE",
+		2: "PRIORITY_BATCH",
+	}
+	Priority_value = map[string]int32{
+		"PRIORITY_UNSPECIFIED": 0,
+		"PRIORITY_INTERACTIVE": 1,
+		"PRIORITY_BATCH":       2,
+	}
+)
+
+func (x Priority) Enum() *Priority {
+	p := new(Priority)
+	*p = x
+	return p
+}
+
+func (x Priority) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (Priority) Descriptor() protoreflect.EnumDescriptor {
+	return file_provisioner_v1_types_proto_enumTypes[1].Descriptor()
+}
+
+func (Priority) Type() protoreflect.EnumType {
+	return &file_provisioner_v1_types_proto_enumTypes[1]
+}
+
+func (x Priority) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use Priority.Descriptor instead.
+func (Priority) EnumDescriptor() ([]byte, []int) {
+	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{1}
+}
+
 type DeploymentState int32
 
 const (
@@ -149,11 +216,11 @@ func (x DeploymentState) String() string {
 }
 
 func (DeploymentState) Descriptor() protoreflect.EnumDescriptor {
-	return file_provisioner_v1_types_proto_enumTypes[1].Descriptor()
+	return file_provisioner_v1_types_proto_enumTypes[2].Descriptor()
 }
 
 func (DeploymentState) Type() protoreflect.EnumType {
-	return &file_provisioner_v1_types_proto_enumTypes[1]
+	return &file_provisioner_v1_types_proto_enumTypes[2]
 }
 
 func (x DeploymentState) Number() protoreflect.EnumNumber {
@@ -162,7 +229,7 @@ func (x DeploymentState) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use DeploymentState.Descriptor instead.
 func (DeploymentState) EnumDescriptor() ([]byte, []int) {
-	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{1}
+	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{2}
 }
 
 // Spec is what the operator asks for. Provider-agnostic. Everything in
@@ -1114,7 +1181,7 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"created_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x1a7\n" +
 	"\tTagsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xbb\a\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xd3\a\n" +
 	"\n" +
 	"Deployment\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1f\n" +
@@ -1147,14 +1214,18 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"\x0fno_idle_destroy\x18\x15 \x01(\bR\rnoIdleDestroy\x1a6\n" +
 	"\bEnvEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01*\xc0\x01\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01J\x04\b\x16\x10\x17R\x10default_priority*\xc0\x01\n" +
 	"\rInstanceState\x12\x1e\n" +
 	"\x1aINSTANCE_STATE_UNSPECIFIED\x10\x00\x12\x1a\n" +
 	"\x16INSTANCE_STATE_PENDING\x10\x01\x12\x19\n" +
 	"\x15INSTANCE_STATE_ACTIVE\x10\x02\x12\x1e\n" +
 	"\x1aINSTANCE_STATE_TERMINATING\x10\x03\x12\x1d\n" +
 	"\x19INSTANCE_STATE_TERMINATED\x10\x04\x12\x19\n" +
-	"\x15INSTANCE_STATE_FAILED\x10\x05*\xaf\x02\n" +
+	"\x15INSTANCE_STATE_FAILED\x10\x05*R\n" +
+	"\bPriority\x12\x18\n" +
+	"\x14PRIORITY_UNSPECIFIED\x10\x00\x12\x18\n" +
+	"\x14PRIORITY_INTERACTIVE\x10\x01\x12\x12\n" +
+	"\x0ePRIORITY_BATCH\x10\x02*\xaf\x02\n" +
 	"\x0fDeploymentState\x12 \n" +
 	"\x1cDEPLOYMENT_STATE_UNSPECIFIED\x10\x00\x12\x1c\n" +
 	"\x18DEPLOYMENT_STATE_PENDING\x10\x01\x12\x1d\n" +
@@ -1180,42 +1251,43 @@ func file_provisioner_v1_types_proto_rawDescGZIP() []byte {
 	return file_provisioner_v1_types_proto_rawDescData
 }
 
-var file_provisioner_v1_types_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
+var file_provisioner_v1_types_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
 var file_provisioner_v1_types_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
 var file_provisioner_v1_types_proto_goTypes = []any{
 	(InstanceState)(0),            // 0: provisioner.v1.InstanceState
-	(DeploymentState)(0),          // 1: provisioner.v1.DeploymentState
-	(*Spec)(nil),                  // 2: provisioner.v1.Spec
-	(*ResourceRequirements)(nil),  // 3: provisioner.v1.ResourceRequirements
-	(*GpuInfo)(nil),               // 4: provisioner.v1.GpuInfo
-	(*SshTarget)(nil),             // 5: provisioner.v1.SshTarget
-	(*Instance)(nil),              // 6: provisioner.v1.Instance
-	(*InstanceRef)(nil),           // 7: provisioner.v1.InstanceRef
-	(*Deployment)(nil),            // 8: provisioner.v1.Deployment
-	nil,                           // 9: provisioner.v1.Spec.TagsEntry
-	nil,                           // 10: provisioner.v1.InstanceRef.TagsEntry
-	nil,                           // 11: provisioner.v1.Deployment.EnvEntry
-	(*timestamppb.Timestamp)(nil), // 12: google.protobuf.Timestamp
+	(Priority)(0),                 // 1: provisioner.v1.Priority
+	(DeploymentState)(0),          // 2: provisioner.v1.DeploymentState
+	(*Spec)(nil),                  // 3: provisioner.v1.Spec
+	(*ResourceRequirements)(nil),  // 4: provisioner.v1.ResourceRequirements
+	(*GpuInfo)(nil),               // 5: provisioner.v1.GpuInfo
+	(*SshTarget)(nil),             // 6: provisioner.v1.SshTarget
+	(*Instance)(nil),              // 7: provisioner.v1.Instance
+	(*InstanceRef)(nil),           // 8: provisioner.v1.InstanceRef
+	(*Deployment)(nil),            // 9: provisioner.v1.Deployment
+	nil,                           // 10: provisioner.v1.Spec.TagsEntry
+	nil,                           // 11: provisioner.v1.InstanceRef.TagsEntry
+	nil,                           // 12: provisioner.v1.Deployment.EnvEntry
+	(*timestamppb.Timestamp)(nil), // 13: google.protobuf.Timestamp
 }
 var file_provisioner_v1_types_proto_depIdxs = []int32{
-	3,  // 0: provisioner.v1.Spec.requirements:type_name -> provisioner.v1.ResourceRequirements
-	9,  // 1: provisioner.v1.Spec.tags:type_name -> provisioner.v1.Spec.TagsEntry
-	2,  // 2: provisioner.v1.Instance.spec:type_name -> provisioner.v1.Spec
-	4,  // 3: provisioner.v1.Instance.gpu:type_name -> provisioner.v1.GpuInfo
+	4,  // 0: provisioner.v1.Spec.requirements:type_name -> provisioner.v1.ResourceRequirements
+	10, // 1: provisioner.v1.Spec.tags:type_name -> provisioner.v1.Spec.TagsEntry
+	3,  // 2: provisioner.v1.Instance.spec:type_name -> provisioner.v1.Spec
+	5,  // 3: provisioner.v1.Instance.gpu:type_name -> provisioner.v1.GpuInfo
 	0,  // 4: provisioner.v1.Instance.state:type_name -> provisioner.v1.InstanceState
-	12, // 5: provisioner.v1.Instance.created_at:type_name -> google.protobuf.Timestamp
-	12, // 6: provisioner.v1.Instance.activated_at:type_name -> google.protobuf.Timestamp
-	12, // 7: provisioner.v1.Instance.terminated_at:type_name -> google.protobuf.Timestamp
-	5,  // 8: provisioner.v1.Instance.ssh:type_name -> provisioner.v1.SshTarget
-	10, // 9: provisioner.v1.InstanceRef.tags:type_name -> provisioner.v1.InstanceRef.TagsEntry
-	12, // 10: provisioner.v1.InstanceRef.created_at:type_name -> google.protobuf.Timestamp
-	11, // 11: provisioner.v1.Deployment.env:type_name -> provisioner.v1.Deployment.EnvEntry
-	1,  // 12: provisioner.v1.Deployment.state:type_name -> provisioner.v1.DeploymentState
-	12, // 13: provisioner.v1.Deployment.created_at:type_name -> google.protobuf.Timestamp
-	12, // 14: provisioner.v1.Deployment.started_at:type_name -> google.protobuf.Timestamp
-	12, // 15: provisioner.v1.Deployment.ready_at:type_name -> google.protobuf.Timestamp
-	12, // 16: provisioner.v1.Deployment.terminated_at:type_name -> google.protobuf.Timestamp
-	12, // 17: provisioner.v1.Deployment.last_activity_at:type_name -> google.protobuf.Timestamp
+	13, // 5: provisioner.v1.Instance.created_at:type_name -> google.protobuf.Timestamp
+	13, // 6: provisioner.v1.Instance.activated_at:type_name -> google.protobuf.Timestamp
+	13, // 7: provisioner.v1.Instance.terminated_at:type_name -> google.protobuf.Timestamp
+	6,  // 8: provisioner.v1.Instance.ssh:type_name -> provisioner.v1.SshTarget
+	11, // 9: provisioner.v1.InstanceRef.tags:type_name -> provisioner.v1.InstanceRef.TagsEntry
+	13, // 10: provisioner.v1.InstanceRef.created_at:type_name -> google.protobuf.Timestamp
+	12, // 11: provisioner.v1.Deployment.env:type_name -> provisioner.v1.Deployment.EnvEntry
+	2,  // 12: provisioner.v1.Deployment.state:type_name -> provisioner.v1.DeploymentState
+	13, // 13: provisioner.v1.Deployment.created_at:type_name -> google.protobuf.Timestamp
+	13, // 14: provisioner.v1.Deployment.started_at:type_name -> google.protobuf.Timestamp
+	13, // 15: provisioner.v1.Deployment.ready_at:type_name -> google.protobuf.Timestamp
+	13, // 16: provisioner.v1.Deployment.terminated_at:type_name -> google.protobuf.Timestamp
+	13, // 17: provisioner.v1.Deployment.last_activity_at:type_name -> google.protobuf.Timestamp
 	18, // [18:18] is the sub-list for method output_type
 	18, // [18:18] is the sub-list for method input_type
 	18, // [18:18] is the sub-list for extension type_name
@@ -1233,7 +1305,7 @@ func file_provisioner_v1_types_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_provisioner_v1_types_proto_rawDesc), len(file_provisioner_v1_types_proto_rawDesc)),
-			NumEnums:      2,
+			NumEnums:      3,
 			NumMessages:   10,
 			NumExtensions: 0,
 			NumServices:   0,

@@ -136,13 +136,13 @@ func runDeploymentDeploy(cmd *cobra.Command, args []string) error {
 	engineEnv := mergeOtelEnv(deployEnv, deployOtelEndpoint, deployOtelHeaders)
 
 	dep := &provisionerv1.Deployment{
-		Id:         id,
-		InstanceId: deployInstanceID,
-		Image:      deployImage,
-		Model:      deployModel,
-		EnginePort: deployEnginePort,
-		EngineArgs: deployEngineArgs,
-		Env:        engineEnv,
+		Id:             id,
+		InstanceId:     deployInstanceID,
+		Image:          deployImage,
+		Model:          deployModel,
+		EnginePort:     deployEnginePort,
+		EngineArgs:     deployEngineArgs,
+		Env:            engineEnv,
 		DebugShell:     deployDebugShell,
 		IdleTtlSeconds: int32(deployIdleTTL.Seconds()),
 		NoIdleDestroy:  deployNoIdleDestroy,

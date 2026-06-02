@@ -263,8 +263,8 @@ func TestRouter_NoQueue_StaysOnDirectPath(t *testing.T) {
 			}, nil
 		},
 	}, nil /* no WithQueue */)
-	if r.pool != nil {
-		t.Fatalf("expected no pool on default Router; got %v", r.pool)
+	if r.interactivePool != nil || r.batchPool != nil {
+		t.Fatalf("expected no pools on default Router; got interactive=%v batch=%v", r.interactivePool, r.batchPool)
 	}
 
 	srv := httptest.NewServer(serveThroughMux(r))

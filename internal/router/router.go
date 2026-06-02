@@ -70,6 +70,7 @@ const (
 	AttrRouterUpstream = "iplane.router.upstream"  // engine endpoint URL
 	AttrRouterStatus   = "iplane.router.status"    // status label string (success | engine_error | ...)
 	AttrRouterTenantID = "iplane.router.tenant_id" // operator-asserted tenant; "default" when unannotated
+	AttrRouterPriority = "iplane.router.priority"  // effective lane: "interactive" | "batch"
 )
 
 // Span name for the router's request-dispatch span. Single name across
@@ -115,18 +116,24 @@ type Router struct {
 	tracer     trace.Tracer
 	propagator propagation.TextMapPropagator
 
-	// pool is the v0.2 Beat 2 M/M/k waiting room. When nil (the
-	// Beat 1 default), incoming requests forward inline -- the
-	// existing direct-dispatch behavior. When non-nil, requests
-	// submit to the pool's bounded queue; pool servicers Pop and
-	// run handleWithObservability. ErrQueueFull surfaces as a
-	// 503 + Retry-After at the route level.
+	// interactivePool and batchPool are the v0.2 Beat 2.3 priority
+	// lanes. Each is an independent M/M/k waiting room with its own
+	// servicers and capacity. enqueueOrServe routes by the resolved
+	// effective priority of the request.
 	//
-	// Construction lives behind WithQueue(servicers, capacity).
-	// servicers <= 0 (or the option not supplied) skips Pool
-	// construction; that's the Beat 1 path and the recommended
-	// default for v0.2 release/v0.2 snapshots until demo 05 lands.
-	pool *queue.Pool[*queueEntry]
+	// Either nil (lane not configured) means "skip the queue for
+	// this lane -- forward inline." A request whose effective
+	// priority targets an unconfigured lane falls through to the
+	// direct path (Beat 1 behavior). Beat 1's WithQueue option
+	// applies the same (servicers, capacity) to both lanes; Beat 2.3
+	// adds WithInteractiveQueue + WithBatchQueue for asymmetric
+	// tuning.
+	//
+	// The scheduler that prefers interactive over batch on shared
+	// engine concurrency lands in Beat 2.4 (#78). This PR just
+	// classifies and lanes; both pools run in parallel.
+	interactivePool *queue.Pool[*queueEntry]
+	batchPool       *queue.Pool[*queueEntry]
 }
 
 // Option is the functional-option type for New. Existing callers
@@ -134,28 +141,54 @@ type Router struct {
 // via WithQueue.
 type Option func(*Router)
 
-// WithQueue activates the v0.2 Beat 2 M/M/k waiting room in front of
-// the engine. servicers is k (the number of parallel dispatcher
-// goroutines); capacity is the bounded waiting room size N.
+// WithQueue activates the M/M/k waiting room in front of the engine
+// using the same (servicers, capacity) on BOTH priority lanes. This
+// is the convenience option for operators who don't want per-lane
+// tuning -- one knob, both lanes queue identically. The Beat 2.4
+// scheduler (when it lands) is the one that decides which lane to
+// drain when both have work.
+//
+// For asymmetric tuning (e.g., more servicers on interactive than
+// batch), use WithInteractiveQueue + WithBatchQueue instead.
 //
 // Semantics:
 //
-//   - servicers <= 0 -> no-op; router stays on the direct-forward
-//     path (Beat 1 behavior).
-//   - capacity <= 0 -> no-op; an unbounded waiting room is not
-//     supported in v0.2 (the whole point is bounded backpressure).
-//   - servicers > 0 AND capacity > 0 -> Pool is constructed but NOT
+//   - servicers <= 0 OR capacity <= 0 -> no-op; lanes stay on the
+//     direct-forward path (Beat 1 behavior).
+//   - both positive -> both lane pools are constructed but NOT
 //     started. Caller must invoke Router.Start(ctx) to spawn the
 //     servicer goroutines.
-//
-// The (construct, then start) split lets the daemon register the
-// router with its mux before the servicers begin processing.
 func WithQueue(servicers, capacity int) Option {
 	return func(r *Router) {
 		if servicers <= 0 || capacity <= 0 {
 			return
 		}
-		r.pool = newPool(servicers, capacity, r.dispatchEntry)
+		r.interactivePool = newPool(servicers, capacity, r.dispatchEntry)
+		r.batchPool = newPool(servicers, capacity, r.dispatchEntry)
+	}
+}
+
+// WithInteractiveQueue configures ONLY the interactive lane.
+// Requests with effective priority INTERACTIVE will submit through
+// this pool; BATCH requests fall through to whatever the batch
+// option configures (or direct-forward if not configured).
+func WithInteractiveQueue(servicers, capacity int) Option {
+	return func(r *Router) {
+		if servicers <= 0 || capacity <= 0 {
+			return
+		}
+		r.interactivePool = newPool(servicers, capacity, r.dispatchEntry)
+	}
+}
+
+// WithBatchQueue configures ONLY the batch lane. Symmetric to
+// WithInteractiveQueue.
+func WithBatchQueue(servicers, capacity int) Option {
+	return func(r *Router) {
+		if servicers <= 0 || capacity <= 0 {
+			return
+		}
+		r.batchPool = newPool(servicers, capacity, r.dispatchEntry)
 	}
 }
 
@@ -188,28 +221,44 @@ func New(client provisionerv1connect.DeploymentServiceClient, recorder *metrics.
 	return r
 }
 
-// Start activates the queue path's servicer goroutines if WithQueue
-// configured one. parent is the daemon's lifetime context — when it
-// cancels, servicers drain in-flight requests and exit.
+// Start activates the queue path's servicer goroutines for every
+// configured lane. parent is the daemon's lifetime context -- when
+// it cancels, servicers drain in-flight requests and exit.
 //
-// Safe to call when no pool is configured (Beat 1 path) — Start
+// Safe to call when no lane is configured (Beat 1 path) -- Start
 // becomes a no-op. Idempotency / re-start guards live on Pool.Start.
 func (r *Router) Start(parent context.Context) {
-	if r.pool != nil {
-		r.pool.Start(parent)
+	if r.interactivePool != nil {
+		r.interactivePool.Start(parent)
+	}
+	if r.batchPool != nil {
+		r.batchPool.Start(parent)
 	}
 }
 
-// Shutdown stops the pool's servicer goroutines and waits for them
-// to drain in-flight items. After Shutdown, the router rejects new
-// queued requests with ErrClosed (mapped to 503 + "router shutting
-// down" in the queue submit path).
+// Shutdown stops every configured lane pool and waits for in-flight
+// items to drain. After Shutdown, the router rejects new queued
+// requests with ErrClosed (mapped to 503 + "router shutting down"
+// in the queue submit path).
 //
-// Safe to call when no pool is configured — Shutdown is a no-op.
+// Safe to call when no lane is configured -- Shutdown is a no-op.
 func (r *Router) Shutdown() {
-	if r.pool != nil {
-		r.pool.Stop()
+	if r.interactivePool != nil {
+		r.interactivePool.Stop()
 	}
+	if r.batchPool != nil {
+		r.batchPool.Stop()
+	}
+}
+
+// poolFor returns the lane pool a request of the given priority
+// should submit to. Returns nil when the lane is unconfigured;
+// callers fall back to the direct-forward path.
+func (r *Router) poolFor(p provisionerv1.Priority) *queue.Pool[*queueEntry] {
+	if p == provisionerv1.Priority_PRIORITY_BATCH {
+		return r.batchPool
+	}
+	return r.interactivePool
 }
 
 // serveDeployID handles the explicit-deployment URL family:
@@ -280,12 +329,13 @@ func (r *Router) handleWithObservability(w http.ResponseWriter, req *http.Reques
 	if !stripDeployPrefix {
 		routeMatch = routeMatchFlat
 	}
-	// v0.2 Beat 2.2: tenant resolved by withTenant middleware before
-	// the request reaches here. Read it once; thread it into the span
-	// attribute and metric labels. Tenant intentionally does NOT
-	// flow into OTel baggage -- engines stay tenant-agnostic;
-	// correlation across the engine boundary uses trace_id alone.
+	// v0.2 Beat 2.2: tenant resolved by withTenant middleware.
+	// v0.2 Beat 2.3: priority resolved in enqueueOrServe AFTER
+	// deployment lookup (header > deployment default > INTERACTIVE)
+	// and re-stashed on ctx. Both flow into the span attribute set
+	// and metric labels; neither crosses to the engine.
 	tenantID := tenantFromContext(req.Context())
+	priorityLabelStr := priorityLabel(effectivePriorityFromCtx(req.Context()))
 	ctx, span := r.tracer.Start(req.Context(), spanNameDispatch,
 		trace.WithSpanKind(trace.SpanKindServer),
 		trace.WithAttributes(
@@ -294,6 +344,7 @@ func (r *Router) handleWithObservability(w http.ResponseWriter, req *http.Reques
 			attribute.String(AttrRouterModel, dep.GetModel()),
 			attribute.String(AttrRouterUpstream, dep.GetEngineEndpoint()),
 			attribute.String(AttrRouterTenantID, tenantID),
+			attribute.String(AttrRouterPriority, priorityLabelStr),
 		),
 	)
 	defer span.End()
@@ -313,11 +364,11 @@ func (r *Router) handleWithObservability(w http.ResponseWriter, req *http.Reques
 		}
 
 		r.recorder.RecordRouterRequest(ctx,
-			dep.GetId(), dep.GetModel(), tenantID, statusLabel,
+			dep.GetId(), dep.GetModel(), tenantID, priorityLabelStr, statusLabel,
 			time.Since(start).Seconds())
 		if tokens := tcw.CompletionTokens(); tokens > 0 {
 			r.recorder.RecordRouterTokens(ctx,
-				dep.GetId(), dep.GetModel(), tenantID, tokens)
+				dep.GetId(), dep.GetModel(), tenantID, priorityLabelStr, tokens)
 		}
 	}()
 	if !r.forwardable(tcw, dep) {
@@ -371,13 +422,16 @@ func (r *Router) touchActivity(ctx context.Context, deployID string) {
 // {deploy_id} into PathValue; handlers do not parse the path
 // themselves.
 func (r *Router) Handle() map[string]http.Handler {
-	// v0.2 Beat 2.2: every route is wrapped in withTenant so the
-	// tenant ID is on the request ctx before either dispatch path
-	// (direct or queued) runs. The middleware is centralized here
-	// rather than at each serve* entry point so a new URL family
-	// added later automatically inherits tenant resolution.
-	deployIDHandler := withTenant(http.HandlerFunc(r.serveDeployID))
-	flatHandler := withTenant(http.HandlerFunc(r.serveFlat))
+	// v0.2 Beat 2.2: withTenant resolves operator-asserted tenant.
+	// v0.2 Beat 2.3: withPriority decodes the priority header.
+	// Both middlewares run BEFORE deployment lookup; the effective
+	// priority (header > deployment default > INTERACTIVE) is
+	// re-resolved in enqueueOrServe once the deployment is known.
+	middleware := func(h http.HandlerFunc) http.Handler {
+		return withTenant(withPriority(h))
+	}
+	deployIDHandler := middleware(r.serveDeployID)
+	flatHandler := middleware(r.serveFlat)
 	return map[string]http.Handler{
 		"POST /v1/{deploy_id}/v1/chat/completions": deployIDHandler,
 		"POST /v1/{deploy_id}/v1/completions":      deployIDHandler,
@@ -491,6 +545,9 @@ func (r *Router) proxyTo(w http.ResponseWriter, req *http.Request, dep *provisio
 			// goes through OTel trace_id (injected below), not via
 			// replicating tenant on every layer.
 			pr.Out.Header.Del(TenantHeader)
+			// v0.2 ch7-beat2.3: same rule for priority. The router
+			// uses it to pick a lane; the engine has no use for it.
+			pr.Out.Header.Del(PriorityHeader)
 			// v0.2 ch7-beat1.6: inject W3C traceparent + baggage on
 			// the outbound request. Engines running with OTel SDK
 			// configured (Ch 6 phase 3 plumbs OTEL_EXPORTER_OTLP_*

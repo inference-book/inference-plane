@@ -319,6 +319,41 @@ message Deployment {
   // deployment across Ch 7's demos is pinned at the start of the
   // session so afk pauses do not tear it down.
   bool no_idle_destroy = 21;
+
+  // Field 22 was Deployment.default_priority (Priority enum) in an
+  // earlier draft of v0.2 ch7-beat2.3. Removed before merge: priority
+  // is a property of the request stream, not the deployment. The
+  // engine inside the deployment is priority-blind (continuous
+  // batching on whatever it gets); the router is the SOLE priority
+  // decision point. Unannotated requests fall back to a router-level
+  // default (INTERACTIVE), not a per-deployment default. Reserved
+  // here so readers of the wire don't repurpose the slot.
+  reserved 22;
+  reserved "default_priority";
+}
+
+// Priority is the lane an inbound request joins on its way to the
+// engine. Two values in v0.2: interactive (low-latency, user-facing)
+// and batch (high-throughput, bulk). The scheduler that decides
+// which lane to drain when lands in v0.2 ch7-beat2.4; this enum
+// just labels the request so the lane structure can be plumbed.
+//
+// Priority is a request-level concept -- the router maps inbound
+// requests onto lanes based on the X-IPlane-Priority header (or a
+// router-level default for unannotated traffic). No Deployment-side
+// proto field carries a priority; the engine itself is
+// priority-blind.
+//
+// Forward-compat: numeric values are stable; appending future
+// priorities (e.g., BACKGROUND, REALTIME) does not break readers
+// pinned to ch07-final.
+enum Priority {
+  PRIORITY_UNSPECIFIED = 0;
+  // User-facing traffic; should not wait behind bulk work.
+  PRIORITY_INTERACTIVE = 1;
+  // Bulk traffic; tolerates higher tail latency in exchange for
+  // throughput.
+  PRIORITY_BATCH = 2;
 }
 
 enum DeploymentState {
