@@ -71,6 +71,9 @@ const (
 	// DeploymentServiceTouchDeploymentProcedure is the fully-qualified name of the DeploymentService's
 	// TouchDeployment RPC.
 	DeploymentServiceTouchDeploymentProcedure = "/provisioner.v1.DeploymentService/TouchDeployment"
+	// DeploymentServiceScaleDeploymentProcedure is the fully-qualified name of the DeploymentService's
+	// ScaleDeployment RPC.
+	DeploymentServiceScaleDeploymentProcedure = "/provisioner.v1.DeploymentService/ScaleDeployment"
 )
 
 // ProvisionerServiceClient is a client for the provisioner.v1.ProvisionerService service.
@@ -407,6 +410,18 @@ type DeploymentServiceClient interface {
 	// (operator running `iplane deployment describe` to check state)
 	// must not extend the lease, or the reaper is useless.
 	TouchDeployment(context.Context, *connect.Request[v1.TouchDeploymentRequest]) (*connect.Response[v1.TouchDeploymentResponse], error)
+	// ScaleDeployment changes the replica count of a running deployment.
+	// v0.2 ch7-beat3.8 (#86) ships scale-up only: target_replicas > the
+	// current count appends new replicas by extending the slot numbering
+	// (deployment with r0,r1,r2 scaled to 5 gains r3,r4 -- existing slots
+	// are not touched, even if they're DEGRADED tombstones from a prior
+	// fan-out partial failure). Scale-down (target < current) returns
+	// UNIMPLEMENTED with a pointer to #145 where the drain-and-destroy
+	// semantics get designed.
+	//
+	// target == current is a no-op and returns the current record
+	// unchanged. target <= 0 is invalid.
+	ScaleDeployment(context.Context, *connect.Request[v1.ScaleDeploymentRequest]) (*connect.Response[v1.ScaleDeploymentResponse], error)
 }
 
 // NewDeploymentServiceClient constructs a client for the provisioner.v1.DeploymentService service.
@@ -456,6 +471,12 @@ func NewDeploymentServiceClient(httpClient connect.HTTPClient, baseURL string, o
 			connect.WithSchema(deploymentServiceMethods.ByName("TouchDeployment")),
 			connect.WithClientOptions(opts...),
 		),
+		scaleDeployment: connect.NewClient[v1.ScaleDeploymentRequest, v1.ScaleDeploymentResponse](
+			httpClient,
+			baseURL+DeploymentServiceScaleDeploymentProcedure,
+			connect.WithSchema(deploymentServiceMethods.ByName("ScaleDeployment")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -467,6 +488,7 @@ type deploymentServiceClient struct {
 	destroyDeployment  *connect.Client[v1.DestroyDeploymentRequest, v1.DestroyDeploymentResponse]
 	watchDeployment    *connect.Client[v1.WatchDeploymentRequest, v1.DeploymentStateChangedEvent]
 	touchDeployment    *connect.Client[v1.TouchDeploymentRequest, v1.TouchDeploymentResponse]
+	scaleDeployment    *connect.Client[v1.ScaleDeploymentRequest, v1.ScaleDeploymentResponse]
 }
 
 // CreateDeployment calls provisioner.v1.DeploymentService.CreateDeployment.
@@ -497,6 +519,11 @@ func (c *deploymentServiceClient) WatchDeployment(ctx context.Context, req *conn
 // TouchDeployment calls provisioner.v1.DeploymentService.TouchDeployment.
 func (c *deploymentServiceClient) TouchDeployment(ctx context.Context, req *connect.Request[v1.TouchDeploymentRequest]) (*connect.Response[v1.TouchDeploymentResponse], error) {
 	return c.touchDeployment.CallUnary(ctx, req)
+}
+
+// ScaleDeployment calls provisioner.v1.DeploymentService.ScaleDeployment.
+func (c *deploymentServiceClient) ScaleDeployment(ctx context.Context, req *connect.Request[v1.ScaleDeploymentRequest]) (*connect.Response[v1.ScaleDeploymentResponse], error) {
+	return c.scaleDeployment.CallUnary(ctx, req)
 }
 
 // DeploymentServiceHandler is an implementation of the provisioner.v1.DeploymentService service.
@@ -543,6 +570,18 @@ type DeploymentServiceHandler interface {
 	// (operator running `iplane deployment describe` to check state)
 	// must not extend the lease, or the reaper is useless.
 	TouchDeployment(context.Context, *connect.Request[v1.TouchDeploymentRequest]) (*connect.Response[v1.TouchDeploymentResponse], error)
+	// ScaleDeployment changes the replica count of a running deployment.
+	// v0.2 ch7-beat3.8 (#86) ships scale-up only: target_replicas > the
+	// current count appends new replicas by extending the slot numbering
+	// (deployment with r0,r1,r2 scaled to 5 gains r3,r4 -- existing slots
+	// are not touched, even if they're DEGRADED tombstones from a prior
+	// fan-out partial failure). Scale-down (target < current) returns
+	// UNIMPLEMENTED with a pointer to #145 where the drain-and-destroy
+	// semantics get designed.
+	//
+	// target == current is a no-op and returns the current record
+	// unchanged. target <= 0 is invalid.
+	ScaleDeployment(context.Context, *connect.Request[v1.ScaleDeploymentRequest]) (*connect.Response[v1.ScaleDeploymentResponse], error)
 }
 
 // NewDeploymentServiceHandler builds an HTTP handler from the service implementation. It returns
@@ -588,6 +627,12 @@ func NewDeploymentServiceHandler(svc DeploymentServiceHandler, opts ...connect.H
 		connect.WithSchema(deploymentServiceMethods.ByName("TouchDeployment")),
 		connect.WithHandlerOptions(opts...),
 	)
+	deploymentServiceScaleDeploymentHandler := connect.NewUnaryHandler(
+		DeploymentServiceScaleDeploymentProcedure,
+		svc.ScaleDeployment,
+		connect.WithSchema(deploymentServiceMethods.ByName("ScaleDeployment")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/provisioner.v1.DeploymentService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case DeploymentServiceCreateDeploymentProcedure:
@@ -602,6 +647,8 @@ func NewDeploymentServiceHandler(svc DeploymentServiceHandler, opts ...connect.H
 			deploymentServiceWatchDeploymentHandler.ServeHTTP(w, r)
 		case DeploymentServiceTouchDeploymentProcedure:
 			deploymentServiceTouchDeploymentHandler.ServeHTTP(w, r)
+		case DeploymentServiceScaleDeploymentProcedure:
+			deploymentServiceScaleDeploymentHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -633,4 +680,8 @@ func (UnimplementedDeploymentServiceHandler) WatchDeployment(context.Context, *c
 
 func (UnimplementedDeploymentServiceHandler) TouchDeployment(context.Context, *connect.Request[v1.TouchDeploymentRequest]) (*connect.Response[v1.TouchDeploymentResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("provisioner.v1.DeploymentService.TouchDeployment is not implemented"))
+}
+
+func (UnimplementedDeploymentServiceHandler) ScaleDeployment(context.Context, *connect.Request[v1.ScaleDeploymentRequest]) (*connect.Response[v1.ScaleDeploymentResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("provisioner.v1.DeploymentService.ScaleDeployment is not implemented"))
 }

@@ -49,6 +49,7 @@ type deploymentClient interface {
 	DestroyDeployment(context.Context, *provisionerv1.DestroyDeploymentRequest) (*provisionerv1.DestroyDeploymentResponse, error)
 	WatchDeployment(context.Context, *provisionerv1.WatchDeploymentRequest, func(*provisionerv1.DeploymentStateChangedEvent) error) error
 	TouchDeployment(context.Context, *provisionerv1.TouchDeploymentRequest) (*provisionerv1.TouchDeploymentResponse, error)
+	ScaleDeployment(context.Context, *provisionerv1.ScaleDeploymentRequest) (*provisionerv1.ScaleDeploymentResponse, error)
 }
 
 // inProcessDeploymentClient bridges the gRPC server-stream signature
@@ -78,6 +79,10 @@ func (c *inProcessDeploymentClient) DestroyDeployment(ctx context.Context, req *
 
 func (c *inProcessDeploymentClient) TouchDeployment(ctx context.Context, req *provisionerv1.TouchDeploymentRequest) (*provisionerv1.TouchDeploymentResponse, error) {
 	return c.svc.TouchDeployment(ctx, req)
+}
+
+func (c *inProcessDeploymentClient) ScaleDeployment(ctx context.Context, req *provisionerv1.ScaleDeploymentRequest) (*provisionerv1.ScaleDeploymentResponse, error) {
+	return c.svc.ScaleDeployment(ctx, req)
 }
 
 func (c *inProcessDeploymentClient) WatchDeployment(ctx context.Context, req *provisionerv1.WatchDeploymentRequest, onEvent func(*provisionerv1.DeploymentStateChangedEvent) error) error {
@@ -133,6 +138,14 @@ func (a *connectDeploymentClient) DestroyDeployment(ctx context.Context, req *pr
 
 func (a *connectDeploymentClient) TouchDeployment(ctx context.Context, req *provisionerv1.TouchDeploymentRequest) (*provisionerv1.TouchDeploymentResponse, error) {
 	resp, err := a.c.TouchDeployment(ctx, connect.NewRequest(req))
+	if err != nil {
+		return nil, err
+	}
+	return resp.Msg, nil
+}
+
+func (a *connectDeploymentClient) ScaleDeployment(ctx context.Context, req *provisionerv1.ScaleDeploymentRequest) (*provisionerv1.ScaleDeploymentResponse, error) {
+	resp, err := a.c.ScaleDeployment(ctx, connect.NewRequest(req))
 	if err != nil {
 		return nil, err
 	}

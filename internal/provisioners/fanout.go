@@ -37,6 +37,222 @@ type fanOutResult struct {
 	err        error
 }
 
+// ScaleDeployment implements the v0.2 ch7-beat3.8 scale verb (#86).
+// Reads the deployment, computes delta = target - current. Three
+// outcomes:
+//
+//   - target == current: no-op, returns the current record.
+//   - target > current: appendReplicas provisions delta new slots
+//     starting at the next slot index (existing slots are not
+//     touched, even DEGRADED tombstones -- scale appends, doesn't
+//     repair). Aggregate state stays RUNNING if all new succeed,
+//     transitions to DEGRADED if any new fail.
+//   - target < current: Unimplemented; scale-down's drain semantics
+//     are designed in #145.
+//
+// Precondition: deployment is RUNNING or DEGRADED. Other states
+// (PENDING, STARTING, TERMINATING, TERMINATED, FAILED) are rejected
+// -- scale is operator capacity-tuning of an already-serving
+// deployment, not a recovery mechanism.
+//
+// dry_run=true returns the planned new instance_ids without
+// mutating state. The CLI surfaces these to the operator for
+// confirmation.
+func (s *Service) ScaleDeployment(ctx context.Context, req *provisionerv1.ScaleDeploymentRequest) (*provisionerv1.ScaleDeploymentResponse, error) {
+	id := req.GetId()
+	if err := ValidateID(id); err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	target := int(req.GetTargetReplicas())
+	if target <= 0 {
+		return nil, status.Errorf(codes.InvalidArgument, "target_replicas must be > 0 (got %d)", target)
+	}
+
+	file, err := s.store.Read()
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	rec, ok := file.Deployments[id]
+	if !ok {
+		return nil, status.Errorf(codes.NotFound, "no deployment with id %q", id)
+	}
+	switch rec.GetState() {
+	case provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING,
+		provisionerv1.DeploymentState_DEPLOYMENT_STATE_DEGRADED:
+		// scale-eligible
+	default:
+		return nil, status.Errorf(codes.FailedPrecondition, "deployment %q must be RUNNING or DEGRADED to scale (got %s)", id, rec.GetState())
+	}
+
+	current := len(rec.GetInstanceIds())
+	if current == 0 {
+		// Beat 1+2 single-instance deployment: instance_ids is empty,
+		// the singular instance_id is the only slot. Treat as current=1
+		// so scale can extend it to multi-replica.
+		if rec.GetInstanceId() != "" {
+			current = 1
+		}
+	}
+
+	// Normalize Beat 1+2 records before scaling: if the deployment
+	// has a singular instance_id but no instance_ids list, promote
+	// the singular into instance_ids[0] / engine_endpoints[0]. The
+	// scale-up loop below appends starting at slot 1, so without
+	// this, slot 0 would be a phantom tombstone (empty id, even
+	// though the original instance is still serving via the
+	// singular fields). Idempotent: re-running on an already-
+	// normalized record is a no-op.
+	if len(rec.GetInstanceIds()) == 0 && rec.GetInstanceId() != "" {
+		_ = s.store.Update(func(f *State) error {
+			r := f.Deployments[id]
+			if r == nil || len(r.GetInstanceIds()) > 0 {
+				return nil
+			}
+			r.InstanceIds = []string{r.GetInstanceId()}
+			r.EngineEndpoints = []string{r.GetEngineEndpoint()}
+			return nil
+		})
+		// Re-read so subsequent logic sees the normalized record.
+		if f2, rerr := s.store.Read(); rerr == nil {
+			if updated, ok := f2.Deployments[id]; ok {
+				rec = updated
+				file = f2
+			}
+		}
+	}
+
+	delta := target - current
+	switch {
+	case delta == 0:
+		return &provisionerv1.ScaleDeploymentResponse{Deployment: rec}, nil
+	case delta < 0:
+		return nil, status.Errorf(codes.Unimplemented, "scale-down (target=%d, current=%d) lands in #145; v0.2 ch7-beat3.8 ships scale-up only", target, current)
+	}
+
+	// Plan: synthesize the new slot ids. Used for both dry-run
+	// preview and the actual provision path.
+	plannedIDs := make([]string, delta)
+	for i := range delta {
+		plannedIDs[i] = replicaInstanceID(id, current+i)
+	}
+	if req.GetDryRun() {
+		return &provisionerv1.ScaleDeploymentResponse{
+			Deployment:         rec,
+			PlannedInstanceIds: plannedIDs,
+		}, nil
+	}
+
+	// Reconstruct a synthetic CreateDeploymentRequest the placement
+	// helpers can use. Provider / Region / Requirements come from the
+	// underlying Instance behind slot 0 (or the singular instance_id
+	// for legacy Beat 1+2 records). Heterogeneous fleets (#143) will
+	// replace this with a per-slot spec.
+	scaleReq, srErr := s.buildScaleRequest(file, rec)
+	if srErr != nil {
+		return nil, srErr
+	}
+
+	runCtx := context.Background()
+	if req.GetWait() {
+		runCtx = ctx
+		s.appendReplicas(runCtx, scaleReq, id, current, delta)
+		if file2, rerr := s.store.Read(); rerr == nil {
+			if updated, ok := file2.Deployments[id]; ok {
+				rec = updated
+			}
+		}
+	} else {
+		go s.appendReplicas(runCtx, scaleReq, id, current, delta)
+	}
+	return &provisionerv1.ScaleDeploymentResponse{Deployment: rec}, nil
+}
+
+// buildScaleRequest constructs the synthetic CreateDeploymentRequest
+// passed to the fan-out machinery for scale-up. The provider /
+// region / requirements come from the existing slot 0 Instance so
+// the new replicas match the shape of the existing fleet.
+//
+// For Beat 1+2 legacy deployments (no instance_ids, just a singular
+// instance_id), the singular Instance is the source of truth.
+//
+// Fails if the slot-0 Instance is missing -- the deployment record
+// is inconsistent with the instance store, and scale can't pick a
+// shape to extend.
+func (s *Service) buildScaleRequest(file *State, rec *provisionerv1.Deployment) (*provisionerv1.CreateDeploymentRequest, error) {
+	var anchorID string
+	if ids := rec.GetInstanceIds(); len(ids) > 0 && ids[0] != "" {
+		anchorID = ids[0]
+	} else {
+		anchorID = rec.GetInstanceId()
+	}
+	if anchorID == "" {
+		return nil, status.Errorf(codes.FailedPrecondition, "deployment %q has no anchor instance to scale from (state file inconsistent)", rec.GetId())
+	}
+	anchor, ok := file.Instances[anchorID]
+	if !ok {
+		return nil, status.Errorf(codes.FailedPrecondition, "deployment %q's anchor instance %q is missing from the state file", rec.GetId(), anchorID)
+	}
+	spec := anchor.GetSpec()
+	if spec == nil {
+		return nil, status.Errorf(codes.FailedPrecondition, "anchor instance %q has no spec (cannot extend the fleet)", anchorID)
+	}
+	return &provisionerv1.CreateDeploymentRequest{
+		Deployment:   rec,
+		Provider:     anchor.GetProvider(),
+		Region:       spec.GetRegion(),
+		Requirements: spec.GetRequirements(),
+	}, nil
+}
+
+// appendReplicas extends the deployment's slot table by delta new
+// replicas starting at currentCount. Reuses provisionSlots + the
+// scale-specific recordAppendedSlots + applyScaleAggregate.
+//
+// Aggregate semantics:
+//   - all delta succeed: deployment stays RUNNING (existing slots
+//     were RUNNING per ScaleDeployment's precondition).
+//   - any delta fail: transitions to DEGRADED with a failure_reason
+//     listing the failed new slots. (Existing tombstones from a prior
+//     fan-out partial failure stay; scale doesn't touch them. The
+//     deployment's pre-scale state may have already been DEGRADED;
+//     scale-up cannot make that better.)
+func (s *Service) appendReplicas(ctx context.Context, req *provisionerv1.CreateDeploymentRequest, deployID string, currentCount, delta int) {
+	successes, failureReasons := s.provisionSlots(ctx, req, deployID, currentCount, delta, s.recordAppendedSlots)
+	s.applyScaleAggregate(deployID, delta, successes, failureReasons)
+}
+
+// applyScaleAggregate transitions deployment state after a scale-up
+// append. Unlike applyAggregateState (which computes whole-deployment
+// state from scratch for the create path), this preserves the
+// existing slot table and only considers whether the new delta
+// replicas all succeeded.
+//
+//   - delta successes == delta count: stay RUNNING (or DEGRADED if
+//     pre-scale was DEGRADED -- this method doesn't lift DEGRADED
+//     back to RUNNING; that's #93's reconciliation job).
+//   - else: DEGRADED + failure_reason describing the new failures.
+//
+// failure_reason is overwritten on each scale call. A future
+// reconciliation pass (#93) clears it when all slots become healthy.
+func (s *Service) applyScaleAggregate(deployID string, delta, successes int, failureReasons []string) {
+	_ = s.store.Update(func(f *State) error {
+		rec, ok := f.Deployments[deployID]
+		if !ok {
+			return nil
+		}
+		if successes == delta {
+			// All new slots succeeded. If the deployment was RUNNING
+			// pre-scale, it stays RUNNING. If it was DEGRADED (existing
+			// tombstones), it stays DEGRADED -- scale doesn't repair.
+			return nil
+		}
+		rec.State = provisionerv1.DeploymentState_DEPLOYMENT_STATE_DEGRADED
+		rec.FailureReason = fmt.Sprintf("%d of %d new replicas failed at scale-up: %s",
+			delta-successes, delta, strings.Join(failureReasons, "; "))
+		return nil
+	})
+}
+
 // createMultiReplicaDeployment is the CreateDeployment branch for
 // replicas > 1. The single-instance shared path handled validation
 // + model resolve before dispatching here; this method owns the
@@ -120,8 +336,12 @@ func (s *Service) createMultiReplicaDeployment(ctx context.Context, req *provisi
 	return &provisionerv1.CreateDeploymentResponse{Deployment: record}, nil
 }
 
-// fanOutProvision drives the multi-replica path. Called from
-// CreateDeployment when replicas > 1. Sequence:
+// fanOutProvision drives the multi-replica create path. Called from
+// CreateDeployment when replicas > 1. startingSlot is always 0 here
+// (Create starts from an empty slot table); the parameter exists so
+// the placement + launch machinery is shared with Scale, where
+// startingSlot is the current replica count and the new slots
+// append. Sequence:
 //
 //  1. Place N per-replica Instances in parallel (deploy_id-r0..r(N-1)).
 //  2. Persist the Deployment record's instance_ids list -- placed
@@ -145,25 +365,28 @@ func (s *Service) createMultiReplicaDeployment(ctx context.Context, req *provisi
 // is stamped. CreateDeployment runs it on the request ctx when
 // wait=true, or in a detached background goroutine when wait=false.
 func (s *Service) fanOutProvision(ctx context.Context, req *provisionerv1.CreateDeploymentRequest, deployID string, count int) {
-	placements, placeErrs := s.placeAllReplicas(ctx, req, deployID, count)
+	successes, failureReasons := s.provisionSlots(ctx, req, deployID, 0, count, s.recordCreateSlots)
+	s.applyAggregateState(deployID, count, successes, failureReasons)
+}
 
-	// Persist instance_ids for placed slots so subsequent
-	// patchDeploymentSlot calls have a slot index to match against.
-	// Place-failed slots get empty-string ids; engine_endpoints is
-	// sized to match so the parallel-arrays invariant holds.
-	s.recordPlacedSlots(deployID, placements, count)
+// provisionSlots is the shared placement + launch primitive used by
+// both create (startingSlot=0) and scale (startingSlot=current).
+// recordSlots is the caller's slot-persistence strategy: create
+// overwrites; scale appends.
+//
+// Returns the count of successful slots and the failure reasons for
+// failed slots (used by the caller's aggregate-state routine).
+func (s *Service) provisionSlots(ctx context.Context, req *provisionerv1.CreateDeploymentRequest, deployID string, startingSlot, count int, recordSlots func(deployID string, placements []*provisionerv1.Instance, startingSlot int)) (int, []string) {
+	placements, placeErrs := s.placeSlots(ctx, req, deployID, startingSlot, count)
+	recordSlots(deployID, placements, startingSlot)
 
-	// Phase 2: load the SSH key once (same provider for all replicas
-	// in this PR -- heterogeneous fleets are #143). A keyStore error
-	// fails every replica that was successfully placed.
-	var key = s.loadFanOutKey(req)
-
+	key := s.loadFanOutKey(req)
 	results := make(chan fanOutResult, count)
-	var launched int
 	for i, inst := range placements {
+		slot := startingSlot + i
 		if inst == nil {
 			results <- fanOutResult{
-				instanceID: replicaInstanceID(deployID, i),
+				instanceID: replicaInstanceID(deployID, slot),
 				err:        placeErrs[i],
 			}
 			continue
@@ -175,14 +398,9 @@ func (s *Service) fanOutProvision(ctx context.Context, req *provisionerv1.Create
 			}
 			continue
 		}
-		launched++
-		go s.launchReplica(ctx, deployID, i, inst, key, req.GetDeployment(), results)
+		go s.launchReplica(ctx, deployID, slot, inst, key, req.GetDeployment(), results)
 	}
 
-	// Phase 3: collect outcomes. Note: we drained the trivial
-	// "couldn't even try" cases synchronously above; goroutines fire
-	// the remaining `launched` results. Total result count == count
-	// (synchronous + async).
 	successes := 0
 	var failureReasons []string
 	for range count {
@@ -193,23 +411,19 @@ func (s *Service) fanOutProvision(ctx context.Context, req *provisionerv1.Create
 			failureReasons = append(failureReasons, fmt.Sprintf("%s: %v", r.instanceID, r.err))
 		}
 	}
-
-	// Phase 4: aggregate state. Order matters: DEGRADED if any
-	// instance succeeded (operator can still serve traffic from the
-	// healthy subset via router #85); FAILED only when zero
-	// succeeded.
-	s.applyAggregateState(deployID, count, successes, failureReasons)
+	return successes, failureReasons
 }
 
-// placeAllReplicas spawns count goroutines, each placing one
-// per-replica Instance. Returns parallel slices: placements[i] is
-// the Instance for slot i (nil on failure), placeErrs[i] is the
-// matching error (nil on success).
+// placeSlots spawns count goroutines, each placing one per-replica
+// Instance starting at startingSlot. Returns parallel slices (indexed
+// 0..count-1, mapping to global slots startingSlot..startingSlot+count-1):
+// placements[i] is the Instance for the local index i (nil on failure),
+// placeErrs[i] is the matching error (nil on success).
 //
 // Idempotent: placeReplicaInstance reuses an existing Instance
 // record if one already exists at the synthesized id (re-runs of a
 // failed CreateDeployment don't double-rent).
-func (s *Service) placeAllReplicas(ctx context.Context, req *provisionerv1.CreateDeploymentRequest, deployID string, count int) ([]*provisionerv1.Instance, []error) {
+func (s *Service) placeSlots(ctx context.Context, req *provisionerv1.CreateDeploymentRequest, deployID string, startingSlot, count int) ([]*provisionerv1.Instance, []error) {
 	placements := make([]*provisionerv1.Instance, count)
 	placeErrs := make([]error, count)
 	var wg sync.WaitGroup
@@ -217,7 +431,7 @@ func (s *Service) placeAllReplicas(ctx context.Context, req *provisionerv1.Creat
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			inst, err := s.placeReplicaInstance(ctx, req, deployID, i)
+			inst, err := s.placeReplicaInstance(ctx, req, deployID, startingSlot+i)
 			if err != nil {
 				placeErrs[i] = err
 				return
@@ -229,22 +443,56 @@ func (s *Service) placeAllReplicas(ctx context.Context, req *provisionerv1.Creat
 	return placements, placeErrs
 }
 
-// recordPlacedSlots persists the instance_ids / engine_endpoints
-// parallel arrays sized to count. Successful placements stamp their
-// instance id; place-failed slots remain "". This is the snapshot
-// the router (#85) reads to decide which slots are eligible for
-// round-robin selection.
-func (s *Service) recordPlacedSlots(deployID string, placements []*provisionerv1.Instance, count int) {
+// recordCreateSlots persists the instance_ids / engine_endpoints
+// parallel arrays for the create path (startingSlot is always 0;
+// the call resizes the slot table from scratch). Successful
+// placements stamp their instance id; place-failed slots remain "".
+// This is the snapshot the router (#85) reads to decide which slots
+// are eligible for round-robin selection.
+func (s *Service) recordCreateSlots(deployID string, placements []*provisionerv1.Instance, _ int) {
 	_ = s.store.Update(func(f *State) error {
 		rec, ok := f.Deployments[deployID]
 		if !ok {
 			return nil
 		}
+		count := len(placements)
 		rec.InstanceIds = make([]string, count)
 		rec.EngineEndpoints = make([]string, count)
 		for i, inst := range placements {
 			if inst != nil {
 				rec.InstanceIds[i] = inst.GetId()
+			}
+		}
+		return nil
+	})
+}
+
+// recordAppendedSlots is the scale-up analog of recordCreateSlots:
+// the deployment already has slots 0..startingSlot-1 stamped;
+// appendReplicas extends instance_ids / engine_endpoints by
+// len(placements) slots starting at startingSlot. Existing slots
+// (including DEGRADED tombstones with empty ids) are untouched --
+// scale appends, never repairs.
+func (s *Service) recordAppendedSlots(deployID string, placements []*provisionerv1.Instance, startingSlot int) {
+	_ = s.store.Update(func(f *State) error {
+		rec, ok := f.Deployments[deployID]
+		if !ok {
+			return nil
+		}
+		// Grow both arrays to startingSlot+len(placements). If the
+		// existing arrays were shorter (unlikely; recordCreateSlots
+		// sized them to count at create time, but a Beat-1+2 legacy
+		// deployment may have len < startingSlot), pad with empties.
+		need := startingSlot + len(placements)
+		for len(rec.InstanceIds) < need {
+			rec.InstanceIds = append(rec.InstanceIds, "")
+		}
+		for len(rec.EngineEndpoints) < need {
+			rec.EngineEndpoints = append(rec.EngineEndpoints, "")
+		}
+		for i, inst := range placements {
+			if inst != nil {
+				rec.InstanceIds[startingSlot+i] = inst.GetId()
 			}
 		}
 		return nil
