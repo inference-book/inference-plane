@@ -29,13 +29,15 @@ import (
 // services that need to emit metrics. nil-safe at the call site so
 // tests that don't init telemetry still work (no-op recorder).
 type Recorder struct {
-	requests       metric.Int64Counter
-	duration       metric.Float64Histogram
-	tokens         metric.Int64Counter
-	backendHealthy metric.Int64Gauge
-	reaperDestroys metric.Int64Counter
-	queueDepth     metric.Int64Gauge
-	queueWait      metric.Float64Histogram
+	requests         metric.Int64Counter
+	duration         metric.Float64Histogram
+	tokens           metric.Int64Counter
+	backendHealthy   metric.Int64Gauge
+	reaperDestroys   metric.Int64Counter
+	queueDepth       metric.Int64Gauge
+	queueWait        metric.Float64Histogram
+	replicaInFlight  metric.Int64Gauge
+	routerDecisions  metric.Int64Counter
 }
 
 // NewRecorder builds the four instruments via the global MeterProvider.
@@ -125,14 +127,38 @@ func NewRecorder() (*Recorder, error) {
 		return nil, fmt.Errorf("metrics: queue wait histogram: %w", err)
 	}
 
+	// Synchronous gauge -- the router records the current in-flight
+	// count after every push (dispatch) and pop (response). OTel
+	// last-value semantics give the dashboard "what's happening right
+	// now"; no callback / async observation needed.
+	replicaInFlight, err := meter.Int64Gauge(
+		telemetry.MetricReplicaInFlight,
+		metric.WithDescription("Current in-flight requests per (deploy_id, replica_id)."),
+		metric.WithUnit("{request}"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("metrics: replica in-flight gauge: %w", err)
+	}
+
+	routerDecisions, err := meter.Int64Counter(
+		telemetry.MetricRouterDecisionsTotal,
+		metric.WithDescription("Routing decisions at the router, labeled by deploy_id / replica_id / outcome."),
+		metric.WithUnit("{decision}"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("metrics: router decisions counter: %w", err)
+	}
+
 	return &Recorder{
-		requests:       requests,
-		duration:       duration,
-		tokens:         tokens,
-		backendHealthy: healthy,
-		reaperDestroys: reaperDestroys,
-		queueDepth:     queueDepth,
-		queueWait:      queueWait,
+		requests:        requests,
+		duration:        duration,
+		tokens:          tokens,
+		backendHealthy:  healthy,
+		reaperDestroys:  reaperDestroys,
+		queueDepth:      queueDepth,
+		queueWait:       queueWait,
+		replicaInFlight: replicaInFlight,
+		routerDecisions: routerDecisions,
 	}, nil
 }
 
@@ -291,5 +317,55 @@ func (r *Recorder) RecordQueueWait(ctx context.Context, deployID, tenantID, prio
 		attribute.String(telemetry.LabelDeployID, deployID),
 		attribute.String(telemetry.LabelTenantID, tenantID),
 		attribute.String(telemetry.LabelPriority, priority),
+	))
+}
+
+// RecordReplicaInFlight records the current in-flight request count
+// for (deployID, replicaID) into the synchronous gauge. The router
+// calls this after every push (dispatch) and pop (response) so
+// dashboards see live load. The chapter narrative: "watch the per-
+// replica bars equalize under round-robin" (v0.2 ch7-beat3.6 demo
+// 06's act-3 punchline).
+//
+// Synchronous gauge (not async/observable) because the router owns
+// the source of truth and emits cheaply on each transition. A
+// callback-based observable gauge would need a periodic scrape of
+// the same state with no operator-visible difference -- mirrors the
+// same decision RecordQueueDepth made.
+//
+// nil-safe so handlers holding a nil Recorder (tests) get a no-op
+// rather than a panic.
+func (r *Recorder) RecordReplicaInFlight(ctx context.Context, deployID, replicaID string, current int64) {
+	if r == nil {
+		return
+	}
+	r.replicaInFlight.Record(ctx, current, metric.WithAttributes(
+		attribute.String(telemetry.LabelDeployID, deployID),
+		attribute.String(telemetry.LabelReplicaID, replicaID),
+	))
+}
+
+// RecordRouterDecision bumps the router-decisions counter for one
+// routing attempt. outcome is "picked" when pickReplica returned a
+// replica, "no_replicas" when every slot was empty or quarantined
+// (the 503 replica_unavailable path). replicaID is the chosen
+// replica's id on "picked"; empty string on "no_replicas".
+//
+// Why a separate counter from inference.requests.total: that one
+// counts completed requests with downstream engine status (success,
+// backend_error, etc.). This counts routing decisions at the
+// router seam regardless of what the engine did downstream --
+// useful for spotting "we keep getting 503s before hitting the
+// engine."
+//
+// nil-safe.
+func (r *Recorder) RecordRouterDecision(ctx context.Context, deployID, replicaID, outcome string) {
+	if r == nil {
+		return
+	}
+	r.routerDecisions.Add(ctx, 1, metric.WithAttributes(
+		attribute.String(telemetry.LabelDeployID, deployID),
+		attribute.String(telemetry.LabelReplicaID, replicaID),
+		attribute.String(telemetry.LabelOutcome, outcome),
 	))
 }
