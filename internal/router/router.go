@@ -71,6 +71,7 @@ const (
 	AttrRouterStatus   = "iplane.router.status"    // status label string (success | engine_error | ...)
 	AttrRouterTenantID = "iplane.router.tenant_id" // operator-asserted tenant; "default" when unannotated
 	AttrRouterPriority = "iplane.router.priority"  // effective lane: "interactive" | "batch"
+	AttrQueueWaitMs    = "iplane.queue.wait_ms"    // ms spent waiting in the router queue before dispatch (v0.2 ch7-beat2.7); only set when the request was actually queued (direct-forward path leaves it unset)
 )
 
 // Span name for the router's request-dispatch span. Single name across
@@ -431,6 +432,15 @@ func (r *Router) handleWithObservability(w http.ResponseWriter, req *http.Reques
 			attribute.String(AttrRouterPriority, priorityLabelStr),
 		),
 	)
+	// v0.2 ch7-beat2.7: stamp queue-wait duration on the span when
+	// the request actually went through the queue (dispatchEntry
+	// puts the value on ctx). Direct-forward path leaves the
+	// attribute unset -- a span without iplane.queue.wait_ms means
+	// "this request didn't queue at all," which is the chapter
+	// narrative for unconfigured-scheduler operators.
+	if waitMs, ok := req.Context().Value(queueWaitCtxKey{}).(int64); ok {
+		span.SetAttributes(attribute.Int64(AttrQueueWaitMs, waitMs))
+	}
 	defer span.End()
 	req = req.WithContext(ctx)
 

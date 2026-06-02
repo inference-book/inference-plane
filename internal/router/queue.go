@@ -84,6 +84,13 @@ func (s schedulerEntry) Tenant() string           { return s.queueEntry.TenantID
 func (s schedulerEntry) StampEnqueued(t time.Time) { s.queueEntry.enqueuedAt = t }
 func (s schedulerEntry) EnqueuedAt() time.Time    { return s.queueEntry.enqueuedAt }
 
+// queueWaitCtxKey is the unexported context key the dispatcher uses
+// to pass the per-request queue-wait duration (milliseconds) into
+// handleWithObservability. Set only on the queued path; the direct-
+// forward path leaves it unset and the span attribute is simply
+// not recorded.
+type queueWaitCtxKey struct{}
+
 // dispatchEntry is the scheduler-facing handler. Closes done after
 // the proxy call returns. The scheduler's root context is
 // intentionally NOT propagated into the proxy call -- the per-request
@@ -92,9 +99,20 @@ func (s schedulerEntry) EnqueuedAt() time.Time    { return s.queueEntry.enqueued
 // streaming responses; relying on the request ctx means
 // client-disconnect cancels the upstream and server-shutdown drains
 // in-flight cleanly.
+//
+// v0.2 ch7-beat2.7: dispatchEntry stashes the queue-wait duration
+// on the request context so handleWithObservability can stamp the
+// router span with `iplane.queue.wait_ms`. The chapter's trace
+// narrative reads "this request waited 240ms in the queue, then
+// took 1.2s at the engine" directly off the span attributes.
 func (r *Router) dispatchEntry(_ context.Context, e scheduler.Entry) {
 	se := e.(schedulerEntry).queueEntry
 	defer close(se.done)
+	if !se.enqueuedAt.IsZero() {
+		waitMs := time.Since(se.enqueuedAt).Milliseconds()
+		ctx := context.WithValue(se.req.Context(), queueWaitCtxKey{}, waitMs)
+		se.req = se.req.WithContext(ctx)
+	}
 	r.handleWithObservability(se.w, se.req, se.dep, se.stripDeployPrefix)
 }
 

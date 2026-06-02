@@ -283,3 +283,17 @@ func spanAttrFromStub(stub tracetest.SpanStub, key string) string {
 	}
 	return ""
 }
+
+// spanInt64AttrFromStub is the Int64 counterpart of spanAttrFromStub.
+// Returns (value, true) on hit; (0, false) if the attribute is
+// missing -- distinguishes "absent" from "present-with-value-0",
+// which matters for the queue-wait test (direct-forward path leaves
+// the attribute absent, NOT zero).
+func spanInt64AttrFromStub(stub tracetest.SpanStub, key string) (int64, bool) {
+	for _, a := range stub.Attributes {
+		if string(a.Key) == key {
+			return a.Value.AsInt64(), true
+		}
+	}
+	return 0, false
+}
