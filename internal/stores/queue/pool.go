@@ -130,6 +130,13 @@ func (p *Pool[T]) Submit(item T) error {
 	return p.queue.Push(item)
 }
 
+// Len returns the current number of items waiting in the pool's
+// underlying queue. Point-in-time observation -- may be stale by the
+// time the caller acts. Useful for per-lane depth metrics and tests.
+func (p *Pool[T]) Len() int {
+	return p.queue.Len()
+}
+
 // Stop closes the queue and waits for all servicers to drain
 // remaining items and exit. After Stop, Submit returns ErrClosed.
 //

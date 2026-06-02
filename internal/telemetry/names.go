@@ -60,6 +60,7 @@ const (
 	LabelDeployID = "deploy_id"
 	LabelGPUType = "gpu_type"
 	LabelModel = "model"
+	LabelPriority = "priority"
 	LabelProvider = "provider"
 	LabelReason = "reason"
 	LabelStatus = "status"

@@ -1,0 +1,390 @@
+package router
+
+import (
+	"context"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+
+	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
+)
+
+func TestPriorityFromHeader(t *testing.T) {
+	cases := []struct {
+		name, header string
+		want         provisionerv1.Priority
+	}{
+		{"interactive", "interactive", provisionerv1.Priority_PRIORITY_INTERACTIVE},
+		{"interactive uppercase", "INTERACTIVE", provisionerv1.Priority_PRIORITY_INTERACTIVE},
+		{"interactive whitespace", " interactive ", provisionerv1.Priority_PRIORITY_INTERACTIVE},
+		{"batch", "batch", provisionerv1.Priority_PRIORITY_BATCH},
+		{"batch mixed case", "Batch", provisionerv1.Priority_PRIORITY_BATCH},
+		{"missing", "", provisionerv1.Priority_PRIORITY_UNSPECIFIED},
+		{"unknown", "background", provisionerv1.Priority_PRIORITY_UNSPECIFIED},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+			if tc.header != "" {
+				req.Header.Set(PriorityHeader, tc.header)
+			}
+			if got := priorityFromHeader(req); got != tc.want {
+				t.Errorf("priorityFromHeader=%v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestEffectivePriority_PrecedenceOrder(t *testing.T) {
+	depBatch := &provisionerv1.Deployment{
+		DefaultPriority: provisionerv1.Priority_PRIORITY_BATCH,
+	}
+	depUnspec := &provisionerv1.Deployment{
+		DefaultPriority: provisionerv1.Priority_PRIORITY_UNSPECIFIED,
+	}
+	depInteractive := &provisionerv1.Deployment{
+		DefaultPriority: provisionerv1.Priority_PRIORITY_INTERACTIVE,
+	}
+
+	cases := []struct {
+		name string
+		ctx  context.Context
+		dep  *provisionerv1.Deployment
+		want provisionerv1.Priority
+	}{
+		{
+			name: "header overrides deployment default",
+			ctx:  context.WithValue(context.Background(), priorityCtxKey{}, provisionerv1.Priority_PRIORITY_INTERACTIVE),
+			dep:  depBatch,
+			want: provisionerv1.Priority_PRIORITY_INTERACTIVE,
+		},
+		{
+			name: "no header falls back to deployment default",
+			ctx:  context.WithValue(context.Background(), priorityCtxKey{}, provisionerv1.Priority_PRIORITY_UNSPECIFIED),
+			dep:  depBatch,
+			want: provisionerv1.Priority_PRIORITY_BATCH,
+		},
+		{
+			name: "no header and no deployment default = INTERACTIVE",
+			ctx:  context.WithValue(context.Background(), priorityCtxKey{}, provisionerv1.Priority_PRIORITY_UNSPECIFIED),
+			dep:  depUnspec,
+			want: provisionerv1.Priority_PRIORITY_INTERACTIVE,
+		},
+		{
+			name: "empty ctx (no middleware ran) + dep default",
+			ctx:  context.Background(),
+			dep:  depInteractive,
+			want: provisionerv1.Priority_PRIORITY_INTERACTIVE,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := effectivePriority(tc.ctx, tc.dep); got != tc.want {
+				t.Errorf("effectivePriority=%v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRouter_PriorityHeaderStrippedAtEngine: same architectural
+// invariant as the tenant header. Engines stay priority-agnostic;
+// the lane is iplane's job.
+func TestRouter_PriorityHeaderStrippedAtEngine(t *testing.T) {
+	var seenHeader atomic.Pointer[string]
+	engine := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		v := r.Header.Get(PriorityHeader)
+		seenHeader.Store(&v)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	defer engine.Close()
+
+	r := New(&fakeDeploymentClient{
+		describe: func(*provisionerv1.DescribeDeploymentRequest) (*provisionerv1.DescribeDeploymentResponse, error) {
+			return &provisionerv1.DescribeDeploymentResponse{
+				Deployment: &provisionerv1.Deployment{
+					Id:             "my-llama",
+					State:          provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING,
+					EngineEndpoint: engine.URL,
+				},
+			}, nil
+		},
+	}, nil)
+
+	srv := httptest.NewServer(serveThroughMux(r))
+	defer srv.Close()
+
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/my-llama/v1/chat/completions",
+		strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(PriorityHeader, "batch")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
+
+	got := seenHeader.Load()
+	if got == nil {
+		t.Fatalf("engine never received the request")
+	}
+	if *got != "" {
+		t.Errorf("engine saw %s=%q; want stripped", PriorityHeader, *got)
+	}
+}
+
+// TestRouter_PriorityRoutesToCorrectLane verifies a batch-headered
+// request lands on batchPool and an interactive request lands on
+// interactivePool. Acceptance criterion: "request with
+// X-IPlane-Priority: interactive lands in interactive lane."
+func TestRouter_PriorityRoutesToCorrectLane(t *testing.T) {
+	engine := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	defer engine.Close()
+
+	r := New(&fakeDeploymentClient{
+		describe: func(*provisionerv1.DescribeDeploymentRequest) (*provisionerv1.DescribeDeploymentResponse, error) {
+			return &provisionerv1.DescribeDeploymentResponse{
+				Deployment: &provisionerv1.Deployment{
+					Id:             "my-llama",
+					State:          provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING,
+					EngineEndpoint: engine.URL,
+				},
+			}, nil
+		},
+	}, nil, WithInteractiveQueue(2, 8), WithBatchQueue(2, 8))
+
+	// Replace each pool's handler with one that records which lane
+	// the entry hit. Same swap-the-handler pattern Beat 2.2's
+	// QueuedPath_CapturesTenantOnEntry test uses.
+	var interactiveHits, batchHits atomic.Int32
+	if r.interactivePool == nil || r.batchPool == nil {
+		t.Fatalf("expected both pools configured")
+	}
+	r.interactivePool = newPool(2, 8, func(e *queueEntry) {
+		interactiveHits.Add(1)
+		r.dispatchEntry(e)
+	})
+	r.batchPool = newPool(2, 8, func(e *queueEntry) {
+		batchHits.Add(1)
+		r.dispatchEntry(e)
+	})
+	r.Start(context.Background())
+	defer r.Shutdown()
+
+	srv := httptest.NewServer(serveThroughMux(r))
+	defer srv.Close()
+
+	// Interactive request
+	req1, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/my-llama/v1/chat/completions",
+		strings.NewReader(`{}`))
+	req1.Header.Set(PriorityHeader, "interactive")
+	resp1, err := http.DefaultClient.Do(req1)
+	if err != nil {
+		t.Fatalf("interactive Do: %v", err)
+	}
+	resp1.Body.Close()
+
+	// Batch request
+	req2, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/my-llama/v1/chat/completions",
+		strings.NewReader(`{}`))
+	req2.Header.Set(PriorityHeader, "batch")
+	resp2, err := http.DefaultClient.Do(req2)
+	if err != nil {
+		t.Fatalf("batch Do: %v", err)
+	}
+	resp2.Body.Close()
+
+	if got := interactiveHits.Load(); got != 1 {
+		t.Errorf("interactive lane hits=%d, want 1", got)
+	}
+	if got := batchHits.Load(); got != 1 {
+		t.Errorf("batch lane hits=%d, want 1", got)
+	}
+}
+
+// TestRouter_PriorityFallbacksToDeploymentDefault: no header sent;
+// deployment default is BATCH; request lands in the batch lane.
+// Acceptance criterion: "without the header, falls back to deployment
+// default."
+func TestRouter_PriorityFallbacksToDeploymentDefault(t *testing.T) {
+	engine := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	defer engine.Close()
+
+	r := New(&fakeDeploymentClient{
+		describe: func(*provisionerv1.DescribeDeploymentRequest) (*provisionerv1.DescribeDeploymentResponse, error) {
+			return &provisionerv1.DescribeDeploymentResponse{
+				Deployment: &provisionerv1.Deployment{
+					Id:              "my-llama",
+					State:           provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING,
+					EngineEndpoint:  engine.URL,
+					DefaultPriority: provisionerv1.Priority_PRIORITY_BATCH,
+				},
+			}, nil
+		},
+	}, nil, WithInteractiveQueue(2, 8), WithBatchQueue(2, 8))
+
+	var interactiveHits, batchHits atomic.Int32
+	r.interactivePool = newPool(2, 8, func(e *queueEntry) {
+		interactiveHits.Add(1)
+		r.dispatchEntry(e)
+	})
+	r.batchPool = newPool(2, 8, func(e *queueEntry) {
+		batchHits.Add(1)
+		r.dispatchEntry(e)
+	})
+	r.Start(context.Background())
+	defer r.Shutdown()
+
+	srv := httptest.NewServer(serveThroughMux(r))
+	defer srv.Close()
+
+	// No X-IPlane-Priority header -- should follow deployment default (BATCH).
+	resp, err := http.Post(srv.URL+"/v1/my-llama/v1/chat/completions",
+		"application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatalf("Post: %v", err)
+	}
+	resp.Body.Close()
+
+	if interactiveHits.Load() != 0 {
+		t.Errorf("interactive lane hits=%d, want 0 (default should send to batch)", interactiveHits.Load())
+	}
+	if batchHits.Load() != 1 {
+		t.Errorf("batch lane hits=%d, want 1 (default=batch should send here)", batchHits.Load())
+	}
+}
+
+// TestRouter_LaneDepth_VisibleViaPoolLen exposes per-lane depth.
+// Acceptance criterion: "Queue stats expose per-lane depth."
+//
+// Cleanup ordering matters here: the engine handler blocks on hold,
+// so the router has in-flight requests waiting on it. If srv.Close
+// (router server) fires before close(hold), it deadlocks waiting for
+// those in-flight requests to drain. Single combined defer enforces
+// the order: release engine first, then close server, then shutdown
+// pool, then close engine. Tests that don't hold mid-handler can
+// stay on the simple multi-defer pattern.
+func TestRouter_LaneDepth_VisibleViaPoolLen(t *testing.T) {
+	hold := make(chan struct{})
+	engine := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-hold
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	r := New(&fakeDeploymentClient{
+		describe: func(*provisionerv1.DescribeDeploymentRequest) (*provisionerv1.DescribeDeploymentResponse, error) {
+			return &provisionerv1.DescribeDeploymentResponse{
+				Deployment: &provisionerv1.Deployment{
+					Id:             "my-llama",
+					State:          provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING,
+					EngineEndpoint: engine.URL,
+				},
+			}, nil
+		},
+	}, nil, WithInteractiveQueue(1, 8), WithBatchQueue(1, 8))
+	r.Start(context.Background())
+
+	srv := httptest.NewServer(serveThroughMux(r))
+	defer func() {
+		close(hold)    // unblock engine handler so in-flight requests complete
+		srv.Close()    // close router server
+		r.Shutdown()   // drain pool servicers
+		engine.Close() // close engine server
+	}()
+
+	// Submit 3 batch requests (1 in servicer, 2 queued). Interactive
+	// stays empty.
+	for range 3 {
+		go func() {
+			req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/my-llama/v1/chat/completions",
+				strings.NewReader(`{}`))
+			req.Header.Set(PriorityHeader, "batch")
+			resp, err := http.DefaultClient.Do(req)
+			if err == nil {
+				resp.Body.Close()
+			}
+		}()
+	}
+
+	// Poll until batch.Len reaches >= 1 (some requests queued behind
+	// the in-flight one). The exact count depends on goroutine
+	// scheduling; >=1 is the meaningful assertion.
+	if !waitFor(func() bool { return r.batchPool.Len() >= 1 }) {
+		t.Fatalf("batch lane never reached non-zero depth within poll budget")
+	}
+	if got := r.interactivePool.Len(); got != 0 {
+		t.Errorf("interactive lane depth=%d, want 0", got)
+	}
+}
+
+// waitFor polls predicate up to a fixed budget (~1s). Returns true
+// if predicate became true; false otherwise. Used by integration-
+// style tests that need to observe an async transition.
+func waitFor(predicate func() bool) bool {
+	for range 100 {
+		if predicate() {
+			return true
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return false
+}
+
+// TestRouter_PriorityThreadsIntoMetricLabels: verify the priority
+// label is populated on the request counter.
+func TestRouter_PriorityThreadsIntoMetricLabels(t *testing.T) {
+	reader, recorder := setupMetricsCapture(t)
+
+	engine := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	defer engine.Close()
+
+	r := New(&fakeDeploymentClient{
+		describe: func(_ *provisionerv1.DescribeDeploymentRequest) (*provisionerv1.DescribeDeploymentResponse, error) {
+			return &provisionerv1.DescribeDeploymentResponse{Deployment: &provisionerv1.Deployment{
+				Id:             "my-llama",
+				Model:          "m",
+				State:          provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING,
+				EngineEndpoint: engine.URL,
+			}}, nil
+		},
+	}, recorder)
+	srv := httptest.NewServer(serveThroughMux(r))
+	defer srv.Close()
+
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/my-llama/v1/chat/completions",
+		strings.NewReader(`{}`))
+	req.Header.Set(PriorityHeader, "batch")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	resp.Body.Close()
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	reqs := findCounter(t, rm, "inference.requests.total")
+	if len(reqs) != 1 {
+		t.Fatalf("expected 1 request observation, got %d", len(reqs))
+	}
+	if got := attrValue(reqs[0].Attributes, "priority"); got != "batch" {
+		t.Errorf("priority label = %q, want batch", got)
+	}
+}

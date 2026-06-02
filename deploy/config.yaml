@@ -34,19 +34,25 @@ deployment:
   instance_id: ""                 # set per-instance via env override
 
 router:
-  # v0.2 Beat 2 M/M/k waiting room in front of the engine.
+  # v0.2 Beat 2 M/M/k waiting room in front of the engine. Beat 2.3
+  # added priority lanes -- interactive and batch can be configured
+  # independently. Three patterns:
   #
-  # servicers = 0 keeps Beat 1's behavior: no queue, no concurrency
-  # cap, requests forward inline. Demo 04 (Beat 1 closer) runs on
-  # this path; the v0.2 release/v0.2 snapshot defaults stay here
-  # until demo 05 (Beat 2 closer) ships and the chapter flips the
-  # default in prose.
-  #
-  # When servicers > 0:
-  #   - servicers parallel dispatcher goroutines drain the queue
-  #   - capacity bounds the waiting room (M/M/k/N in Kendall notation)
-  #   - arrivals beyond capacity get 503 + Retry-After (fail-fast
-  #     backpressure)
+  # 1. Disabled (Beat 1 path): all three servicers values are 0.
+  #    Requests forward inline; no queue, no concurrency cap.
+  # 2. Single global queue (Beat 2.1 backward-compat): set the
+  #    top-level servicers + capacity. Both lanes use the same shape.
+  # 3. Per-lane tuning (Beat 2.3+): set interactive.servicers and/or
+  #    batch.servicers. Each lane gets its own M/M/k pool. The
+  #    scheduler that prefers interactive over batch on shared engine
+  #    capacity lands in Beat 2.4 (#78); this PR ships parallel
+  #    independent lanes only.
   queue:
     servicers: 0
     capacity: 256
+    interactive:
+      servicers: 0
+      capacity: 256
+    batch:
+      servicers: 0
+      capacity: 256

@@ -45,6 +45,7 @@ var (
 	deployDebugShell    bool
 	deployIdleTTL       time.Duration
 	deployNoIdleDestroy bool
+	deployPriority      string
 	deployOtelEndpoint string
 	deployOtelHeaders  map[string]string
 	deployWait       bool
@@ -135,17 +136,22 @@ func runDeploymentDeploy(cmd *cobra.Command, args []string) error {
 	// them up without iplane-specific knowledge.
 	engineEnv := mergeOtelEnv(deployEnv, deployOtelEndpoint, deployOtelHeaders)
 
+	priority, err := parsePriorityFlag(deployPriority)
+	if err != nil {
+		return err
+	}
 	dep := &provisionerv1.Deployment{
-		Id:         id,
-		InstanceId: deployInstanceID,
-		Image:      deployImage,
-		Model:      deployModel,
-		EnginePort: deployEnginePort,
-		EngineArgs: deployEngineArgs,
-		Env:        engineEnv,
-		DebugShell:     deployDebugShell,
-		IdleTtlSeconds: int32(deployIdleTTL.Seconds()),
-		NoIdleDestroy:  deployNoIdleDestroy,
+		Id:               id,
+		InstanceId:       deployInstanceID,
+		Image:            deployImage,
+		Model:            deployModel,
+		EnginePort:       deployEnginePort,
+		EngineArgs:       deployEngineArgs,
+		Env:              engineEnv,
+		DebugShell:       deployDebugShell,
+		IdleTtlSeconds:   int32(deployIdleTTL.Seconds()),
+		NoIdleDestroy:    deployNoIdleDestroy,
+		DefaultPriority:  priority,
 	}
 	req := &provisionerv1.CreateDeploymentRequest{
 		Deployment: dep,
@@ -228,6 +234,8 @@ func init() {
 		`destroy the deployment after this much idle time (no inference + no operator RPCs). Default 0 = no reaping. v0.2 ch7-beat1.7.`)
 	f.BoolVar(&deployNoIdleDestroy, "no-idle-destroy", false,
 		`pin the deployment against the idle-TTL reaper. Set when the deployment is the shared anchor for a demo session and afk pauses must not reap it. v0.2 ch7-beat1.9.`)
+	f.StringVar(&deployPriority, "priority", "",
+		`default priority lane for requests against this deployment: interactive | batch. When set, requests without an X-IPlane-Priority header fall into this lane. Empty defaults to interactive. v0.2 ch7-beat2.3.`)
 
 	f.BoolVar(&deployDebugShell, "debug-shell", false,
 		`opt in to shell-level access to the engine pod (allocates a routable IP + ssh; costs more, narrows placement). Engine endpoint is unchanged either way.`)

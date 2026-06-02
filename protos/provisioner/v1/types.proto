@@ -319,6 +319,35 @@ message Deployment {
   // deployment across Ch 7's demos is pinned at the start of the
   // session so afk pauses do not tear it down.
   bool no_idle_destroy = 21;
+
+  // default_priority is the lane that requests against this
+  // deployment fall into when the inbound HTTP request does NOT
+  // carry an X-IPlane-Priority header. Operator sets it at
+  // CreateDeployment time (--priority flag, v0.2 ch7-beat2.3).
+  // UNSPECIFIED behaves as INTERACTIVE: the chapter narrative
+  // treats "no choice given" as "treat my traffic as user-facing"
+  // (the lower-latency lane); operators who want bulk-batch
+  // semantics by default flip it explicitly. The router resolves
+  // header > deployment default > INTERACTIVE on each request.
+  Priority default_priority = 22;
+}
+
+// Priority is the lane an inbound request joins on its way to the
+// engine. Two values in v0.2: interactive (low-latency, user-facing)
+// and batch (high-throughput, bulk). The scheduler that decides
+// which lane to drain when lands in v0.2 ch7-beat2.4; this enum
+// just labels the request so the lane structure can be plumbed.
+//
+// Forward-compat: numeric values are stable; appending future
+// priorities (e.g., BACKGROUND, REALTIME) does not break readers
+// pinned to ch07-final.
+enum Priority {
+  PRIORITY_UNSPECIFIED = 0;
+  // User-facing traffic; should not wait behind bulk work.
+  PRIORITY_INTERACTIVE = 1;
+  // Bulk traffic; tolerates higher tail latency in exchange for
+  // throughput.
+  PRIORITY_BATCH = 2;
 }
 
 enum DeploymentState {

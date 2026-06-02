@@ -85,6 +85,8 @@ labels:
     value: deploy_id
   - key: tenant_id
     value: tenant_id
+  - key: priority
+    value: priority
   - key: reason
     value: reason
   - key: provider
