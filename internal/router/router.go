@@ -145,12 +145,13 @@ type Router struct {
 // or both -- per-lane wins when set, otherwise the global value
 // fills in.
 type pendingSchedCfg struct {
-	servicers              int // global; >0 enables default scheduler
-	globalCapacity         int
-	interactiveCapacity    int
-	batchCapacity          int
-	inFlightCap            int
-	explicitSchedulerSet   bool // WithScheduler called; skip auto-build
+	servicers            int // global; >0 enables default scheduler
+	globalCapacity       int
+	interactiveCapacity  int
+	batchCapacity        int
+	inFlightCap          int
+	tenantWeights        scheduler.Weights
+	explicitSchedulerSet bool // WithScheduler called; skip auto-build
 }
 
 // Option is the functional-option type for New. Existing callers
@@ -227,6 +228,24 @@ func WithInFlightCap(cap int) Option {
 	}
 }
 
+// WithTenantWeights configures per-tenant fair-share weights for
+// the default scheduler (v0.2 ch7-beat2.5). The scheduler picks
+// one tenant per dispatch using weighted random selection across
+// tenants whose sub-queues are non-empty; tenants not in the map
+// get scheduler.DefaultTenantWeight (= 1).
+//
+// Nil or empty map means "everyone gets default weight" -- the
+// scheduler still does per-tenant sub-queues, but the lottery is
+// uniform.
+//
+// Ignored when WithScheduler installs a caller-supplied impl
+// (the caller owns the weights config in that case).
+func WithTenantWeights(w scheduler.Weights) Option {
+	return func(r *Router) {
+		r.pendingSchedulerCfg.tenantWeights = w
+	}
+}
+
 // WithScheduler installs a caller-supplied Scheduler impl, bypassing
 // the default-construction path. Used by tests that swap in a no-op
 // scheduler (acceptance: "Scheduler can be swapped out via interface").
@@ -293,7 +312,9 @@ func New(client provisionerv1connect.DeploymentServiceClient, recorder *metrics.
 			InteractiveCapacity: interactiveCap,
 			BatchCapacity:       batchCap,
 			InFlightCap:         cfg.inFlightCap,
+			Weights:             cfg.tenantWeights,
 			Handler:             r.dispatchEntry,
+			Observer:            newMetricsObserver(r.recorder),
 		})
 	}
 	return r

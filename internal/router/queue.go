@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"time"
 
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
 	"github.com/inference-book/inference-plane/internal/scheduler"
@@ -24,10 +25,15 @@ import (
 // writes.
 //
 // TenantID + Priority are captured into struct fields (in addition
-// to living on req's context) so Beat 2.5+ scheduler logic that
-// inspects the queue without invoking the handler (e.g., shedding
-// decisions, per-tenant/per-lane metrics) can read them without
-// unmarshaling the context.
+// to living on req's context) so the scheduler can route to the
+// right (lane, tenant) sub-queue and per-tenant fair-share works
+// without unmarshaling the context every call.
+//
+// enqueuedAt is stamped by the scheduler at Submit time and read at
+// dispatch to compute queue-wait-time (v0.2 ch7-beat2.6 metric).
+// Unexported because it's an implementation detail of the
+// scheduler<->router observer contract; the schedulerEntry wrapper
+// exposes it via StampEnqueued / EnqueuedAt methods.
 type queueEntry struct {
 	w                 http.ResponseWriter
 	req               *http.Request
@@ -36,6 +42,8 @@ type queueEntry struct {
 	done              chan struct{}
 	TenantID          string
 	Priority          provisionerv1.Priority
+
+	enqueuedAt time.Time
 }
 
 // DeploymentID satisfies scheduler.Entry. The scheduler's
@@ -60,17 +68,21 @@ func (e *queueEntry) PriorityLabel() string {
 	return e.priorityLabelString()
 }
 
-// schedulerEntry adapts queueEntry to scheduler.Entry. Doing it on
-// the type itself would conflict with queueEntry.Priority (the proto
-// enum field); a thin wrapper that exposes the right method names
-// keeps the field naming clean. Method receivers, not pointer
-// shenanigans, do the adaptation.
+// schedulerEntry adapts queueEntry to scheduler.Entry plus the
+// optional TenantIdentifier + EnqueueTimestamper interfaces the
+// scheduler uses for fair-share routing and wait-time tracking.
+// Doing it on the queueEntry type itself would conflict with
+// queueEntry.Priority (the proto enum field); a thin wrapper that
+// exposes the right method names keeps the field naming clean.
 type schedulerEntry struct {
 	*queueEntry
 }
 
-func (s schedulerEntry) Priority() string     { return s.priorityLabelString() }
-func (s schedulerEntry) DeploymentID() string { return s.queueEntry.DeploymentID() }
+func (s schedulerEntry) Priority() string         { return s.priorityLabelString() }
+func (s schedulerEntry) DeploymentID() string     { return s.queueEntry.DeploymentID() }
+func (s schedulerEntry) Tenant() string           { return s.queueEntry.TenantID }
+func (s schedulerEntry) StampEnqueued(t time.Time) { s.queueEntry.enqueuedAt = t }
+func (s schedulerEntry) EnqueuedAt() time.Time    { return s.queueEntry.enqueuedAt }
 
 // dispatchEntry is the scheduler-facing handler. Closes done after
 // the proxy call returns. The scheduler's root context is

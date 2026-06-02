@@ -21,6 +21,12 @@ const MetricInferenceActiveSeconds = "inference.active.seconds.total"
 // MetricInstanceUptimeSeconds -- Counter of wall-clock seconds since the control plane started. Base for billed-time cost calculations.
 const MetricInstanceUptimeSeconds = "instance.uptime.seconds.total"
 
+// MetricQueueDepth -- Gauge of current items waiting in the router's per-(deploy, tenant, lane) sub-queue. Updated synchronously on push/pop. Operator-facing signal for fair-share visibility (v0.2 ch7-beat2.6).
+const MetricQueueDepth = "iplane.queue.depth"
+
+// MetricQueueWaitSeconds -- Histogram of seconds an entry spent waiting in the router's queue before dispatch. Labeled by deploy_id / tenant_id / class so per-class p95 wait is the chapter's fair-queueing dashboard story.
+const MetricQueueWaitSeconds = "iplane.queue.wait.seconds"
+
 // MetricReaperDestroysTotal -- Counter of deployments destroyed by the idle-TTL reaper, labeled by reason (idle, etc.). Operator-facing signal of leak protection working.
 const MetricReaperDestroysTotal = "iplane.reaper.destroys.total"
 

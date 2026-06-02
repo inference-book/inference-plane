@@ -34,6 +34,8 @@ type Recorder struct {
 	tokens         metric.Int64Counter
 	backendHealthy metric.Int64Gauge
 	reaperDestroys metric.Int64Counter
+	queueDepth     metric.Int64Gauge
+	queueWait      metric.Float64Histogram
 }
 
 // NewRecorder builds the four instruments via the global MeterProvider.
@@ -98,12 +100,39 @@ func NewRecorder() (*Recorder, error) {
 		return nil, fmt.Errorf("metrics: reaper counter: %w", err)
 	}
 
+	queueDepth, err := meter.Int64Gauge(
+		telemetry.MetricQueueDepth,
+		metric.WithDescription("Current items waiting in the router's per-(deploy, tenant, lane) sub-queue."),
+		metric.WithUnit("{request}"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("metrics: queue depth gauge: %w", err)
+	}
+
+	// Wait-time histogram buckets cover the operator-observable
+	// spectrum: sub-second (interactive p50), a few seconds (under
+	// queue pressure), tens of seconds (saturated batch). Same
+	// shape as the request-duration histogram so dashboards can
+	// stack the two for the chapter's queue-vs-engine-time
+	// breakdown.
+	queueWait, err := meter.Float64Histogram(
+		telemetry.MetricQueueWaitSeconds,
+		metric.WithDescription("Seconds an entry spent waiting in the router's queue before dispatch."),
+		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(0.001, 0.01, 0.1, 0.5, 1, 2, 5, 10, 30),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("metrics: queue wait histogram: %w", err)
+	}
+
 	return &Recorder{
 		requests:       requests,
 		duration:       duration,
 		tokens:         tokens,
 		backendHealthy: healthy,
 		reaperDestroys: reaperDestroys,
+		queueDepth:     queueDepth,
+		queueWait:      queueWait,
 	}, nil
 }
 
@@ -217,6 +246,47 @@ func (r *Recorder) RecordRouterTokens(ctx context.Context, deployID, model, tena
 	r.tokens.Add(ctx, n, metric.WithAttributes(
 		attribute.String(telemetry.LabelDeployID, deployID),
 		attribute.String(telemetry.LabelModel, model),
+		attribute.String(telemetry.LabelTenantID, tenantID),
+		attribute.String(telemetry.LabelPriority, priority),
+	))
+}
+
+// RecordQueueDepth emits one observation of the queue-depth gauge
+// for the (deploy_id, tenant_id, priority) cell. Called by the
+// scheduler observer on every push + pop so the dashboard sees
+// live depth changes.
+//
+// Synchronous gauge (not async/observable) because the scheduler
+// already owns the source of truth and emits cheaply; a callback-
+// based observable gauge would need a periodic scrape of the same
+// state with no operator-visible difference.
+//
+// nil-safe.
+func (r *Recorder) RecordQueueDepth(ctx context.Context, deployID, tenantID, priority string, depth int64) {
+	if r == nil {
+		return
+	}
+	r.queueDepth.Record(ctx, depth, metric.WithAttributes(
+		attribute.String(telemetry.LabelDeployID, deployID),
+		attribute.String(telemetry.LabelTenantID, tenantID),
+		attribute.String(telemetry.LabelPriority, priority),
+	))
+}
+
+// RecordQueueWait records one wait-duration observation in the
+// queue-wait histogram. Called by the scheduler observer when an
+// entry exits the queue. Zero / negative durations are dropped --
+// they indicate the entry came from an Entry impl that doesn't
+// stamp enqueue time (test no-ops) and recording them would skew
+// the histogram toward 0.
+//
+// nil-safe.
+func (r *Recorder) RecordQueueWait(ctx context.Context, deployID, tenantID, priority string, waitSec float64) {
+	if r == nil || waitSec <= 0 {
+		return
+	}
+	r.queueWait.Record(ctx, waitSec, metric.WithAttributes(
+		attribute.String(telemetry.LabelDeployID, deployID),
 		attribute.String(telemetry.LabelTenantID, tenantID),
 		attribute.String(telemetry.LabelPriority, priority),
 	))
