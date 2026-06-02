@@ -12,14 +12,15 @@ import (
 )
 
 var (
-	deploymentScaleWait   bool
-	deploymentScaleDryRun bool
+	deploymentScaleWait        bool
+	deploymentScaleDryRun      bool
+	deploymentScaleAddReplicas []string
 )
 
 var deploymentScaleCmd = &cobra.Command{
-	Use:   "scale <id> <N>",
+	Use:   "scale <id> [<N>]",
 	Short: "Change a deployment's replica count",
-	Args:  cobra.ExactArgs(2),
+	Args:  cobra.RangeArgs(1, 2),
 	Long: `Change a deployment's replica count to N.
 
 v0.2 ch7-beat3.8 ships scale-up only: N greater than the current
@@ -38,12 +39,33 @@ designed in #145.
 
 func runDeploymentScale(cmd *cobra.Command, args []string) error {
 	id := args[0]
-	target, err := strconv.Atoi(args[1])
+
+	addSpecs, err := parseReplicaSpecs(deploymentScaleAddReplicas)
 	if err != nil {
-		return fmt.Errorf("invalid replica count %q: %w", args[1], err)
+		return err
 	}
-	if target <= 0 {
-		return fmt.Errorf("replica count must be > 0 (got %d)", target)
+
+	// Two forms:
+	//   - homogeneous: positional <N> (absolute target)
+	//   - heterogeneous: --add-replica '<provider>:<class>' repeatable
+	// Mutually exclusive.
+	var target int32
+	switch {
+	case len(addSpecs) > 0 && len(args) >= 2:
+		return fmt.Errorf("--add-replica is mutually exclusive with the positional target count <N> -- use one form per call")
+	case len(addSpecs) > 0:
+		// heterogeneous: count comes from len(--add-replica)
+	case len(args) >= 2:
+		t, perr := strconv.Atoi(args[1])
+		if perr != nil {
+			return fmt.Errorf("invalid replica count %q: %w", args[1], perr)
+		}
+		if t <= 0 {
+			return fmt.Errorf("replica count must be > 0 (got %d)", t)
+		}
+		target = int32(t)
+	default:
+		return fmt.Errorf("scale requires either a positional <N> or one or more --add-replica '<provider>:<class>' flags")
 	}
 
 	client, err := buildDeploymentClient()
@@ -61,12 +83,17 @@ func runDeploymentScale(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(cmd.Context(), timeout)
 	defer cancel()
 
-	resp, err := client.ScaleDeployment(ctx, &provisionerv1.ScaleDeploymentRequest{
-		Id:             id,
-		TargetReplicas: int32(target),
-		Wait:           deploymentScaleWait && !deploymentScaleDryRun,
-		DryRun:         deploymentScaleDryRun,
-	})
+	req := &provisionerv1.ScaleDeploymentRequest{
+		Id:     id,
+		Wait:   deploymentScaleWait && !deploymentScaleDryRun,
+		DryRun: deploymentScaleDryRun,
+	}
+	if len(addSpecs) > 0 {
+		req.AddReplicas = addSpecs
+	} else {
+		req.TargetReplicas = target
+	}
+	resp, err := client.ScaleDeployment(ctx, req)
 	if err != nil {
 		return fmt.Errorf("scale %q to %d: %w", id, target, err)
 	}
@@ -85,7 +112,15 @@ func runDeploymentScale(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(out, "[dry-run] deployment %q (state: %s)\n",
 			dep.GetId(), deploymentStateLabel(dep.GetState()))
 		fmt.Fprintf(out, "[dry-run] current replicas: %d\n", current)
-		fmt.Fprintf(out, "[dry-run] target replicas:  %d\n", target)
+		if len(addSpecs) > 0 {
+			fmt.Fprintf(out, "[dry-run] adding %d heterogeneous replicas:\n", len(addSpecs))
+			for i, spec := range addSpecs {
+				fmt.Fprintf(out, "[dry-run]   r%d: provider=%s class=%s\n",
+					current+i, spec.GetProvider(), spec.GetRequirements().GetClass())
+			}
+		} else {
+			fmt.Fprintf(out, "[dry-run] target replicas:  %d\n", target)
+		}
 		planned := resp.GetPlannedInstanceIds()
 		if len(planned) == 0 {
 			fmt.Fprintln(out, "[dry-run] no-op (already at target)")
@@ -114,4 +149,6 @@ func init() {
 		`block until new replicas reach a terminal aggregate state`)
 	f.BoolVar(&deploymentScaleDryRun, "dry-run", false,
 		`print the planned new instance ids without provisioning`)
+	f.StringSliceVar(&deploymentScaleAddReplicas, "add-replica", nil,
+		`per-replica spec in 'provider:class' form (e.g., runpod:small). Repeatable. Each --add-replica appends one replica with that (provider, class) shape. Mutually exclusive with the positional <N> count -- use this form for heterogeneous scale-up (1 runpod + 1 vast + 1 lambda).`)
 }

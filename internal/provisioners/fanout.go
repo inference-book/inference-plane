@@ -63,8 +63,18 @@ func (s *Service) ScaleDeployment(ctx context.Context, req *provisionerv1.ScaleD
 	if err := ValidateID(id); err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
+	// target_replicas + add_replicas are mutually exclusive forms:
+	// pick one per call. Heterogeneous (add_replicas) is the v0.2
+	// ch7-beat3.9 (#143) form; target_replicas is the homogeneous
+	// shortcut that extends the existing fleet's anchor shape.
 	target := int(req.GetTargetReplicas())
-	if target <= 0 {
+	hetero := req.GetAddReplicas()
+	switch {
+	case target > 0 && len(hetero) > 0:
+		return nil, status.Error(codes.InvalidArgument, "target_replicas and add_replicas are mutually exclusive -- use one form per call")
+	case target == 0 && len(hetero) == 0:
+		return nil, status.Error(codes.InvalidArgument, "scale requires either target_replicas > 0 or add_replicas (heterogeneous)")
+	case target < 0:
 		return nil, status.Errorf(codes.InvalidArgument, "target_replicas must be > 0 (got %d)", target)
 	}
 
@@ -121,18 +131,34 @@ func (s *Service) ScaleDeployment(ctx context.Context, req *provisionerv1.ScaleD
 		}
 	}
 
-	delta := target - current
-	switch {
-	case delta == 0:
-		return &provisionerv1.ScaleDeploymentResponse{Deployment: rec}, nil
-	case delta < 0:
-		return nil, status.Errorf(codes.Unimplemented, "scale-down (target=%d, current=%d) lands in #145; v0.2 ch7-beat3.8 ships scale-up only", target, current)
+	// Build per-slot ReplicaSpecs for the new replicas. Heterogeneous
+	// path takes specs verbatim; homogeneous path replicates the
+	// anchor instance's spec delta times.
+	var specs []*provisionerv1.ReplicaSpec
+	if len(hetero) > 0 {
+		specs = hetero
+	} else {
+		delta := target - current
+		switch {
+		case delta == 0:
+			return &provisionerv1.ScaleDeploymentResponse{Deployment: rec}, nil
+		case delta < 0:
+			return nil, status.Errorf(codes.Unimplemented, "scale-down (target=%d, current=%d) lands in #145; v0.2 ch7-beat3.8 ships scale-up only", target, current)
+		}
+		anchorSpec, asErr := s.anchorReplicaSpec(file, rec)
+		if asErr != nil {
+			return nil, asErr
+		}
+		specs = make([]*provisionerv1.ReplicaSpec, delta)
+		for i := range specs {
+			specs[i] = anchorSpec
+		}
 	}
 
 	// Plan: synthesize the new slot ids. Used for both dry-run
 	// preview and the actual provision path.
-	plannedIDs := make([]string, delta)
-	for i := range delta {
+	plannedIDs := make([]string, len(specs))
+	for i := range specs {
 		plannedIDs[i] = replicaInstanceID(id, current+i)
 	}
 	if req.GetDryRun() {
@@ -142,35 +168,26 @@ func (s *Service) ScaleDeployment(ctx context.Context, req *provisionerv1.ScaleD
 		}, nil
 	}
 
-	// Reconstruct a synthetic CreateDeploymentRequest the placement
-	// helpers can use. Provider / Region / Requirements come from the
-	// underlying Instance behind slot 0 (or the singular instance_id
-	// for legacy Beat 1+2 records). Heterogeneous fleets (#143) will
-	// replace this with a per-slot spec.
-	scaleReq, srErr := s.buildScaleRequest(file, rec)
-	if srErr != nil {
-		return nil, srErr
-	}
-
 	runCtx := context.Background()
 	if req.GetWait() {
 		runCtx = ctx
-		s.appendReplicas(runCtx, scaleReq, id, current, delta)
+		s.appendReplicas(runCtx, rec, id, specs, current)
 		if file2, rerr := s.store.Read(); rerr == nil {
 			if updated, ok := file2.Deployments[id]; ok {
 				rec = updated
 			}
 		}
 	} else {
-		go s.appendReplicas(runCtx, scaleReq, id, current, delta)
+		go s.appendReplicas(runCtx, rec, id, specs, current)
 	}
 	return &provisionerv1.ScaleDeploymentResponse{Deployment: rec}, nil
 }
 
-// buildScaleRequest constructs the synthetic CreateDeploymentRequest
-// passed to the fan-out machinery for scale-up. The provider /
-// region / requirements come from the existing slot 0 Instance so
-// the new replicas match the shape of the existing fleet.
+// anchorReplicaSpec extracts the (provider, region, requirements)
+// shape from the existing slot 0 Instance, so a homogeneous
+// scale-up call (target_replicas) can extend the existing fleet's
+// shape. For heterogeneous fleets, scale's add_replicas form names
+// each new spec explicitly and this helper is bypassed.
 //
 // For Beat 1+2 legacy deployments (no instance_ids, just a singular
 // instance_id), the singular Instance is the source of truth.
@@ -178,7 +195,7 @@ func (s *Service) ScaleDeployment(ctx context.Context, req *provisionerv1.ScaleD
 // Fails if the slot-0 Instance is missing -- the deployment record
 // is inconsistent with the instance store, and scale can't pick a
 // shape to extend.
-func (s *Service) buildScaleRequest(file *State, rec *provisionerv1.Deployment) (*provisionerv1.CreateDeploymentRequest, error) {
+func (s *Service) anchorReplicaSpec(file *State, rec *provisionerv1.Deployment) (*provisionerv1.ReplicaSpec, error) {
 	var anchorID string
 	if ids := rec.GetInstanceIds(); len(ids) > 0 && ids[0] != "" {
 		anchorID = ids[0]
@@ -196,8 +213,7 @@ func (s *Service) buildScaleRequest(file *State, rec *provisionerv1.Deployment) 
 	if spec == nil {
 		return nil, status.Errorf(codes.FailedPrecondition, "anchor instance %q has no spec (cannot extend the fleet)", anchorID)
 	}
-	return &provisionerv1.CreateDeploymentRequest{
-		Deployment:   rec,
+	return &provisionerv1.ReplicaSpec{
 		Provider:     anchor.GetProvider(),
 		Region:       spec.GetRegion(),
 		Requirements: spec.GetRequirements(),
@@ -216,8 +232,9 @@ func (s *Service) buildScaleRequest(file *State, rec *provisionerv1.Deployment) 
 //     fan-out partial failure stay; scale doesn't touch them. The
 //     deployment's pre-scale state may have already been DEGRADED;
 //     scale-up cannot make that better.)
-func (s *Service) appendReplicas(ctx context.Context, req *provisionerv1.CreateDeploymentRequest, deployID string, currentCount, delta int) {
-	successes, failureReasons := s.provisionSlots(ctx, req, deployID, currentCount, delta, s.recordAppendedSlots)
+func (s *Service) appendReplicas(ctx context.Context, dep *provisionerv1.Deployment, deployID string, specs []*provisionerv1.ReplicaSpec, currentCount int) {
+	delta := len(specs)
+	successes, failureReasons := s.provisionSlots(ctx, specs, dep, deployID, currentCount, s.recordAppendedSlots)
 	s.applyScaleAggregate(deployID, delta, successes, failureReasons)
 }
 
@@ -320,10 +337,21 @@ func (s *Service) createMultiReplicaDeployment(ctx context.Context, req *provisi
 		return &provisionerv1.CreateDeploymentResponse{Deployment: record, AlreadyExisted: true}, nil
 	}
 
+	specs, specErr := resolveCreateReplicaSpecs(req)
+	if specErr != nil {
+		return nil, specErr
+	}
+	// Defensive: the caller (CreateDeployment) already gated this
+	// branch on replicas > 1 OR replicas_spec set. If specs is short
+	// here, it's a programmer error.
+	if len(specs) != count {
+		return nil, status.Errorf(codes.Internal, "spec count %d != requested replica count %d", len(specs), count)
+	}
+
 	runCtx := context.Background()
 	if req.GetWait() {
 		runCtx = ctx
-		s.fanOutProvision(runCtx, req, record.GetId(), count)
+		s.fanOutProvision(runCtx, req, record.GetId(), specs)
 		// Re-read the record to surface terminal aggregate state.
 		if file, rerr := s.store.Read(); rerr == nil {
 			if final, ok := file.Deployments[record.GetId()]; ok {
@@ -331,7 +359,7 @@ func (s *Service) createMultiReplicaDeployment(ctx context.Context, req *provisi
 			}
 		}
 	} else {
-		go s.fanOutProvision(runCtx, req, record.GetId(), count)
+		go s.fanOutProvision(runCtx, req, record.GetId(), specs)
 	}
 	return &provisionerv1.CreateDeploymentResponse{Deployment: record}, nil
 }
@@ -364,23 +392,31 @@ func (s *Service) createMultiReplicaDeployment(ctx context.Context, req *provisi
 // Synchronous wrt the caller: it returns when the aggregate state
 // is stamped. CreateDeployment runs it on the request ctx when
 // wait=true, or in a detached background goroutine when wait=false.
-func (s *Service) fanOutProvision(ctx context.Context, req *provisionerv1.CreateDeploymentRequest, deployID string, count int) {
-	successes, failureReasons := s.provisionSlots(ctx, req, deployID, 0, count, s.recordCreateSlots)
+func (s *Service) fanOutProvision(ctx context.Context, req *provisionerv1.CreateDeploymentRequest, deployID string, specs []*provisionerv1.ReplicaSpec) {
+	count := len(specs)
+	successes, failureReasons := s.provisionSlots(ctx, specs, req.GetDeployment(), deployID, 0, s.recordCreateSlots)
 	s.applyAggregateState(deployID, count, successes, failureReasons)
 }
 
 // provisionSlots is the shared placement + launch primitive used by
 // both create (startingSlot=0) and scale (startingSlot=current).
-// recordSlots is the caller's slot-persistence strategy: create
-// overwrites; scale appends.
+// specs carries the per-slot (provider, region, requirements);
+// dep is the Deployment record (carries Image, Env, EnginePort
+// shared across all slots). recordSlots is the caller's slot-
+// persistence strategy: create overwrites; scale appends.
 //
 // Returns the count of successful slots and the failure reasons for
 // failed slots (used by the caller's aggregate-state routine).
-func (s *Service) provisionSlots(ctx context.Context, req *provisionerv1.CreateDeploymentRequest, deployID string, startingSlot, count int, recordSlots func(deployID string, placements []*provisionerv1.Instance, startingSlot int)) (int, []string) {
-	placements, placeErrs := s.placeSlots(ctx, req, deployID, startingSlot, count)
+//
+// Heterogeneous-aware: each slot's executor runs against its own
+// provider's Deployer (resolved via deployerFor on the per-slot
+// Instance). The SSH key per-slot is loaded by provider name; a
+// keystore failure for one provider doesn't break other slots.
+func (s *Service) provisionSlots(ctx context.Context, specs []*provisionerv1.ReplicaSpec, dep *provisionerv1.Deployment, deployID string, startingSlot int, recordSlots func(deployID string, placements []*provisionerv1.Instance, startingSlot int)) (int, []string) {
+	count := len(specs)
+	placements, placeErrs := s.placeSlots(ctx, specs, dep.GetImage(), deployID, startingSlot)
 	recordSlots(deployID, placements, startingSlot)
 
-	key := s.loadFanOutKey(req)
 	results := make(chan fanOutResult, count)
 	for i, inst := range placements {
 		slot := startingSlot + i
@@ -391,14 +427,20 @@ func (s *Service) provisionSlots(ctx context.Context, req *provisionerv1.CreateD
 			}
 			continue
 		}
-		if key == nil {
+		// Load the SSH key per slot (heterogeneous: each provider has
+		// its own keypair). One provider's keystore failure doesn't
+		// break other slots -- the failure for that slot is recorded
+		// as a fanOutResult with err set, and the aggregator counts
+		// it like any other failed replica.
+		key, keyErr := s.replicaKey(specs[i].GetProvider())
+		if keyErr != nil {
 			results <- fanOutResult{
 				instanceID: inst.GetId(),
-				err:        fmt.Errorf("ssh keypair unavailable for provider %q", req.GetProvider()),
+				err:        keyErr,
 			}
 			continue
 		}
-		go s.launchReplica(ctx, deployID, slot, inst, key, req.GetDeployment(), results)
+		go s.launchReplica(ctx, deployID, slot, inst, key, dep, results)
 	}
 
 	successes := 0
@@ -414,16 +456,38 @@ func (s *Service) provisionSlots(ctx context.Context, req *provisionerv1.CreateD
 	return successes, failureReasons
 }
 
-// placeSlots spawns count goroutines, each placing one per-replica
-// Instance starting at startingSlot. Returns parallel slices (indexed
-// 0..count-1, mapping to global slots startingSlot..startingSlot+count-1):
-// placements[i] is the Instance for the local index i (nil on failure),
-// placeErrs[i] is the matching error (nil on success).
+// replicaKey loads the SSH keypair for one provider. Per-slot helper
+// for heterogeneous fan-out: each provider has its own keystore
+// entry. Returns a non-nil error if the keystore is unconfigured or
+// the load fails -- the caller treats this as a per-slot failure
+// (the other slots in the fan-out can still succeed).
+func (s *Service) replicaKey(providerName string) (*sshkeys.KeyPair, error) {
+	if s.keyStore == nil {
+		return nil, fmt.Errorf("keystore unconfigured (use provisioners.WithKeyStore)")
+	}
+	key, err := s.keyStore.EnsureKeyPair(s.operatorID, providerName)
+	if err != nil {
+		return nil, fmt.Errorf("load ssh key for provider %q: %v", providerName, err)
+	}
+	return key, nil
+}
+
+// placeSlots spawns len(specs) goroutines, each placing one per-replica
+// Instance at globalSlot = startingSlot+i with specs[i]. Returns
+// parallel slices (indexed 0..len(specs)-1, mapping to global slots
+// startingSlot..startingSlot+len(specs)-1): placements[i] is the
+// Instance for the local index i (nil on failure), placeErrs[i] is
+// the matching error (nil on success).
+//
+// Heterogeneous-aware: each slot uses its own (provider, region,
+// requirements) from specs[i]. Homogeneous fan-out passes N copies
+// of the same spec; the helper does not distinguish.
 //
 // Idempotent: placeReplicaInstance reuses an existing Instance
 // record if one already exists at the synthesized id (re-runs of a
 // failed CreateDeployment don't double-rent).
-func (s *Service) placeSlots(ctx context.Context, req *provisionerv1.CreateDeploymentRequest, deployID string, startingSlot, count int) ([]*provisionerv1.Instance, []error) {
+func (s *Service) placeSlots(ctx context.Context, specs []*provisionerv1.ReplicaSpec, baseImage, deployID string, startingSlot int) ([]*provisionerv1.Instance, []error) {
+	count := len(specs)
 	placements := make([]*provisionerv1.Instance, count)
 	placeErrs := make([]error, count)
 	var wg sync.WaitGroup
@@ -431,7 +495,7 @@ func (s *Service) placeSlots(ctx context.Context, req *provisionerv1.CreateDeplo
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			inst, err := s.placeReplicaInstance(ctx, req, deployID, startingSlot+i)
+			inst, err := s.placeReplicaInstance(ctx, specs[i], baseImage, deployID, startingSlot+i)
 			if err != nil {
 				placeErrs[i] = err
 				return
@@ -676,17 +740,33 @@ func (s *Service) readSlotEndpoint(deployID string, slot int) string {
 // Idempotent: if an Instance already exists at the synthesized id,
 // reuse it (re-runs of a partially-failed CreateDeployment don't
 // double-rent the slot).
-func (s *Service) placeReplicaInstance(_ context.Context, req *provisionerv1.CreateDeploymentRequest, deployID string, slot int) (*provisionerv1.Instance, error) {
-	reqs := req.GetRequirements()
-	if reqs == nil {
-		return nil, status.Error(codes.InvalidArgument, "multi-replica deployment requires resource requirements (--class, --min-vram-gb, or --sku)")
+// placeReplicaInstance synthesizes one per-replica Instance record
+// at slot. Per-slot (provider, region, requirements) come from spec,
+// not from a singular request field -- heterogeneous fleets (#143)
+// can mix providers across slots, so this helper is spec-agnostic.
+// Homogeneous fan-out passes N copies of the same spec.
+//
+// Auto-provision only: the explicit-instance-id branch from
+// placeDeployment cannot apply here -- fan-out callers don't get to
+// name underlying instances.
+//
+// Idempotent: if an Instance already exists at the synthesized id,
+// reuse it (re-runs of a partially-failed CreateDeployment don't
+// double-rent the slot).
+func (s *Service) placeReplicaInstance(_ context.Context, spec *provisionerv1.ReplicaSpec, baseImage, deployID string, slot int) (*provisionerv1.Instance, error) {
+	if spec == nil {
+		return nil, status.Error(codes.InvalidArgument, "replica spec is required")
 	}
-	providerName := req.GetProvider()
+	reqs := spec.GetRequirements()
+	if reqs == nil {
+		return nil, status.Errorf(codes.InvalidArgument, "replica slot r%d: resource requirements are required (--class, --min-vram-gb, or --sku)", slot)
+	}
+	providerName := spec.GetProvider()
 	if providerName == "" {
-		return nil, status.Error(codes.InvalidArgument, "multi-replica deployment requires a provider")
+		return nil, status.Errorf(codes.InvalidArgument, "replica slot r%d: provider is required", slot)
 	}
 	if _, ok := s.providers[providerName]; !ok {
-		return nil, status.Errorf(codes.InvalidArgument, "unknown provider %q", providerName)
+		return nil, status.Errorf(codes.InvalidArgument, "replica slot r%d: unknown provider %q", slot, providerName)
 	}
 
 	instanceID := replicaInstanceID(deployID, slot)
@@ -695,19 +775,56 @@ func (s *Service) placeReplicaInstance(_ context.Context, req *provisionerv1.Cre
 			return existing, nil
 		}
 	}
-	spec := &provisionerv1.Spec{
+	pspec := &provisionerv1.Spec{
 		Id:           instanceID,
 		Provider:     providerName,
-		Region:       req.GetRegion(),
-		BaseImage:    req.GetDeployment().GetImage(),
+		Region:       spec.GetRegion(),
+		BaseImage:    baseImage,
 		Requirements: reqs,
 	}
-	if err := ValidateAndExpandRequirements(spec); err != nil {
-		return nil, status.Error(codes.InvalidArgument, err.Error())
+	if err := ValidateAndExpandRequirements(pspec); err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "replica slot r%d: %v", slot, err)
 	}
-	inst := newPendingInstance(spec, providerName, s.clock())
+	inst := newPendingInstance(pspec, providerName, s.clock())
 	if err := s.patchRecord(inst.GetId(), inst); err != nil {
-		return nil, status.Errorf(codes.Internal, "record placed replica: %v", err)
+		return nil, status.Errorf(codes.Internal, "record placed replica r%d: %v", slot, err)
 	}
 	return inst, nil
+}
+
+// resolveCreateReplicaSpecs converts a CreateDeploymentRequest into a
+// list of per-slot ReplicaSpecs. Returns:
+//
+//   - replicas_spec set -> the list verbatim (heterogeneous).
+//   - replicas_spec empty + replicas > 0 -> N copies of the singular
+//     (provider, region, requirements) triple (homogeneous).
+//
+// The two forms are mutually exclusive: if both are set, returns
+// InvalidArgument. The single ReplicaSpec built from homogeneous
+// fields is the *degenerate* of the heterogeneous case -- the rest
+// of the fan-out machinery (placeReplicaInstance, provisionSlots)
+// cares only about the per-slot specs, not which form filled them.
+func resolveCreateReplicaSpecs(req *provisionerv1.CreateDeploymentRequest) ([]*provisionerv1.ReplicaSpec, error) {
+	specs := req.GetReplicasSpec()
+	replicas := req.GetReplicas()
+	if replicas == 0 {
+		replicas = 1
+	}
+	if len(specs) > 0 {
+		if req.GetReplicas() > 1 || req.GetProvider() != "" || req.GetRequirements() != nil {
+			return nil, status.Error(codes.InvalidArgument, "replicas_spec is mutually exclusive with the singular provider / requirements / replicas fields -- use one form per call")
+		}
+		return specs, nil
+	}
+	// Homogeneous: build N copies of the singular spec.
+	homo := &provisionerv1.ReplicaSpec{
+		Provider:     req.GetProvider(),
+		Region:       req.GetRegion(),
+		Requirements: req.GetRequirements(),
+	}
+	out := make([]*provisionerv1.ReplicaSpec, replicas)
+	for i := range out {
+		out[i] = homo
+	}
+	return out, nil
 }

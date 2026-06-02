@@ -841,29 +841,36 @@ func (s *Service) CreateDeployment(ctx context.Context, req *provisionerv1.Creat
 		return nil, status.Error(codes.InvalidArgument, "deployment.model is required")
 	}
 	// v0.2 ch7-beat3.2 / #84: --replicas N plumbed through. v0.2
-	// ch7-beat3.7 (#138) implements the parallel fan-out:
-	// values > 1 dispatch to fanOutProvision below, after the shared
-	// validation + idempotency + model-resolve path completes.
+	// ch7-beat3.7 (#138) implemented homogeneous fan-out. v0.2
+	// ch7-beat3.9 (#143) extends with heterogeneous: replicas_spec
+	// names per-slot (provider, class) so the same Deployment can
+	// span providers (1 runpod + 1 vast + 1 lambda) -- iplane's
+	// load-bearing differentiator from k8s / Auto Scaling Groups.
+	//
+	// Validation:
+	//   - replicas + replicas_spec mutually exclusive (caller picks
+	//     one form per call).
+	//   - replicas < 0: invalid.
+	//   - replicas_spec entries with empty provider / nil
+	//     requirements: invalid (per-slot, surfaced by
+	//     resolveCreateReplicaSpecs / placeReplicaInstance).
+	//   - Multi-replica + operator-supplied instance_id /
+	//     instance_ids: fan-out always auto-provisions; pinned
+	//     instances are incoherent.
 	replicas := req.GetReplicas()
-	if replicas == 0 {
-		replicas = 1
-	}
+	hetero := req.GetReplicasSpec()
 	if replicas < 0 {
 		return nil, status.Errorf(codes.InvalidArgument, "replicas must be >= 0 (got %d)", replicas)
 	}
-	// Heterogeneous fleets (#143) will let operators name a per-
-	// replica provider/class via a richer request shape. Until then,
-	// reject the combination of replicas>1 + operator-supplied
-	// instance_ids -- the fan-out synthesizes ids deterministically
-	// (deploy_id-r0, -r1, ...) and operator-supplied lists would
-	// conflict silently.
-	if replicas > 1 && len(dep.GetInstanceIds()) > 0 {
-		return nil, status.Errorf(codes.InvalidArgument, "deployment.instance_ids cannot be combined with replicas > 1; heterogeneous-fleet specification lands in #143")
+	multiReplica := len(hetero) > 0 || replicas > 1
+	if multiReplica && len(dep.GetInstanceIds()) > 0 {
+		return nil, status.Errorf(codes.InvalidArgument, "deployment.instance_ids cannot be combined with multi-replica deployments; fan-out synthesizes ids deterministically")
 	}
-	// Same logic for the explicit-instance pin: multi-replica fan-out
-	// always auto-provisions, so a pinned instance_id is incompatible.
-	if replicas > 1 && dep.GetInstanceId() != "" {
-		return nil, status.Errorf(codes.InvalidArgument, "deployment.instance_id cannot be combined with replicas > 1; multi-replica deployments auto-provision their underlying instances")
+	if multiReplica && dep.GetInstanceId() != "" {
+		return nil, status.Errorf(codes.InvalidArgument, "deployment.instance_id cannot be combined with multi-replica deployments; fan-out always auto-provisions")
+	}
+	if replicas == 0 && len(hetero) == 0 {
+		replicas = 1 // proto3 zero-value -> single-instance default
 	}
 
 	// Pre-flight: resolve the model spec through the configured
@@ -897,8 +904,12 @@ func (s *Service) CreateDeployment(ctx context.Context, req *provisionerv1.Creat
 	// per-replica Instances inside fanOutProvision and never touches
 	// the singular dep.instance_id, so we branch before placeDeployment
 	// and run a parallel persist + fan-out path.
-	if replicas > 1 {
-		return s.createMultiReplicaDeployment(ctx, req, int(replicas))
+	if multiReplica {
+		count := int(replicas)
+		if len(hetero) > 0 {
+			count = len(hetero)
+		}
+		return s.createMultiReplicaDeployment(ctx, req, count)
 	}
 
 	// Resolve the target instance: place the deployment. v0.1's

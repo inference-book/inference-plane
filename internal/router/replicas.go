@@ -4,6 +4,7 @@ import (
 	"sync/atomic"
 
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
+	"github.com/inference-book/inference-plane/internal/router/policy"
 )
 
 // pickReplica selects one (instance_id, engine_endpoint) pair from
@@ -40,46 +41,72 @@ import (
 // case where one always-empty slot would never let the rotation
 // progress.
 func (r *Router) pickReplica(dep *provisionerv1.Deployment) (instanceID, endpoint string, ok bool) {
+	replicas := r.eligibleReplicas(dep)
+	if len(replicas) == 0 {
+		return "", "", false
+	}
+	selected, picked := r.policy.Pick(nil, dep.GetId(), replicas, r)
+	if !picked {
+		return "", "", false
+	}
+	return selected.InstanceID, selected.Endpoint, true
+}
+
+// eligibleReplicas builds the policy-facing replica set: filters
+// out empty endpoint slots (still-provisioning) and quarantined
+// slots (#87). Policies see only what they can actually pick --
+// the empty/quarantined filtering lives here, not in each policy,
+// so future policies don't have to re-implement the same skip
+// logic.
+//
+// Replica.InstanceID may be "" for legacy single-instance
+// deployments where engine_endpoint is set but instance_id isn't
+// populated. That's fine for routing -- the endpoint is what
+// matters for forwarding; instance_id is metric/span metadata.
+func (r *Router) eligibleReplicas(dep *provisionerv1.Deployment) []policy.Replica {
 	eps := effectiveEndpoints(dep)
 	if len(eps) == 0 {
-		return "", "", false
+		return nil
 	}
 	ids := effectiveInstanceIDs(dep)
 	quarantined := quarantinedSet(dep)
 
-	counterAny, _ := r.rrCounters.LoadOrStore(dep.GetId(), new(atomic.Uint64))
-	counter := counterAny.(*atomic.Uint64)
-
-	// At most n attempts so a deployment with all empty/quarantined
-	// slots fails fast (rather than looping). The increment-and-
-	// modulo pattern gives stable round-robin under concurrent
-	// traffic; visited slots cycle deterministically across calls.
-	//
-	// ids may be shorter than eps if a deployment record has
-	// engine_endpoint set without instance_id (test fixtures, or
-	// pre-Beat-3 records that predate the instance_ids list). Pad
-	// with empty replica_id labels rather than refusing to route --
-	// the engine endpoint is what matters for forwarding; the
-	// replica_id is metric/span metadata. (A replica with an empty
-	// instance_id can never be quarantined -- there's no key to put
-	// it under in unhealthy_instance_ids -- so the set lookup is
-	// safe to skip in that case.)
-	n := len(eps)
-	for range n {
-		idx := int(counter.Add(1)-1) % n
-		if eps[idx] == "" {
+	out := make([]policy.Replica, 0, len(eps))
+	for i, ep := range eps {
+		if ep == "" {
 			continue
 		}
 		instanceID := ""
-		if idx < len(ids) {
-			instanceID = ids[idx]
+		if i < len(ids) {
+			instanceID = ids[i]
 		}
 		if _, isQuarantined := quarantined[instanceID]; isQuarantined && instanceID != "" {
 			continue
 		}
-		return instanceID, eps[idx], true
+		out = append(out, policy.Replica{
+			InstanceID: instanceID,
+			Endpoint:   ep,
+		})
 	}
-	return "", "", false
+	return out
+}
+
+// InFlight implements policy.Stats: returns the current in-flight
+// request count for the (deploy, replica) pair from the router's
+// own in-flight tracker (the same map that feeds the
+// iplane.replica.in_flight gauge from #88). Returns 0 when the
+// pair is unknown (the router hasn't seen any requests against
+// the slot yet).
+//
+// Today's RoundRobin policy ignores Stats; Ch 8's prefix-affinity
+// will read this to break ties between equally cache-hot replicas.
+func (r *Router) InFlight(deployID, replicaID string) int64 {
+	key := deployID + "/" + replicaID
+	counterAny, ok := r.inFlight.Load(key)
+	if !ok {
+		return 0
+	}
+	return counterAny.(*atomic.Int64).Load()
 }
 
 // quarantinedSet builds the O(1)-lookup form of the deployment's

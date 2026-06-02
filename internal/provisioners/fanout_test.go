@@ -253,7 +253,7 @@ func TestFanOut_RejectsInstanceIdWithReplicas(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected InvalidArgument for instance_id + replicas>1")
 	}
-	if !strings.Contains(err.Error(), "instance_id cannot be combined with replicas > 1") {
+	if !strings.Contains(err.Error(), "instance_id cannot be combined with multi-replica") {
 		t.Errorf("error should explain the conflict: %v", err)
 	}
 }
