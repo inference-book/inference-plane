@@ -21,12 +21,18 @@ import (
 // Submit, servicer owns them after Pop. The handler's blocking on
 // done keeps the underlying http.Server goroutine alive so the
 // ResponseWriter stays valid for the servicer's writes.
+//
+// TenantID is captured into a struct field (in addition to living on
+// req's context) so Beat 2.3+ scheduler logic that reads the queue
+// without invoking the handler (e.g., shedding decisions, per-tenant
+// queue-depth metrics) can read it without unmarshaling the context.
 type queueEntry struct {
 	w                 http.ResponseWriter
 	req               *http.Request
 	dep               *provisionerv1.Deployment
 	stripDeployPrefix bool
 	done              chan struct{}
+	TenantID          string
 }
 
 // dispatchEntry is the handler the worker pool runs for each item.
@@ -60,6 +66,7 @@ func (r *Router) enqueueOrServe(w http.ResponseWriter, req *http.Request, dep *p
 		dep:               dep,
 		stripDeployPrefix: stripDeployPrefix,
 		done:              make(chan struct{}),
+		TenantID:          tenantFromContext(req.Context()),
 	}
 	if err := r.pool.Submit(entry); err != nil {
 		switch {

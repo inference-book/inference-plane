@@ -69,6 +69,7 @@ const (
 	AttrRouterModel    = "iplane.router.model"     // deployment.model
 	AttrRouterUpstream = "iplane.router.upstream"  // engine endpoint URL
 	AttrRouterStatus   = "iplane.router.status"    // status label string (success | engine_error | ...)
+	AttrRouterTenantID = "iplane.router.tenant_id" // operator-asserted tenant; "default" when unannotated
 )
 
 // Span name for the router's request-dispatch span. Single name across
@@ -279,6 +280,12 @@ func (r *Router) handleWithObservability(w http.ResponseWriter, req *http.Reques
 	if !stripDeployPrefix {
 		routeMatch = routeMatchFlat
 	}
+	// v0.2 Beat 2.2: tenant resolved by withTenant middleware before
+	// the request reaches here. Read it once; thread it into the span
+	// attribute and metric labels. Tenant intentionally does NOT
+	// flow into OTel baggage -- engines stay tenant-agnostic;
+	// correlation across the engine boundary uses trace_id alone.
+	tenantID := tenantFromContext(req.Context())
 	ctx, span := r.tracer.Start(req.Context(), spanNameDispatch,
 		trace.WithSpanKind(trace.SpanKindServer),
 		trace.WithAttributes(
@@ -286,6 +293,7 @@ func (r *Router) handleWithObservability(w http.ResponseWriter, req *http.Reques
 			attribute.String(AttrRouterDeployID, dep.GetId()),
 			attribute.String(AttrRouterModel, dep.GetModel()),
 			attribute.String(AttrRouterUpstream, dep.GetEngineEndpoint()),
+			attribute.String(AttrRouterTenantID, tenantID),
 		),
 	)
 	defer span.End()
@@ -305,11 +313,11 @@ func (r *Router) handleWithObservability(w http.ResponseWriter, req *http.Reques
 		}
 
 		r.recorder.RecordRouterRequest(ctx,
-			dep.GetId(), dep.GetModel(), "" /* tenant_id scaffold */, statusLabel,
+			dep.GetId(), dep.GetModel(), tenantID, statusLabel,
 			time.Since(start).Seconds())
 		if tokens := tcw.CompletionTokens(); tokens > 0 {
 			r.recorder.RecordRouterTokens(ctx,
-				dep.GetId(), dep.GetModel(), "" /* tenant_id scaffold */, tokens)
+				dep.GetId(), dep.GetModel(), tenantID, tokens)
 		}
 	}()
 	if !r.forwardable(tcw, dep) {
@@ -363,8 +371,13 @@ func (r *Router) touchActivity(ctx context.Context, deployID string) {
 // {deploy_id} into PathValue; handlers do not parse the path
 // themselves.
 func (r *Router) Handle() map[string]http.Handler {
-	deployIDHandler := http.HandlerFunc(r.serveDeployID)
-	flatHandler := http.HandlerFunc(r.serveFlat)
+	// v0.2 Beat 2.2: every route is wrapped in withTenant so the
+	// tenant ID is on the request ctx before either dispatch path
+	// (direct or queued) runs. The middleware is centralized here
+	// rather than at each serve* entry point so a new URL family
+	// added later automatically inherits tenant resolution.
+	deployIDHandler := withTenant(http.HandlerFunc(r.serveDeployID))
+	flatHandler := withTenant(http.HandlerFunc(r.serveFlat))
 	return map[string]http.Handler{
 		"POST /v1/{deploy_id}/v1/chat/completions": deployIDHandler,
 		"POST /v1/{deploy_id}/v1/completions":      deployIDHandler,
@@ -470,6 +483,14 @@ func (r *Router) proxyTo(w http.ResponseWriter, req *http.Request, dep *provisio
 			}
 			pr.Out.URL.RawPath = ""
 			pr.Out.Host = target.Host
+			// v0.2 ch7-beat2.2: strip the iplane-internal tenant
+			// header. Engines stay tenant-agnostic -- the operator
+			// asserted the tenant for iplane's queueing /
+			// metrics / (Part V) auth, but vLLM has no business
+			// branching on it. Correlation across iplane→engine
+			// goes through OTel trace_id (injected below), not via
+			// replicating tenant on every layer.
+			pr.Out.Header.Del(TenantHeader)
 			// v0.2 ch7-beat1.6: inject W3C traceparent + baggage on
 			// the outbound request. Engines running with OTel SDK
 			// configured (Ch 6 phase 3 plumbs OTEL_EXPORTER_OTLP_*
