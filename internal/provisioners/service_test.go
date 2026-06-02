@@ -1258,6 +1258,55 @@ func TestCreateDeployment_ResolveError_FailsWithInvalidArgument(t *testing.T) {
 	}
 }
 
+// TestCreateDeployment_InstanceIds_DefaultsEmpty: a CreateDeployment
+// request without instance_ids persists a record with empty list.
+// v0.2 ch7-beat3.1: the multi-instance list is empty for single-
+// instance deployments (Beat 1+2 shape); readers fall back to
+// the singular `instance_id` via EffectiveInstanceIDs (helper
+// added in #84). #83 ships the field as passive scaffolding.
+func TestCreateDeployment_InstanceIds_DefaultsEmpty(t *testing.T) {
+	svc, store, _ := newSvcWithDeploy(t)
+	if _, err := svc.CreateDeployment(context.Background(), &provisionerv1.CreateDeploymentRequest{
+		Deployment: okDep(),
+		Wait:       true,
+	}); err != nil {
+		t.Fatalf("CreateDeployment: %v", err)
+	}
+	f, _ := store.Read()
+	ids := f.Deployments["my-llama"].GetInstanceIds()
+	if len(ids) != 0 {
+		t.Errorf("persisted instance_ids = %v, want empty (Beat 3 fan-out not yet wired)", ids)
+	}
+}
+
+// TestCreateDeployment_InstanceIds_PreservesOperatorList: an
+// operator-supplied instance_ids list on the request survives to
+// the persisted record. The heterogeneous-fleet path: operators
+// pre-allocate Instances via #84's add-instance verb, then bind
+// them to a Deployment by passing the list at create time.
+func TestCreateDeployment_InstanceIds_PreservesOperatorList(t *testing.T) {
+	svc, store, _ := newSvcWithDeploy(t)
+	dep := okDep()
+	dep.InstanceIds = []string{"runpod-a", "vast-b", "lambda-c"}
+	if _, err := svc.CreateDeployment(context.Background(), &provisionerv1.CreateDeploymentRequest{
+		Deployment: dep,
+		Wait:       true,
+	}); err != nil {
+		t.Fatalf("CreateDeployment: %v", err)
+	}
+	f, _ := store.Read()
+	got := f.Deployments["my-llama"].GetInstanceIds()
+	want := []string{"runpod-a", "vast-b", "lambda-c"}
+	if len(got) != len(want) {
+		t.Fatalf("persisted instance_ids = %v, want %v", got, want)
+	}
+	for i, v := range want {
+		if got[i] != v {
+			t.Errorf("instance_ids[%d] = %q, want %q", i, got[i], v)
+		}
+	}
+}
+
 func TestCreateDeployment_HappyPath_WaitsForRUNNING(t *testing.T) {
 	svc, store, exec := newSvcWithDeploy(t)
 	resp, err := svc.CreateDeployment(context.Background(), &provisionerv1.CreateDeploymentRequest{

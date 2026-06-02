@@ -934,6 +934,16 @@ func (s *Service) CreateDeployment(ctx context.Context, req *provisionerv1.Creat
 			IdleTtlSeconds: dep.GetIdleTtlSeconds(),
 			NoIdleDestroy:  dep.GetNoIdleDestroy(),
 		}
+		// v0.2 ch7-beat3.1: instance_ids is the canonical multi-
+		// instance list. #83 leaves it empty on Service-driven
+		// creates -- Beat 1+2 deployments are single-instance and
+		// fall back to the singular `instance_id` field via
+		// EffectiveInstanceIDs (added in #84). Future operator-
+		// supplied lists (heterogeneous fleets) get respected
+		// verbatim; pre-populate from request if present.
+		if ids := dep.GetInstanceIds(); len(ids) > 0 {
+			record.InstanceIds = append(record.InstanceIds, ids...)
+		}
 		f.Deployments[dep.GetId()] = record
 		return nil
 	})
