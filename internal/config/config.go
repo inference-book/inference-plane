@@ -14,6 +14,25 @@ type Config struct {
 	Backend    BackendConfig    `yaml:"backend"`
 	Telemetry  TelemetryConfig  `yaml:"telemetry"`
 	Deployment DeploymentConfig `yaml:"deployment"`
+	Router     RouterConfig     `yaml:"router"`
+}
+
+// RouterConfig configures the v0.2 data-plane router. Beat 2 adds the
+// queue; future beats will add per-replica selection knobs here.
+type RouterConfig struct {
+	Queue QueueConfig `yaml:"queue"`
+}
+
+// QueueConfig parameterizes the M/M/k waiting room in front of the
+// engine. Servicers is k (number of parallel dispatcher goroutines);
+// Capacity is the bounded waiting-room size N.
+//
+// Servicers == 0 is the Beat 1 path: no queue, no concurrency cap;
+// requests forward inline. Servicers > 0 activates the queue and
+// caps engine concurrency.
+type QueueConfig struct {
+	Servicers int `yaml:"servicers"`
+	Capacity  int `yaml:"capacity"`
 }
 
 // ServerConfig configures the HTTP listener of the control plane.
@@ -62,6 +81,15 @@ func Validate(cfg *Config) error {
 	}
 	if cfg.Telemetry.ServiceName == "" {
 		return errors.New("config: telemetry.service_name is required")
+	}
+	// router.queue: servicers and capacity are independent knobs;
+	// validate the meaningful invariants. Servicers == 0 is the Beat 1
+	// path (queue disabled); negative is a typo.
+	if cfg.Router.Queue.Servicers < 0 {
+		return errors.New("config: router.queue.servicers must be >= 0 (0 disables the queue)")
+	}
+	if cfg.Router.Queue.Servicers > 0 && cfg.Router.Queue.Capacity <= 0 {
+		return errors.New("config: router.queue.capacity must be > 0 when servicers > 0")
 	}
 	return nil
 }
