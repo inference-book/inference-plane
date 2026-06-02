@@ -95,6 +95,8 @@ labels:
     value: tenant_id
   - key: priority
     value: priority
+  - key: replica_id
+    value: replica_id
   - key: reason
     value: reason
   - key: provider

@@ -69,6 +69,7 @@ const (
 	LabelPriority = "priority"
 	LabelProvider = "provider"
 	LabelReason = "reason"
+	LabelReplicaID = "replica_id"
 	LabelStatus = "status"
 	LabelTenantID = "tenant_id"
 )
