@@ -320,16 +320,16 @@ message Deployment {
   // session so afk pauses do not tear it down.
   bool no_idle_destroy = 21;
 
-  // default_priority is the lane that requests against this
-  // deployment fall into when the inbound HTTP request does NOT
-  // carry an X-IPlane-Priority header. Operator sets it at
-  // CreateDeployment time (--priority flag, v0.2 ch7-beat2.3).
-  // UNSPECIFIED behaves as INTERACTIVE: the chapter narrative
-  // treats "no choice given" as "treat my traffic as user-facing"
-  // (the lower-latency lane); operators who want bulk-batch
-  // semantics by default flip it explicitly. The router resolves
-  // header > deployment default > INTERACTIVE on each request.
-  Priority default_priority = 22;
+  // Field 22 was Deployment.default_priority (Priority enum) in an
+  // earlier draft of v0.2 ch7-beat2.3. Removed before merge: priority
+  // is a property of the request stream, not the deployment. The
+  // engine inside the deployment is priority-blind (continuous
+  // batching on whatever it gets); the router is the SOLE priority
+  // decision point. Unannotated requests fall back to a router-level
+  // default (INTERACTIVE), not a per-deployment default. Reserved
+  // here so readers of the wire don't repurpose the slot.
+  reserved 22;
+  reserved "default_priority";
 }
 
 // Priority is the lane an inbound request joins on its way to the
@@ -337,6 +337,12 @@ message Deployment {
 // and batch (high-throughput, bulk). The scheduler that decides
 // which lane to drain when lands in v0.2 ch7-beat2.4; this enum
 // just labels the request so the lane structure can be plumbed.
+//
+// Priority is a request-level concept -- the router maps inbound
+// requests onto lanes based on the X-IPlane-Priority header (or a
+// router-level default for unannotated traffic). No Deployment-side
+// proto field carries a priority; the engine itself is
+// priority-blind.
 //
 // Forward-compat: numeric values are stable; appending future
 // priorities (e.g., BACKGROUND, REALTIME) does not break readers

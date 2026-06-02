@@ -920,29 +920,19 @@ func (s *Service) CreateDeployment(ctx context.Context, req *provisionerv1.Creat
 			// TERMINATED / FAILED: treat as gone; claim a fresh record.
 		}
 		now := timestamppb.New(s.clock())
-		// Normalize default_priority: UNSPECIFIED on the incoming proto
-		// becomes INTERACTIVE on the persisted record. The chapter's
-		// "no choice given = user-facing" framing lives here so router
-		// code can rely on a non-UNSPECIFIED value on every RUNNING
-		// deployment without per-call fallback logic.
-		defaultPriority := dep.GetDefaultPriority()
-		if defaultPriority == provisionerv1.Priority_PRIORITY_UNSPECIFIED {
-			defaultPriority = provisionerv1.Priority_PRIORITY_INTERACTIVE
-		}
 		record = &provisionerv1.Deployment{
-			Id:               dep.GetId(),
-			InstanceId:       dep.GetInstanceId(),
-			Image:            dep.GetImage(),
-			Model:            dep.GetModel(),
-			EngineArgs:       dep.GetEngineArgs(),
-			Env:              dep.GetEnv(),
-			EnginePort:       dep.GetEnginePort(),
-			State:            provisionerv1.DeploymentState_DEPLOYMENT_STATE_PENDING,
-			CreatedAt:        now,
-			DebugShell:       dep.GetDebugShell(),
-			IdleTtlSeconds:   dep.GetIdleTtlSeconds(),
-			NoIdleDestroy:    dep.GetNoIdleDestroy(),
-			DefaultPriority:  defaultPriority,
+			Id:             dep.GetId(),
+			InstanceId:     dep.GetInstanceId(),
+			Image:          dep.GetImage(),
+			Model:          dep.GetModel(),
+			EngineArgs:     dep.GetEngineArgs(),
+			Env:            dep.GetEnv(),
+			EnginePort:     dep.GetEnginePort(),
+			State:          provisionerv1.DeploymentState_DEPLOYMENT_STATE_PENDING,
+			CreatedAt:      now,
+			DebugShell:     dep.GetDebugShell(),
+			IdleTtlSeconds: dep.GetIdleTtlSeconds(),
+			NoIdleDestroy:  dep.GetNoIdleDestroy(),
 		}
 		f.Deployments[dep.GetId()] = record
 		return nil

@@ -96,6 +96,12 @@ func (InstanceState) EnumDescriptor() ([]byte, []int) {
 // which lane to drain when lands in v0.2 ch7-beat2.4; this enum
 // just labels the request so the lane structure can be plumbed.
 //
+// Priority is a request-level concept -- the router maps inbound
+// requests onto lanes based on the X-IPlane-Priority header (or a
+// router-level default for unannotated traffic). No Deployment-side
+// proto field carries a priority; the engine itself is
+// priority-blind.
+//
 // Forward-compat: numeric values are stable; appending future
 // priorities (e.g., BACKGROUND, REALTIME) does not break readers
 // pinned to ch07-final.
@@ -933,18 +939,8 @@ type Deployment struct {
 	// deployment across Ch 7's demos is pinned at the start of the
 	// session so afk pauses do not tear it down.
 	NoIdleDestroy bool `protobuf:"varint,21,opt,name=no_idle_destroy,json=noIdleDestroy,proto3" json:"no_idle_destroy,omitempty"`
-	// default_priority is the lane that requests against this
-	// deployment fall into when the inbound HTTP request does NOT
-	// carry an X-IPlane-Priority header. Operator sets it at
-	// CreateDeployment time (--priority flag, v0.2 ch7-beat2.3).
-	// UNSPECIFIED behaves as INTERACTIVE: the chapter narrative
-	// treats "no choice given" as "treat my traffic as user-facing"
-	// (the lower-latency lane); operators who want bulk-batch
-	// semantics by default flip it explicitly. The router resolves
-	// header > deployment default > INTERACTIVE on each request.
-	DefaultPriority Priority `protobuf:"varint,22,opt,name=default_priority,json=defaultPriority,proto3,enum=provisioner.v1.Priority" json:"default_priority,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Deployment) Reset() {
@@ -1124,13 +1120,6 @@ func (x *Deployment) GetNoIdleDestroy() bool {
 	return false
 }
 
-func (x *Deployment) GetDefaultPriority() Priority {
-	if x != nil {
-		return x.DefaultPriority
-	}
-	return Priority_PRIORITY_UNSPECIFIED
-}
-
 var File_provisioner_v1_types_proto protoreflect.FileDescriptor
 
 const file_provisioner_v1_types_proto_rawDesc = "" +
@@ -1192,7 +1181,7 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"created_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x1a7\n" +
 	"\tTagsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x80\b\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xd3\a\n" +
 	"\n" +
 	"Deployment\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1f\n" +
@@ -1222,11 +1211,10 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"debugShell\x12(\n" +
 	"\x10idle_ttl_seconds\x18\x13 \x01(\x05R\x0eidleTtlSeconds\x12D\n" +
 	"\x10last_activity_at\x18\x14 \x01(\v2\x1a.google.protobuf.TimestampR\x0elastActivityAt\x12&\n" +
-	"\x0fno_idle_destroy\x18\x15 \x01(\bR\rnoIdleDestroy\x12C\n" +
-	"\x10default_priority\x18\x16 \x01(\x0e2\x18.provisioner.v1.PriorityR\x0fdefaultPriority\x1a6\n" +
+	"\x0fno_idle_destroy\x18\x15 \x01(\bR\rnoIdleDestroy\x1a6\n" +
 	"\bEnvEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01*\xc0\x01\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01J\x04\b\x16\x10\x17R\x10default_priority*\xc0\x01\n" +
 	"\rInstanceState\x12\x1e\n" +
 	"\x1aINSTANCE_STATE_UNSPECIFIED\x10\x00\x12\x1a\n" +
 	"\x16INSTANCE_STATE_PENDING\x10\x01\x12\x19\n" +
@@ -1300,12 +1288,11 @@ var file_provisioner_v1_types_proto_depIdxs = []int32{
 	13, // 15: provisioner.v1.Deployment.ready_at:type_name -> google.protobuf.Timestamp
 	13, // 16: provisioner.v1.Deployment.terminated_at:type_name -> google.protobuf.Timestamp
 	13, // 17: provisioner.v1.Deployment.last_activity_at:type_name -> google.protobuf.Timestamp
-	1,  // 18: provisioner.v1.Deployment.default_priority:type_name -> provisioner.v1.Priority
-	19, // [19:19] is the sub-list for method output_type
-	19, // [19:19] is the sub-list for method input_type
-	19, // [19:19] is the sub-list for extension type_name
-	19, // [19:19] is the sub-list for extension extendee
-	0,  // [0:19] is the sub-list for field type_name
+	18, // [18:18] is the sub-list for method output_type
+	18, // [18:18] is the sub-list for method input_type
+	18, // [18:18] is the sub-list for extension type_name
+	18, // [18:18] is the sub-list for extension extendee
+	0,  // [0:18] is the sub-list for field type_name
 }
 
 func init() { file_provisioner_v1_types_proto_init() }

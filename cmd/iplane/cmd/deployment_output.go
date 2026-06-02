@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"sort"
-	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -97,9 +96,6 @@ func writeDeploymentDetail(w io.Writer, dep *provisionerv1.Deployment) {
 	if dep.GetNoIdleDestroy() {
 		fmt.Fprintf(w, "pinned:          true (no idle destroy)\n")
 	}
-	if p := dep.GetDefaultPriority(); p != provisionerv1.Priority_PRIORITY_UNSPECIFIED {
-		fmt.Fprintf(w, "default priority: %s\n", priorityLabel(p))
-	}
 	if reason := dep.GetFailureReason(); reason != "" {
 		fmt.Fprintf(w, "failure:         %s\n", reason)
 	}
@@ -138,39 +134,6 @@ func deploymentStateLabel(s provisionerv1.DeploymentState) string {
 	return name
 }
 
-// priorityLabel renders a Priority enum value as its lowercased
-// label without the PRIORITY_ prefix (e.g. "interactive"). Used by
-// CLI output + the --priority flag parser to keep the wire-name
-// and the operator-facing label in sync.
-func priorityLabel(p provisionerv1.Priority) string {
-	switch p {
-	case provisionerv1.Priority_PRIORITY_INTERACTIVE:
-		return "interactive"
-	case provisionerv1.Priority_PRIORITY_BATCH:
-		return "batch"
-	default:
-		return "unspecified"
-	}
-}
-
-// parsePriorityFlag turns the --priority CLI input into the proto
-// enum. Empty string maps to UNSPECIFIED (the service normalizes
-// that to INTERACTIVE on persist; keeps the CLI default sentinel
-// distinct from an operator who explicitly typed "interactive").
-// Case-insensitive on the value; unknown values are an error.
-func parsePriorityFlag(s string) (provisionerv1.Priority, error) {
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "":
-		return provisionerv1.Priority_PRIORITY_UNSPECIFIED, nil
-	case "interactive":
-		return provisionerv1.Priority_PRIORITY_INTERACTIVE, nil
-	case "batch":
-		return provisionerv1.Priority_PRIORITY_BATCH, nil
-	default:
-		return provisionerv1.Priority_PRIORITY_UNSPECIFIED,
-			fmt.Errorf("invalid --priority %q (want: interactive | batch)", s)
-	}
-}
 
 // dryRunDeploy is the deploy-verb dry-run path. Mirrors the Service's
 // validation + idempotency lookup but stops at "would deploy" without

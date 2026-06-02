@@ -42,50 +42,41 @@ func TestPriorityFromHeader(t *testing.T) {
 }
 
 func TestEffectivePriority_PrecedenceOrder(t *testing.T) {
-	depBatch := &provisionerv1.Deployment{
-		DefaultPriority: provisionerv1.Priority_PRIORITY_BATCH,
-	}
-	depUnspec := &provisionerv1.Deployment{
-		DefaultPriority: provisionerv1.Priority_PRIORITY_UNSPECIFIED,
-	}
-	depInteractive := &provisionerv1.Deployment{
-		DefaultPriority: provisionerv1.Priority_PRIORITY_INTERACTIVE,
-	}
+	// Priority is request-level only -- there is no Deployment-side
+	// fallback in v0.2 (engines stay priority-blind; per-deployment
+	// defaults would be a routing-policy leak onto the runtime
+	// artifact). Precedence: header > INTERACTIVE.
+	dep := &provisionerv1.Deployment{}
 
 	cases := []struct {
 		name string
 		ctx  context.Context
-		dep  *provisionerv1.Deployment
 		want provisionerv1.Priority
 	}{
 		{
-			name: "header overrides deployment default",
+			name: "header sets explicit priority",
 			ctx:  context.WithValue(context.Background(), priorityCtxKey{}, provisionerv1.Priority_PRIORITY_INTERACTIVE),
-			dep:  depBatch,
 			want: provisionerv1.Priority_PRIORITY_INTERACTIVE,
 		},
 		{
-			name: "no header falls back to deployment default",
-			ctx:  context.WithValue(context.Background(), priorityCtxKey{}, provisionerv1.Priority_PRIORITY_UNSPECIFIED),
-			dep:  depBatch,
+			name: "header sets batch",
+			ctx:  context.WithValue(context.Background(), priorityCtxKey{}, provisionerv1.Priority_PRIORITY_BATCH),
 			want: provisionerv1.Priority_PRIORITY_BATCH,
 		},
 		{
-			name: "no header and no deployment default = INTERACTIVE",
+			name: "ctx has UNSPECIFIED -> INTERACTIVE",
 			ctx:  context.WithValue(context.Background(), priorityCtxKey{}, provisionerv1.Priority_PRIORITY_UNSPECIFIED),
-			dep:  depUnspec,
 			want: provisionerv1.Priority_PRIORITY_INTERACTIVE,
 		},
 		{
-			name: "empty ctx (no middleware ran) + dep default",
+			name: "empty ctx (no middleware ran) -> INTERACTIVE",
 			ctx:  context.Background(),
-			dep:  depInteractive,
 			want: provisionerv1.Priority_PRIORITY_INTERACTIVE,
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := effectivePriority(tc.ctx, tc.dep); got != tc.want {
+			if got := effectivePriority(tc.ctx, dep); got != tc.want {
 				t.Errorf("effectivePriority=%v, want %v", got, tc.want)
 			}
 		})
@@ -212,11 +203,11 @@ func TestRouter_PriorityRoutesToCorrectLane(t *testing.T) {
 	}
 }
 
-// TestRouter_PriorityFallbacksToDeploymentDefault: no header sent;
-// deployment default is BATCH; request lands in the batch lane.
-// Acceptance criterion: "without the header, falls back to deployment
-// default."
-func TestRouter_PriorityFallbacksToDeploymentDefault(t *testing.T) {
+// TestRouter_PriorityFallbacksToInteractiveDefault: no header sent;
+// request lands in the interactive lane (the router-level default).
+// Priority is request-level only -- the engine is priority-blind,
+// so there's no Deployment-side priority field driving this.
+func TestRouter_PriorityFallbacksToInteractiveDefault(t *testing.T) {
 	engine := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{}`)
@@ -227,10 +218,9 @@ func TestRouter_PriorityFallbacksToDeploymentDefault(t *testing.T) {
 		describe: func(*provisionerv1.DescribeDeploymentRequest) (*provisionerv1.DescribeDeploymentResponse, error) {
 			return &provisionerv1.DescribeDeploymentResponse{
 				Deployment: &provisionerv1.Deployment{
-					Id:              "my-llama",
-					State:           provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING,
-					EngineEndpoint:  engine.URL,
-					DefaultPriority: provisionerv1.Priority_PRIORITY_BATCH,
+					Id:             "my-llama",
+					State:          provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING,
+					EngineEndpoint: engine.URL,
 				},
 			}, nil
 		},
@@ -251,7 +241,8 @@ func TestRouter_PriorityFallbacksToDeploymentDefault(t *testing.T) {
 	srv := httptest.NewServer(serveThroughMux(r))
 	defer srv.Close()
 
-	// No X-IPlane-Priority header -- should follow deployment default (BATCH).
+	// No X-IPlane-Priority header -- should land in the interactive
+	// lane (the router-level default for unannotated requests).
 	resp, err := http.Post(srv.URL+"/v1/my-llama/v1/chat/completions",
 		"application/json", strings.NewReader(`{}`))
 	if err != nil {
@@ -259,11 +250,11 @@ func TestRouter_PriorityFallbacksToDeploymentDefault(t *testing.T) {
 	}
 	resp.Body.Close()
 
-	if interactiveHits.Load() != 0 {
-		t.Errorf("interactive lane hits=%d, want 0 (default should send to batch)", interactiveHits.Load())
+	if interactiveHits.Load() != 1 {
+		t.Errorf("interactive lane hits=%d, want 1 (unannotated requests default to interactive)", interactiveHits.Load())
 	}
-	if batchHits.Load() != 1 {
-		t.Errorf("batch lane hits=%d, want 1 (default=batch should send here)", batchHits.Load())
+	if batchHits.Load() != 0 {
+		t.Errorf("batch lane hits=%d, want 0 (no header, no deployment-side priority)", batchHits.Load())
 	}
 }
 

@@ -54,18 +54,24 @@ func withPriority(next http.Handler) http.Handler {
 }
 
 // effectivePriority returns the resolved Priority for this request,
-// applying the chapter's precedence: explicit header > deployment
-// default > INTERACTIVE. Always returns a non-UNSPECIFIED value so
+// applying the chapter's precedence: explicit header > router-level
+// default (INTERACTIVE). Always returns a non-UNSPECIFIED value so
 // the router's lane-routing code can switch on it without an extra
 // fallback.
 //
-// Called after deployment lookup (in serveDeployID / serveFlat) so
-// the deployment's default_priority is available.
-func effectivePriority(ctx context.Context, dep *provisionerv1.Deployment) provisionerv1.Priority {
+// Priority is a request-level concept: there is intentionally NO
+// per-deployment fallback. The engine inside the deployment is
+// priority-blind (it just batches what it gets); putting a default
+// on Deployment would be policy-on-the-runtime-artifact, which
+// belongs at the routing layer instead. Operators who need a
+// deployment-specific default wrap their clients to inject the
+// header.
+//
+// The dep argument is unused today; kept on the signature because
+// future routing policies (e.g., model-based defaults) may want
+// it. Tagged with _ to silence the linter.
+func effectivePriority(ctx context.Context, _ *provisionerv1.Deployment) provisionerv1.Priority {
 	if p, ok := ctx.Value(priorityCtxKey{}).(provisionerv1.Priority); ok && p != provisionerv1.Priority_PRIORITY_UNSPECIFIED {
-		return p
-	}
-	if p := dep.GetDefaultPriority(); p != provisionerv1.Priority_PRIORITY_UNSPECIFIED {
 		return p
 	}
 	return provisionerv1.Priority_PRIORITY_INTERACTIVE
