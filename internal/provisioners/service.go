@@ -840,6 +840,21 @@ func (s *Service) CreateDeployment(ctx context.Context, req *provisionerv1.Creat
 	if dep.GetModel() == "" {
 		return nil, status.Error(codes.InvalidArgument, "deployment.model is required")
 	}
+	// v0.2 ch7-beat3.2 / #84: --replicas N is plumbed through but
+	// parallel fan-out (the real work) is filed as a focused
+	// follow-up. This PR scaffolds the proto + helpers + CLI flag;
+	// values > 1 are rejected explicitly so operators get a clear
+	// signal rather than silent single-instance behavior.
+	replicas := req.GetReplicas()
+	if replicas == 0 {
+		replicas = 1
+	}
+	if replicas < 0 {
+		return nil, status.Errorf(codes.InvalidArgument, "replicas must be >= 0 (got %d)", replicas)
+	}
+	if replicas > 1 {
+		return nil, status.Errorf(codes.Unimplemented, "replicas=%d: parallel fan-out lands in a follow-up to v0.2 ch7-beat3.2; this PR scaffolds the proto + helpers only. Use --replicas 1 (or omit) for the v0.2 Beat 1+2 single-instance path.", replicas)
+	}
 
 	// Pre-flight: resolve the model spec through the configured
 	// ModelStore. Default is Passthrough (no validation); production
@@ -1205,6 +1220,14 @@ func (s *Service) patchDeployment(id string, u DeployStateUpdate) error {
 		}
 		if u.EngineEndpoint != "" {
 			rec.EngineEndpoint = u.EngineEndpoint
+			// v0.2 ch7-beat3.2 / #84: maintain the parallel
+			// engine_endpoints list. For single-instance deployments
+			// (the only path in this scaffolding PR), the list has
+			// one slot mirroring the singular endpoint. Multi-instance
+			// fan-out (follow-up to #84) will populate each slot as
+			// per-instance deploys reach RUNNING; the router reads
+			// the list via EffectiveEndpoints.
+			rec.EngineEndpoints = []string{u.EngineEndpoint}
 		}
 		if u.FailureReason != "" {
 			rec.FailureReason = u.FailureReason

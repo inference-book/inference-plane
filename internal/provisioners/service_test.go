@@ -16,6 +16,8 @@ import (
 	"github.com/inference-book/inference-plane/internal/provisioners/stores/file"
 	"github.com/inference-book/inference-plane/internal/sshkeys"
 	"github.com/panyam/oneauth/keys"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -1255,6 +1257,71 @@ func TestCreateDeployment_ResolveError_FailsWithInvalidArgument(t *testing.T) {
 	}
 	if exec.deployCalls != 0 {
 		t.Errorf("provider deploy must not run when Resolve fails; got %d calls", exec.deployCalls)
+	}
+}
+
+// TestCreateDeployment_Replicas_RejectsGreaterThanOne: v0.2
+// ch7-beat3.2 ships proto + helpers + CLI flag scaffolding. The
+// parallel-provisioning impl is a focused follow-up; values > 1
+// must reject explicitly so operators don't silently get a single
+// instance when they asked for several.
+func TestCreateDeployment_Replicas_RejectsGreaterThanOne(t *testing.T) {
+	svc, _, _ := newSvcWithDeploy(t)
+	_, err := svc.CreateDeployment(context.Background(), &provisionerv1.CreateDeploymentRequest{
+		Deployment: okDep(),
+		Wait:       true,
+		Replicas:   3,
+	})
+	if err == nil {
+		t.Fatalf("expected error for replicas=3 (Unimplemented), got nil")
+	}
+	if c := status.Code(err); c != codes.Unimplemented {
+		t.Errorf("expected Unimplemented, got %s: %v", c, err)
+	}
+}
+
+// TestCreateDeployment_Replicas_ZeroNormalizesToOne: proto3 zero
+// value (replicas=0) on the wire normalizes to 1 -- the
+// single-instance default that matches Beat 1+2 behavior.
+func TestCreateDeployment_Replicas_ZeroNormalizesToOne(t *testing.T) {
+	svc, _, _ := newSvcWithDeploy(t)
+	resp, err := svc.CreateDeployment(context.Background(), &provisionerv1.CreateDeploymentRequest{
+		Deployment: okDep(),
+		Wait:       true,
+		Replicas:   0,
+	})
+	if err != nil {
+		t.Fatalf("replicas=0 should succeed (normalize to 1): %v", err)
+	}
+	if resp.GetDeployment().GetState() != provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING {
+		t.Errorf("state = %v, want RUNNING", resp.GetDeployment().GetState())
+	}
+}
+
+// TestCreateDeployment_EngineEndpoints_SnapshotPopulated: a
+// successful single-instance deploy populates the parallel
+// engine_endpoints list with the singular endpoint. The router
+// (#85) reads this list via EffectiveEndpoints to fan out.
+func TestCreateDeployment_EngineEndpoints_SnapshotPopulated(t *testing.T) {
+	svc, store, _ := newSvcWithDeploy(t)
+	if _, err := svc.CreateDeployment(context.Background(), &provisionerv1.CreateDeploymentRequest{
+		Deployment: okDep(),
+		Wait:       true,
+	}); err != nil {
+		t.Fatalf("CreateDeployment: %v", err)
+	}
+	f, _ := store.Read()
+	dep := f.Deployments["my-llama"]
+	if dep.GetEngineEndpoint() == "" {
+		t.Fatalf("singular engine_endpoint missing")
+	}
+	eps := dep.GetEngineEndpoints()
+	if len(eps) != 1 {
+		t.Fatalf("engine_endpoints len = %d, want 1 (single-instance snapshot)", len(eps))
+	}
+	if eps[0] != dep.GetEngineEndpoint() {
+		t.Errorf("engine_endpoints[0] = %q, want = singular engine_endpoint %q",
+			eps[0], dep.GetEngineEndpoint())
 	}
 }
 

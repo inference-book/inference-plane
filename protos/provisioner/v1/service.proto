@@ -258,6 +258,21 @@ message CreateDeploymentRequest {
   string provider = 4;
   // Region hint passed through to the provider when auto-provisioning.
   string region = 5;
+  // replicas is the number of same-shape Instances the operator wants
+  // back for this Deployment at create time (v0.2 ch7-beat3.2 / #84).
+  // Default 0 means 1 (proto3 zero-value semantics; Service normalizes
+  // 0 -> 1 on receive). Values > 1 trigger parallel provisioning of
+  // N instances, each with the same `requirements` + `provider` shape.
+  // On partial failure (M of N succeed, M < N), the persisted
+  // deployment lands in DEGRADED with failure_reason populated; the
+  // operator can AddInstance to fill the gap or DestroyDeployment to
+  // restart.
+  //
+  // Heterogeneous fleets land via AddInstance after create, not via
+  // this field: --replicas is the homogeneous-onramp shortcut; the
+  // multi-provider value-add story is the operator chaining
+  // AddInstance calls with different specs.
+  int32 replicas = 6;
 }
 
 message CreateDeploymentResponse {
