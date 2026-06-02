@@ -714,7 +714,22 @@ type CreateDeploymentRequest struct {
 	// is used). v0.1: "runpod" is the image-native default.
 	Provider string `protobuf:"bytes,4,opt,name=provider,proto3" json:"provider,omitempty"`
 	// Region hint passed through to the provider when auto-provisioning.
-	Region        string `protobuf:"bytes,5,opt,name=region,proto3" json:"region,omitempty"`
+	Region string `protobuf:"bytes,5,opt,name=region,proto3" json:"region,omitempty"`
+	// replicas is the number of same-shape Instances the operator wants
+	// back for this Deployment at create time (v0.2 ch7-beat3.2 / #84).
+	// Default 0 means 1 (proto3 zero-value semantics; Service normalizes
+	// 0 -> 1 on receive). Values > 1 trigger parallel provisioning of
+	// N instances, each with the same `requirements` + `provider` shape.
+	// On partial failure (M of N succeed, M < N), the persisted
+	// deployment lands in DEGRADED with failure_reason populated; the
+	// operator can AddInstance to fill the gap or DestroyDeployment to
+	// restart.
+	//
+	// Heterogeneous fleets land via AddInstance after create, not via
+	// this field: --replicas is the homogeneous-onramp shortcut; the
+	// multi-provider value-add story is the operator chaining
+	// AddInstance calls with different specs.
+	Replicas      int32 `protobuf:"varint,6,opt,name=replicas,proto3" json:"replicas,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -782,6 +797,13 @@ func (x *CreateDeploymentRequest) GetRegion() string {
 		return x.Region
 	}
 	return ""
+}
+
+func (x *CreateDeploymentRequest) GetReplicas() int32 {
+	if x != nil {
+		return x.Replicas
+	}
+	return 0
 }
 
 type CreateDeploymentResponse struct {
@@ -1385,7 +1407,7 @@ const file_provisioner_v1_service_proto_rawDesc = "" +
 	"\x19GetInstanceSSHKeyResponse\x12&\n" +
 	"\x0fprivate_key_pem\x18\x01 \x01(\fR\rprivateKeyPem\x122\n" +
 	"\x15public_key_authorized\x18\x02 \x01(\fR\x13publicKeyAuthorized\x12\x12\n" +
-	"\x04user\x18\x03 \x01(\tR\x04user\"\xe7\x01\n" +
+	"\x04user\x18\x03 \x01(\tR\x04user\"\x83\x02\n" +
 	"\x17CreateDeploymentRequest\x12:\n" +
 	"\n" +
 	"deployment\x18\x01 \x01(\v2\x1a.provisioner.v1.DeploymentR\n" +
@@ -1393,7 +1415,8 @@ const file_provisioner_v1_service_proto_rawDesc = "" +
 	"\x04wait\x18\x02 \x01(\bR\x04wait\x12H\n" +
 	"\frequirements\x18\x03 \x01(\v2$.provisioner.v1.ResourceRequirementsR\frequirements\x12\x1a\n" +
 	"\bprovider\x18\x04 \x01(\tR\bprovider\x12\x16\n" +
-	"\x06region\x18\x05 \x01(\tR\x06region\"\x7f\n" +
+	"\x06region\x18\x05 \x01(\tR\x06region\x12\x1a\n" +
+	"\breplicas\x18\x06 \x01(\x05R\breplicas\"\x7f\n" +
 	"\x18CreateDeploymentResponse\x12:\n" +
 	"\n" +
 	"deployment\x18\x01 \x01(\v2\x1a.provisioner.v1.DeploymentR\n" +

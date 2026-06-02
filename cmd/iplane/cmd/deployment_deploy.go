@@ -45,6 +45,7 @@ var (
 	deployDebugShell    bool
 	deployIdleTTL       time.Duration
 	deployNoIdleDestroy bool
+	deployReplicas      int32
 	deployOtelEndpoint string
 	deployOtelHeaders  map[string]string
 	deployWait       bool
@@ -152,6 +153,7 @@ func runDeploymentDeploy(cmd *cobra.Command, args []string) error {
 		Wait:       deployWait,
 		Provider:   deployProvider,
 		Region:     deployRegion,
+		Replicas:   deployReplicas,
 		Requirements: &provisionerv1.ResourceRequirements{
 			Class:     deployClass,
 			Sku:       deploySKU,
@@ -228,6 +230,8 @@ func init() {
 		`destroy the deployment after this much idle time (no inference + no operator RPCs). Default 0 = no reaping. v0.2 ch7-beat1.7.`)
 	f.BoolVar(&deployNoIdleDestroy, "no-idle-destroy", false,
 		`pin the deployment against the idle-TTL reaper. Set when the deployment is the shared anchor for a demo session and afk pauses must not reap it. v0.2 ch7-beat1.9.`)
+	f.Int32Var(&deployReplicas, "replicas", 1,
+		`number of same-shape Instances to provision at deploy time (v0.2 ch7-beat3.2). Default 1. Values > 1 currently return Unimplemented; parallel fan-out is a follow-up to this scaffolding PR.`)
 
 	f.BoolVar(&deployDebugShell, "debug-shell", false,
 		`opt in to shell-level access to the engine pod (allocates a routable IP + ssh; costs more, narrows placement). Engine endpoint is unchanged either way.`)

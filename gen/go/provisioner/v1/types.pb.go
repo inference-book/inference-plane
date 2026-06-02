@@ -958,9 +958,31 @@ type Deployment struct {
 	// backward-compat: for one-instance deployments it remains the
 	// canonical primary; for multi-instance deployments it equals
 	// instance_ids[0] (the first-provisioned instance).
-	InstanceIds   []string `protobuf:"bytes,24,rep,name=instance_ids,json=instanceIds,proto3" json:"instance_ids,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	InstanceIds []string `protobuf:"bytes,24,rep,name=instance_ids,json=instanceIds,proto3" json:"instance_ids,omitempty"`
+	// engine_endpoints is the parallel list to instance_ids: position i
+	// holds the engine endpoint URL for instance_ids[i], or empty
+	// string while that instance hasn't reached RUNNING yet (v0.2
+	// ch7-beat3.2 / #84-#85). Maintained by the Service as the single
+	// writer; the router reads it to pick which endpoint a request
+	// goes to via round-robin (and future per-replica policies).
+	//
+	// Invariant: when populated, len(engine_endpoints) ==
+	// len(instance_ids). Empty list (Beat 1+2 single-instance
+	// Deployments) means "fall back to the singular engine_endpoint
+	// field at slot 17." The EffectiveEndpoints helper encapsulates
+	// this fallback.
+	//
+	// Why denormalized on Deployment rather than fetched per-request
+	// from each Instance: the Service is the single writer of
+	// deployment state and naturally knows both the instance set and
+	// each engine's endpoint at deploy time. Snapshot-on-Deployment
+	// means the router does 1 RPC per request (DescribeDeployment)
+	// instead of 1 + N. Consistency is the Service's problem -- a
+	// future cache invalidator (#88+) layers on top without
+	// restructuring this field.
+	EngineEndpoints []string `protobuf:"bytes,25,rep,name=engine_endpoints,json=engineEndpoints,proto3" json:"engine_endpoints,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *Deployment) Reset() {
@@ -1147,6 +1169,13 @@ func (x *Deployment) GetInstanceIds() []string {
 	return nil
 }
 
+func (x *Deployment) GetEngineEndpoints() []string {
+	if x != nil {
+		return x.EngineEndpoints
+	}
+	return nil
+}
+
 var File_provisioner_v1_types_proto protoreflect.FileDescriptor
 
 const file_provisioner_v1_types_proto_rawDesc = "" +
@@ -1208,7 +1237,7 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"created_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x1a7\n" +
 	"\tTagsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x86\b\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xb1\b\n" +
 	"\n" +
 	"Deployment\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1f\n" +
@@ -1239,7 +1268,8 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"\x10idle_ttl_seconds\x18\x13 \x01(\x05R\x0eidleTtlSeconds\x12D\n" +
 	"\x10last_activity_at\x18\x14 \x01(\v2\x1a.google.protobuf.TimestampR\x0elastActivityAt\x12&\n" +
 	"\x0fno_idle_destroy\x18\x15 \x01(\bR\rnoIdleDestroy\x12!\n" +
-	"\finstance_ids\x18\x18 \x03(\tR\vinstanceIds\x1a6\n" +
+	"\finstance_ids\x18\x18 \x03(\tR\vinstanceIds\x12)\n" +
+	"\x10engine_endpoints\x18\x19 \x03(\tR\x0fengineEndpoints\x1a6\n" +
 	"\bEnvEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01J\x04\b\x16\x10\x17J\x04\b\x17\x10\x18R\x10default_priorityR\breplicas*\xc0\x01\n" +
