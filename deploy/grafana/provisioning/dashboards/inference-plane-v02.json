@@ -129,6 +129,38 @@
           "custom": { "displayMode": "auto" }
         }
       }
+    },
+    {
+      "id": 6,
+      "title": "Queue depth (per deploy_id / tenant_id / class)",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 32, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "mimir" },
+      "description": "Current waiting items in the router's per-(deploy_id, tenant_id, priority) sub-queue. v0.2 ch7-beat2.6.",
+      "targets": [
+        {
+          "expr": "iplane_queue_depth",
+          "legendFormat": "{{deploy_id}} / {{tenant_id}} / {{priority}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } }
+    },
+    {
+      "id": 7,
+      "title": "Queue wait p95 (per class)",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 32, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "mimir" },
+      "description": "p95 seconds an entry spent waiting in the router's queue before dispatch. Demo 05's fair-queueing story: per-class p95 stays bounded while batch backlogs grow.",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, priority) (rate(iplane_queue_wait_seconds_bucket[1m])))",
+          "legendFormat": "p95 {{priority}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" } }
     }
   ]
 }

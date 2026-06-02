@@ -61,3 +61,17 @@ router:
     batch:
       servicers: 0
       capacity: 256
+    # Per-tenant fair-share weights (v0.2 ch7-beat2.5). Within a
+    # priority lane, each tenant has its own bounded sub-queue;
+    # the scheduler picks one tenant per dispatch via weighted
+    # random selection across non-empty tenants.
+    #
+    # Tenants not listed get weight 1. Higher weight = larger share
+    # of dispatches under saturation. Restart-only in v0.2;
+    # changes require an `iplane serve` restart.
+    #
+    # Example:
+    #   tenant_weights:
+    #     alice: 1
+    #     bob: 3
+    tenant_weights: {}

@@ -32,6 +32,7 @@ import (
 	"github.com/inference-book/inference-plane/internal/provisioners/lifecycle"
 	"github.com/inference-book/inference-plane/internal/provisioners/stores/file"
 	"github.com/inference-book/inference-plane/internal/router"
+	"github.com/inference-book/inference-plane/internal/scheduler"
 	"github.com/inference-book/inference-plane/internal/services"
 	"github.com/inference-book/inference-plane/internal/telemetry"
 	"github.com/inference-book/inference-plane/internal/web/server"
@@ -298,6 +299,7 @@ func runServe(parent context.Context) error {
 		router.WithInteractiveQueue(cfg.Router.Queue.Interactive.Servicers, cfg.Router.Queue.Interactive.Capacity),
 		router.WithBatchQueue(cfg.Router.Queue.Batch.Servicers, cfg.Router.Queue.Batch.Capacity),
 		router.WithInFlightCap(cfg.Router.Queue.InFlightCap),
+		router.WithTenantWeights(scheduler.Weights(cfg.Router.Queue.TenantWeights)),
 	}
 	deploymentRouter := router.New(
 		provisionerv1connect.NewDeploymentServiceClient(http.DefaultClient, daemonBaseURL),

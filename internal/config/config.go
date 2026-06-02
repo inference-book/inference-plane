@@ -43,6 +43,13 @@ type QueueConfig struct {
 	InFlightCap int       `yaml:"in_flight_cap"`
 	Interactive LaneQueue `yaml:"interactive"`
 	Batch       LaneQueue `yaml:"batch"`
+
+	// TenantWeights configures per-tenant fair-share weights for
+	// the scheduler's intra-lane dispatch (v0.2 ch7-beat2.5).
+	// Tenants not listed get scheduler.DefaultTenantWeight on
+	// first Submit. Nil / empty map means "all tenants equal."
+	// Restart-only in v0.2; hot-reload is filed as a follow-up.
+	TenantWeights map[string]int `yaml:"tenant_weights"`
 }
 
 // LaneQueue is the per-priority-lane configuration. Beat 2.4
