@@ -363,21 +363,10 @@ message CreateDeploymentRequest {
   repeated ReplicaSpec replicas_spec = 7;
 }
 
-// ReplicaSpec carries one replica's per-slot provisioning shape.
-// Used in `replicas_spec` on CreateDeploymentRequest and
-// `add_replicas` on ScaleDeploymentRequest. Each spec is validated
-// and placed independently; a heterogeneous fan-out is N parallel
-// placements of N different specs.
-message ReplicaSpec {
-  // Provider to provision this replica on. Required.
-  string provider = 1;
-  // Region hint passed to the provider when supported. Optional.
-  string region = 2;
-  // Resource requirements for this replica's underlying Instance.
-  // Same three-layer shape as the homogeneous `requirements` field:
-  // class shorthand, numeric floors, or exact sku. Required.
-  ResourceRequirements requirements = 3;
-}
+// ReplicaSpec moved to types.proto (it's used by both
+// CreateDeploymentRequest / ScaleDeploymentRequest here AND by
+// Deployment.replica_specs in types.proto; types.proto can't
+// import service.proto, so the shared type belongs there).
 
 message CreateDeploymentResponse {
   Deployment deployment = 1;

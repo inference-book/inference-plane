@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
@@ -55,6 +56,17 @@ type Service struct {
 	modelStore modelstores.ModelStore
 	operatorID string
 	clock      func() time.Time
+
+	// pendingReplicaSpecs is the per-fan-out stash that
+	// provisionSlots writes and recordCreateSlots / recordAppendedSlots
+	// reads. Threading the specs through every recordSlots variant
+	// would have widened a signature shared with the create path's
+	// "no specs to record" case; a single-element stash keeps the
+	// data flow contained to fanout.go. Mutex-guarded so the
+	// pattern survives if a future fan-out runs concurrent with
+	// another (today there is at most one in-flight per Service).
+	pendingReplicaSpecs   []*provisionerv1.ReplicaSpec
+	pendingReplicaSpecsMu sync.Mutex
 }
 
 // keyEnsurer is the narrow interface the Service uses to fetch an

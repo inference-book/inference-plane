@@ -1010,8 +1010,35 @@ type Deployment struct {
 	// ticks to restore after the daemon comes back -- acceptable
 	// since restart is rare.
 	UnhealthyInstanceIds []string `protobuf:"bytes,26,rep,name=unhealthy_instance_ids,json=unhealthyInstanceIds,proto3" json:"unhealthy_instance_ids,omitempty"`
-	unknownFields        protoimpl.UnknownFields
-	sizeCache            protoimpl.SizeCache
+	// replica_specs records the per-slot ReplicaSpec each slot was
+	// originally provisioned from (heterogeneous form) or derived
+	// from (homogeneous form: one entry replicated len(instance_ids)
+	// times via resolveCreateReplicaSpecs). Parallel to instance_ids
+	// / engine_endpoints / unhealthy_instance_ids; position i is the
+	// spec for instance_ids[i]. v0.2 ch7-beat3.9 (#143).
+	//
+	// This is the operator's *intent* shape: class="small" stays
+	// "small" here even after the provider resolved it to a concrete
+	// SKU at rent time (the resolved form lives on Instance.spec.
+	// requirements -- two complementary views).
+	//
+	// Used by:
+	//   - #93's reconciliation loop: retry a failed slot with the
+	//     same spec the operator asked for, even if the dead
+	//     Instance is gone from the state file.
+	//   - Scale operations: anchor off dep.replica_specs[0] instead
+	//     of looking up the slot-0 Instance for the homogeneous
+	//     target_replicas form.
+	//   - Describe / audit: surface what the operator actually
+	//     asked for, not just what got rented.
+	//
+	// Empty list for Beat 1+2 single-instance legacy deployments
+	// (which fell back to the singular instance_id). Beat 3
+	// deployments always populate this in lockstep with the other
+	// parallel arrays.
+	ReplicaSpecs  []*ReplicaSpec `protobuf:"bytes,27,rep,name=replica_specs,json=replicaSpecs,proto3" json:"replica_specs,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Deployment) Reset() {
@@ -1212,6 +1239,88 @@ func (x *Deployment) GetUnhealthyInstanceIds() []string {
 	return nil
 }
 
+func (x *Deployment) GetReplicaSpecs() []*ReplicaSpec {
+	if x != nil {
+		return x.ReplicaSpecs
+	}
+	return nil
+}
+
+// ReplicaSpec carries one replica's per-slot provisioning shape.
+// Used in `replicas_spec` on CreateDeploymentRequest, `add_replicas`
+// on ScaleDeploymentRequest, AND on Deployment.replica_specs (the
+// persisted operator-intent form per slot). Each spec is validated
+// and placed independently; a heterogeneous fan-out is N parallel
+// placements of N different specs.
+//
+// Lives in types.proto (not service.proto) because Deployment
+// references it -- types.proto can't import service.proto, so the
+// shared message belongs here.
+type ReplicaSpec struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Provider to provision this replica on. Required.
+	Provider string `protobuf:"bytes,1,opt,name=provider,proto3" json:"provider,omitempty"`
+	// Region hint passed to the provider when supported. Optional.
+	Region string `protobuf:"bytes,2,opt,name=region,proto3" json:"region,omitempty"`
+	// Resource requirements for this replica's underlying Instance.
+	// Same three-layer shape as the homogeneous `requirements` field:
+	// class shorthand, numeric floors, or exact sku. Required.
+	Requirements  *ResourceRequirements `protobuf:"bytes,3,opt,name=requirements,proto3" json:"requirements,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReplicaSpec) Reset() {
+	*x = ReplicaSpec{}
+	mi := &file_provisioner_v1_types_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReplicaSpec) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReplicaSpec) ProtoMessage() {}
+
+func (x *ReplicaSpec) ProtoReflect() protoreflect.Message {
+	mi := &file_provisioner_v1_types_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReplicaSpec.ProtoReflect.Descriptor instead.
+func (*ReplicaSpec) Descriptor() ([]byte, []int) {
+	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *ReplicaSpec) GetProvider() string {
+	if x != nil {
+		return x.Provider
+	}
+	return ""
+}
+
+func (x *ReplicaSpec) GetRegion() string {
+	if x != nil {
+		return x.Region
+	}
+	return ""
+}
+
+func (x *ReplicaSpec) GetRequirements() *ResourceRequirements {
+	if x != nil {
+		return x.Requirements
+	}
+	return nil
+}
+
 var File_provisioner_v1_types_proto protoreflect.FileDescriptor
 
 const file_provisioner_v1_types_proto_rawDesc = "" +
@@ -1273,7 +1382,7 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"created_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x1a7\n" +
 	"\tTagsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xe7\b\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x81\t\n" +
 	"\n" +
 	"Deployment\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1f\n" +
@@ -1306,10 +1415,15 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"\x0fno_idle_destroy\x18\x15 \x01(\bR\rnoIdleDestroy\x12!\n" +
 	"\finstance_ids\x18\x18 \x03(\tR\vinstanceIds\x12)\n" +
 	"\x10engine_endpoints\x18\x19 \x03(\tR\x0fengineEndpoints\x124\n" +
-	"\x16unhealthy_instance_ids\x18\x1a \x03(\tR\x14unhealthyInstanceIds\x1a6\n" +
+	"\x16unhealthy_instance_ids\x18\x1a \x03(\tR\x14unhealthyInstanceIds\x12@\n" +
+	"\rreplica_specs\x18\x1b \x03(\v2\x1b.provisioner.v1.ReplicaSpecR\freplicaSpecs\x1a6\n" +
 	"\bEnvEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01J\x04\b\x16\x10\x17J\x04\b\x17\x10\x18R\x10default_priorityR\breplicas*\xc0\x01\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x8b\x01\n" +
+	"\vReplicaSpec\x12\x1a\n" +
+	"\bprovider\x18\x01 \x01(\tR\bprovider\x12\x16\n" +
+	"\x06region\x18\x02 \x01(\tR\x06region\x12H\n" +
+	"\frequirements\x18\x03 \x01(\v2$.provisioner.v1.ResourceRequirementsR\frequirements*\xc0\x01\n" +
 	"\rInstanceState\x12\x1e\n" +
 	"\x1aINSTANCE_STATE_UNSPECIFIED\x10\x00\x12\x1a\n" +
 	"\x16INSTANCE_STATE_PENDING\x10\x01\x12\x19\n" +
@@ -1347,7 +1461,7 @@ func file_provisioner_v1_types_proto_rawDescGZIP() []byte {
 }
 
 var file_provisioner_v1_types_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_provisioner_v1_types_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
+var file_provisioner_v1_types_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
 var file_provisioner_v1_types_proto_goTypes = []any{
 	(InstanceState)(0),            // 0: provisioner.v1.InstanceState
 	(Priority)(0),                 // 1: provisioner.v1.Priority
@@ -1359,35 +1473,38 @@ var file_provisioner_v1_types_proto_goTypes = []any{
 	(*Instance)(nil),              // 7: provisioner.v1.Instance
 	(*InstanceRef)(nil),           // 8: provisioner.v1.InstanceRef
 	(*Deployment)(nil),            // 9: provisioner.v1.Deployment
-	nil,                           // 10: provisioner.v1.Spec.TagsEntry
-	nil,                           // 11: provisioner.v1.InstanceRef.TagsEntry
-	nil,                           // 12: provisioner.v1.Deployment.EnvEntry
-	(*timestamppb.Timestamp)(nil), // 13: google.protobuf.Timestamp
+	(*ReplicaSpec)(nil),           // 10: provisioner.v1.ReplicaSpec
+	nil,                           // 11: provisioner.v1.Spec.TagsEntry
+	nil,                           // 12: provisioner.v1.InstanceRef.TagsEntry
+	nil,                           // 13: provisioner.v1.Deployment.EnvEntry
+	(*timestamppb.Timestamp)(nil), // 14: google.protobuf.Timestamp
 }
 var file_provisioner_v1_types_proto_depIdxs = []int32{
 	4,  // 0: provisioner.v1.Spec.requirements:type_name -> provisioner.v1.ResourceRequirements
-	10, // 1: provisioner.v1.Spec.tags:type_name -> provisioner.v1.Spec.TagsEntry
+	11, // 1: provisioner.v1.Spec.tags:type_name -> provisioner.v1.Spec.TagsEntry
 	3,  // 2: provisioner.v1.Instance.spec:type_name -> provisioner.v1.Spec
 	5,  // 3: provisioner.v1.Instance.gpu:type_name -> provisioner.v1.GpuInfo
 	0,  // 4: provisioner.v1.Instance.state:type_name -> provisioner.v1.InstanceState
-	13, // 5: provisioner.v1.Instance.created_at:type_name -> google.protobuf.Timestamp
-	13, // 6: provisioner.v1.Instance.activated_at:type_name -> google.protobuf.Timestamp
-	13, // 7: provisioner.v1.Instance.terminated_at:type_name -> google.protobuf.Timestamp
+	14, // 5: provisioner.v1.Instance.created_at:type_name -> google.protobuf.Timestamp
+	14, // 6: provisioner.v1.Instance.activated_at:type_name -> google.protobuf.Timestamp
+	14, // 7: provisioner.v1.Instance.terminated_at:type_name -> google.protobuf.Timestamp
 	6,  // 8: provisioner.v1.Instance.ssh:type_name -> provisioner.v1.SshTarget
-	11, // 9: provisioner.v1.InstanceRef.tags:type_name -> provisioner.v1.InstanceRef.TagsEntry
-	13, // 10: provisioner.v1.InstanceRef.created_at:type_name -> google.protobuf.Timestamp
-	12, // 11: provisioner.v1.Deployment.env:type_name -> provisioner.v1.Deployment.EnvEntry
+	12, // 9: provisioner.v1.InstanceRef.tags:type_name -> provisioner.v1.InstanceRef.TagsEntry
+	14, // 10: provisioner.v1.InstanceRef.created_at:type_name -> google.protobuf.Timestamp
+	13, // 11: provisioner.v1.Deployment.env:type_name -> provisioner.v1.Deployment.EnvEntry
 	2,  // 12: provisioner.v1.Deployment.state:type_name -> provisioner.v1.DeploymentState
-	13, // 13: provisioner.v1.Deployment.created_at:type_name -> google.protobuf.Timestamp
-	13, // 14: provisioner.v1.Deployment.started_at:type_name -> google.protobuf.Timestamp
-	13, // 15: provisioner.v1.Deployment.ready_at:type_name -> google.protobuf.Timestamp
-	13, // 16: provisioner.v1.Deployment.terminated_at:type_name -> google.protobuf.Timestamp
-	13, // 17: provisioner.v1.Deployment.last_activity_at:type_name -> google.protobuf.Timestamp
-	18, // [18:18] is the sub-list for method output_type
-	18, // [18:18] is the sub-list for method input_type
-	18, // [18:18] is the sub-list for extension type_name
-	18, // [18:18] is the sub-list for extension extendee
-	0,  // [0:18] is the sub-list for field type_name
+	14, // 13: provisioner.v1.Deployment.created_at:type_name -> google.protobuf.Timestamp
+	14, // 14: provisioner.v1.Deployment.started_at:type_name -> google.protobuf.Timestamp
+	14, // 15: provisioner.v1.Deployment.ready_at:type_name -> google.protobuf.Timestamp
+	14, // 16: provisioner.v1.Deployment.terminated_at:type_name -> google.protobuf.Timestamp
+	14, // 17: provisioner.v1.Deployment.last_activity_at:type_name -> google.protobuf.Timestamp
+	10, // 18: provisioner.v1.Deployment.replica_specs:type_name -> provisioner.v1.ReplicaSpec
+	4,  // 19: provisioner.v1.ReplicaSpec.requirements:type_name -> provisioner.v1.ResourceRequirements
+	20, // [20:20] is the sub-list for method output_type
+	20, // [20:20] is the sub-list for method input_type
+	20, // [20:20] is the sub-list for extension type_name
+	20, // [20:20] is the sub-list for extension extendee
+	0,  // [0:20] is the sub-list for field type_name
 }
 
 func init() { file_provisioner_v1_types_proto_init() }
@@ -1401,7 +1518,7 @@ func file_provisioner_v1_types_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_provisioner_v1_types_proto_rawDesc), len(file_provisioner_v1_types_proto_rawDesc)),
 			NumEnums:      3,
-			NumMessages:   10,
+			NumMessages:   11,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

@@ -242,6 +242,91 @@ func TestHetero_Scale_NeitherForm(t *testing.T) {
 	}
 }
 
+// TestHetero_Deployment_RecordsReplicaSpecs: after a heterogeneous
+// create, dep.replica_specs is populated in lockstep with
+// instance_ids / engine_endpoints. The persisted record carries the
+// operator's intent shape per slot -- the data #93's reconciliation
+// loop reads to know what to retry with.
+func TestHetero_Deployment_RecordsReplicaSpecs(t *testing.T) {
+	svc, store, _, _ := heteroSvc(t)
+	if _, err := svc.CreateDeployment(context.Background(), &provisionerv1.CreateDeploymentRequest{
+		Deployment: &provisionerv1.Deployment{
+			Id:         "intent",
+			Image:      "vllm/vllm-openai:v0.7.0",
+			Model:      "Qwen/Qwen2.5-1.5B-Instruct",
+			EnginePort: 8000,
+		},
+		ReplicasSpec: []*provisionerv1.ReplicaSpec{
+			{Provider: "mockA", Requirements: &provisionerv1.ResourceRequirements{Sku: "a-sku"}},
+			{Provider: "mockB", Requirements: &provisionerv1.ResourceRequirements{Sku: "b-sku"}},
+		},
+		Wait: true,
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	state, _ := store.Read()
+	dep := state.Deployments["intent"]
+	specs := dep.GetReplicaSpecs()
+	if len(specs) != 2 {
+		t.Fatalf("replica_specs len = %d, want 2", len(specs))
+	}
+	if specs[0].GetProvider() != "mockA" || specs[1].GetProvider() != "mockB" {
+		t.Errorf("replica_specs providers = [%q %q], want [mockA mockB]",
+			specs[0].GetProvider(), specs[1].GetProvider())
+	}
+	if specs[0].GetRequirements().GetSku() != "a-sku" {
+		t.Errorf("slot 0 sku = %q, want a-sku", specs[0].GetRequirements().GetSku())
+	}
+}
+
+// TestHetero_Scale_AnchorsOffReplicaSpecs: scale-up (homogeneous
+// target_replicas form) reads its anchor shape from
+// dep.replica_specs[0], not from a slot-0 Instance lookup. After
+// the scale, the new slots' replica_specs match the anchor's.
+func TestHetero_Scale_AnchorsOffReplicaSpecs(t *testing.T) {
+	svc, store, _, _ := heteroSvc(t)
+	if _, err := svc.CreateDeployment(context.Background(), &provisionerv1.CreateDeploymentRequest{
+		Deployment: &provisionerv1.Deployment{
+			Id:         "anchored",
+			Image:      "vllm/vllm-openai:v0.7.0",
+			Model:      "Qwen/Qwen2.5-1.5B-Instruct",
+			EnginePort: 8000,
+		},
+		Provider:     "mockA",
+		Requirements: &provisionerv1.ResourceRequirements{Class: "small"},
+		Replicas:     1,
+		Wait:         true,
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := svc.ScaleDeployment(context.Background(), &provisionerv1.ScaleDeploymentRequest{
+		Id:             "anchored",
+		TargetReplicas: 3,
+		Wait:           true,
+	}); err != nil {
+		t.Fatalf("Scale: %v", err)
+	}
+
+	state, _ := store.Read()
+	dep := state.Deployments["anchored"]
+	specs := dep.GetReplicaSpecs()
+	if len(specs) != 3 {
+		t.Fatalf("replica_specs len = %d, want 3", len(specs))
+	}
+	// All three slots carry the same (provider, class="small"): the
+	// scale anchored off slot 0's original ReplicaSpec.
+	for i, sp := range specs {
+		if sp.GetProvider() != "mockA" {
+			t.Errorf("slot %d provider = %q, want mockA", i, sp.GetProvider())
+		}
+		// Class is the operator's intent form ("small"); the
+		// resolved sku stays on Instance.spec.requirements.
+		if sp.GetRequirements().GetClass() != "small" {
+			t.Errorf("slot %d class = %q, want small (operator intent preserved)", i, sp.GetRequirements().GetClass())
+		}
+	}
+}
+
 // Compile-time check: the fanOutMockProvider doesn't reference
 // sshkeys.KeyPair directly, but our heteroSvc uses both providers
 // through the same key store. Sanity import for sshkeys to keep

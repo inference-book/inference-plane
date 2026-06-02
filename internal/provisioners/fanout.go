@@ -106,13 +106,21 @@ func (s *Service) ScaleDeployment(ctx context.Context, req *provisionerv1.ScaleD
 
 	// Normalize Beat 1+2 records before scaling: if the deployment
 	// has a singular instance_id but no instance_ids list, promote
-	// the singular into instance_ids[0] / engine_endpoints[0]. The
-	// scale-up loop below appends starting at slot 1, so without
-	// this, slot 0 would be a phantom tombstone (empty id, even
-	// though the original instance is still serving via the
-	// singular fields). Idempotent: re-running on an already-
-	// normalized record is a no-op.
+	// the singular into instance_ids[0] / engine_endpoints[0] /
+	// replica_specs[0]. The scale-up loop below appends starting at
+	// slot 1, so without this, slot 0 would be a phantom tombstone
+	// (empty id, even though the original instance is still serving
+	// via the singular fields). Idempotent: re-running on an
+	// already-normalized record is a no-op.
+	//
+	// replica_specs[0] is derived from the anchor Instance's Spec
+	// (the resolved form -- class -> sku expansion already
+	// happened). Beat 1+2 records predate replica_specs so the
+	// operator-intent shape was never stored; the resolved form
+	// from the Instance is the best available signal.
 	if len(rec.GetInstanceIds()) == 0 && rec.GetInstanceId() != "" {
+		anchorID := rec.GetInstanceId()
+		anchorInst, anchorOK := file.Instances[anchorID]
 		_ = s.store.Update(func(f *State) error {
 			r := f.Deployments[id]
 			if r == nil || len(r.GetInstanceIds()) > 0 {
@@ -120,6 +128,13 @@ func (s *Service) ScaleDeployment(ctx context.Context, req *provisionerv1.ScaleD
 			}
 			r.InstanceIds = []string{r.GetInstanceId()}
 			r.EngineEndpoints = []string{r.GetEngineEndpoint()}
+			if anchorOK && anchorInst.GetSpec() != nil {
+				r.ReplicaSpecs = []*provisionerv1.ReplicaSpec{{
+					Provider:     anchorInst.GetProvider(),
+					Region:       anchorInst.GetSpec().GetRegion(),
+					Requirements: anchorInst.GetSpec().GetRequirements(),
+				}}
+			}
 			return nil
 		})
 		// Re-read so subsequent logic sees the normalized record.
@@ -183,19 +198,29 @@ func (s *Service) ScaleDeployment(ctx context.Context, req *provisionerv1.ScaleD
 	return &provisionerv1.ScaleDeploymentResponse{Deployment: rec}, nil
 }
 
-// anchorReplicaSpec extracts the (provider, region, requirements)
-// shape from the existing slot 0 Instance, so a homogeneous
-// scale-up call (target_replicas) can extend the existing fleet's
-// shape. For heterogeneous fleets, scale's add_replicas form names
-// each new spec explicitly and this helper is bypassed.
+// anchorReplicaSpec returns the (provider, region, requirements)
+// shape a homogeneous scale-up call (target_replicas) should
+// replicate. For heterogeneous fleets, scale's add_replicas form
+// names each new spec explicitly and this helper is bypassed.
 //
-// For Beat 1+2 legacy deployments (no instance_ids, just a singular
-// instance_id), the singular Instance is the source of truth.
+// Resolution order:
+//  1. dep.replica_specs[0] (v0.2 ch7-beat3.9 onward) -- the
+//     operator's intent shape, preserved verbatim. This is the
+//     preferred path because it reflects what was requested, not
+//     what the provider resolved to (Instance.spec.requirements
+//     after class -> sku expansion).
+//  2. Slot-0 Instance.spec (Beat 1+2 / pre-#143 records that
+//     predate replica_specs population). Resolved shape; sufficient
+//     for replication but loses the operator's class-shorthand
+//     view.
 //
-// Fails if the slot-0 Instance is missing -- the deployment record
-// is inconsistent with the instance store, and scale can't pick a
-// shape to extend.
+// Fails when neither path yields a spec -- the deployment record
+// is inconsistent with both the new operator-intent and the
+// per-Instance fallback, and scale can't pick a shape to extend.
 func (s *Service) anchorReplicaSpec(file *State, rec *provisionerv1.Deployment) (*provisionerv1.ReplicaSpec, error) {
+	if specs := rec.GetReplicaSpecs(); len(specs) > 0 && specs[0] != nil {
+		return specs[0], nil
+	}
 	var anchorID string
 	if ids := rec.GetInstanceIds(); len(ids) > 0 && ids[0] != "" {
 		anchorID = ids[0]
@@ -415,6 +440,16 @@ func (s *Service) fanOutProvision(ctx context.Context, req *provisionerv1.Create
 func (s *Service) provisionSlots(ctx context.Context, specs []*provisionerv1.ReplicaSpec, dep *provisionerv1.Deployment, deployID string, startingSlot int, recordSlots func(deployID string, placements []*provisionerv1.Instance, startingSlot int)) (int, []string) {
 	count := len(specs)
 	placements, placeErrs := s.placeSlots(ctx, specs, dep.GetImage(), deployID, startingSlot)
+	// Stash the per-slot specs on the Service so recordSlots can
+	// pick them up (the recordSlots signature is shared between
+	// create/scale variants; passing specs through would have meant
+	// either a wider signature or threading specs into every Option
+	// type). Single fan-out call per Service per moment, so the
+	// stash is contention-free; even so, takePendingReplicaSpecs
+	// clears it on read.
+	s.pendingReplicaSpecsMu.Lock()
+	s.pendingReplicaSpecs = specs
+	s.pendingReplicaSpecsMu.Unlock()
 	recordSlots(deployID, placements, startingSlot)
 
 	results := make(chan fanOutResult, count)
@@ -454,6 +489,19 @@ func (s *Service) provisionSlots(ctx context.Context, specs []*provisionerv1.Rep
 		}
 	}
 	return successes, failureReasons
+}
+
+// takePendingReplicaSpecs returns the specs stashed by the most
+// recent provisionSlots call, clearing the stash so a subsequent
+// fan-out can stash its own without leaking. Returns nil if no
+// specs are pending (e.g., a legacy code path that doesn't use the
+// new shape).
+func (s *Service) takePendingReplicaSpecs() []*provisionerv1.ReplicaSpec {
+	s.pendingReplicaSpecsMu.Lock()
+	defer s.pendingReplicaSpecsMu.Unlock()
+	specs := s.pendingReplicaSpecs
+	s.pendingReplicaSpecs = nil
+	return specs
 }
 
 // replicaKey loads the SSH keypair for one provider. Per-slot helper
@@ -507,13 +555,19 @@ func (s *Service) placeSlots(ctx context.Context, specs []*provisionerv1.Replica
 	return placements, placeErrs
 }
 
-// recordCreateSlots persists the instance_ids / engine_endpoints
-// parallel arrays for the create path (startingSlot is always 0;
-// the call resizes the slot table from scratch). Successful
-// placements stamp their instance id; place-failed slots remain "".
-// This is the snapshot the router (#85) reads to decide which slots
-// are eligible for round-robin selection.
+// recordCreateSlots persists the instance_ids / engine_endpoints /
+// replica_specs parallel arrays for the create path (startingSlot
+// is always 0; the call resizes the slot table from scratch).
+// Successful placements stamp their instance id; place-failed slots
+// remain "". This is the snapshot the router (#85) reads to decide
+// which slots are eligible for round-robin selection.
+//
+// replica_specs is set by the caller (provisionSlots stashes the
+// specs on the Service for the recorder to pick up). For
+// recordCreateSlots, specs reflects the full slot table starting
+// at slot 0.
 func (s *Service) recordCreateSlots(deployID string, placements []*provisionerv1.Instance, _ int) {
+	specs := s.takePendingReplicaSpecs()
 	_ = s.store.Update(func(f *State) error {
 		rec, ok := f.Deployments[deployID]
 		if !ok {
@@ -527,26 +581,34 @@ func (s *Service) recordCreateSlots(deployID string, placements []*provisionerv1
 				rec.InstanceIds[i] = inst.GetId()
 			}
 		}
+		// Stamp replica_specs in lockstep with the other arrays.
+		// Each slot's spec is the operator's intent for that slot
+		// regardless of whether placement succeeded -- a failed
+		// slot keeps its spec so #93's reconciliation knows what
+		// to retry with.
+		if len(specs) == count {
+			rec.ReplicaSpecs = specs
+		}
 		return nil
 	})
 }
 
 // recordAppendedSlots is the scale-up analog of recordCreateSlots:
 // the deployment already has slots 0..startingSlot-1 stamped;
-// appendReplicas extends instance_ids / engine_endpoints by
-// len(placements) slots starting at startingSlot. Existing slots
-// (including DEGRADED tombstones with empty ids) are untouched --
-// scale appends, never repairs.
+// appendReplicas extends instance_ids / engine_endpoints /
+// replica_specs by len(placements) slots starting at startingSlot.
+// Existing slots (including DEGRADED tombstones with empty ids)
+// are untouched -- scale appends, never repairs.
 func (s *Service) recordAppendedSlots(deployID string, placements []*provisionerv1.Instance, startingSlot int) {
+	specs := s.takePendingReplicaSpecs()
 	_ = s.store.Update(func(f *State) error {
 		rec, ok := f.Deployments[deployID]
 		if !ok {
 			return nil
 		}
-		// Grow both arrays to startingSlot+len(placements). If the
-		// existing arrays were shorter (unlikely; recordCreateSlots
-		// sized them to count at create time, but a Beat-1+2 legacy
-		// deployment may have len < startingSlot), pad with empties.
+		// Grow all three arrays to startingSlot+len(placements). If
+		// the existing arrays were shorter (Beat-1+2 legacy
+		// deployment with len < startingSlot), pad with empties.
 		need := startingSlot + len(placements)
 		for len(rec.InstanceIds) < need {
 			rec.InstanceIds = append(rec.InstanceIds, "")
@@ -554,10 +616,18 @@ func (s *Service) recordAppendedSlots(deployID string, placements []*provisioner
 		for len(rec.EngineEndpoints) < need {
 			rec.EngineEndpoints = append(rec.EngineEndpoints, "")
 		}
+		for len(rec.ReplicaSpecs) < startingSlot {
+			rec.ReplicaSpecs = append(rec.ReplicaSpecs, nil)
+		}
 		for i, inst := range placements {
 			if inst != nil {
 				rec.InstanceIds[startingSlot+i] = inst.GetId()
 			}
+		}
+		// Append the new slots' specs. Failed slots still get their
+		// spec recorded so #93's reconciliation can retry.
+		if len(specs) == len(placements) {
+			rec.ReplicaSpecs = append(rec.ReplicaSpecs, specs...)
 		}
 		return nil
 	})
