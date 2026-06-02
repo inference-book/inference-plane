@@ -72,12 +72,18 @@ import (
 // by the health-poll loop. Purely additive; old 1.3 records load
 // with unhealthy_instance_ids=[] via protojson DiscardUnknown, which
 // is exactly the "no replica is quarantined" initial state.
+// v0.2 ch7-beat3.9 bumps to "1.5" -- the Deployment message gains
+// replica_specs (per-slot ReplicaSpec) so the persisted record
+// carries the operator's intent shape per slot (#143). Purely
+// additive; old 1.4 records load with replica_specs=[] via
+// protojson DiscardUnknown, and the scale-anchor code falls back
+// to Instance.spec lookup when the array is empty.
 //
 // Note: an interim "1.3" briefly existed in a draft of v0.2
 // ch7-beat2.3 for Deployment.default_priority; that field was removed
 // before merge and the version reverted to "1.2". This "1.3" bump
 // is the first one operators see in shipped artifacts.
-const SchemaVersion = "1.4"
+const SchemaVersion = "1.5"
 
 // BackendLocalFile is the value written into the file's `backend` field.
 // v1.0's remote backend will write its own value here and may fall back

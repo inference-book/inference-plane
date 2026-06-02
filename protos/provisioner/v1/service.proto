@@ -276,6 +276,21 @@ message ScaleDeploymentRequest {
   // surfaces these to the operator for confirmation before re-running
   // without --dry-run.
   bool dry_run = 4;
+
+  // add_replicas is the heterogeneous append form (v0.2 ch7-beat3.9,
+  // #143): each entry appends one replica with its own (provider,
+  // region, requirements) shape. Mutually exclusive with
+  // target_replicas -- pick one form per call. The new replicas
+  // append at the next slot index (current_count, current_count+1, ...)
+  // like the homogeneous target_replicas path; the only difference is
+  // each new slot can name a different provider/class.
+  //
+  // Example: a deployment with 1 runpod replica scaled to add one vast
+  // and one lambda is ScaleDeployment(id, add_replicas=[vast:medium,
+  // lambda:medium]) -- post-scale the deployment has 1 runpod + 1 vast
+  // + 1 lambda, all serving the same model behind the router's
+  // round-robin distribution.
+  repeated ReplicaSpec add_replicas = 5;
 }
 
 message ScaleDeploymentResponse {
@@ -313,22 +328,45 @@ message CreateDeploymentRequest {
   string provider = 4;
   // Region hint passed through to the provider when auto-provisioning.
   string region = 5;
-  // replicas is the number of same-shape Instances the operator wants
-  // back for this Deployment at create time (v0.2 ch7-beat3.2 / #84).
-  // Default 0 means 1 (proto3 zero-value semantics; Service normalizes
-  // 0 -> 1 on receive). Values > 1 trigger parallel provisioning of
-  // N instances, each with the same `requirements` + `provider` shape.
-  // On partial failure (M of N succeed, M < N), the persisted
-  // deployment lands in DEGRADED with failure_reason populated; the
-  // operator can AddInstance to fill the gap or DestroyDeployment to
-  // restart.
+  // replicas is the homogeneous-onramp shortcut: when set and
+  // replicas_spec is empty, the Service provisions `replicas`
+  // Instances all sharing the singular `provider` / `region` /
+  // `requirements` triple above. Default 0 means 1 (proto3 zero-
+  // value semantics; Service normalizes 0 -> 1 on receive).
   //
-  // Heterogeneous fleets land via AddInstance after create, not via
-  // this field: --replicas is the homogeneous-onramp shortcut; the
-  // multi-provider value-add story is the operator chaining
-  // AddInstance calls with different specs.
+  // For heterogeneous fleets (1 runpod + 1 vast + 1 lambda -- iplane's
+  // load-bearing differentiator from k8s/ASGs), use replicas_spec
+  // below. The two fields are mutually exclusive.
   int32 replicas = 6;
+
+  // replicas_spec is the heterogeneous form: each entry names one
+  // replica's (provider, region, requirements) independently, so a
+  // single Deployment can span providers (v0.2 ch7-beat3.9, #143).
+  // When set, replicas_spec wins over the homogeneous
+  // `provider` / `region` / `requirements` / `replicas` fields
+  // (the count equals `len(replicas_spec)`).
+  //
+  // This is iplane's central value-add over Kubernetes / Auto
+  // Scaling Groups: the same Deployment can rent capacity from
+  // multiple clouds for cost arbitrage, availability tolerance,
+  // and burst absorption. The router (#85) distributes evenly
+  // across the heterogeneous fleet (round-robin is provider-
+  // agnostic); future routing-policy seams (#89) can layer
+  // cost-aware / region-aware selection on top.
+  //
+  // Long-term direction: when a request *is* homogeneous on a
+  // single provider AND that provider ships a fleet API (AWS
+  // ASGs, GCP MIGs, RunPod fleet API if/when), the fan-out can
+  // delegate to a single SpawnGroup call instead of N parallel
+  // rents (#147). replicas_spec stays the operator-facing surface;
+  // the optimization is provider-side.
+  repeated ReplicaSpec replicas_spec = 7;
 }
+
+// ReplicaSpec moved to types.proto (it's used by both
+// CreateDeploymentRequest / ScaleDeploymentRequest here AND by
+// Deployment.replica_specs in types.proto; types.proto can't
+// import service.proto, so the shared type belongs there).
 
 message CreateDeploymentResponse {
   Deployment deployment = 1;

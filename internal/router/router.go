@@ -51,6 +51,7 @@ import (
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
 	"github.com/inference-book/inference-plane/gen/go/provisioner/v1/provisionerv1connect"
 	"github.com/inference-book/inference-plane/internal/metrics"
+	"github.com/inference-book/inference-plane/internal/router/policy"
 	"github.com/inference-book/inference-plane/internal/scheduler"
 )
 
@@ -141,14 +142,12 @@ type Router struct {
 	// ready-to-go Scheduler).
 	pendingSchedulerCfg pendingSchedCfg
 
-	// rrCounters is the per-deployment round-robin state for
-	// replica selection (v0.2 ch7-beat3.3). Keyed by deploy_id;
-	// each value is a *atomic.Uint64 incremented once per Pop.
-	// The map grows monotonically across the daemon's lifetime --
-	// per-deployment entries are NOT cleaned on DestroyDeployment
-	// in v0.2 (the leaked entry is a few bytes and the deployment
-	// id won't be reused). #88+ can layer cleanup if/when it matters.
-	rrCounters sync.Map
+	// policy is the v0.2 ch7-beat3.9 routing seam (#89). pickReplica
+	// builds the eligible replica set + delegates selection here.
+	// Defaults to round-robin (the only impl shipped in v0.2); Ch 8
+	// will add prefix-cache affinity as the second impl that
+	// motivated extracting the seam.
+	policy policy.Policy
 
 	// inFlight tracks per-(deploy, replica) in-flight request count
 	// for the iplane.replica.in_flight gauge (v0.2 ch7-beat3.6, #88).
@@ -179,6 +178,18 @@ type pendingSchedCfg struct {
 // using New(client, recorder) keep working; the queue path is opt-in
 // via WithQueue.
 type Option func(*Router)
+
+// WithRoutingPolicy installs a custom routing policy. The default
+// (when omitted) is policy.NewRoundRobin(). Future Ch 8 work
+// installs a prefix-affinity policy here; tests use the seam to
+// substitute deterministic policies that verify routing decisions.
+func WithRoutingPolicy(p policy.Policy) Option {
+	return func(r *Router) {
+		if p != nil {
+			r.policy = p
+		}
+	}
+}
 
 // WithQueue activates the default scheduler with `servicers`
 // workers (k) and `capacity` waiting room on BOTH priority lanes.
@@ -303,6 +314,7 @@ func New(client provisionerv1connect.DeploymentServiceClient, recorder *metrics.
 		recorder:   recorder,
 		tracer:     otel.Tracer(tracerName),
 		propagator: otel.GetTextMapPropagator(),
+		policy:     policy.NewRoundRobin(),
 	}
 	for _, opt := range opts {
 		opt(r)

@@ -322,24 +322,15 @@ message Deployment {
 
   // Field 22 was Deployment.default_priority (Priority enum) in an
   // earlier draft of v0.2 ch7-beat2.3. Removed before merge: priority
-  // is a property of the request stream, not the deployment. The
-  // engine inside the deployment is priority-blind (continuous
-  // batching on whatever it gets); the router is the SOLE priority
-  // decision point. Unannotated requests fall back to a router-level
-  // default (INTERACTIVE), not a per-deployment default. Reserved
-  // here so readers of the wire don't repurpose the slot.
-  reserved 22;
-  reserved "default_priority";
-
-  // Field 23 was Deployment.replicas (int32, k8s-shaped count) in
-  // an earlier draft of v0.2 ch7-beat3.1. Removed before merge:
-  // a homogeneous-count field duplicates k8s and hides iplane's
-  // core value-add (heterogeneous multi-provider fleets serving
-  // the same model). Replaced by `instance_ids` below, which makes
-  // the heterogeneous composition first-class. Reserved here so
-  // future wire readers don't repurpose the slot.
-  reserved 23;
-  reserved "replicas";
+  // Slots 22 and 23 were briefly used in pre-merge drafts (a
+  // Deployment.default_priority field and a homogeneous replicas
+  // int) -- both removed before merge once we worked out that
+  // priority is request-traffic-level, not artifact-level, and
+  // that a homogeneous count duplicates k8s without surfacing
+  // iplane's heterogeneous-fleet differentiator. Pre-publication,
+  // `reserved` markers are not warranted (no deployed wire
+  // consumers to protect from slot re-use); the slots are simply
+  // free for re-use if needed.
 
   // instance_ids is the full list of Instances that back this
   // Deployment (v0.2 ch7-beat3.1). One Deployment, N Instances --
@@ -414,6 +405,55 @@ message Deployment {
   // ticks to restore after the daemon comes back -- acceptable
   // since restart is rare.
   repeated string unhealthy_instance_ids = 26;
+
+  // replica_specs records the per-slot ReplicaSpec each slot was
+  // originally provisioned from (heterogeneous form) or derived
+  // from (homogeneous form: one entry replicated len(instance_ids)
+  // times via resolveCreateReplicaSpecs). Parallel to instance_ids
+  // / engine_endpoints / unhealthy_instance_ids; position i is the
+  // spec for instance_ids[i]. v0.2 ch7-beat3.9 (#143).
+  //
+  // This is the operator's *intent* shape: class="small" stays
+  // "small" here even after the provider resolved it to a concrete
+  // SKU at rent time (the resolved form lives on Instance.spec.
+  // requirements -- two complementary views).
+  //
+  // Used by:
+  //   - #93's reconciliation loop: retry a failed slot with the
+  //     same spec the operator asked for, even if the dead
+  //     Instance is gone from the state file.
+  //   - Scale operations: anchor off dep.replica_specs[0] instead
+  //     of looking up the slot-0 Instance for the homogeneous
+  //     target_replicas form.
+  //   - Describe / audit: surface what the operator actually
+  //     asked for, not just what got rented.
+  //
+  // Empty list for Beat 1+2 single-instance legacy deployments
+  // (which fell back to the singular instance_id). Beat 3
+  // deployments always populate this in lockstep with the other
+  // parallel arrays.
+  repeated ReplicaSpec replica_specs = 27;
+}
+
+// ReplicaSpec carries one replica's per-slot provisioning shape.
+// Used in `replicas_spec` on CreateDeploymentRequest, `add_replicas`
+// on ScaleDeploymentRequest, AND on Deployment.replica_specs (the
+// persisted operator-intent form per slot). Each spec is validated
+// and placed independently; a heterogeneous fan-out is N parallel
+// placements of N different specs.
+//
+// Lives in types.proto (not service.proto) because Deployment
+// references it -- types.proto can't import service.proto, so the
+// shared message belongs here.
+message ReplicaSpec {
+  // Provider to provision this replica on. Required.
+  string provider = 1;
+  // Region hint passed to the provider when supported. Optional.
+  string region = 2;
+  // Resource requirements for this replica's underlying Instance.
+  // Same three-layer shape as the homogeneous `requirements` field:
+  // class shorthand, numeric floors, or exact sku. Required.
+  ResourceRequirements requirements = 3;
 }
 
 // Priority is the lane an inbound request joins on its way to the

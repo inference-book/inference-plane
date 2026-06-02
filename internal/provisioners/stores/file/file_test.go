@@ -207,7 +207,7 @@ func TestDeployment_ForwardCompat_OldRecordLoadsAsZero(t *testing.T) {
 	}
 }
 
-func TestSchemaVersion_BumpedTo1Dot4(t *testing.T) {
+func TestSchemaVersion_BumpedTo1Dot5(t *testing.T) {
 	s := newStore(t)
 	if err := s.Update(func(f *provisioners.State) error { return nil }); err != nil {
 		t.Fatalf("Update: %v", err)
@@ -216,8 +216,8 @@ func TestSchemaVersion_BumpedTo1Dot4(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
 	}
-	if !strings.Contains(string(raw), `"schema_version": "1.4"`) {
-		t.Errorf("on-disk envelope missing schema_version=1.4; got:\n%s", raw)
+	if !strings.Contains(string(raw), `"schema_version": "1.5"`) {
+		t.Errorf("on-disk envelope missing schema_version=1.5; got:\n%s", raw)
 	}
 }
 
