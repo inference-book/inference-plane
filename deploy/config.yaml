@@ -34,22 +34,27 @@ deployment:
   instance_id: ""                 # set per-instance via env override
 
 router:
-  # v0.2 Beat 2 M/M/k waiting room in front of the engine. Beat 2.3
-  # added priority lanes -- interactive and batch can be configured
-  # independently. Three patterns:
+  # v0.2 Beat 2.4 scheduler in front of the engine. Strict-priority
+  # dispatch: interactive lane preferred; batch only runs when
+  # interactive is empty. Per-deployment in-flight cap mirrors the
+  # engine's max-num-seqs.
   #
-  # 1. Disabled (Beat 1 path): all three servicers values are 0.
-  #    Requests forward inline; no queue, no concurrency cap.
-  # 2. Single global queue (Beat 2.1 backward-compat): set the
-  #    top-level servicers + capacity. Both lanes use the same shape.
-  # 3. Per-lane tuning (Beat 2.3+): set interactive.servicers and/or
-  #    batch.servicers. Each lane gets its own M/M/k pool. The
-  #    scheduler that prefers interactive over batch on shared engine
-  #    capacity lands in Beat 2.4 (#78); this PR ships parallel
-  #    independent lanes only.
+  # Three patterns:
+  #
+  # 1. Disabled (Beat 1 path): servicers = 0. Requests forward inline;
+  #    no queue, no concurrency cap.
+  # 2. Single global queue: set top-level servicers + capacity; both
+  #    lanes inherit the same capacity.
+  # 3. Per-lane tuning: set interactive.capacity / batch.capacity
+  #    independently. Servicers is shared across lanes (the scheduler
+  #    is one pool of workers servicing both queues).
+  #
+  # in_flight_cap > 0 caps concurrent in-flight per deployment; 0
+  # means unlimited (only the worker count bounds engine load).
   queue:
     servicers: 0
     capacity: 256
+    in_flight_cap: 0
     interactive:
       servicers: 0
       capacity: 256

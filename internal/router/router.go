@@ -50,7 +50,7 @@ import (
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
 	"github.com/inference-book/inference-plane/gen/go/provisioner/v1/provisionerv1connect"
 	"github.com/inference-book/inference-plane/internal/metrics"
-	"github.com/inference-book/inference-plane/internal/stores/queue"
+	"github.com/inference-book/inference-plane/internal/scheduler"
 )
 
 // tracerName is the instrumentation library name attached to every
@@ -116,24 +116,41 @@ type Router struct {
 	tracer     trace.Tracer
 	propagator propagation.TextMapPropagator
 
-	// interactivePool and batchPool are the v0.2 Beat 2.3 priority
-	// lanes. Each is an independent M/M/k waiting room with its own
-	// servicers and capacity. enqueueOrServe routes by the resolved
-	// effective priority of the request.
+	// scheduler is the v0.2 Beat 2.4 dequeue-and-dispatch primitive.
+	// When non-nil, requests submit through it; the scheduler holds
+	// the lane queues + per-deployment in-flight cap. When nil, the
+	// router stays on the Beat 1 direct-forward path.
 	//
-	// Either nil (lane not configured) means "skip the queue for
-	// this lane -- forward inline." A request whose effective
-	// priority targets an unconfigured lane falls through to the
-	// direct path (Beat 1 behavior). Beat 1's WithQueue option
-	// applies the same (servicers, capacity) to both lanes; Beat 2.3
-	// adds WithInteractiveQueue + WithBatchQueue for asymmetric
-	// tuning.
+	// Beat 2.3's two-parallel-pools model is gone -- the scheduler
+	// is now the single point of dispatch with strict-priority
+	// across lanes. Operators tune the scheduler via WithQueue /
+	// WithInteractiveQueue / WithBatchQueue / WithInFlightCap.
 	//
-	// The scheduler that prefers interactive over batch on shared
-	// engine concurrency lands in Beat 2.4 (#78). This PR just
-	// classifies and lanes; both pools run in parallel.
-	interactivePool *queue.Pool[*queueEntry]
-	batchPool       *queue.Pool[*queueEntry]
+	// Custom schedulers (no-op test impls, future weighted-RR
+	// variants) plug in via WithScheduler.
+	scheduler scheduler.Scheduler
+
+	// pendingSchedulerCfg holds scheduler config supplied through
+	// the lane-shape options (WithQueue / WithInteractiveQueue /
+	// WithBatchQueue / WithInFlightCap). New applies these at the
+	// end of construction so the order of options doesn't matter.
+	// WithScheduler skips this path entirely (caller supplies a
+	// ready-to-go Scheduler).
+	pendingSchedulerCfg pendingSchedCfg
+}
+
+// pendingSchedCfg gathers per-option mutations before New
+// materializes the default scheduler. servicers / capacity may be
+// set globally (WithQueue), per-lane (WithInteractive/WithBatchQueue),
+// or both -- per-lane wins when set, otherwise the global value
+// fills in.
+type pendingSchedCfg struct {
+	servicers              int // global; >0 enables default scheduler
+	globalCapacity         int
+	interactiveCapacity    int
+	batchCapacity          int
+	inFlightCap            int
+	explicitSchedulerSet   bool // WithScheduler called; skip auto-build
 }
 
 // Option is the functional-option type for New. Existing callers
@@ -141,54 +158,88 @@ type Router struct {
 // via WithQueue.
 type Option func(*Router)
 
-// WithQueue activates the M/M/k waiting room in front of the engine
-// using the same (servicers, capacity) on BOTH priority lanes. This
-// is the convenience option for operators who don't want per-lane
-// tuning -- one knob, both lanes queue identically. The Beat 2.4
-// scheduler (when it lands) is the one that decides which lane to
-// drain when both have work.
-//
-// For asymmetric tuning (e.g., more servicers on interactive than
-// batch), use WithInteractiveQueue + WithBatchQueue instead.
+// WithQueue activates the default scheduler with `servicers`
+// workers (k) and `capacity` waiting room on BOTH priority lanes.
+// Convenience option for operators who don't want per-lane tuning;
+// equivalent to WithInteractiveQueue + WithBatchQueue with the
+// same values.
 //
 // Semantics:
 //
-//   - servicers <= 0 OR capacity <= 0 -> no-op; lanes stay on the
-//     direct-forward path (Beat 1 behavior).
-//   - both positive -> both lane pools are constructed but NOT
-//     started. Caller must invoke Router.Start(ctx) to spawn the
-//     servicer goroutines.
+//   - servicers <= 0 OR capacity <= 0 -> no-op; router stays on
+//     the direct-forward path (Beat 1 behavior).
+//   - both positive -> scheduler config is gathered; the actual
+//     scheduler is materialized at the end of New so option order
+//     doesn't matter.
 func WithQueue(servicers, capacity int) Option {
 	return func(r *Router) {
 		if servicers <= 0 || capacity <= 0 {
 			return
 		}
-		r.interactivePool = newPool(servicers, capacity, r.dispatchEntry)
-		r.batchPool = newPool(servicers, capacity, r.dispatchEntry)
+		r.pendingSchedulerCfg.servicers = servicers
+		r.pendingSchedulerCfg.globalCapacity = capacity
 	}
 }
 
-// WithInteractiveQueue configures ONLY the interactive lane.
-// Requests with effective priority INTERACTIVE will submit through
-// this pool; BATCH requests fall through to whatever the batch
-// option configures (or direct-forward if not configured).
+// WithInteractiveQueue overrides the interactive lane's capacity
+// without affecting batch. servicers is shared across lanes
+// (single scheduler in Beat 2.4); use WithQueue to set it.
 func WithInteractiveQueue(servicers, capacity int) Option {
 	return func(r *Router) {
 		if servicers <= 0 || capacity <= 0 {
 			return
 		}
-		r.interactivePool = newPool(servicers, capacity, r.dispatchEntry)
+		// Workers config flows through the global knob; per-lane
+		// values affect only capacity (Beat 2.4 has a single pool
+		// of workers servicing both lanes).
+		if r.pendingSchedulerCfg.servicers == 0 {
+			r.pendingSchedulerCfg.servicers = servicers
+		}
+		r.pendingSchedulerCfg.interactiveCapacity = capacity
 	}
 }
 
-// WithBatchQueue configures ONLY the batch lane. Symmetric to
+// WithBatchQueue overrides the batch lane's capacity. Symmetric to
 // WithInteractiveQueue.
 func WithBatchQueue(servicers, capacity int) Option {
 	return func(r *Router) {
 		if servicers <= 0 || capacity <= 0 {
 			return
 		}
-		r.batchPool = newPool(servicers, capacity, r.dispatchEntry)
+		if r.pendingSchedulerCfg.servicers == 0 {
+			r.pendingSchedulerCfg.servicers = servicers
+		}
+		r.pendingSchedulerCfg.batchCapacity = capacity
+	}
+}
+
+// WithInFlightCap sets the per-deployment in-flight concurrency
+// cap on the default scheduler. Mirrors the engine's max-num-seqs;
+// 0 means unlimited (workers themselves are the only bound).
+// Ignored if no scheduler is configured (direct-forward path
+// doesn't enforce a cap; engine's own bound applies).
+func WithInFlightCap(cap int) Option {
+	return func(r *Router) {
+		if cap < 0 {
+			return
+		}
+		r.pendingSchedulerCfg.inFlightCap = cap
+	}
+}
+
+// WithScheduler installs a caller-supplied Scheduler impl, bypassing
+// the default-construction path. Used by tests that swap in a no-op
+// scheduler (acceptance: "Scheduler can be swapped out via interface").
+// Future weighted-RR / aging schedulers (#132) will land as
+// alternative impls plugged in this way.
+//
+// When WithScheduler is set, the lane-shape options
+// (WithQueue / WithInteractiveQueue / WithBatchQueue / WithInFlightCap)
+// are ignored -- the caller owns the scheduler config.
+func WithScheduler(s scheduler.Scheduler) Option {
+	return func(r *Router) {
+		r.scheduler = s
+		r.pendingSchedulerCfg.explicitSchedulerSet = true
 	}
 }
 
@@ -205,9 +256,7 @@ func WithBatchQueue(servicers, capacity int) Option {
 // When set, the router instruments each request via RecordRouterRequest
 // and RecordRouterTokens.
 //
-// opts apply functional options. Today the only option is WithQueue;
-// future Beat 2 / Beat 3 wiring (per-tenant routing, replica
-// selection) will land as additional options.
+// opts apply functional options.
 func New(client provisionerv1connect.DeploymentServiceClient, recorder *metrics.Recorder, opts ...Option) *Router {
 	r := &Router{
 		client:     client,
@@ -218,47 +267,61 @@ func New(client provisionerv1connect.DeploymentServiceClient, recorder *metrics.
 	for _, opt := range opts {
 		opt(r)
 	}
+	// Materialize the default scheduler from the gathered config
+	// unless the caller installed one explicitly via WithScheduler.
+	if !r.pendingSchedulerCfg.explicitSchedulerSet && r.pendingSchedulerCfg.servicers > 0 {
+		cfg := r.pendingSchedulerCfg
+		interactiveCap := cfg.interactiveCapacity
+		if interactiveCap == 0 {
+			interactiveCap = cfg.globalCapacity
+		}
+		batchCap := cfg.batchCapacity
+		if batchCap == 0 {
+			batchCap = cfg.globalCapacity
+		}
+		// Either-lane capacity unset (global also 0): default to
+		// a small bounded buffer so options users don't get
+		// silently unbounded queues.
+		if interactiveCap <= 0 {
+			interactiveCap = 256
+		}
+		if batchCap <= 0 {
+			batchCap = 256
+		}
+		r.scheduler = scheduler.NewInteractiveFirst(scheduler.InteractiveFirstConfig{
+			Workers:             cfg.servicers,
+			InteractiveCapacity: interactiveCap,
+			BatchCapacity:       batchCap,
+			InFlightCap:         cfg.inFlightCap,
+			Handler:             r.dispatchEntry,
+		})
+	}
 	return r
 }
 
-// Start activates the queue path's servicer goroutines for every
-// configured lane. parent is the daemon's lifetime context -- when
-// it cancels, servicers drain in-flight requests and exit.
+// Start activates the scheduler's worker goroutines. parent is the
+// daemon's lifetime context -- when it cancels, workers drain
+// in-flight requests and exit.
 //
-// Safe to call when no lane is configured (Beat 1 path) -- Start
-// becomes a no-op. Idempotency / re-start guards live on Pool.Start.
+// Safe to call when no scheduler is configured (Beat 1 path) --
+// Start becomes a no-op.
 func (r *Router) Start(parent context.Context) {
-	if r.interactivePool != nil {
-		r.interactivePool.Start(parent)
-	}
-	if r.batchPool != nil {
-		r.batchPool.Start(parent)
+	if r.scheduler != nil {
+		r.scheduler.Start(parent)
 	}
 }
 
-// Shutdown stops every configured lane pool and waits for in-flight
-// items to drain. After Shutdown, the router rejects new queued
-// requests with ErrClosed (mapped to 503 + "router shutting down"
-// in the queue submit path).
+// Shutdown stops the scheduler and waits for in-flight items to
+// drain. After Shutdown, the router rejects new queued requests
+// with ErrClosed (mapped to 503 + "router shutting down" in the
+// queue submit path).
 //
-// Safe to call when no lane is configured -- Shutdown is a no-op.
+// Safe to call when no scheduler is configured -- Shutdown is a
+// no-op.
 func (r *Router) Shutdown() {
-	if r.interactivePool != nil {
-		r.interactivePool.Stop()
+	if r.scheduler != nil {
+		r.scheduler.Stop()
 	}
-	if r.batchPool != nil {
-		r.batchPool.Stop()
-	}
-}
-
-// poolFor returns the lane pool a request of the given priority
-// should submit to. Returns nil when the lane is unconfigured;
-// callers fall back to the direct-forward path.
-func (r *Router) poolFor(p provisionerv1.Priority) *queue.Pool[*queueEntry] {
-	if p == provisionerv1.Priority_PRIORITY_BATCH {
-		return r.batchPool
-	}
-	return r.interactivePool
 }
 
 // serveDeployID handles the explicit-deployment URL family:

@@ -126,6 +126,7 @@ func registerServeDefaults() {
 	// "use the top-level setting if any, otherwise no queue."
 	viper.SetDefault("router.queue.servicers", 0)
 	viper.SetDefault("router.queue.capacity", 256)
+	viper.SetDefault("router.queue.in_flight_cap", 0)
 	viper.SetDefault("router.queue.interactive.servicers", 0)
 	viper.SetDefault("router.queue.interactive.capacity", 256)
 	viper.SetDefault("router.queue.batch.servicers", 0)
@@ -296,6 +297,7 @@ func runServe(parent context.Context) error {
 		router.WithQueue(cfg.Router.Queue.Servicers, cfg.Router.Queue.Capacity),
 		router.WithInteractiveQueue(cfg.Router.Queue.Interactive.Servicers, cfg.Router.Queue.Interactive.Capacity),
 		router.WithBatchQueue(cfg.Router.Queue.Batch.Servicers, cfg.Router.Queue.Batch.Capacity),
+		router.WithInFlightCap(cfg.Router.Queue.InFlightCap),
 	}
 	deploymentRouter := router.New(
 		provisionerv1connect.NewDeploymentServiceClient(http.DefaultClient, daemonBaseURL),

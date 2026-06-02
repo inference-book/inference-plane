@@ -12,6 +12,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
+	"github.com/inference-book/inference-plane/internal/scheduler"
 )
 
 // (setupMetricsCapture / findCounter / attrValue live in metrics_test.go;
@@ -290,21 +291,24 @@ func TestRouter_QueuedPath_CapturesTenantOnEntry(t *testing.T) {
 				},
 			}, nil
 		},
-	}, nil, WithQueue(1, 4))
+	}, nil /* scheduler installed below */)
 
-	// Swap the interactive pool's handler for one that captures the
+	// Install a scheduler with a wrapper handler that captures the
 	// entry's TenantID before delegating to the real dispatch. With
 	// no X-IPlane-Priority header (and no deployment default), the
 	// effective priority resolves to INTERACTIVE, so all submits
-	// land on the interactive pool. Beat 2.3+'s priority test
-	// covers the batch lane separately.
-	if r.interactivePool == nil {
-		t.Fatalf("interactive pool not constructed")
-	}
-	r.interactivePool = newPool(1, 4, func(e *queueEntry) {
-		v := e.TenantID
-		capturedTenant.Store(&v)
-		r.dispatchEntry(e)
+	// land on the interactive lane. Beat 2.3's priority test covers
+	// lane routing separately.
+	r.scheduler = scheduler.NewInteractiveFirst(scheduler.InteractiveFirstConfig{
+		Workers:             1,
+		InteractiveCapacity: 4,
+		BatchCapacity:       4,
+		Handler: func(ctx context.Context, e scheduler.Entry) {
+			se := e.(schedulerEntry).queueEntry
+			v := se.TenantID
+			capturedTenant.Store(&v)
+			r.dispatchEntry(ctx, e)
+		},
 	})
 	r.Start(context.Background())
 	defer r.Shutdown()
