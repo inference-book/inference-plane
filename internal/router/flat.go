@@ -83,7 +83,7 @@ func (r *Router) serveFlat(w http.ResponseWriter, req *http.Request) {
 
 	// stripDeployPrefix=false: the flat URL has no iplane-side prefix
 	// to strip; /v1/chat/completions forwards as-is to the engine.
-	r.handleWithObservability(w, req, dep, false)
+	r.enqueueOrServe(w, req, dep, false /* stripDeployPrefix */)
 }
 
 // pickDeploymentForModel returns the deployment that should serve a

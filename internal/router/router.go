@@ -50,6 +50,7 @@ import (
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
 	"github.com/inference-book/inference-plane/gen/go/provisioner/v1/provisionerv1connect"
 	"github.com/inference-book/inference-plane/internal/metrics"
+	"github.com/inference-book/inference-plane/internal/stores/queue"
 )
 
 // tracerName is the instrumentation library name attached to every
@@ -112,6 +113,49 @@ type Router struct {
 	recorder   *metrics.Recorder
 	tracer     trace.Tracer
 	propagator propagation.TextMapPropagator
+
+	// pool is the v0.2 Beat 2 M/M/k waiting room. When nil (the
+	// Beat 1 default), incoming requests forward inline -- the
+	// existing direct-dispatch behavior. When non-nil, requests
+	// submit to the pool's bounded queue; pool servicers Pop and
+	// run handleWithObservability. ErrQueueFull surfaces as a
+	// 503 + Retry-After at the route level.
+	//
+	// Construction lives behind WithQueue(servicers, capacity).
+	// servicers <= 0 (or the option not supplied) skips Pool
+	// construction; that's the Beat 1 path and the recommended
+	// default for v0.2 release/v0.2 snapshots until demo 05 lands.
+	pool *queue.Pool[*queueEntry]
+}
+
+// Option is the functional-option type for New. Existing callers
+// using New(client, recorder) keep working; the queue path is opt-in
+// via WithQueue.
+type Option func(*Router)
+
+// WithQueue activates the v0.2 Beat 2 M/M/k waiting room in front of
+// the engine. servicers is k (the number of parallel dispatcher
+// goroutines); capacity is the bounded waiting room size N.
+//
+// Semantics:
+//
+//   - servicers <= 0 -> no-op; router stays on the direct-forward
+//     path (Beat 1 behavior).
+//   - capacity <= 0 -> no-op; an unbounded waiting room is not
+//     supported in v0.2 (the whole point is bounded backpressure).
+//   - servicers > 0 AND capacity > 0 -> Pool is constructed but NOT
+//     started. Caller must invoke Router.Start(ctx) to spawn the
+//     servicer goroutines.
+//
+// The (construct, then start) split lets the daemon register the
+// router with its mux before the servicers begin processing.
+func WithQueue(servicers, capacity int) Option {
+	return func(r *Router) {
+		if servicers <= 0 || capacity <= 0 {
+			return
+		}
+		r.pool = newPool(servicers, capacity, r.dispatchEntry)
+	}
 }
 
 // New constructs a Router backed by the supplied DeploymentService
@@ -126,12 +170,44 @@ type Router struct {
 // recorder may be nil for tests or daemons that omit telemetry init.
 // When set, the router instruments each request via RecordRouterRequest
 // and RecordRouterTokens.
-func New(client provisionerv1connect.DeploymentServiceClient, recorder *metrics.Recorder) *Router {
-	return &Router{
+//
+// opts apply functional options. Today the only option is WithQueue;
+// future Beat 2 / Beat 3 wiring (per-tenant routing, replica
+// selection) will land as additional options.
+func New(client provisionerv1connect.DeploymentServiceClient, recorder *metrics.Recorder, opts ...Option) *Router {
+	r := &Router{
 		client:     client,
 		recorder:   recorder,
 		tracer:     otel.Tracer(tracerName),
 		propagator: otel.GetTextMapPropagator(),
+	}
+	for _, opt := range opts {
+		opt(r)
+	}
+	return r
+}
+
+// Start activates the queue path's servicer goroutines if WithQueue
+// configured one. parent is the daemon's lifetime context — when it
+// cancels, servicers drain in-flight requests and exit.
+//
+// Safe to call when no pool is configured (Beat 1 path) — Start
+// becomes a no-op. Idempotency / re-start guards live on Pool.Start.
+func (r *Router) Start(parent context.Context) {
+	if r.pool != nil {
+		r.pool.Start(parent)
+	}
+}
+
+// Shutdown stops the pool's servicer goroutines and waits for them
+// to drain in-flight items. After Shutdown, the router rejects new
+// queued requests with ErrClosed (mapped to 503 + "router shutting
+// down" in the queue submit path).
+//
+// Safe to call when no pool is configured — Shutdown is a no-op.
+func (r *Router) Shutdown() {
+	if r.pool != nil {
+		r.pool.Stop()
 	}
 }
 
@@ -169,7 +245,7 @@ func (r *Router) serveDeployID(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	r.handleWithObservability(w, req, dep, true /* stripDeployPrefix */)
+	r.enqueueOrServe(w, req, dep, true /* stripDeployPrefix */)
 }
 
 // handleWithObservability is the shared instrumented tail used by

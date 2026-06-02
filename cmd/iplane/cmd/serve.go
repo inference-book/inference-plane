@@ -119,6 +119,11 @@ func registerServeDefaults() {
 	viper.SetDefault("telemetry.service_name", "inference-plane")
 	viper.SetDefault("telemetry.environment", "dev")
 	viper.SetDefault("telemetry.sample_ratio", 1.0)
+
+	// router.queue: 0 servicers = Beat 1 behavior (no queue). Capacity
+	// has a default but only kicks in when servicers > 0.
+	viper.SetDefault("router.queue.servicers", 0)
+	viper.SetDefault("router.queue.capacity", 256)
 }
 
 // loopbackURL turns the daemon's HTTP bind address into a fully-qualified
@@ -274,11 +279,17 @@ func runServe(parent context.Context) error {
 	// CP/DP-1, the router reaches deployment state only through the
 	// generated DeploymentService Connect client; in `iplane serve`
 	// that client loopback-dials this same HTTP listener.
+	//
+	// router.queue.servicers > 0 activates the v0.2 Beat 2 M/M/k
+	// waiting room; 0 (the default in deploy/config.yaml) keeps
+	// Beat 1's direct-forward path.
 	daemonBaseURL := loopbackURL(cfg.Server.Addr)
 	deploymentRouter := router.New(
 		provisionerv1connect.NewDeploymentServiceClient(http.DefaultClient, daemonBaseURL),
 		recorder,
+		router.WithQueue(cfg.Router.Queue.Servicers, cfg.Router.Queue.Capacity),
 	)
+	deploymentRouter.Start(parent)
 
 	api, err := server.New(parent, grpcAddr, logger,
 		server.WithProvisionerHandler(provisioners.NewConnectProvisionerAdapter(provisionerSvc)),
@@ -306,6 +317,11 @@ func runServe(parent context.Context) error {
 	err = skhttp.ListenAndServeGraceful(httpSrv,
 		skhttp.WithDrainTimeout(time.Duration(cfg.Server.ShutdownSec)*time.Second),
 		skhttp.WithOnShutdown(func() {
+			// Drain the router queue before tearing down gRPC and
+			// telemetry: in-flight engine calls keep firing until the
+			// pool's servicers exit, and their spans / metrics need
+			// the telemetry SDK alive to flush.
+			deploymentRouter.Shutdown()
 			grpcSrv.GracefulStop()
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()

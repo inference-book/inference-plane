@@ -32,3 +32,21 @@ deployment:
   gpu_type: "a10g"
   billing_mode: "metered_per_second"
   instance_id: ""                 # set per-instance via env override
+
+router:
+  # v0.2 Beat 2 M/M/k waiting room in front of the engine.
+  #
+  # servicers = 0 keeps Beat 1's behavior: no queue, no concurrency
+  # cap, requests forward inline. Demo 04 (Beat 1 closer) runs on
+  # this path; the v0.2 release/v0.2 snapshot defaults stay here
+  # until demo 05 (Beat 2 closer) ships and the chapter flips the
+  # default in prose.
+  #
+  # When servicers > 0:
+  #   - servicers parallel dispatcher goroutines drain the queue
+  #   - capacity bounds the waiting room (M/M/k/N in Kendall notation)
+  #   - arrivals beyond capacity get 503 + Retry-After (fail-fast
+  #     backpressure)
+  queue:
+    servicers: 0
+    capacity: 256
