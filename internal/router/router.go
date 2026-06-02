@@ -36,6 +36,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"sync"
 	"time"
 
 	"log/slog"
@@ -71,6 +72,7 @@ const (
 	AttrRouterStatus   = "iplane.router.status"    // status label string (success | engine_error | ...)
 	AttrRouterTenantID = "iplane.router.tenant_id" // operator-asserted tenant; "default" when unannotated
 	AttrRouterPriority = "iplane.router.priority"  // effective lane: "interactive" | "batch"
+	AttrRouterReplicaID = "iplane.router.replica_id" // instance_id of the replica this request was routed to (v0.2 ch7-beat3.3); empty when no replica was healthy (returns 503)
 	AttrQueueWaitMs    = "iplane.queue.wait_ms"    // ms spent waiting in the router queue before dispatch (v0.2 ch7-beat2.7); only set when the request was actually queued (direct-forward path leaves it unset)
 )
 
@@ -138,6 +140,15 @@ type Router struct {
 	// WithScheduler skips this path entirely (caller supplies a
 	// ready-to-go Scheduler).
 	pendingSchedulerCfg pendingSchedCfg
+
+	// rrCounters is the per-deployment round-robin state for
+	// replica selection (v0.2 ch7-beat3.3). Keyed by deploy_id;
+	// each value is a *atomic.Uint64 incremented once per Pop.
+	// The map grows monotonically across the daemon's lifetime --
+	// per-deployment entries are NOT cleaned on DestroyDeployment
+	// in v0.2 (the leaked entry is a few bytes and the deployment
+	// id won't be reused). #88+ can layer cleanup if/when it matters.
+	rrCounters sync.Map
 }
 
 // pendingSchedCfg gathers per-option mutations before New
@@ -421,15 +432,26 @@ func (r *Router) handleWithObservability(w http.ResponseWriter, req *http.Reques
 	// and metric labels; neither crosses to the engine.
 	tenantID := tenantFromContext(req.Context())
 	priorityLabelStr := priorityLabel(effectivePriorityFromCtx(req.Context()))
+
+	// v0.2 ch7-beat3.3: pick a replica (instance + endpoint) from
+	// the deployment's parallel lists. Round-robin within the
+	// deployment's healthy set (empty endpoint slots are skipped --
+	// they represent provisioning-in-progress instances or
+	// quarantined replicas once #87 lands). For single-instance
+	// Beat 1+2 deployments, the helpers fall back to the singular
+	// instance_id / engine_endpoint and the loop picks them every
+	// time -- no behavior change from Beat 1+2.
+	replicaID, replicaEndpoint, replicaOK := r.pickReplica(dep)
 	ctx, span := r.tracer.Start(req.Context(), spanNameDispatch,
 		trace.WithSpanKind(trace.SpanKindServer),
 		trace.WithAttributes(
 			attribute.String(AttrRouterMatch, routeMatch),
 			attribute.String(AttrRouterDeployID, dep.GetId()),
 			attribute.String(AttrRouterModel, dep.GetModel()),
-			attribute.String(AttrRouterUpstream, dep.GetEngineEndpoint()),
+			attribute.String(AttrRouterUpstream, replicaEndpoint),
 			attribute.String(AttrRouterTenantID, tenantID),
 			attribute.String(AttrRouterPriority, priorityLabelStr),
+			attribute.String(AttrRouterReplicaID, replicaID),
 		),
 	)
 	// v0.2 ch7-beat2.7: stamp queue-wait duration on the span when
@@ -458,14 +480,26 @@ func (r *Router) handleWithObservability(w http.ResponseWriter, req *http.Reques
 		}
 
 		r.recorder.RecordRouterRequest(ctx,
-			dep.GetId(), dep.GetModel(), tenantID, priorityLabelStr, statusLabel,
+			dep.GetId(), dep.GetModel(), tenantID, priorityLabelStr, replicaID, statusLabel,
 			time.Since(start).Seconds())
 		if tokens := tcw.CompletionTokens(); tokens > 0 {
 			r.recorder.RecordRouterTokens(ctx,
-				dep.GetId(), dep.GetModel(), tenantID, priorityLabelStr, tokens)
+				dep.GetId(), dep.GetModel(), tenantID, priorityLabelStr, replicaID, tokens)
 		}
 	}()
 	if !r.forwardable(tcw, dep) {
+		return
+	}
+	if !replicaOK {
+		// All replicas are unhealthy / still provisioning. Return
+		// 503 with a retry hint -- the operator can wait for the
+		// scheduler to bring instances online. Retry-After is set
+		// BEFORE writeOpenAIError flushes headers; setting it
+		// after would no-op (response already committed).
+		tcw.Header().Set("Retry-After", "5")
+		writeOpenAIError(tcw, http.StatusServiceUnavailable,
+			fmt.Sprintf("deployment %q has no healthy replicas; retry shortly", dep.GetId()),
+			"replica_unavailable")
 		return
 	}
 	// v0.2 ch7-beat1.7: mark this deployment as actively serving
@@ -473,7 +507,7 @@ func (r *Router) handleWithObservability(w http.ResponseWriter, req *http.Reques
 	// requests are still flowing. Best-effort -- a touch failure
 	// is logged but never blocks the proxy or fails the request.
 	r.touchActivity(ctx, dep.GetId())
-	r.proxyTo(tcw, req, dep, stripDeployPrefix)
+	r.proxyTo(tcw, req, dep, replicaEndpoint, stripDeployPrefix)
 }
 
 // touchActivity fires a TouchDeployment RPC against the control
@@ -616,10 +650,14 @@ func (r *Router) forwardable(w http.ResponseWriter, dep *provisionerv1.Deploymen
 // behavior), so killing a chat REPL mid-stream terminates the
 // engine's compute rather than leaking it. Both properties are
 // asserted in stream_test.go.
-func (r *Router) proxyTo(w http.ResponseWriter, req *http.Request, dep *provisionerv1.Deployment, stripDeployPrefix bool) {
-	target, err := url.Parse(dep.GetEngineEndpoint())
+func (r *Router) proxyTo(w http.ResponseWriter, req *http.Request, dep *provisionerv1.Deployment, endpoint string, stripDeployPrefix bool) {
+	// v0.2 ch7-beat3.3: endpoint comes from pickReplica's round-robin
+	// selection, not from dep.GetEngineEndpoint() directly. For
+	// single-instance Beat 1+2 deployments the helpers fall back to
+	// the singular endpoint so behavior is unchanged.
+	target, err := url.Parse(endpoint)
 	if err != nil {
-		writeOpenAIError(w, http.StatusBadGateway, fmt.Sprintf("deployment %q has malformed engine endpoint %q: %v", dep.GetId(), dep.GetEngineEndpoint(), err), "engine_unreachable")
+		writeOpenAIError(w, http.StatusBadGateway, fmt.Sprintf("deployment %q has malformed engine endpoint %q: %v", dep.GetId(), endpoint, err), "engine_unreachable")
 		return
 	}
 

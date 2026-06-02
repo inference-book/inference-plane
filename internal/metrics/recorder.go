@@ -201,7 +201,7 @@ func (r *Recorder) SetBackendHealth(ctx context.Context, healthy bool) {
 // nil-safe: handlers that hold a nil Recorder (tests, daemon
 // constructed without telemetry init) get a no-op rather than a
 // panic.
-func (r *Recorder) RecordRouterRequest(ctx context.Context, deployID, model, tenantID, priority, status string, durationSec float64) {
+func (r *Recorder) RecordRouterRequest(ctx context.Context, deployID, model, tenantID, priority, replicaID, status string, durationSec float64) {
 	if r == nil {
 		return
 	}
@@ -210,6 +210,7 @@ func (r *Recorder) RecordRouterRequest(ctx context.Context, deployID, model, ten
 		attribute.String(telemetry.LabelModel, model),
 		attribute.String(telemetry.LabelTenantID, tenantID),
 		attribute.String(telemetry.LabelPriority, priority),
+		attribute.String(telemetry.LabelReplicaID, replicaID),
 		attribute.String(telemetry.LabelStatus, status),
 	)
 	r.requests.Add(ctx, 1, attrs)
@@ -239,7 +240,7 @@ func (r *Recorder) RecordReaperDestroy(ctx context.Context, reason string) {
 // Skip calling this when n is zero or unknown (e.g., a streaming
 // request whose engine did not emit a `usage` frame) -- recording
 // zeros pollutes the counter without adding signal.
-func (r *Recorder) RecordRouterTokens(ctx context.Context, deployID, model, tenantID, priority string, n int64) {
+func (r *Recorder) RecordRouterTokens(ctx context.Context, deployID, model, tenantID, priority, replicaID string, n int64) {
 	if r == nil || n <= 0 {
 		return
 	}
@@ -248,6 +249,7 @@ func (r *Recorder) RecordRouterTokens(ctx context.Context, deployID, model, tena
 		attribute.String(telemetry.LabelModel, model),
 		attribute.String(telemetry.LabelTenantID, tenantID),
 		attribute.String(telemetry.LabelPriority, priority),
+		attribute.String(telemetry.LabelReplicaID, replicaID),
 	))
 }
 
