@@ -96,6 +96,14 @@ func writeDeploymentDetail(w io.Writer, dep *provisionerv1.Deployment) {
 	if dep.GetNoIdleDestroy() {
 		fmt.Fprintf(w, "pinned:          true (no idle destroy)\n")
 	}
+	// v0.2 ch7-beat3.1: surface the full instance list when it's
+	// populated (multi-instance Deployments after #84 fan-out lands).
+	// For single-instance Deployments the `instance:` line above
+	// already shows the only one; we only print the list when it's
+	// > 1 entry so describe stays compact in the common case.
+	if ids := dep.GetInstanceIds(); len(ids) > 1 {
+		fmt.Fprintf(w, "instances:       %v\n", ids)
+	}
 	if reason := dep.GetFailureReason(); reason != "" {
 		fmt.Fprintf(w, "failure:         %s\n", reason)
 	}

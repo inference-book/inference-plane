@@ -207,7 +207,7 @@ func TestDeployment_ForwardCompat_OldRecordLoadsAsZero(t *testing.T) {
 	}
 }
 
-func TestSchemaVersion_BumpedTo1Dot2(t *testing.T) {
+func TestSchemaVersion_BumpedTo1Dot3(t *testing.T) {
 	s := newStore(t)
 	if err := s.Update(func(f *provisioners.State) error { return nil }); err != nil {
 		t.Fatalf("Update: %v", err)
@@ -216,8 +216,89 @@ func TestSchemaVersion_BumpedTo1Dot2(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
 	}
-	if !strings.Contains(string(raw), `"schema_version": "1.2"`) {
-		t.Errorf("on-disk envelope missing schema_version=1.2; got:\n%s", raw)
+	if !strings.Contains(string(raw), `"schema_version": "1.3"`) {
+		t.Errorf("on-disk envelope missing schema_version=1.3; got:\n%s", raw)
+	}
+}
+
+// TestDeployment_InstanceIds_RoundTrip: a Deployment record with
+// instance_ids=[a, b, c] written via Update reads back unchanged.
+// v0.2 ch7-beat3.1 acceptance: state-file write/read preserves the
+// multi-instance list (heterogeneous fleet case).
+func TestDeployment_InstanceIds_RoundTrip(t *testing.T) {
+	s := newStore(t)
+	want := &provisionerv1.Deployment{
+		Id:          "multi-instance-llama",
+		InstanceId:  "runpod-a", // singular = primary instance
+		InstanceIds: []string{"runpod-a", "vast-b", "lambda-c"},
+		Image:       "vllm/vllm-openai:0.7.0",
+		Model:       "Qwen/Qwen2.5-7B-Instruct",
+		State:       provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING,
+	}
+	if err := s.Update(func(f *provisioners.State) error {
+		f.Deployments["multi-instance-llama"] = want
+		return nil
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	got, err := s.Read()
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	dep, ok := got.Deployments["multi-instance-llama"]
+	if !ok {
+		t.Fatal("deployment missing after round-trip")
+	}
+	gotIDs := dep.GetInstanceIds()
+	if len(gotIDs) != 3 {
+		t.Fatalf("InstanceIds = %v, want 3 entries", gotIDs)
+	}
+	for i, v := range []string{"runpod-a", "vast-b", "lambda-c"} {
+		if gotIDs[i] != v {
+			t.Errorf("InstanceIds[%d] = %q, want %q (round-trip preservation broken)", i, gotIDs[i], v)
+		}
+	}
+}
+
+// TestDeployment_InstanceIds_ForwardCompat: a v0.2-early state file
+// (schema 1.2, only singular instance_id) loads cleanly with an
+// EMPTY instance_ids list. Downstream readers handle this via
+// EffectiveInstanceIDs (added in #84): empty list falls back to
+// [instance_id] so single-instance Beat 1+2 deployments work
+// unchanged after the schema bump.
+func TestDeployment_InstanceIds_ForwardCompat(t *testing.T) {
+	s := newStore(t)
+	raw := `{
+  "schema_version": "1.2",
+  "backend": "local-file",
+  "operator_id": "default",
+  "instances": {},
+  "deployments": {
+    "legacy-llama": {
+      "id": "legacy-llama",
+      "instance_id": "my-pod",
+      "image": "vllm/vllm-openai:0.7.0",
+      "model": "Qwen/Qwen2.5-7B-Instruct",
+      "state": "DEPLOYMENT_STATE_RUNNING"
+    }
+  }
+}`
+	if err := os.WriteFile(s.Path(), []byte(raw), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	f, err := s.Read()
+	if err != nil {
+		t.Fatalf("Read should tolerate v0.2-early Deployment: %v", err)
+	}
+	dep, ok := f.Deployments["legacy-llama"]
+	if !ok {
+		t.Fatal("legacy-llama missing")
+	}
+	if got := dep.GetInstanceIds(); len(got) != 0 {
+		t.Errorf("legacy record InstanceIds = %v, want empty (no field present in 1.2)", got)
+	}
+	if dep.GetInstanceId() != "my-pod" {
+		t.Errorf("singular instance_id = %q, want my-pod (must still load)", dep.GetInstanceId())
 	}
 }
 

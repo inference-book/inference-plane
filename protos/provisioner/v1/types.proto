@@ -330,6 +330,37 @@ message Deployment {
   // here so readers of the wire don't repurpose the slot.
   reserved 22;
   reserved "default_priority";
+
+  // Field 23 was Deployment.replicas (int32, k8s-shaped count) in
+  // an earlier draft of v0.2 ch7-beat3.1. Removed before merge:
+  // a homogeneous-count field duplicates k8s and hides iplane's
+  // core value-add (heterogeneous multi-provider fleets serving
+  // the same model). Replaced by `instance_ids` below, which makes
+  // the heterogeneous composition first-class. Reserved here so
+  // future wire readers don't repurpose the slot.
+  reserved 23;
+  reserved "replicas";
+
+  // instance_ids is the full list of Instances that back this
+  // Deployment (v0.2 ch7-beat3.1). One Deployment, N Instances --
+  // each Instance was provisioned independently and may differ in
+  // provider / GPU class / region. Beat 3 fan-out (#84) writes
+  // this list at CreateDeployment time (for the --replicas N sugar)
+  // or via the add-instance verb (for heterogeneous composition).
+  // Beat 3 router fan-out (#85) reads this list to pick which
+  // engine endpoint a request goes to.
+  //
+  // Backward-compat with v0.1's single-instance contract: when
+  // instance_ids is empty (legacy 1.2 records), readers treat the
+  // singular `instance_id` field as the only entry. The
+  // EffectiveInstanceIDs helper (added in #84) encapsulates this
+  // fallback so callers don't branch on emptiness themselves.
+  //
+  // The singular `instance_id` field at slot 2 stays for v0.1
+  // backward-compat: for one-instance deployments it remains the
+  // canonical primary; for multi-instance deployments it equals
+  // instance_ids[0] (the first-provisioned instance).
+  repeated string instance_ids = 24;
 }
 
 // Priority is the lane an inbound request joins on its way to the

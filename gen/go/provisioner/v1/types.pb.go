@@ -939,6 +939,26 @@ type Deployment struct {
 	// deployment across Ch 7's demos is pinned at the start of the
 	// session so afk pauses do not tear it down.
 	NoIdleDestroy bool `protobuf:"varint,21,opt,name=no_idle_destroy,json=noIdleDestroy,proto3" json:"no_idle_destroy,omitempty"`
+	// instance_ids is the full list of Instances that back this
+	// Deployment (v0.2 ch7-beat3.1). One Deployment, N Instances --
+	// each Instance was provisioned independently and may differ in
+	// provider / GPU class / region. Beat 3 fan-out (#84) writes
+	// this list at CreateDeployment time (for the --replicas N sugar)
+	// or via the add-instance verb (for heterogeneous composition).
+	// Beat 3 router fan-out (#85) reads this list to pick which
+	// engine endpoint a request goes to.
+	//
+	// Backward-compat with v0.1's single-instance contract: when
+	// instance_ids is empty (legacy 1.2 records), readers treat the
+	// singular `instance_id` field as the only entry. The
+	// EffectiveInstanceIDs helper (added in #84) encapsulates this
+	// fallback so callers don't branch on emptiness themselves.
+	//
+	// The singular `instance_id` field at slot 2 stays for v0.1
+	// backward-compat: for one-instance deployments it remains the
+	// canonical primary; for multi-instance deployments it equals
+	// instance_ids[0] (the first-provisioned instance).
+	InstanceIds   []string `protobuf:"bytes,24,rep,name=instance_ids,json=instanceIds,proto3" json:"instance_ids,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1120,6 +1140,13 @@ func (x *Deployment) GetNoIdleDestroy() bool {
 	return false
 }
 
+func (x *Deployment) GetInstanceIds() []string {
+	if x != nil {
+		return x.InstanceIds
+	}
+	return nil
+}
+
 var File_provisioner_v1_types_proto protoreflect.FileDescriptor
 
 const file_provisioner_v1_types_proto_rawDesc = "" +
@@ -1181,7 +1208,7 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"created_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x1a7\n" +
 	"\tTagsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xd3\a\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x86\b\n" +
 	"\n" +
 	"Deployment\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1f\n" +
@@ -1211,10 +1238,11 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"debugShell\x12(\n" +
 	"\x10idle_ttl_seconds\x18\x13 \x01(\x05R\x0eidleTtlSeconds\x12D\n" +
 	"\x10last_activity_at\x18\x14 \x01(\v2\x1a.google.protobuf.TimestampR\x0elastActivityAt\x12&\n" +
-	"\x0fno_idle_destroy\x18\x15 \x01(\bR\rnoIdleDestroy\x1a6\n" +
+	"\x0fno_idle_destroy\x18\x15 \x01(\bR\rnoIdleDestroy\x12!\n" +
+	"\finstance_ids\x18\x18 \x03(\tR\vinstanceIds\x1a6\n" +
 	"\bEnvEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01J\x04\b\x16\x10\x17R\x10default_priority*\xc0\x01\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01J\x04\b\x16\x10\x17J\x04\b\x17\x10\x18R\x10default_priorityR\breplicas*\xc0\x01\n" +
 	"\rInstanceState\x12\x1e\n" +
 	"\x1aINSTANCE_STATE_UNSPECIFIED\x10\x00\x12\x1a\n" +
 	"\x16INSTANCE_STATE_PENDING\x10\x01\x12\x19\n" +
