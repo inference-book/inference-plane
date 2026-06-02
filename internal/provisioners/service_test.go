@@ -1260,23 +1260,26 @@ func TestCreateDeployment_ResolveError_FailsWithInvalidArgument(t *testing.T) {
 	}
 }
 
-// TestCreateDeployment_Replicas_RejectsGreaterThanOne: v0.2
-// ch7-beat3.2 ships proto + helpers + CLI flag scaffolding. The
-// parallel-provisioning impl is a focused follow-up; values > 1
-// must reject explicitly so operators don't silently get a single
-// instance when they asked for several.
-func TestCreateDeployment_Replicas_RejectsGreaterThanOne(t *testing.T) {
+// TestCreateDeployment_Replicas_RejectsPinnedInstance: replicas>1
+// with a pinned deployment.instance_id is rejected -- multi-replica
+// fan-out auto-provisions, so a pinned instance is incoherent.
+// v0.2 ch7-beat3.7 (#138) replaces the old Unimplemented-for-N>1
+// rejection with this narrower validation; the actual multi-replica
+// path is exercised in fanout_test.go.
+func TestCreateDeployment_Replicas_RejectsPinnedInstance(t *testing.T) {
 	svc, _, _ := newSvcWithDeploy(t)
+	dep := okDep()
+	dep.InstanceId = "my-pod"
 	_, err := svc.CreateDeployment(context.Background(), &provisionerv1.CreateDeploymentRequest{
-		Deployment: okDep(),
+		Deployment: dep,
 		Wait:       true,
 		Replicas:   3,
 	})
 	if err == nil {
-		t.Fatalf("expected error for replicas=3 (Unimplemented), got nil")
+		t.Fatalf("expected InvalidArgument for replicas=3 + pinned instance_id, got nil")
 	}
-	if c := status.Code(err); c != codes.Unimplemented {
-		t.Errorf("expected Unimplemented, got %s: %v", c, err)
+	if c := status.Code(err); c != codes.InvalidArgument {
+		t.Errorf("expected InvalidArgument, got %s: %v", c, err)
 	}
 }
 
