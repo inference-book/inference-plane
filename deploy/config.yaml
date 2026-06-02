@@ -75,3 +75,22 @@ router:
     #     alice: 1
     #     bob: 3
     tenant_weights: {}
+
+health:
+  # v0.2 Beat 3.5 (#87): per-replica health-poll loop. One goroutine in
+  # iplane serve probes GET <engine_endpoint>/health on each tick. After
+  # `failure_threshold` consecutive failures, the replica is added to the
+  # deployment's unhealthy_instance_ids set and the router (#85) skips
+  # it. After `success_threshold` consecutive passes on a quarantined
+  # replica, it is restored.
+  #
+  # Defaults give ~30s to first quarantine on a hung replica
+  # (3 * 10s = 30s), matching the acceptance criterion in #87.
+  # probe_timeout caps each probe; max_concurrent bounds in-flight probes
+  # inside a tick so a daemon with many deployments doesn't fan out
+  # uncontrolled.
+  poll_interval: 10s
+  failure_threshold: 3
+  success_threshold: 3
+  probe_timeout: 2s
+  max_concurrent: 32

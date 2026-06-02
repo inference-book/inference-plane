@@ -67,12 +67,17 @@ import (
 // gains replicas (default 1) for the multi-replica fan-out story.
 // Still additive; old 1.2 records load with replicas=0 via protojson
 // DiscardUnknown, and downstream code treats 0 as 1.
+// v0.2 ch7-beat3.5 bumps to "1.4" -- the Deployment message gains
+// unhealthy_instance_ids for the per-replica quarantine set written
+// by the health-poll loop. Purely additive; old 1.3 records load
+// with unhealthy_instance_ids=[] via protojson DiscardUnknown, which
+// is exactly the "no replica is quarantined" initial state.
 //
 // Note: an interim "1.3" briefly existed in a draft of v0.2
 // ch7-beat2.3 for Deployment.default_priority; that field was removed
 // before merge and the version reverted to "1.2". This "1.3" bump
 // is the first one operators see in shipped artifacts.
-const SchemaVersion = "1.3"
+const SchemaVersion = "1.4"
 
 // BackendLocalFile is the value written into the file's `backend` field.
 // v1.0's remote backend will write its own value here and may fall back

@@ -981,8 +981,37 @@ type Deployment struct {
 	// future cache invalidator (#88+) layers on top without
 	// restructuring this field.
 	EngineEndpoints []string `protobuf:"bytes,25,rep,name=engine_endpoints,json=engineEndpoints,proto3" json:"engine_endpoints,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// unhealthy_instance_ids is the parallel set of Instance IDs that
+	// the health-poll loop has currently marked unhealthy. Position-
+	// independent: the router treats membership in this set as the
+	// signal to skip the corresponding entry in instance_ids /
+	// engine_endpoints. v0.2 ch7-beat3.5 (#87).
+	//
+	// Why a parallel set, not a state flag on each instance: the
+	// router already does an effective_endpoints lookup per request;
+	// adding a small set membership check is O(k) where k = number
+	// of replicas (small). A per-instance state enum would have
+	// required a proto restructure to `repeated Replica` and would
+	// have invalidated the parallel-arrays shape #84/#85 just
+	// landed on.
+	//
+	// Mutation contract: only the health-poll loop writes this field.
+	// It calls Quarantine(deploy, instance) on the deployment service
+	// after K consecutive /health failures, and Restore(deploy,
+	// instance) after K consecutive successes when previously
+	// quarantined. The engine endpoint in engine_endpoints[i] is
+	// preserved across quarantine; restore is set-removal, not
+	// re-discovery.
+	//
+	// Persistence: this field is persisted to the state file so
+	// operator-visible quarantine state survives daemon restart. The
+	// K-of-K streak counters are in-memory only; a restart resets
+	// them, which means a quarantined replica may take an extra K
+	// ticks to restore after the daemon comes back -- acceptable
+	// since restart is rare.
+	UnhealthyInstanceIds []string `protobuf:"bytes,26,rep,name=unhealthy_instance_ids,json=unhealthyInstanceIds,proto3" json:"unhealthy_instance_ids,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
 }
 
 func (x *Deployment) Reset() {
@@ -1176,6 +1205,13 @@ func (x *Deployment) GetEngineEndpoints() []string {
 	return nil
 }
 
+func (x *Deployment) GetUnhealthyInstanceIds() []string {
+	if x != nil {
+		return x.UnhealthyInstanceIds
+	}
+	return nil
+}
+
 var File_provisioner_v1_types_proto protoreflect.FileDescriptor
 
 const file_provisioner_v1_types_proto_rawDesc = "" +
@@ -1237,7 +1273,7 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"created_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x1a7\n" +
 	"\tTagsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xb1\b\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xe7\b\n" +
 	"\n" +
 	"Deployment\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1f\n" +
@@ -1269,7 +1305,8 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"\x10last_activity_at\x18\x14 \x01(\v2\x1a.google.protobuf.TimestampR\x0elastActivityAt\x12&\n" +
 	"\x0fno_idle_destroy\x18\x15 \x01(\bR\rnoIdleDestroy\x12!\n" +
 	"\finstance_ids\x18\x18 \x03(\tR\vinstanceIds\x12)\n" +
-	"\x10engine_endpoints\x18\x19 \x03(\tR\x0fengineEndpoints\x1a6\n" +
+	"\x10engine_endpoints\x18\x19 \x03(\tR\x0fengineEndpoints\x124\n" +
+	"\x16unhealthy_instance_ids\x18\x1a \x03(\tR\x14unhealthyInstanceIds\x1a6\n" +
 	"\bEnvEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01J\x04\b\x16\x10\x17J\x04\b\x17\x10\x18R\x10default_priorityR\breplicas*\xc0\x01\n" +
