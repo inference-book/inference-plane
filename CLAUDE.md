@@ -84,8 +84,8 @@ flatten to underscore (so `deployment.provider` → `IPLANE_DEPLOYMENT_PROVIDER`
 | `HF_TOKEN`                         | Propagated to engine pods for gated-model fetches; HF pre-flight check also uses it for gated-model existence probes |
 | `RUNPOD_API_KEY`                   | Required for `iplane instance create runpod ...` — must be a new-style scoped key (`rpa_...` prefix) with **Full** access (REST scope is NOT covered by legacy keys or `api.runpod.ai`-only scopes — both silently 401 on `rest.runpod.io/v1`) |
 | `IPLANE_PROVIDER`                  | Default provider for CLI commands and demo binaries when `--provider` is omitted. Falls back to `runpod` if unset (preserves Ch 6 behavior). Example: `IPLANE_PROVIDER=vast iplane deployment deploy llama --model ...` |
-| `VAST_API_KEY`                     | Required when `IPLANE_PROVIDER=vast` (or `--provider vast`). Lands with PR for #150. |
-| `LAMBDA_API_KEY`                   | Required when `IPLANE_PROVIDER=lambdalabs` (or `--provider lambdalabs`). Lands with PR for #151. |
+| `VAST_API_KEY`                     | Required when `IPLANE_PROVIDER=vast` (or `--provider vast`). Bearer-token auth on `console.vast.ai`. |
+| `LAMBDA_API_KEY`                   | Required when `IPLANE_PROVIDER=lambdalabs` (or `--provider lambdalabs`). HTTP-Basic auth on `cloud.lambdalabs.com` (apiKey as username, empty password). |
 
 Future provider API keys (not yet implemented): `EQUINIX_AUTH_TOKEN`, `EQUINIX_PROJECT_ID`. See `.env.local.example`.
 

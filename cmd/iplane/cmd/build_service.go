@@ -7,6 +7,7 @@ import (
 
 	"github.com/inference-book/inference-plane/internal/deployments/sshdocker"
 	"github.com/inference-book/inference-plane/internal/provisioners"
+	"github.com/inference-book/inference-plane/internal/provisioners/lambdalabs"
 	"github.com/inference-book/inference-plane/internal/provisioners/local"
 	"github.com/inference-book/inference-plane/internal/provisioners/runpod"
 	"github.com/inference-book/inference-plane/internal/provisioners/stores/file"
@@ -33,6 +34,9 @@ import (
 //   - vast: included only when VAST_API_KEY is set in env. v0.2 ch7-
 //     beat3.11 (#150). VM-style provider; the engine container runs via
 //     the sshdocker executor.
+//   - lambdalabs: included only when LAMBDA_API_KEY is set in env.
+//     v0.2 ch7-beat3.12 (#151). VM-style provider; the engine
+//     container runs via the sshdocker executor.
 func buildLocalService(store *file.Store, operatorID string) (*provisioners.Service, error) {
 	keyStore, err := sshkeys.New(sshkeys.WithDir(filepath.Join(store.Dir(), "keys")))
 	if err != nil {
@@ -45,6 +49,9 @@ func buildLocalService(store *file.Store, operatorID string) (*provisioners.Serv
 	}
 	if key := os.Getenv("VAST_API_KEY"); key != "" {
 		providers = append(providers, vast.New(vast.NewClient(key)))
+	}
+	if key := os.Getenv("LAMBDA_API_KEY"); key != "" {
+		providers = append(providers, lambdalabs.New(lambdalabs.NewClient(key)))
 	}
 
 	executor := sshdocker.NewExecutor()

@@ -40,6 +40,10 @@ smoke-vast: ## Hit the real Vast.ai API (List is free; VAST_RENT=1 also rents + 
 	@test -n "$$VAST_API_KEY" || (echo "VAST_API_KEY not set" && exit 1)
 	go test -tags=smoke_vast -v -count=1 -timeout=5m ./tests/smoke-vast/...
 
+smoke-lambdalabs: ## Hit the real Lambda Labs API (List is free; LAMBDA_RENT=1 also rents + terminates an A10) -- requires LAMBDA_API_KEY
+	@test -n "$$LAMBDA_API_KEY" || (echo "LAMBDA_API_KEY not set" && exit 1)
+	go test -tags=smoke_lambdalabs -v -count=1 -timeout=5m ./tests/smoke-lambdalabs/...
+
 load: ## Generate synthetic traffic against the running stack (safe with mock backend)
 	go run ./cmd/iplane load --url=http://localhost:8080
 
