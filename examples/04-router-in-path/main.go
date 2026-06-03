@@ -54,6 +54,7 @@ import (
 	"github.com/panyam/demokit"
 	"github.com/panyam/demokit/tui"
 
+	"github.com/inference-book/inference-plane/examples/common"
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
 	"github.com/inference-book/inference-plane/gen/go/provisioner/v1/provisionerv1connect"
 	"github.com/inference-book/inference-plane/internal/provisioners"
@@ -83,7 +84,8 @@ func main() {
 	url := flag.String("url", "http://localhost:8080", "iplane serve HTTP URL")
 	grafanaURL := flag.String("grafana-url", "http://localhost:3000", "Grafana base URL (used for panel links; nothing fails if unreachable)")
 	tempoURL := flag.String("tempo-url", "http://localhost:3200", "Tempo base URL (used for the trace pointer)")
-	provider := flag.String("provider", provisioners.ProviderRunPod, "provider (only runpod is deployable in v0.2 Beat 1)")
+	provider := flag.String("provider", common.DefaultProvider(),
+		"provider (default: "+common.EnvProvider+" env, else runpod)")
 	region := flag.String("region", "", "region override (default: unpinned)")
 	loadRPS := flag.Float64("load-rps", 5.0, "iplane load --rps to fire after the deployment is RUNNING")
 	loadDuration := flag.Duration("load-duration", 30*time.Second, "iplane load --duration")
@@ -96,8 +98,11 @@ func main() {
 		demokit.ValueFlag("--input-timeout"),
 	))
 
-	if *provider != provisioners.ProviderRunPod {
-		log.Fatalf("only --provider runpod is deployable in v0.2 Beat 1 (got %q); local instances have no SSH endpoint", *provider)
+	if !common.IsDeployableProvider(*provider) {
+		log.Fatalf("provider %q is not deployable (local has no SSH endpoint); set --provider or %s to runpod, vast, or lambdalabs", *provider, common.EnvProvider)
+	}
+	if err := common.EnsureProviderAPIKey(*provider); err != nil {
+		log.Fatal(err)
 	}
 
 	// Build the CLI binary so iplane load drives the local checkout
@@ -637,3 +642,4 @@ func indentBlock(s string) string {
 	}
 	return strings.Join(lines, "\n")
 }
+

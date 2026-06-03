@@ -236,8 +236,8 @@ func init() {
 	f := deploymentDeployCmd.Flags()
 	f.StringVar(&deployInstanceID, "instance", "",
 		`place onto an existing instance (omit to auto-provision a fresh one)`)
-	f.StringVar(&deployProvider, "provider", "",
-		`provider to auto-provision on, e.g. runpod (required when --instance is omitted)`)
+	f.StringVar(&deployProvider, "provider", defaultProvider(""),
+		`provider to auto-provision on, e.g. runpod (required when --instance is omitted; falls back to `+EnvProvider+` env when unset)`)
 	f.StringVar(&deployRegion, "region", "", `region hint for auto-provisioning (optional)`)
 	f.StringVar(&deployImage, "image", "", `engine container image, e.g. vllm/vllm-openai:v0.7.0 (required)`)
 	f.StringVar(&deployModel, "model", "",
