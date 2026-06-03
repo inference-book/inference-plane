@@ -48,6 +48,8 @@ func TestVast_SpawnAndTerminate(t *testing.T) {
 		// Vast's adapter doesn't populate hourly_rate_usd yet (the
 		// dph_total comes back on the offer search but isn't
 		// surfaced on the Instance). Leave ExpectHourlyRate false.
-		ListFilter: map[string]string{"label-prefix": "iplane-"},
+		ListFilterFn: func(_ string) map[string]string {
+			return map[string]string{"label-prefix": "iplane-"}
+		},
 	})
 }

@@ -42,9 +42,12 @@ func TestRunPod_SpawnAndTerminate(t *testing.T) {
 	}
 	sku := os.Getenv("RUNPOD_SKU")
 	if sku == "" {
-		// RunPod's gpu_name field uses the full display name; this
-		// is the smallest reliably-available SKU.
-		sku = "NVIDIA GeForce RTX 4090"
+		// RunPod's gpu_name field uses the full display name. RTX
+		// 3090 is cheap and reliably has secure-cloud capacity
+		// across datacenters; RTX 4090 used to be the default but
+		// gets capacity-bound (HTTP 500 "no instances available")
+		// often enough that operators kept overriding it.
+		sku = "NVIDIA GeForce RTX 3090"
 	}
 	// Region defaults empty: RunPod's dataCenterIds allowlist drifts
 	// (e.g., US-CA-1 was retired in 2026-Q2) and a hardcoded default
@@ -64,6 +67,11 @@ func TestRunPod_SpawnAndTerminate(t *testing.T) {
 		ExpectHourlyRate: true, // RunPod stamps costPerHr on the pod record
 		// Server-side List filter by iplane-id catches the post-
 		// spawn instance even before it transitions to ACTIVE.
-		ListFilter: map[string]string{provisioners.TagID: "smoke-"},
+		// RunPod's ?name= is exact-match, so we pass the full
+		// stamped spec ID (not a "smoke-" prefix, which never
+		// matched and silently returned 0 refs).
+		ListFilterFn: func(id string) map[string]string {
+			return map[string]string{provisioners.TagID: id}
+		},
 	})
 }

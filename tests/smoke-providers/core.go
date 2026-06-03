@@ -66,11 +66,16 @@ type Config struct {
 	// is the safe default.
 	ExpectHourlyRate bool
 
-	// ListFilter is the tag filter passed to provider.List for
-	// the post-spawn verification. RunPod uses
-	// {iplane-id: <stamp>}; Vast uses {label-prefix: iplane-}.
-	// When nil, the test skips the post-spawn List check.
-	ListFilter map[string]string
+	// ListFilterFn builds the tag filter passed to provider.List
+	// for the post-spawn verification, given the stamped spec ID
+	// (which core picks each run). Different providers want
+	// different filter shapes: RunPod uses {iplane-id: <exact ID>}
+	// (server-side exact match via ?name=); Vast uses
+	// {label-prefix: iplane-} (server-side prefix match). A
+	// hardcoded map would work for prefix-style filters but not
+	// for exact-match ones, hence the function form. When nil, the
+	// test skips the post-spawn List check.
+	ListFilterFn func(specID string) map[string]string
 }
 
 // RunSpawnAndTerminate is the load-bearing smoke check: rent a
@@ -158,10 +163,11 @@ func RunSpawnAndTerminate(t *testing.T, cfg Config) {
 
 	// Optional post-spawn List check: confirm the rented instance
 	// shows up in the provider's account view via tag filter.
-	if cfg.ListFilter == nil {
+	if cfg.ListFilterFn == nil {
 		return
 	}
-	refs, err := cfg.Provider.List(ctx, cfg.ListFilter)
+	filter := cfg.ListFilterFn(spec.GetId())
+	refs, err := cfg.Provider.List(ctx, filter)
 	if err != nil {
 		t.Errorf("List after Spawn: %v", err)
 		return
@@ -175,7 +181,7 @@ func RunSpawnAndTerminate(t *testing.T, cfg Config) {
 	}
 	if !found {
 		t.Errorf("List did not return the instance we just spawned (refs=%d, filter=%v)",
-			len(refs), cfg.ListFilter)
+			len(refs), filter)
 	}
 }
 

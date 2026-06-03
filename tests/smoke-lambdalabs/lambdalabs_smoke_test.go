@@ -54,6 +54,8 @@ func TestLambdaLabs_SpawnAndTerminate(t *testing.T) {
 		Region:           region,
 		CostEnv:          "LAMBDA_RENT",
 		ExpectHourlyRate: true, // Lambda stamps price_cents_per_hour on the instance type
-		ListFilter:       map[string]string{"name-prefix": "iplane-"},
+		ListFilterFn: func(_ string) map[string]string {
+			return map[string]string{"name-prefix": "iplane-"}
+		},
 	})
 }
