@@ -46,10 +46,12 @@ func TestRunPod_SpawnAndTerminate(t *testing.T) {
 		// is the smallest reliably-available SKU.
 		sku = "NVIDIA GeForce RTX 4090"
 	}
+	// Region defaults empty: RunPod's dataCenterIds allowlist drifts
+	// (e.g., US-CA-1 was retired in 2026-Q2) and a hardcoded default
+	// breaks the smoke whenever the operator hasn't kept up. Empty
+	// means RunPod schedules wherever; callers pin via RUNPOD_REGION
+	// if they need a specific datacenter.
 	region := os.Getenv("RUNPOD_REGION")
-	if region == "" {
-		region = "US-CA-1"
-	}
 	smokeproviders.RunSpawnAndTerminate(t, smokeproviders.Config{
 		Provider:         runpod.New(runpod.NewClient(apiKey)),
 		ProviderName:     provisioners.ProviderRunPod,
