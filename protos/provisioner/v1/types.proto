@@ -2,6 +2,7 @@ syntax = "proto3";
 
 package provisioner.v1;
 
+import "google/protobuf/struct.proto";
 import "google/protobuf/timestamp.proto";
 
 // Spec is what the operator asks for. Provider-agnostic. Everything in
@@ -105,13 +106,44 @@ message ResourceRequirements {
   string sku = 6;
 }
 
-// GpuInfo describes what was actually scheduled. Provider answers with
-// a concrete SKU and observed VRAM after the spawn.
-message GpuInfo {
-  string class = 1;
-  string sku = 2;
-  int32 count = 3;
-  int32 vram_gb = 4;
+// Hardware is the cross-provider physical-characteristics base for
+// an Instance. Every adapter populates what its provider exposes;
+// fields the provider doesn't surface stay 0 (or "" for strings).
+//
+// **All memory fields are MB.** Units are uniform on the iplane
+// side -- adapters convert at the wire boundary so callers never
+// see provider-specific GB/GiB/MiB mismatches. The single-unit
+// convention also kills round-tripping bugs (the 24564 MB -> 23
+// GB int-truncation that bit Vast in PR for #150).
+//
+// Fields will graduate from `Instance.metadata` (the provider-
+// specific escape hatch) into Hardware as cross-provider patterns
+// become clear. The initial set is the lowest-common-denominator
+// every cloud surfaces: GPU shape, vCPU count, host RAM, host disk.
+message Hardware {
+  // GPU details -- provider-native SKU id, count, per-GPU VRAM.
+  // gpu_sku is the provider's literal identifier (gpu_1x_a10,
+  // RTX 4090) so it round-trips back to the provider unchanged.
+  // gpu_vram_mb is per-GPU; total VRAM is gpu_vram_mb * gpu_count.
+  string gpu_sku = 1;
+  int32 gpu_count = 2;
+  int32 gpu_vram_mb = 3;
+
+  // Host CPU -- virtual CPUs the operator's container sees and
+  // the model string for diagnostic output. Optional; left zero
+  // when the provider doesn't expose vCPU info on the rented
+  // instance record.
+  int32 vcpus = 10;
+  string cpu_model = 11;
+
+  // Host RAM (system memory available to the container). MB.
+  int32 cpu_ram_mb = 12;
+
+  // Host disk allocation for this rental. MB. Lambda exposes this
+  // as `instance_type.specs.storage_gib`; Vast as the offer's
+  // `disk_space` (GB); RunPod as the pod's `containerDiskInGb`.
+  // All converted to MB at the adapter boundary.
+  int32 disk_mb = 20;
 }
 
 // SshTarget is the reachability tuple returned for instances that expose
@@ -169,8 +201,11 @@ message Instance {
   // spec.region if the provider auto-selects a sub-zone).
   string region = 5;
 
-  // GPU as actually scheduled (concrete SKU, observed VRAM).
-  GpuInfo gpu = 6;
+  // Hardware as actually scheduled (concrete SKU + cross-provider
+  // CPU/RAM/disk base). Replaces the v0.1 GpuInfo field which was
+  // deleted pre-publication (no `reserved` marker per the no-
+  // reserved-fields-pre-publication memory).
+  Hardware hardware = 6;
 
   // What the operator is being billed at the moment of Spawn. Loaded
   // from providers.yaml then confirmed against the provider's response
@@ -202,6 +237,28 @@ message Instance {
   // forward-compatibility property the state file owes any reader
   // pinned to ch06-final.
   bytes provider_data = 14;
+
+  // Provider-specific raw data the adapter wants to preserve outside
+  // the typed `Hardware` base. Keys follow the convention
+  // "<provider>.<field>" (e.g. "vast.reliability2",
+  // "lambda.region_description", "runpod.machine_id") so cross-
+  // provider readers can branch on the prefix.
+  //
+  // google.protobuf.Value preserves type fidelity (number, string,
+  // bool, null, struct, list) so downstream code reads
+  // `meta["vast.reliability2"].GetNumberValue()` and
+  // `meta["vast.verification"].GetStringValue()` without per-key
+  // string parsing. JSON serialization is transparent --
+  // `iplane instance describe`'s output preserves the original
+  // type.
+  //
+  // Useful for: leak detection (vast.machine_id, runpod.machine_id),
+  // routing-policy hints (vast.verification, vast.reliability2),
+  // Lambda-side capability flags (lambda.actions_migrate), and any
+  // field the chapter doesn't surface yet but might want later.
+  // Fields with cross-provider patterns graduate into `Hardware`;
+  // metadata is the staging ground.
+  map<string, google.protobuf.Value> metadata = 15;
 }
 
 // InstanceRef is the lighter-weight record returned by the underlying

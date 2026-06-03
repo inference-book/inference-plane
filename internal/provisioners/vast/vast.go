@@ -64,6 +64,7 @@ import (
 	"strings"
 	"time"
 
+	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
@@ -287,9 +288,9 @@ func (p *Provider) Spawn(ctx context.Context, spec *provisionerv1.Spec) (*provis
 			State:      provisionerv1.InstanceState_INSTANCE_STATE_PENDING,
 			Region:     spec.GetRegion(),
 			CreatedAt:  timestamppb.New(p.clock()),
-			Gpu: &provisionerv1.GpuInfo{
-				Sku:   pickedFor,
-				Count: int32(gpuCount),
+			Hardware: &provisionerv1.Hardware{
+				GpuSku:   pickedFor,
+				GpuCount: int32(gpuCount),
 			},
 		}, nil
 	}
@@ -497,6 +498,12 @@ func (p *Provider) instanceFromAPI(api *apiInstance, originalSpec *provisionerv1
 	if originalSpec != nil && originalSpec.GetId() != "" {
 		iplaneID = originalSpec.GetId()
 	}
+	// disk_space comes back from Vast in GB (float, host's total
+	// disk-for-rent at the offer). Convert to MB for the
+	// Hardware.disk_mb uniform unit. Vast.ai's response calls the
+	// per-GPU VRAM `gpu_ram` and reports MB directly -- no
+	// conversion needed.
+	diskMB := int32(api.DiskSpace * 1024)
 	inst := &provisionerv1.Instance{
 		Id:            iplaneID,
 		Provider:      p.Name(),
@@ -506,11 +513,16 @@ func (p *Provider) instanceFromAPI(api *apiInstance, originalSpec *provisionerv1
 		CreatedAt:     timestamppb.New(p.clock()),
 		Region:        api.GeolocationCountry,
 		HourlyRateUsd: api.DphTotal,
-		Gpu: &provisionerv1.GpuInfo{
-			Sku:    gpuName,
-			Count:  int32(api.NumGPUs),
-			VramGb: int32((api.GpuRAM + 512) / 1024), // round to nearest GB (24564 MB -> 24, not 23)
+		Hardware: &provisionerv1.Hardware{
+			GpuSku:    gpuName,
+			GpuCount:  int32(api.NumGPUs),
+			GpuVramMb: int32(api.GpuRAM),
+			Vcpus:     int32(api.CPUCores),
+			CpuModel:  api.CPUName,
+			CpuRamMb:  int32(api.CPURam),
+			DiskMb:    diskMB,
 		},
+		Metadata: vastMetadata(api),
 	}
 	if api.SSHHost != "" {
 		inst.Ssh = &provisionerv1.SshTarget{
@@ -520,6 +532,35 @@ func (p *Provider) instanceFromAPI(api *apiInstance, originalSpec *provisionerv1
 		}
 	}
 	return inst
+}
+
+// vastMetadata captures the Vast-specific fields outside the
+// Hardware base, with type fidelity preserved via google.protobuf.Value.
+// Empty / zero values are dropped so describe output isn't cluttered.
+func vastMetadata(api *apiInstance) map[string]*structpb.Value {
+	out := map[string]*structpb.Value{}
+	if api.Geolocation != "" {
+		out["vast.geolocation"] = structpb.NewStringValue(api.Geolocation)
+	}
+	if api.HostID > 0 {
+		out["vast.host_id"] = structpb.NewNumberValue(float64(api.HostID))
+	}
+	if api.MachineID > 0 {
+		out["vast.machine_id"] = structpb.NewNumberValue(float64(api.MachineID))
+	}
+	if api.Reliability2 > 0 {
+		out["vast.reliability2"] = structpb.NewNumberValue(api.Reliability2)
+	}
+	if api.Verification != "" {
+		out["vast.verification"] = structpb.NewStringValue(api.Verification)
+	}
+	if api.IsBid {
+		out["vast.is_bid"] = structpb.NewBoolValue(true)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // mapVastState translates Vast.ai's actual_status enum into the
@@ -579,11 +620,24 @@ type apiInstance struct {
 	ActualStatus       string  `json:"actual_status"`
 	GpuName            string  `json:"gpu_name"`
 	NumGPUs            int     `json:"num_gpus"`
-	GpuRAM             int     `json:"gpu_ram"` // MB
+	GpuRAM             int     `json:"gpu_ram"` // MB per GPU
 	SSHHost            string  `json:"ssh_host"`
 	SSHPort            int     `json:"ssh_port"`
 	GeolocationCountry string  `json:"geolocation_country"`
-	DphTotal           float64 `json:"dph_total"` // dollars-per-hour-total
+	Geolocation        string  `json:"geolocation"`
+	DphTotal           float64 `json:"dph_total"`
+	// Host details -- populated by both the bundles search
+	// response and the instance record. Used to fill Hardware and
+	// metadata.
+	CPUName      string  `json:"cpu_name"`
+	CPUCores     int     `json:"cpu_cores"`
+	CPURam       int     `json:"cpu_ram"` // MB
+	DiskSpace    float64 `json:"disk_space"` // GB
+	HostID       int     `json:"host_id"`
+	MachineID    int     `json:"machine_id"`
+	Reliability2 float64 `json:"reliability2"`
+	Verification string  `json:"verification"`
+	IsBid        bool    `json:"is_bid"`
 }
 
 type instanceResponse struct {

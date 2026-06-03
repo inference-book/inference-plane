@@ -146,7 +146,7 @@ func buildEnginePodRequest(dep *provisionerv1.Deployment, inst *provisionerv1.In
 	//     free capacity, not just the cheapest. Mitigates the common
 	//     "no capacity on A5000 right now" 500.
 	var gpuSKUs []string
-	if sku := inst.GetGpu().GetSku(); sku != "" {
+	if sku := inst.GetHardware().GetGpuSku(); sku != "" {
 		gpuSKUs = []string{sku}
 	} else {
 		reqs := inst.GetSpec().GetRequirements()
@@ -190,7 +190,7 @@ func buildEnginePodRequest(dep *provisionerv1.Deployment, inst *provisionerv1.In
 
 	// GPU count: from the resolved instance if present, else the
 	// requirements, else 1.
-	gpuCount := int(inst.GetGpu().GetCount())
+	gpuCount := int(inst.GetHardware().GetGpuCount())
 	if gpuCount <= 0 {
 		gpuCount = int(inst.GetSpec().GetRequirements().GetGpuCount())
 	}
