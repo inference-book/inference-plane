@@ -36,13 +36,22 @@
 // `keyregistrar.go` can automate this once we verify the SSH key
 // endpoint shape against the real API.
 //
-// SPECULATIVE NOTE (v0.2 ch7-beat3.11, #150): this adapter was
-// implemented against Vast.ai's documented REST API without end-to-end
-// validation against a real API key. Endpoint paths and JSON shapes
-// match published documentation but may need tweaks discovered in the
-// first real-API run. Real-API tests in vast_real_test.go are
-// scaffolded behind a `//go:build real` tag; running them with
-// VAST_API_KEY set is the verification step.
+// Verified against the live API on 2026-06 via tests/smoke-vast.
+// Wire-format quirks discovered during the smoke run, locked in
+// here:
+//
+//   - Search is GET /api/v0/bundles/ with a `q` URL-encoded JSON
+//     parameter. POST returns 200 with empty offers silently --
+//     SAME endpoint, different method = no error, just no results.
+//   - The filter dict goes INSIDE q: `?q={"gpu_name":{"eq":"RTX 4090"},...}`.
+//   - GPU name in the search filter uses the space form ("RTX 4090"),
+//     NOT the underscored token Vast.ai's older docs sometimes show.
+//     The adapter normalizes at the boundary via gpuNameForVast.
+//   - Boolean filters (rentable, verified) require the {"eq": true}
+//     operator form. Bare booleans return 400 "Input should be a
+//     valid dictionary".
+//   - The `verified` filter excludes ~all community offers (the
+//     cheap RTX tier); omitted from the default filter.
 package vast
 
 import (
@@ -368,25 +377,46 @@ func (p *Provider) List(ctx context.Context, filter map[string]string) ([]*provi
 	return out, nil
 }
 
-// findOffer searches /api/v0/bundles/ for the cheapest rentable offer
-// matching the gpu_name + gpu_count + disk constraints. Returns nil
-// (not an error) when no offer matched.
+// findOffer searches /api/v0/bundles/ for the cheapest rentable
+// offer matching the gpu_name + gpu_count + disk constraints.
+// Returns nil (not an error) when no offer matched.
 //
-// Filter shape per Vast.ai docs: a JSON body where each constraint is
-// an operator object like {"eq": "RTX_4090"}, {"gte": 40}, ordered by
-// dph_total (dollars-per-hour-total) ascending so the cheapest comes
-// first.
+// Wire shape (verified by real-API smoke 2026-06):
+//
+//   - Method: GET (NOT POST -- POST returns 200 with empty offers,
+//     silently dropping the filter).
+//   - Query param: `q` carrying a URL-encoded JSON object. The
+//     filter dict goes INSIDE q, not at top level.
+//   - GPU name uses the space form ("RTX 4090") -- the underscored
+//     form Vast.ai's docs reference ("RTX_4090") returns empty.
+//   - Each constraint is an operator object: `{"eq": value}`,
+//     `{"gte": value}`. Bare bool/string at top of a field returns
+//     400 "Input should be a valid dictionary".
+//   - `verified` filter excludes most of the marketplace (community
+//     hosts) so we omit it; operators who specifically want vetted
+//     hosts can future-proof via a knob.
+//
+// SKU catalog stores the underscored form for stable Go-identifier
+// hygiene; we transform back at the wire boundary via
+// gpuNameForVast.
 func (p *Provider) findOffer(ctx context.Context, gpuName string, gpuCount, diskGB int) (*offerSummary, error) {
-	body := map[string]any{
-		"gpu_name":  map[string]string{"eq": gpuName},
-		"num_gpus":  map[string]int{"eq": gpuCount},
-		"verified":  map[string]bool{"eq": true},
-		"rentable":  map[string]bool{"eq": true},
-		"disk_space": map[string]int{"gte": diskGB},
-		"limit":     5,
-		"order":     [][]string{{"dph_total", "asc"}},
+	q := map[string]any{
+		"gpu_name": map[string]string{"eq": gpuNameForVast(gpuName)},
+		"num_gpus": map[string]int{"eq": gpuCount},
+		"rentable": map[string]bool{"eq": true},
+		"limit":    5,
+		"order":    [][]string{{"dph_total", "asc"}},
 	}
-	req, err := p.client.newReq(http.MethodPost, pathBundles, nil, body)
+	if diskGB > 0 {
+		q["disk_space"] = map[string]int{"gte": diskGB}
+	}
+	qBytes, err := json.Marshal(q)
+	if err != nil {
+		return nil, fmt.Errorf("encode q: %w", err)
+	}
+	params := url.Values{}
+	params.Set("q", string(qBytes))
+	req, err := p.client.newReq(http.MethodGet, pathBundles, params, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -398,6 +428,15 @@ func (p *Provider) findOffer(ctx context.Context, gpuName string, gpuCount, disk
 		return nil, nil
 	}
 	return &resp.Offers[0], nil
+}
+
+// gpuNameForVast converts the underscored SKU token used in our
+// catalog ("RTX_4090") into the space-form gpu_name Vast.ai's API
+// filter expects ("RTX 4090"). Verified via smoke: passing the
+// underscored form to the bundles search returns 0 offers; passing
+// the space form returns the full set.
+func gpuNameForVast(gpuName string) string {
+	return strings.ReplaceAll(gpuName, "_", " ")
 }
 
 // rentOffer PUTs to /api/v0/asks/{offer_id}/ with a rent config and
@@ -459,17 +498,18 @@ func (p *Provider) instanceFromAPI(api *apiInstance, originalSpec *provisionerv1
 		iplaneID = originalSpec.GetId()
 	}
 	inst := &provisionerv1.Instance{
-		Id:         iplaneID,
-		Provider:   p.Name(),
-		ProviderId: strconv.Itoa(api.ID),
-		State:      mapVastState(api.ActualStatus),
-		Spec:       originalSpec,
-		CreatedAt:  timestamppb.New(p.clock()),
-		Region:     api.GeolocationCountry,
+		Id:            iplaneID,
+		Provider:      p.Name(),
+		ProviderId:    strconv.Itoa(api.ID),
+		State:         mapVastState(api.ActualStatus),
+		Spec:          originalSpec,
+		CreatedAt:     timestamppb.New(p.clock()),
+		Region:        api.GeolocationCountry,
+		HourlyRateUsd: api.DphTotal,
 		Gpu: &provisionerv1.GpuInfo{
 			Sku:    gpuName,
 			Count:  int32(api.NumGPUs),
-			VramGb: int32(api.GpuRAM / 1024),
+			VramGb: int32((api.GpuRAM + 512) / 1024), // round to nearest GB (24564 MB -> 24, not 23)
 		},
 	}
 	if api.SSHHost != "" {
@@ -510,10 +550,10 @@ func mapVastState(actualStatus string) provisionerv1.InstanceState {
 	}
 }
 
-// API response shapes. Field names follow Vast.ai's JSON contract.
-// SPECULATIVE: verified against published documentation but not against
-// a live API call; the first real-test run may surface field renames
-// (e.g., ssh_host vs ssh_addr) that get fixed here.
+// API response shapes. Field names verified against live API in
+// the 2026-06 smoke run -- offers come back with `gpu_name`,
+// `num_gpus`, `dph_total`, `disk_space` and instance records use
+// `ssh_host` / `ssh_port` / `actual_status` / `geolocation_country`.
 
 type offerSummary struct {
 	ID       int     `json:"id"`
@@ -534,15 +574,16 @@ type rentResponse struct {
 }
 
 type apiInstance struct {
-	ID                 int    `json:"id"`
-	Label              string `json:"label"`
-	ActualStatus       string `json:"actual_status"`
-	GpuName            string `json:"gpu_name"`
-	NumGPUs            int    `json:"num_gpus"`
-	GpuRAM             int    `json:"gpu_ram"` // MB
-	SSHHost            string `json:"ssh_host"`
-	SSHPort            int    `json:"ssh_port"`
-	GeolocationCountry string `json:"geolocation_country"`
+	ID                 int     `json:"id"`
+	Label              string  `json:"label"`
+	ActualStatus       string  `json:"actual_status"`
+	GpuName            string  `json:"gpu_name"`
+	NumGPUs            int     `json:"num_gpus"`
+	GpuRAM             int     `json:"gpu_ram"` // MB
+	SSHHost            string  `json:"ssh_host"`
+	SSHPort            int     `json:"ssh_port"`
+	GeolocationCountry string  `json:"geolocation_country"`
+	DphTotal           float64 `json:"dph_total"` // dollars-per-hour-total
 }
 
 type instanceResponse struct {

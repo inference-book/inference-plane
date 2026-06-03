@@ -36,6 +36,10 @@ smoke-runpod: ## Provision a real RunPod pod ($0.05 ish) -- requires RUNPOD_API_
 	@test -n "$$RUNPOD_API_KEY" || (echo "RUNPOD_API_KEY not set" && exit 1)
 	go test -tags=smoke_runpod -v -count=1 -timeout=5m ./tests/smoke-runpod/...
 
+smoke-vast: ## Hit the real Vast.ai API (List is free; VAST_RENT=1 also rents + terminates an RTX 3090) -- requires VAST_API_KEY
+	@test -n "$$VAST_API_KEY" || (echo "VAST_API_KEY not set" && exit 1)
+	go test -tags=smoke_vast -v -count=1 -timeout=5m ./tests/smoke-vast/...
+
 load: ## Generate synthetic traffic against the running stack (safe with mock backend)
 	go run ./cmd/iplane load --url=http://localhost:8080
 
