@@ -76,11 +76,23 @@ func writeInstanceDetail(w io.Writer, inst *provisionerv1.Instance) {
 	fmt.Fprintf(w, "provider id:   %s\n", inst.GetProviderId())
 	fmt.Fprintf(w, "state:         %s\n", instanceStateLabel(inst.GetState()))
 	fmt.Fprintf(w, "region:        %s\n", emptyAsDash(inst.GetRegion()))
-	if gpu := inst.GetGpu(); gpu != nil {
-		fmt.Fprintf(w, "gpu class:     %s\n", emptyAsDash(gpu.GetClass()))
-		fmt.Fprintf(w, "gpu sku:       %s\n", emptyAsDash(gpu.GetSku()))
-		fmt.Fprintf(w, "gpu count:     %d\n", gpu.GetCount())
-		fmt.Fprintf(w, "vram (GB):     %d\n", gpu.GetVramGb())
+	if hw := inst.GetHardware(); hw != nil {
+		fmt.Fprintf(w, "gpu sku:       %s\n", emptyAsDash(hw.GetGpuSku()))
+		fmt.Fprintf(w, "gpu count:     %d\n", hw.GetGpuCount())
+		// Hardware uses MB everywhere; display in GB for readability.
+		fmt.Fprintf(w, "vram:          %s\n", mbAsGB(hw.GetGpuVramMb()))
+		if hw.GetVcpus() > 0 {
+			fmt.Fprintf(w, "vcpus:         %d\n", hw.GetVcpus())
+		}
+		if hw.GetCpuModel() != "" {
+			fmt.Fprintf(w, "cpu model:     %s\n", hw.GetCpuModel())
+		}
+		if hw.GetCpuRamMb() > 0 {
+			fmt.Fprintf(w, "host ram:      %s\n", mbAsGB(hw.GetCpuRamMb()))
+		}
+		if hw.GetDiskMb() > 0 {
+			fmt.Fprintf(w, "disk:          %s\n", mbAsGB(hw.GetDiskMb()))
+		}
 	}
 	fmt.Fprintf(w, "hourly rate:   $%.4f/hr\n", inst.GetHourlyRateUsd())
 	if ts := inst.GetCreatedAt(); ts != nil {
@@ -115,7 +127,7 @@ func writeInstanceTable(w io.Writer, instances []*provisionerv1.Instance) {
 			inst.GetId(),
 			inst.GetProvider(),
 			instanceStateLabel(inst.GetState()),
-			emptyAsDash(inst.GetGpu().GetSku()),
+			emptyAsDash(inst.GetHardware().GetGpuSku()),
 			inst.GetHourlyRateUsd(),
 			emptyAsDash(inst.GetRegion()),
 		)
@@ -139,4 +151,20 @@ func emptyAsDash(s string) string {
 		return "-"
 	}
 	return s
+}
+
+// mbAsGB renders a megabyte count as a human-readable "N GB" or
+// "N.N GB" string. Used to display Hardware fields (gpu_vram_mb,
+// cpu_ram_mb, disk_mb) in operator-friendly units while the
+// underlying proto keeps the single MB unit across providers.
+// Returns "-" for zero / negative values.
+func mbAsGB(mb int32) string {
+	if mb <= 0 {
+		return "-"
+	}
+	gb := float64(mb) / 1024.0
+	if gb >= 100 {
+		return fmt.Sprintf("%.0f GB", gb)
+	}
+	return fmt.Sprintf("%.1f GB", gb)
 }

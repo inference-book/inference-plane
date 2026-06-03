@@ -41,6 +41,7 @@ import (
 	"strings"
 	"time"
 
+	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
@@ -214,8 +215,8 @@ func (p *Provider) Spawn(ctx context.Context, spec *provisionerv1.Spec) (*provis
 			State:      provisionerv1.InstanceState_INSTANCE_STATE_PENDING,
 			Region:     region,
 			CreatedAt:  timestamppb.New(p.clock()),
-			Gpu: &provisionerv1.GpuInfo{
-				Sku: instanceTypeName,
+			Hardware: &provisionerv1.Hardware{
+				GpuSku: instanceTypeName,
 			},
 		}, nil
 	}
@@ -344,13 +345,24 @@ func (p *Provider) instanceFromAPI(api *apiInstance, originalSpec *provisionerv1
 	if originalSpec != nil && originalSpec.GetId() != "" {
 		iplaneID = originalSpec.GetId()
 	}
-	vram := 0
+	// Lambda's per-instance response doesn't expose per-GPU VRAM
+	// directly. Two sources to try:
+	//
+	//  1. Curated catalog (skus.go).
+	//  2. Parsing instance_type.description ("1x A10 (24 GB PCIe)")
+	//     for the "(N GB ...)" form, which Lambda's API uses
+	//     consistently. Catches non-curated SKUs.
+	//
+	// First successful match wins; otherwise vram stays 0.
+	vramMB := 0
+	if sku := LookupSKU(api.InstanceType.Name); sku != nil {
+		vramMB = sku.VRAMGb * 1024
+	} else if v := parseVRAMFromDescription(api.InstanceType.Description); v > 0 {
+		vramMB = v * 1024
+	}
 	gpuCount := 1
 	if api.InstanceType.Specs.GPUs > 0 {
 		gpuCount = api.InstanceType.Specs.GPUs
-	}
-	if sku := LookupSKU(api.InstanceType.Name); sku != nil {
-		vram = sku.VRAMGb
 	}
 	inst := &provisionerv1.Instance{
 		Id:            iplaneID,
@@ -361,11 +373,15 @@ func (p *Provider) instanceFromAPI(api *apiInstance, originalSpec *provisionerv1
 		CreatedAt:     timestamppb.New(p.clock()),
 		Region:        api.Region.Name,
 		HourlyRateUsd: float64(api.InstanceType.PriceCentsPerHour) / 100.0,
-		Gpu: &provisionerv1.GpuInfo{
-			Sku:    instanceTypeName,
-			Count:  int32(gpuCount),
-			VramGb: int32(vram),
+		Hardware: &provisionerv1.Hardware{
+			GpuSku:    instanceTypeName,
+			GpuCount:  int32(gpuCount),
+			GpuVramMb: int32(vramMB),
+			Vcpus:     int32(api.InstanceType.Specs.VCPUs),
+			CpuRamMb:  int32(api.InstanceType.Specs.MemoryGiB * 1024),
+			DiskMb:    int32(api.InstanceType.Specs.StorageGiB * 1024),
 		},
+		Metadata: lambdaMetadata(api),
 	}
 	if api.IP != "" {
 		inst.Ssh = &provisionerv1.SshTarget{
@@ -375,6 +391,54 @@ func (p *Provider) instanceFromAPI(api *apiInstance, originalSpec *provisionerv1
 		}
 	}
 	return inst
+}
+
+// parseVRAMFromDescription extracts a VRAM value in GB from
+// Lambda's `instance_type.description` field. Lambda's API uses a
+// consistent "(N GB ...)" pattern -- "1x A10 (24 GB PCIe)",
+// "8x H100 (80 GB SXM5)". We pull the first "(N GB" match.
+//
+// Returns 0 if no match is found (the catalog lookup is preferred
+// when available; this is the fallback for non-curated SKUs).
+func parseVRAMFromDescription(desc string) int {
+	// Look for "(N GB" anywhere in the description.
+	i := strings.Index(desc, "(")
+	if i < 0 {
+		return 0
+	}
+	tail := desc[i+1:]
+	end := strings.Index(tail, " GB")
+	if end < 0 {
+		return 0
+	}
+	var n int
+	for _, r := range tail[:end] {
+		if r < '0' || r > '9' {
+			return 0
+		}
+		n = n*10 + int(r-'0')
+	}
+	return n
+}
+
+// lambdaMetadata captures the Lambda-specific fields outside
+// Hardware. Lambda's instance record is comparatively lean
+// (the rich detail is on the host record, not surfaced).
+func lambdaMetadata(api *apiInstance) map[string]*structpb.Value {
+	out := map[string]*structpb.Value{}
+	if api.Region.Description != "" {
+		out["lambda.region_description"] = structpb.NewStringValue(api.Region.Description)
+	}
+	if api.InstanceType.Description != "" {
+		out["lambda.gpu_description"] = structpb.NewStringValue(api.InstanceType.Description)
+	}
+	if api.Hostname != "" {
+		out["lambda.hostname"] = structpb.NewStringValue(api.Hostname)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // mapLambdaState translates Lambda's status enum into iplane's

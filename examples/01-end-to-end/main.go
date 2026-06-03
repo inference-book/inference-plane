@@ -234,7 +234,7 @@ func runDemo() {
 			fmt.Printf("  iplane id:       %s\n", inst.GetId())
 			fmt.Printf("  provider id:     %s\n", inst.GetProviderId())
 			fmt.Printf("  state:           %s\n", inst.GetState())
-			fmt.Printf("  resolved SKU:    %s\n", inst.GetGpu().GetSku())
+			fmt.Printf("  resolved SKU:    %s\n", inst.GetHardware().GetGpuSku())
 			fmt.Printf("  hourly rate:     $%.4f/hr\n", inst.GetHourlyRateUsd())
 			fmt.Printf("  already existed: %v\n", resp.Msg.GetAlreadyExisted())
 			return nil
@@ -254,8 +254,8 @@ func runDemo() {
 				return abortDemo(cleanup, "DescribeInstance: %v", err)
 			}
 			inst := resp.Msg.GetInstance()
-			fmt.Printf("  state file says: state=%s, gpu=%s (%dGB), rate=$%.4f/hr\n",
-				inst.GetState(), inst.GetGpu().GetSku(), inst.GetGpu().GetVramGb(), inst.GetHourlyRateUsd())
+			fmt.Printf("  state file says: state=%s, gpu=%s (%d MB), rate=$%.4f/hr\n",
+				inst.GetState(), inst.GetHardware().GetGpuSku(), inst.GetHardware().GetGpuVramMb(), inst.GetHourlyRateUsd())
 			return nil
 		})
 

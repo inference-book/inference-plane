@@ -45,6 +45,7 @@ import (
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
 	"github.com/inference-book/inference-plane/internal/provisioners"
 	skhttp "github.com/panyam/servicekit/http"
+	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -619,18 +620,38 @@ func (p *Provider) podToInstance(pod *podBody, spec *provisionerv1.Spec, resolve
 		Provider:   p.Name(),
 		Spec:       spec,
 		Region:     region,
-		Gpu: &provisionerv1.GpuInfo{
-			Class:  resolvedClass,
-			Sku:    resolvedSKU,
-			Count:  int32(gpuCount),
-			VramGb: int32(vramGB),
+		Hardware: &provisionerv1.Hardware{
+			GpuSku:    resolvedSKU,
+			GpuCount:  int32(gpuCount),
+			GpuVramMb: int32(vramGB * 1024), // pod.gpuVRAMGB returns GB; convert to MB
 		},
+		Metadata:      runpodMetadata(pod, resolvedClass),
 		HourlyRateUsd: pod.CostPerHr,
 		State:         provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE,
 		CreatedAt:     createdAt,
 		ActivatedAt:   now,
 		Ssh:           ssh,
 	}
+}
+
+// runpodMetadata captures the RunPod-specific fields outside the
+// Hardware base. machine_id is the most useful: it identifies the
+// underlying physical host, useful for leak detection if RunPod
+// retires a host. The class id stays in metadata because v0.2's
+// Hardware base is per-instance hardware, not the iplane class
+// taxonomy (which is derivable from gpu_vram_mb).
+func runpodMetadata(pod *podBody, class string) map[string]*structpb.Value {
+	out := map[string]*structpb.Value{}
+	if pod.MachineID != "" {
+		out["runpod.machine_id"] = structpb.NewStringValue(pod.MachineID)
+	}
+	if class != "" {
+		out["runpod.class"] = structpb.NewStringValue(class)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // instanceFromCreate builds a minimum-viable Instance when the
@@ -646,10 +667,12 @@ func (p *Provider) instanceFromCreate(spec *provisionerv1.Spec, created *createP
 		Provider:   p.Name(),
 		Spec:       spec,
 		Region:     spec.GetRegion(),
-		Gpu: &provisionerv1.GpuInfo{
-			Class: resolvedClass,
-			Sku:   resolvedSKU,
-			Count: int32(gpuCount),
+		Hardware: &provisionerv1.Hardware{
+			GpuSku:   resolvedSKU,
+			GpuCount: int32(gpuCount),
+		},
+		Metadata: map[string]*structpb.Value{
+			"runpod.class": structpb.NewStringValue(resolvedClass),
 		},
 		State:       provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE,
 		CreatedAt:   now,

@@ -33,11 +33,10 @@ func okInst() *provisionerv1.Instance {
 		Id:         "my-pod",
 		Provider:   "runpod",
 		ProviderId: "rp-base",
-		Gpu: &provisionerv1.GpuInfo{
-			Sku:    "NVIDIA RTX A5000",
-			Class:  "small",
-			Count:  1,
-			VramGb: 24,
+		Hardware: &provisionerv1.Hardware{
+			GpuSku:    "NVIDIA RTX A5000",
+			GpuCount:  1,
+			GpuVramMb: 24 * 1024,
 		},
 	}
 }
@@ -152,7 +151,7 @@ func TestDeploy_NoSKU_OnInstance_GoesToFAILED(t *testing.T) {
 	p := New(client)
 
 	inst := okInst()
-	inst.Gpu = nil // no resolved GPU
+	inst.Hardware = nil // no resolved GPU
 
 	c := &collector{}
 	if err := p.Deploy(context.Background(), okDep(), inst, nil, c.emit); err == nil {
@@ -197,7 +196,7 @@ func TestDeploy_SKUFromRequirements_AutoProvisioned(t *testing.T) {
 	)
 
 	inst := okInst()
-	inst.Gpu = nil // PENDING shell, GPU not yet resolved
+	inst.Hardware = nil // PENDING shell, GPU not yet resolved
 	inst.Spec = &provisionerv1.Spec{
 		Requirements: &provisionerv1.ResourceRequirements{
 			Sku:      "NVIDIA RTX A5000",
@@ -245,7 +244,7 @@ func TestDeploy_PassesFullSKUListWhenAutoProvisioned(t *testing.T) {
 	)
 
 	inst := okInst()
-	inst.Gpu = nil
+	inst.Hardware = nil
 	inst.Spec = &provisionerv1.Spec{
 		Requirements: &provisionerv1.ResourceRequirements{
 			MinVramGb: 24,

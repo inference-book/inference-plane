@@ -675,7 +675,7 @@ func TestDeployerDispatch_ProviderCapability_TakesPrecedence(t *testing.T) {
 		f.Instances["my-pod"] = &provisionerv1.Instance{
 			Id: "my-pod", Provider: "mock", ProviderId: "mock:my-pod",
 			State: provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE,
-			Gpu:   &provisionerv1.GpuInfo{Sku: "mock-sku"},
+			Hardware: &provisionerv1.Hardware{GpuSku: "mock-sku"},
 			Ssh:   &provisionerv1.SshTarget{Host: "1.2.3.4", Port: 22, User: "root"},
 		}
 		return nil
@@ -724,7 +724,7 @@ func TestDeployerDispatch_NoCapability_FallsBackToConfiguredExecutor(t *testing.
 		f.Instances["my-pod"] = &provisionerv1.Instance{
 			Id: "my-pod", Provider: "mock", ProviderId: "mock:my-pod",
 			State: provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE,
-			Gpu:   &provisionerv1.GpuInfo{Sku: "mock-sku"},
+			Hardware: &provisionerv1.Hardware{GpuSku: "mock-sku"},
 			Ssh:   &provisionerv1.SshTarget{Host: "1.2.3.4", Port: 22, User: "root"},
 		}
 		return nil

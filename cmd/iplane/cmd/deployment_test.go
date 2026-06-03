@@ -154,11 +154,10 @@ func seedInstance(id string) *provisionerv1.Instance {
 		ProviderId: "mock:" + id,
 		Provider:   "mock",
 		Region:     "test",
-		Gpu: &provisionerv1.GpuInfo{
-			Class:  "small",
-			Sku:    "mock-sku",
-			Count:  1,
-			VramGb: 24,
+		Hardware: &provisionerv1.Hardware{
+			GpuSku:    "mock-sku",
+			GpuCount:  1,
+			GpuVramMb: 24 * 1024,
 		},
 		HourlyRateUsd: 0.42,
 		State:         provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE,

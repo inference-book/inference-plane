@@ -57,11 +57,10 @@ func (m *mockProvider) Spawn(ctx context.Context, spec *provisionerv1.Spec) (*pr
 		Provider:   m.name,
 		Spec:       spec,
 		Region:     spec.GetRegion(),
-		Gpu: &provisionerv1.GpuInfo{
-			Class:  spec.GetRequirements().GetClass(),
-			Sku:    "mock-sku",
-			Count:  1,
-			VramGb: 24,
+		Hardware: &provisionerv1.Hardware{
+			GpuSku:    "mock-sku",
+			GpuCount:  1,
+			GpuVramMb: 24 * 1024,
 		},
 		HourlyRateUsd: 0.42,
 		State:         provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE,
@@ -442,15 +441,17 @@ func TestDescribe_OutputJSON(t *testing.T) {
 	// (no envelope), matching the protojson encoding of
 	// DescribeInstanceResponse.
 	var inst struct {
-		ID  string `json:"id"`
-		GPU struct {
-			Sku string `json:"sku"`
-		} `json:"gpu"`
+		ID       string `json:"id"`
+		Hardware struct {
+			// writeProtoJSON uses UseProtoNames=true; field names
+			// stay snake_case in the JSON output.
+			GpuSku string `json:"gpu_sku"`
+		} `json:"hardware"`
 	}
 	if err := json.Unmarshal([]byte(out), &inst); err != nil {
 		t.Fatalf("output is not valid JSON: %v\n%s", err, out)
 	}
-	if inst.ID != "my-pod" || inst.GPU.Sku != "mock-sku" {
+	if inst.ID != "my-pod" || inst.Hardware.GpuSku != "mock-sku" {
 		t.Errorf("decoded instance = %+v", inst)
 	}
 }
