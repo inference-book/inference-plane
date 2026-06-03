@@ -140,6 +140,10 @@ const (
 const (
 	ProviderLocal  = "local"
 	ProviderRunPod = "runpod"
+	ProviderVast   = "vast"
+	// ProviderLambdaLabs follows in #151. Const reserved here so the
+	// future PR's diff stays small.
+	ProviderLambdaLabs = "lambdalabs"
 )
 
 // GPU class taxonomy. The chapter teaches one vocabulary across providers;

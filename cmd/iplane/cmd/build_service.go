@@ -10,6 +10,7 @@ import (
 	"github.com/inference-book/inference-plane/internal/provisioners/local"
 	"github.com/inference-book/inference-plane/internal/provisioners/runpod"
 	"github.com/inference-book/inference-plane/internal/provisioners/stores/file"
+	"github.com/inference-book/inference-plane/internal/provisioners/vast"
 	"github.com/inference-book/inference-plane/internal/sshkeys"
 )
 
@@ -29,6 +30,9 @@ import (
 //   - runpod: included only when RUNPOD_API_KEY is set in env. Same env
 //     contract as the v0.1 CLI so the daemon and one-shot CLIs see the
 //     same provider catalog without configuration drift.
+//   - vast: included only when VAST_API_KEY is set in env. v0.2 ch7-
+//     beat3.11 (#150). VM-style provider; the engine container runs via
+//     the sshdocker executor.
 func buildLocalService(store *file.Store, operatorID string) (*provisioners.Service, error) {
 	keyStore, err := sshkeys.New(sshkeys.WithDir(filepath.Join(store.Dir(), "keys")))
 	if err != nil {
@@ -38,6 +42,9 @@ func buildLocalService(store *file.Store, operatorID string) (*provisioners.Serv
 	providers := []provisioners.Provider{local.New()}
 	if key := os.Getenv("RUNPOD_API_KEY"); key != "" {
 		providers = append(providers, runpod.New(runpod.NewClient(key)))
+	}
+	if key := os.Getenv("VAST_API_KEY"); key != "" {
+		providers = append(providers, vast.New(vast.NewClient(key)))
 	}
 
 	executor := sshdocker.NewExecutor()
