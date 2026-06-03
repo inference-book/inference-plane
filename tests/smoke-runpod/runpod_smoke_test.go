@@ -1,115 +1,67 @@
 //go:build smoke_runpod
 
-// Package smoke_runpod actually hits the real RunPod API. Run only
-// when you mean it -- this test provisions a small pod, costs a few
-// cents per run, and the budget guardrail in the iplane CLI is NOT
-// in this path (the adapter trusts the Service layer above it).
+// Thin wrapper around tests/smoke-providers/core.go's shared smoke
+// flow, specialized for RunPod. The per-provider file holds only
+// the RunPod-specific config (env var name, SKU defaults, list
+// filter shape); the shared core does the spawn + terminate +
+// verify dance.
 //
 // Run:
 //
 //	export RUNPOD_API_KEY=...
-//	make smoke-runpod
+//	make smoke-runpod              # read-only List (free)
+//	RUNPOD_RENT=1 make smoke-runpod  # also rents + terminates a pod (~$0.05)
 //
-// The dedicated build tag (smoke_runpod, not plain smoke) keeps this
-// out of every other test target so an operator running `make smoke`
-// to check the HTTP layer cannot accidentally provision a real pod.
+// The smoke flow's shared core moved in v0.2 ch7-beat3.11 follow-up
+// when the Vast.ai smoke test came online -- two providers using a
+// 90% identical test shape made the duplication obvious enough to
+// extract.
 package smoke_runpod
 
 import (
-	"context"
 	"os"
 	"testing"
-	"time"
 
-	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
 	"github.com/inference-book/inference-plane/internal/provisioners"
 	"github.com/inference-book/inference-plane/internal/provisioners/runpod"
+	smokeproviders "github.com/inference-book/inference-plane/tests/smoke-providers"
 )
 
-const (
-	// Smallest reliably-available SKU + region pair. Override via env
-	// if your account is in a different region or has different
-	// capacity at the moment.
-	defaultRegion = "US-CA-1"
-	defaultSKU    = "NVIDIA GeForce RTX 4090"
-)
+func TestRunPod_List(t *testing.T) {
+	apiKey := os.Getenv("RUNPOD_API_KEY")
+	if apiKey == "" {
+		t.Skip("RUNPOD_API_KEY not set; skipping (real-API smoke test)")
+	}
+	smokeproviders.RunList(t, runpod.New(runpod.NewClient(apiKey)))
+}
 
 func TestRunPod_SpawnAndTerminate(t *testing.T) {
 	apiKey := os.Getenv("RUNPOD_API_KEY")
 	if apiKey == "" {
-		t.Skip("RUNPOD_API_KEY not set; skipping (this test costs real money)")
+		t.Skip("RUNPOD_API_KEY not set; skipping (real-API smoke test)")
 	}
-	region := envOr("RUNPOD_REGION", defaultRegion)
-	sku := envOr("RUNPOD_SKU", defaultSKU)
-
-	provider := runpod.New(runpod.NewClient(apiKey))
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
-	defer cancel()
-
-	stamp := shortStamp()
-	spec := &provisionerv1.Spec{
-		Id:       "smoke-" + stamp,
-		Provider: provisioners.ProviderRunPod,
-		Region:   region,
-		Requirements: &provisionerv1.ResourceRequirements{
-			Sku:      sku,
-			GpuCount: 1,
-		},
-		Tags: map[string]string{
-			provisioners.TagID:       "smoke-" + stamp,
-			provisioners.TagOperator: "default",
-			"purpose":                "iplane-runpod-smoke-test",
-		},
+	sku := os.Getenv("RUNPOD_SKU")
+	if sku == "" {
+		// RunPod's gpu_name field uses the full display name; this
+		// is the smallest reliably-available SKU.
+		sku = "NVIDIA GeForce RTX 4090"
 	}
-
-	t.Logf("Spawning %s in %s ...", sku, region)
-	inst, err := provider.Spawn(ctx, spec)
-	if err != nil {
-		t.Fatalf("Spawn: %v", err)
+	region := os.Getenv("RUNPOD_REGION")
+	if region == "" {
+		region = "US-CA-1"
 	}
-	t.Logf("Spawned pod %s @ $%.4f/hr (state=%s)", inst.GetProviderId(), inst.GetHourlyRateUsd(), inst.GetState())
-
-	// Always attempt termination, even if assertions below fail.
-	defer func() {
-		t.Logf("Terminating pod %s ...", inst.GetProviderId())
-		termCtx, termCancel := context.WithTimeout(context.Background(), 60*time.Second)
-		defer termCancel()
-		if err := provider.Terminate(termCtx, inst.GetProviderId()); err != nil {
-			t.Errorf("Terminate failed: %v (manual cleanup required: pod id %s)", err, inst.GetProviderId())
-		}
-	}()
-
-	if inst.GetProviderId() == "" {
-		t.Fatal("expected non-empty provider id")
-	}
-	if inst.GetHourlyRateUsd() <= 0 {
-		t.Errorf("expected positive hourly rate, got %v", inst.GetHourlyRateUsd())
-	}
-
-	// Confirm List sees it.
-	refs, err := provider.List(ctx, map[string]string{provisioners.TagID: spec.GetId()})
-	if err != nil {
-		t.Errorf("List: %v", err)
-	}
-	found := false
-	for _, ref := range refs {
-		if ref.GetProviderId() == inst.GetProviderId() {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Errorf("List did not return the pod we just spawned (refs=%d)", len(refs))
-	}
-}
-
-func envOr(k, fallback string) string {
-	if v := os.Getenv(k); v != "" {
-		return v
-	}
-	return fallback
-}
-
-func shortStamp() string {
-	return time.Now().UTC().Format("20060102t150405")
+	smokeproviders.RunSpawnAndTerminate(t, smokeproviders.Config{
+		Provider:         runpod.New(runpod.NewClient(apiKey)),
+		ProviderName:     provisioners.ProviderRunPod,
+		SKU:              sku,
+		Region:           region,
+		// CostEnv intentionally empty: preserves the v0.1 contract
+		// that `make smoke-runpod` rents on every run when the key
+		// is set. Operators who want the cost gate set
+		// CostEnv="RUNPOD_RENT" via a future env-driven config.
+		ExpectHourlyRate: true, // RunPod stamps costPerHr on the pod record
+		// Server-side List filter by iplane-id catches the post-
+		// spawn instance even before it transitions to ACTIVE.
+		ListFilter: map[string]string{provisioners.TagID: "smoke-"},
+	})
 }
