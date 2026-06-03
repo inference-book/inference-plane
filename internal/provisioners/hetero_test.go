@@ -85,33 +85,10 @@ func TestHetero_Create_OneFromEachProvider(t *testing.T) {
 	}
 }
 
-// TestHetero_Create_HomogeneousAndHeteroAreMutuallyExclusive: a
-// request that sets BOTH replicas (homogeneous) and replicas_spec
-// (heterogeneous) is rejected -- the caller picks one form per call.
-func TestHetero_Create_HomogeneousAndHeteroAreMutuallyExclusive(t *testing.T) {
-	svc, _, _, _ := heteroSvc(t)
-	_, err := svc.CreateDeployment(context.Background(), &provisionerv1.CreateDeploymentRequest{
-		Deployment: &provisionerv1.Deployment{
-			Id:         "bad",
-			Image:      "vllm/vllm-openai:v0.7.0",
-			Model:      "Qwen/Qwen2.5-1.5B-Instruct",
-			EnginePort: 8000,
-		},
-		Provider:     "mockA",
-		Requirements: &provisionerv1.ResourceRequirements{Sku: "x"},
-		Replicas:     3,
-		ReplicasSpec: []*provisionerv1.ReplicaSpec{
-			{Provider: "mockA", Requirements: &provisionerv1.ResourceRequirements{Sku: "a"}},
-		},
-		Wait: true,
-	})
-	if err == nil {
-		t.Fatal("expected InvalidArgument for both homogeneous and replicas_spec set")
-	}
-	if c := status.Code(err); c != codes.InvalidArgument {
-		t.Errorf("code = %s, want InvalidArgument", c)
-	}
-}
+// (TestHetero_Create_HomogeneousAndHeteroAreMutuallyExclusive deleted
+// in v0.2 ch7-beat3.10: the request shape no longer has separate
+// homogeneous + heterogeneous fields, so the conflict it tested is
+// not expressible.)
 
 // TestHetero_Create_UnknownProviderInSpec: a replicas_spec entry
 // referencing an unconfigured provider fails the per-slot place,
@@ -157,10 +134,12 @@ func TestHetero_Scale_AddReplicaAppendsDifferentProvider(t *testing.T) {
 			Model:      "Qwen/Qwen2.5-1.5B-Instruct",
 			EnginePort: 8000,
 		},
-		Provider:     "mockA",
-		Requirements: &provisionerv1.ResourceRequirements{Sku: "a-sku"},
-		Replicas:     1,
-		Wait:         true,
+		ReplicasSpec: []*provisionerv1.ReplicaSpec{{
+			Provider:     "mockA",
+			Requirements: &provisionerv1.ResourceRequirements{Sku: "a-sku"},
+			Replicas:     1,
+		}},
+		Wait: true,
 	}); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -205,10 +184,12 @@ func TestHetero_Scale_MutuallyExclusive(t *testing.T) {
 			Model:      "Qwen/Qwen2.5-1.5B-Instruct",
 			EnginePort: 8000,
 		},
-		Provider:     "mockA",
-		Requirements: &provisionerv1.ResourceRequirements{Sku: "a-sku"},
-		Replicas:     1,
-		Wait:         true,
+		ReplicasSpec: []*provisionerv1.ReplicaSpec{{
+			Provider:     "mockA",
+			Requirements: &provisionerv1.ResourceRequirements{Sku: "a-sku"},
+			Replicas:     1,
+		}},
+		Wait: true,
 	}); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -292,10 +273,12 @@ func TestHetero_Scale_AnchorsOffReplicaSpecs(t *testing.T) {
 			Model:      "Qwen/Qwen2.5-1.5B-Instruct",
 			EnginePort: 8000,
 		},
-		Provider:     "mockA",
-		Requirements: &provisionerv1.ResourceRequirements{Class: "small"},
-		Replicas:     1,
-		Wait:         true,
+		ReplicasSpec: []*provisionerv1.ReplicaSpec{{
+			Provider:     "mockA",
+			Requirements: &provisionerv1.ResourceRequirements{Class: "small"},
+			Replicas:     1,
+		}},
+		Wait: true,
 	}); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -324,6 +307,88 @@ func TestHetero_Scale_AnchorsOffReplicaSpecs(t *testing.T) {
 		if sp.GetRequirements().GetClass() != "small" {
 			t.Errorf("slot %d class = %q, want small (operator intent preserved)", i, sp.GetRequirements().GetClass())
 		}
+	}
+}
+
+// TestHetero_ReplicasSpec_ExpandsCompressedForm: a single
+// replicas_spec entry with replicas=3 expands to 3 slots at the
+// deployment level. The instance-group form gets unrolled into the
+// per-slot view. v0.2 ch7-beat3.10 (#143 refactor).
+func TestHetero_ReplicasSpec_ExpandsCompressedForm(t *testing.T) {
+	svc, store, _, _ := heteroSvc(t)
+	if _, err := svc.CreateDeployment(context.Background(), &provisionerv1.CreateDeploymentRequest{
+		Deployment: &provisionerv1.Deployment{
+			Id:         "compressed",
+			Image:      "vllm/vllm-openai:v0.7.0",
+			Model:      "Qwen/Qwen2.5-1.5B-Instruct",
+			EnginePort: 8000,
+		},
+		ReplicasSpec: []*provisionerv1.ReplicaSpec{{
+			Provider:     "mockA",
+			Requirements: &provisionerv1.ResourceRequirements{Sku: "small"},
+			Replicas:     3,
+		}},
+		Wait: true,
+	}); err != nil {
+		t.Fatalf("CreateDeployment: %v", err)
+	}
+	state, _ := store.Read()
+	dep := state.Deployments["compressed"]
+	ids := dep.GetInstanceIds()
+	if len(ids) != 3 {
+		t.Fatalf("instance_ids len = %d, want 3 (expanded from 1 entry x replicas=3)", len(ids))
+	}
+	for i, id := range ids {
+		want := "compressed-r" + string(rune('0'+i))
+		if id != want {
+			t.Errorf("instance_ids[%d] = %q, want %q", i, id, want)
+		}
+	}
+	// Deployment.replica_specs: expanded one-per-slot, replicas=1
+	// implicit (default).
+	specs := dep.GetReplicaSpecs()
+	if len(specs) != 3 {
+		t.Fatalf("replica_specs len = %d, want 3", len(specs))
+	}
+	for i, s := range specs {
+		if s.GetProvider() != "mockA" {
+			t.Errorf("slot %d provider = %q, want mockA", i, s.GetProvider())
+		}
+	}
+}
+
+// TestHetero_ReplicasSpec_HeterogeneousGroups: two entries with
+// different counts -- 2 of mockA + 1 of mockB -- expand to 3 total
+// slots in the right order.
+func TestHetero_ReplicasSpec_HeterogeneousGroups(t *testing.T) {
+	svc, store, _, _ := heteroSvc(t)
+	if _, err := svc.CreateDeployment(context.Background(), &provisionerv1.CreateDeploymentRequest{
+		Deployment: &provisionerv1.Deployment{
+			Id:         "groups",
+			Image:      "vllm/vllm-openai:v0.7.0",
+			Model:      "Qwen/Qwen2.5-1.5B-Instruct",
+			EnginePort: 8000,
+		},
+		ReplicasSpec: []*provisionerv1.ReplicaSpec{
+			{Provider: "mockA", Requirements: &provisionerv1.ResourceRequirements{Sku: "a"}, Replicas: 2},
+			{Provider: "mockB", Requirements: &provisionerv1.ResourceRequirements{Sku: "b"}, Replicas: 1},
+		},
+		Wait: true,
+	}); err != nil {
+		t.Fatalf("CreateDeployment: %v", err)
+	}
+	state, _ := store.Read()
+	dep := state.Deployments["groups"]
+	specs := dep.GetReplicaSpecs()
+	if len(specs) != 3 {
+		t.Fatalf("replica_specs len = %d, want 3 (2 of A + 1 of B)", len(specs))
+	}
+	if specs[0].GetProvider() != "mockA" || specs[1].GetProvider() != "mockA" {
+		t.Errorf("first two slots should be mockA: %q %q",
+			specs[0].GetProvider(), specs[1].GetProvider())
+	}
+	if specs[2].GetProvider() != "mockB" {
+		t.Errorf("third slot should be mockB: %q", specs[2].GetProvider())
 	}
 }
 

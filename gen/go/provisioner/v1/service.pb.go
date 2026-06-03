@@ -868,51 +868,30 @@ type CreateDeploymentRequest struct {
 	// When true, block until the deployment reaches RUNNING (or FAILED).
 	// Default false -- async-with-LRO. CLI's `--wait` flag sets this.
 	Wait bool `protobuf:"varint,2,opt,name=wait,proto3" json:"wait,omitempty"`
-	// Resource requirements for the instance the deployment is placed on.
-	// Used when deployment.instance_id is empty: the scheduler provisions
-	// a fresh instance satisfying these constraints (image-as-pod
-	// providers run the engine image directly on it). Ignored when
-	// instance_id names an existing instance (the deployment lands on
-	// that instance's already-resolved hardware). Same three-layer shape
-	// as instance create: class shorthand, numeric floors, or exact sku.
-	Requirements *ResourceRequirements `protobuf:"bytes,3,opt,name=requirements,proto3" json:"requirements,omitempty"`
-	// Provider to provision on when auto-provisioning (instance_id empty).
-	// Ignored when instance_id names an existing instance (its provider
-	// is used). v0.1: "runpod" is the image-native default.
-	Provider string `protobuf:"bytes,4,opt,name=provider,proto3" json:"provider,omitempty"`
-	// Region hint passed through to the provider when auto-provisioning.
-	Region string `protobuf:"bytes,5,opt,name=region,proto3" json:"region,omitempty"`
-	// replicas is the homogeneous-onramp shortcut: when set and
-	// replicas_spec is empty, the Service provisions `replicas`
-	// Instances all sharing the singular `provider` / `region` /
-	// `requirements` triple above. Default 0 means 1 (proto3 zero-
-	// value semantics; Service normalizes 0 -> 1 on receive).
+	// replicas_spec describes the fleet to provision: each entry is one
+	// instance group of (provider, region, requirements, count) units.
+	// v0.2 ch7-beat3.10 unifies what was previously two mutually-
+	// exclusive shapes (singular `provider`/`requirements`/`replicas`
+	// for homogeneous AND `replicas_spec` for heterogeneous) into one:
 	//
-	// For heterogeneous fleets (1 runpod + 1 vast + 1 lambda -- iplane's
-	// load-bearing differentiator from k8s/ASGs), use replicas_spec
-	// below. The two fields are mutually exclusive.
-	Replicas int32 `protobuf:"varint,6,opt,name=replicas,proto3" json:"replicas,omitempty"`
-	// replicas_spec is the heterogeneous form: each entry names one
-	// replica's (provider, region, requirements) independently, so a
-	// single Deployment can span providers (v0.2 ch7-beat3.9, #143).
-	// When set, replicas_spec wins over the homogeneous
-	// `provider` / `region` / `requirements` / `replicas` fields
-	// (the count equals `len(replicas_spec)`).
+	//   - 1 small RunPod        -> [{runpod, small, 1}]
+	//   - 3 small RunPods       -> [{runpod, small, 3}]
+	//   - 1 runpod + 1 vast     -> [{runpod, small, 1}, {vast, medium, 1}]
+	//   - 2 runpod + 1 vast     -> [{runpod, small, 2}, {vast, medium, 1}]
+	//   - existing instance     -> empty replicas_spec + dep.instance_id set
 	//
-	// This is iplane's central value-add over Kubernetes / Auto
-	// Scaling Groups: the same Deployment can rent capacity from
-	// multiple clouds for cost arbitrage, availability tolerance,
-	// and burst absorption. The router (#85) distributes evenly
-	// across the heterogeneous fleet (round-robin is provider-
-	// agnostic); future routing-policy seams (#89) can layer
-	// cost-aware / region-aware selection on top.
+	// Each entry maps to one instance group. The chapter narrative:
+	//   - Single-entry replicas_spec = one cloud-native instance group
+	//     (the future delegation target via #147's GroupProvisioner).
+	//   - Multi-entry replicas_spec = several groups composed by iplane,
+	//     possibly across providers -- the differentiator from k8s/ASGs.
 	//
-	// Long-term direction: when a request *is* homogeneous on a
-	// single provider AND that provider ships a fleet API (AWS
-	// ASGs, GCP MIGs, RunPod fleet API if/when), the fan-out can
-	// delegate to a single SpawnGroup call instead of N parallel
-	// rents (#147). replicas_spec stays the operator-facing surface;
-	// the optimization is provider-side.
+	// The persisted Deployment.replica_specs view is the *expanded*
+	// per-slot form (one entry per slot, replicas=1 each). The expansion
+	// happens at fan-out time in resolveCreateReplicaSpecs; the wire
+	// form carries the compressed per-group form. The parallel-arrays
+	// invariant (instance_ids[i] <-> replica_specs[i]) holds on the
+	// persisted view.
 	ReplicasSpec  []*ReplicaSpec `protobuf:"bytes,7,rep,name=replicas_spec,json=replicasSpec,proto3" json:"replicas_spec,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -960,34 +939,6 @@ func (x *CreateDeploymentRequest) GetWait() bool {
 		return x.Wait
 	}
 	return false
-}
-
-func (x *CreateDeploymentRequest) GetRequirements() *ResourceRequirements {
-	if x != nil {
-		return x.Requirements
-	}
-	return nil
-}
-
-func (x *CreateDeploymentRequest) GetProvider() string {
-	if x != nil {
-		return x.Provider
-	}
-	return ""
-}
-
-func (x *CreateDeploymentRequest) GetRegion() string {
-	if x != nil {
-		return x.Region
-	}
-	return ""
-}
-
-func (x *CreateDeploymentRequest) GetReplicas() int32 {
-	if x != nil {
-		return x.Replicas
-	}
-	return 0
 }
 
 func (x *CreateDeploymentRequest) GetReplicasSpec() []*ReplicaSpec {
@@ -1609,16 +1560,12 @@ const file_provisioner_v1_service_proto_rawDesc = "" +
 	"\n" +
 	"deployment\x18\x01 \x01(\v2\x1a.provisioner.v1.DeploymentR\n" +
 	"deployment\x120\n" +
-	"\x14planned_instance_ids\x18\x02 \x03(\tR\x12plannedInstanceIds\"\xc5\x02\n" +
+	"\x14planned_instance_ids\x18\x02 \x03(\tR\x12plannedInstanceIds\"\xab\x01\n" +
 	"\x17CreateDeploymentRequest\x12:\n" +
 	"\n" +
 	"deployment\x18\x01 \x01(\v2\x1a.provisioner.v1.DeploymentR\n" +
 	"deployment\x12\x12\n" +
-	"\x04wait\x18\x02 \x01(\bR\x04wait\x12H\n" +
-	"\frequirements\x18\x03 \x01(\v2$.provisioner.v1.ResourceRequirementsR\frequirements\x12\x1a\n" +
-	"\bprovider\x18\x04 \x01(\tR\bprovider\x12\x16\n" +
-	"\x06region\x18\x05 \x01(\tR\x06region\x12\x1a\n" +
-	"\breplicas\x18\x06 \x01(\x05R\breplicas\x12@\n" +
+	"\x04wait\x18\x02 \x01(\bR\x04wait\x12@\n" +
 	"\rreplicas_spec\x18\a \x03(\v2\x1b.provisioner.v1.ReplicaSpecR\freplicasSpec\"\x7f\n" +
 	"\x18CreateDeploymentResponse\x12:\n" +
 	"\n" +
@@ -1726,9 +1673,8 @@ var file_provisioner_v1_service_proto_goTypes = []any{
 	(*Instance)(nil),                     // 28: provisioner.v1.Instance
 	(*ReplicaSpec)(nil),                  // 29: provisioner.v1.ReplicaSpec
 	(*Deployment)(nil),                   // 30: provisioner.v1.Deployment
-	(*ResourceRequirements)(nil),         // 31: provisioner.v1.ResourceRequirements
-	(DeploymentState)(0),                 // 32: provisioner.v1.DeploymentState
-	(*timestamppb.Timestamp)(nil),        // 33: google.protobuf.Timestamp
+	(DeploymentState)(0),                 // 31: provisioner.v1.DeploymentState
+	(*timestamppb.Timestamp)(nil),        // 32: google.protobuf.Timestamp
 }
 var file_provisioner_v1_service_proto_depIdxs = []int32{
 	27, // 0: provisioner.v1.CreateInstanceRequest.spec:type_name -> provisioner.v1.Spec
@@ -1742,48 +1688,47 @@ var file_provisioner_v1_service_proto_depIdxs = []int32{
 	29, // 8: provisioner.v1.ScaleDeploymentRequest.add_replicas:type_name -> provisioner.v1.ReplicaSpec
 	30, // 9: provisioner.v1.ScaleDeploymentResponse.deployment:type_name -> provisioner.v1.Deployment
 	30, // 10: provisioner.v1.CreateDeploymentRequest.deployment:type_name -> provisioner.v1.Deployment
-	31, // 11: provisioner.v1.CreateDeploymentRequest.requirements:type_name -> provisioner.v1.ResourceRequirements
-	29, // 12: provisioner.v1.CreateDeploymentRequest.replicas_spec:type_name -> provisioner.v1.ReplicaSpec
-	30, // 13: provisioner.v1.CreateDeploymentResponse.deployment:type_name -> provisioner.v1.Deployment
-	30, // 14: provisioner.v1.DescribeDeploymentResponse.deployment:type_name -> provisioner.v1.Deployment
-	32, // 15: provisioner.v1.ListDeploymentsRequest.state:type_name -> provisioner.v1.DeploymentState
-	30, // 16: provisioner.v1.ListDeploymentsResponse.deployments:type_name -> provisioner.v1.Deployment
-	30, // 17: provisioner.v1.DestroyDeploymentResponse.deployment:type_name -> provisioner.v1.Deployment
-	32, // 18: provisioner.v1.DeploymentStateChangedEvent.from:type_name -> provisioner.v1.DeploymentState
-	32, // 19: provisioner.v1.DeploymentStateChangedEvent.to:type_name -> provisioner.v1.DeploymentState
-	33, // 20: provisioner.v1.DeploymentStateChangedEvent.at:type_name -> google.protobuf.Timestamp
-	30, // 21: provisioner.v1.TouchDeploymentResponse.deployment:type_name -> provisioner.v1.Deployment
-	1,  // 22: provisioner.v1.ProvisionerService.CreateInstance:input_type -> provisioner.v1.CreateInstanceRequest
-	3,  // 23: provisioner.v1.ProvisionerService.DestroyInstance:input_type -> provisioner.v1.DestroyInstanceRequest
-	5,  // 24: provisioner.v1.ProvisionerService.DescribeInstance:input_type -> provisioner.v1.DescribeInstanceRequest
-	7,  // 25: provisioner.v1.ProvisionerService.ListInstances:input_type -> provisioner.v1.ListInstancesRequest
-	9,  // 26: provisioner.v1.ProvisionerService.WaitForInstanceReady:input_type -> provisioner.v1.WaitForInstanceReadyRequest
-	11, // 27: provisioner.v1.ProvisionerService.GetInstanceSSHKey:input_type -> provisioner.v1.GetInstanceSSHKeyRequest
-	15, // 28: provisioner.v1.DeploymentService.CreateDeployment:input_type -> provisioner.v1.CreateDeploymentRequest
-	17, // 29: provisioner.v1.DeploymentService.DescribeDeployment:input_type -> provisioner.v1.DescribeDeploymentRequest
-	19, // 30: provisioner.v1.DeploymentService.ListDeployments:input_type -> provisioner.v1.ListDeploymentsRequest
-	21, // 31: provisioner.v1.DeploymentService.DestroyDeployment:input_type -> provisioner.v1.DestroyDeploymentRequest
-	23, // 32: provisioner.v1.DeploymentService.WatchDeployment:input_type -> provisioner.v1.WatchDeploymentRequest
-	25, // 33: provisioner.v1.DeploymentService.TouchDeployment:input_type -> provisioner.v1.TouchDeploymentRequest
-	13, // 34: provisioner.v1.DeploymentService.ScaleDeployment:input_type -> provisioner.v1.ScaleDeploymentRequest
-	2,  // 35: provisioner.v1.ProvisionerService.CreateInstance:output_type -> provisioner.v1.CreateInstanceResponse
-	4,  // 36: provisioner.v1.ProvisionerService.DestroyInstance:output_type -> provisioner.v1.DestroyInstanceResponse
-	6,  // 37: provisioner.v1.ProvisionerService.DescribeInstance:output_type -> provisioner.v1.DescribeInstanceResponse
-	8,  // 38: provisioner.v1.ProvisionerService.ListInstances:output_type -> provisioner.v1.ListInstancesResponse
-	10, // 39: provisioner.v1.ProvisionerService.WaitForInstanceReady:output_type -> provisioner.v1.WaitForInstanceReadyResponse
-	12, // 40: provisioner.v1.ProvisionerService.GetInstanceSSHKey:output_type -> provisioner.v1.GetInstanceSSHKeyResponse
-	16, // 41: provisioner.v1.DeploymentService.CreateDeployment:output_type -> provisioner.v1.CreateDeploymentResponse
-	18, // 42: provisioner.v1.DeploymentService.DescribeDeployment:output_type -> provisioner.v1.DescribeDeploymentResponse
-	20, // 43: provisioner.v1.DeploymentService.ListDeployments:output_type -> provisioner.v1.ListDeploymentsResponse
-	22, // 44: provisioner.v1.DeploymentService.DestroyDeployment:output_type -> provisioner.v1.DestroyDeploymentResponse
-	24, // 45: provisioner.v1.DeploymentService.WatchDeployment:output_type -> provisioner.v1.DeploymentStateChangedEvent
-	26, // 46: provisioner.v1.DeploymentService.TouchDeployment:output_type -> provisioner.v1.TouchDeploymentResponse
-	14, // 47: provisioner.v1.DeploymentService.ScaleDeployment:output_type -> provisioner.v1.ScaleDeploymentResponse
-	35, // [35:48] is the sub-list for method output_type
-	22, // [22:35] is the sub-list for method input_type
-	22, // [22:22] is the sub-list for extension type_name
-	22, // [22:22] is the sub-list for extension extendee
-	0,  // [0:22] is the sub-list for field type_name
+	29, // 11: provisioner.v1.CreateDeploymentRequest.replicas_spec:type_name -> provisioner.v1.ReplicaSpec
+	30, // 12: provisioner.v1.CreateDeploymentResponse.deployment:type_name -> provisioner.v1.Deployment
+	30, // 13: provisioner.v1.DescribeDeploymentResponse.deployment:type_name -> provisioner.v1.Deployment
+	31, // 14: provisioner.v1.ListDeploymentsRequest.state:type_name -> provisioner.v1.DeploymentState
+	30, // 15: provisioner.v1.ListDeploymentsResponse.deployments:type_name -> provisioner.v1.Deployment
+	30, // 16: provisioner.v1.DestroyDeploymentResponse.deployment:type_name -> provisioner.v1.Deployment
+	31, // 17: provisioner.v1.DeploymentStateChangedEvent.from:type_name -> provisioner.v1.DeploymentState
+	31, // 18: provisioner.v1.DeploymentStateChangedEvent.to:type_name -> provisioner.v1.DeploymentState
+	32, // 19: provisioner.v1.DeploymentStateChangedEvent.at:type_name -> google.protobuf.Timestamp
+	30, // 20: provisioner.v1.TouchDeploymentResponse.deployment:type_name -> provisioner.v1.Deployment
+	1,  // 21: provisioner.v1.ProvisionerService.CreateInstance:input_type -> provisioner.v1.CreateInstanceRequest
+	3,  // 22: provisioner.v1.ProvisionerService.DestroyInstance:input_type -> provisioner.v1.DestroyInstanceRequest
+	5,  // 23: provisioner.v1.ProvisionerService.DescribeInstance:input_type -> provisioner.v1.DescribeInstanceRequest
+	7,  // 24: provisioner.v1.ProvisionerService.ListInstances:input_type -> provisioner.v1.ListInstancesRequest
+	9,  // 25: provisioner.v1.ProvisionerService.WaitForInstanceReady:input_type -> provisioner.v1.WaitForInstanceReadyRequest
+	11, // 26: provisioner.v1.ProvisionerService.GetInstanceSSHKey:input_type -> provisioner.v1.GetInstanceSSHKeyRequest
+	15, // 27: provisioner.v1.DeploymentService.CreateDeployment:input_type -> provisioner.v1.CreateDeploymentRequest
+	17, // 28: provisioner.v1.DeploymentService.DescribeDeployment:input_type -> provisioner.v1.DescribeDeploymentRequest
+	19, // 29: provisioner.v1.DeploymentService.ListDeployments:input_type -> provisioner.v1.ListDeploymentsRequest
+	21, // 30: provisioner.v1.DeploymentService.DestroyDeployment:input_type -> provisioner.v1.DestroyDeploymentRequest
+	23, // 31: provisioner.v1.DeploymentService.WatchDeployment:input_type -> provisioner.v1.WatchDeploymentRequest
+	25, // 32: provisioner.v1.DeploymentService.TouchDeployment:input_type -> provisioner.v1.TouchDeploymentRequest
+	13, // 33: provisioner.v1.DeploymentService.ScaleDeployment:input_type -> provisioner.v1.ScaleDeploymentRequest
+	2,  // 34: provisioner.v1.ProvisionerService.CreateInstance:output_type -> provisioner.v1.CreateInstanceResponse
+	4,  // 35: provisioner.v1.ProvisionerService.DestroyInstance:output_type -> provisioner.v1.DestroyInstanceResponse
+	6,  // 36: provisioner.v1.ProvisionerService.DescribeInstance:output_type -> provisioner.v1.DescribeInstanceResponse
+	8,  // 37: provisioner.v1.ProvisionerService.ListInstances:output_type -> provisioner.v1.ListInstancesResponse
+	10, // 38: provisioner.v1.ProvisionerService.WaitForInstanceReady:output_type -> provisioner.v1.WaitForInstanceReadyResponse
+	12, // 39: provisioner.v1.ProvisionerService.GetInstanceSSHKey:output_type -> provisioner.v1.GetInstanceSSHKeyResponse
+	16, // 40: provisioner.v1.DeploymentService.CreateDeployment:output_type -> provisioner.v1.CreateDeploymentResponse
+	18, // 41: provisioner.v1.DeploymentService.DescribeDeployment:output_type -> provisioner.v1.DescribeDeploymentResponse
+	20, // 42: provisioner.v1.DeploymentService.ListDeployments:output_type -> provisioner.v1.ListDeploymentsResponse
+	22, // 43: provisioner.v1.DeploymentService.DestroyDeployment:output_type -> provisioner.v1.DestroyDeploymentResponse
+	24, // 44: provisioner.v1.DeploymentService.WatchDeployment:output_type -> provisioner.v1.DeploymentStateChangedEvent
+	26, // 45: provisioner.v1.DeploymentService.TouchDeployment:output_type -> provisioner.v1.TouchDeploymentResponse
+	14, // 46: provisioner.v1.DeploymentService.ScaleDeployment:output_type -> provisioner.v1.ScaleDeploymentResponse
+	34, // [34:47] is the sub-list for method output_type
+	21, // [21:34] is the sub-list for method input_type
+	21, // [21:21] is the sub-list for extension type_name
+	21, // [21:21] is the sub-list for extension extendee
+	0,  // [0:21] is the sub-list for field type_name
 }
 
 func init() { file_provisioner_v1_service_proto_init() }

@@ -1246,26 +1246,51 @@ func (x *Deployment) GetReplicaSpecs() []*ReplicaSpec {
 	return nil
 }
 
-// ReplicaSpec carries one replica's per-slot provisioning shape.
-// Used in `replicas_spec` on CreateDeploymentRequest, `add_replicas`
-// on ScaleDeploymentRequest, AND on Deployment.replica_specs (the
-// persisted operator-intent form per slot). Each spec is validated
-// and placed independently; a heterogeneous fan-out is N parallel
-// placements of N different specs.
+// ReplicaSpec describes one *instance group* in the fleet: N units
+// of one (provider, region, requirements) shape. Used in two ways:
+//
+//   - Request form: CreateDeploymentRequest.replicas_spec /
+//     ScaleDeploymentRequest.add_replicas. The operator submits a
+//     compact list -- e.g., [{runpod, small, replicas=3}] for "three
+//     small RunPods" or [{runpod, small, 2}, {vast, medium, 1}] for
+//     "two small RunPods plus one medium Vast." replicas defaults to
+//     1 when omitted (proto3 zero-value semantics; Service normalizes
+//     on receive).
+//
+//   - Persisted form: Deployment.replica_specs is the *expanded*
+//     per-slot view: one entry per actual slot, always replicas=1.
+//     resolveCreateReplicaSpecs expands a request's compressed form
+//     into the per-slot list. The expansion direction is fixed: the
+//     parallel-arrays invariant (instance_ids[i] <-> replica_specs[i])
+//     stays clean, and #93's reconciliation reads one spec per slot
+//     without having to do count arithmetic.
+//
+// The instance-group framing is the architectural seam that #147's
+// cloud-native delegation reads: one ReplicaSpec entry with
+// replicas=N is literally a fleet description that can map directly
+// to AWS ASGs / GCP MIGs / RunPod fleet APIs (when providers ship
+// the corresponding GroupProvisioner capability). Heterogeneous
+// requests stay on iplane-side fan-out because no single cloud's
+// group primitive spans clouds.
 //
 // Lives in types.proto (not service.proto) because Deployment
 // references it -- types.proto can't import service.proto, so the
 // shared message belongs here.
 type ReplicaSpec struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Provider to provision this replica on. Required.
+	// Provider to provision this group's replicas on. Required.
 	Provider string `protobuf:"bytes,1,opt,name=provider,proto3" json:"provider,omitempty"`
 	// Region hint passed to the provider when supported. Optional.
 	Region string `protobuf:"bytes,2,opt,name=region,proto3" json:"region,omitempty"`
-	// Resource requirements for this replica's underlying Instance.
-	// Same three-layer shape as the homogeneous `requirements` field:
+	// Resource requirements shared by all replicas in this group.
+	// Same three-layer shape as the original homogeneous form:
 	// class shorthand, numeric floors, or exact sku. Required.
-	Requirements  *ResourceRequirements `protobuf:"bytes,3,opt,name=requirements,proto3" json:"requirements,omitempty"`
+	Requirements *ResourceRequirements `protobuf:"bytes,3,opt,name=requirements,proto3" json:"requirements,omitempty"`
+	// Number of replicas in this group. Default 0 means 1 (proto3
+	// zero-value normalization). On the persisted Deployment.replica_specs
+	// view this is always 1 (the request's compressed N expands to
+	// N one-each entries).
+	Replicas      int32 `protobuf:"varint,4,opt,name=replicas,proto3" json:"replicas,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1319,6 +1344,13 @@ func (x *ReplicaSpec) GetRequirements() *ResourceRequirements {
 		return x.Requirements
 	}
 	return nil
+}
+
+func (x *ReplicaSpec) GetReplicas() int32 {
+	if x != nil {
+		return x.Replicas
+	}
+	return 0
 }
 
 var File_provisioner_v1_types_proto protoreflect.FileDescriptor
@@ -1419,11 +1451,12 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"\rreplica_specs\x18\x1b \x03(\v2\x1b.provisioner.v1.ReplicaSpecR\freplicaSpecs\x1a6\n" +
 	"\bEnvEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x8b\x01\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xa7\x01\n" +
 	"\vReplicaSpec\x12\x1a\n" +
 	"\bprovider\x18\x01 \x01(\tR\bprovider\x12\x16\n" +
 	"\x06region\x18\x02 \x01(\tR\x06region\x12H\n" +
-	"\frequirements\x18\x03 \x01(\v2$.provisioner.v1.ResourceRequirementsR\frequirements*\xc0\x01\n" +
+	"\frequirements\x18\x03 \x01(\v2$.provisioner.v1.ResourceRequirementsR\frequirements\x12\x1a\n" +
+	"\breplicas\x18\x04 \x01(\x05R\breplicas*\xc0\x01\n" +
 	"\rInstanceState\x12\x1e\n" +
 	"\x1aINSTANCE_STATE_UNSPECIFIED\x10\x00\x12\x1a\n" +
 	"\x16INSTANCE_STATE_PENDING\x10\x01\x12\x19\n" +

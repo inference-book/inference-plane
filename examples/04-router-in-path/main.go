@@ -303,10 +303,13 @@ func main() {
 					Env:            depEnv,
 					NoIdleDestroy:  true,
 				},
-				Provider:     *provider,
-				Region:       *region,
-				Requirements: &provisionerv1.ResourceRequirements{Class: provisioners.GPUClassSmall},
-				Wait:         true,
+				ReplicasSpec: []*provisionerv1.ReplicaSpec{{
+					Provider:     *provider,
+					Region:       *region,
+					Requirements: &provisionerv1.ResourceRequirements{Class: provisioners.GPUClassSmall},
+					Replicas:     1,
+				}},
+				Wait: true,
 			}))
 			watchCancel()
 			if err != nil {

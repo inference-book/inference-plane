@@ -223,11 +223,14 @@ func runUp(cmd *cobra.Command, _ []string) error {
 			IdleTtlSeconds: int32(upIdleTTL.Seconds()),
 			NoIdleDestroy:  upNoIdleDestroy,
 		},
-		Provider: upProvider,
-		Region:   upRegion,
-		Requirements: &provisionerv1.ResourceRequirements{
-			Class: upClass,
-		},
+		ReplicasSpec: []*provisionerv1.ReplicaSpec{{
+			Provider: upProvider,
+			Region:   upRegion,
+			Requirements: &provisionerv1.ResourceRequirements{
+				Class: upClass,
+			},
+			Replicas: 1,
+		}},
 		Wait: true,
 	})
 	watchCancel() // stop the progress watcher once Create returns

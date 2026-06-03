@@ -771,11 +771,14 @@ func TestCreateDeployment_AutoProvision_RecordsInstanceAnd1to1(t *testing.T) {
 			Model:      "Qwen/Qwen2.5-1.5B-Instruct",
 			EnginePort: 8000,
 		},
-		Provider: "mock",
-		Requirements: &provisionerv1.ResourceRequirements{
-			Class:    provisioners.GPUClassSmall,
-			GpuCount: 1,
-		},
+		ReplicasSpec: []*provisionerv1.ReplicaSpec{{
+			Provider: "mock",
+			Requirements: &provisionerv1.ResourceRequirements{
+				Class:    provisioners.GPUClassSmall,
+				GpuCount: 1,
+			},
+			Replicas: 1,
+		}},
 		Wait: true,
 	})
 	if err != nil {
@@ -827,9 +830,12 @@ func TestDestroyDeployment_AutoProvisioned_CascadesToInstance(t *testing.T) {
 			Id: "my-llama", Image: "vllm/vllm-openai:v0.7.0",
 			Model: "Qwen/Qwen2.5-1.5B-Instruct", EnginePort: 8000,
 		},
-		Provider:     "mock",
-		Requirements: &provisionerv1.ResourceRequirements{Class: provisioners.GPUClassSmall, GpuCount: 1},
-		Wait:         true,
+		ReplicasSpec: []*provisionerv1.ReplicaSpec{{
+			Provider:     "mock",
+			Requirements: &provisionerv1.ResourceRequirements{Class: provisioners.GPUClassSmall, GpuCount: 1},
+			Replicas:     1,
+		}},
+		Wait: true,
 	}); err != nil {
 		t.Fatalf("CreateDeployment: %v", err)
 	}
@@ -885,10 +891,13 @@ func TestDestroyInstance_AfterDeployFailure_StillTerminatesAtProvider(t *testing
 
 	// Deploy fails, but the pod exists at the provider.
 	_, _ = svc.CreateDeployment(context.Background(), &provisionerv1.CreateDeploymentRequest{
-		Deployment:   &provisionerv1.Deployment{Id: "my-llama", Image: "vllm/vllm-openai:v0.7.0", Model: "Qwen/Qwen2.5-1.5B-Instruct", EnginePort: 8000},
-		Provider:     "mock",
-		Requirements: &provisionerv1.ResourceRequirements{Class: provisioners.GPUClassSmall, GpuCount: 1},
-		Wait:         true,
+		Deployment: &provisionerv1.Deployment{Id: "my-llama", Image: "vllm/vllm-openai:v0.7.0", Model: "Qwen/Qwen2.5-1.5B-Instruct", EnginePort: 8000},
+		ReplicasSpec: []*provisionerv1.ReplicaSpec{{
+			Provider:     "mock",
+			Requirements: &provisionerv1.ResourceRequirements{Class: provisioners.GPUClassSmall, GpuCount: 1},
+			Replicas:     1,
+		}},
+		Wait: true,
 	})
 
 	// Sanity: instance now carries the leaked pod id (the fix).
@@ -1260,12 +1269,10 @@ func TestCreateDeployment_ResolveError_FailsWithInvalidArgument(t *testing.T) {
 	}
 }
 
-// TestCreateDeployment_Replicas_RejectsPinnedInstance: replicas>1
+// TestCreateDeployment_Replicas_RejectsPinnedInstance: replicas_spec
 // with a pinned deployment.instance_id is rejected -- multi-replica
 // fan-out auto-provisions, so a pinned instance is incoherent.
-// v0.2 ch7-beat3.7 (#138) replaces the old Unimplemented-for-N>1
-// rejection with this narrower validation; the actual multi-replica
-// path is exercised in fanout_test.go.
+// v0.2 ch7-beat3.10 (#143 refactor) keeps this validation narrow.
 func TestCreateDeployment_Replicas_RejectsPinnedInstance(t *testing.T) {
 	svc, _, _ := newSvcWithDeploy(t)
 	dep := okDep()
@@ -1273,25 +1280,36 @@ func TestCreateDeployment_Replicas_RejectsPinnedInstance(t *testing.T) {
 	_, err := svc.CreateDeployment(context.Background(), &provisionerv1.CreateDeploymentRequest{
 		Deployment: dep,
 		Wait:       true,
-		Replicas:   3,
+		ReplicasSpec: []*provisionerv1.ReplicaSpec{{
+			Provider:     "runpod",
+			Requirements: &provisionerv1.ResourceRequirements{Class: provisioners.GPUClassSmall},
+			Replicas:     3,
+		}},
 	})
 	if err == nil {
-		t.Fatalf("expected InvalidArgument for replicas=3 + pinned instance_id, got nil")
+		t.Fatalf("expected InvalidArgument for replicas_spec + pinned instance_id, got nil")
 	}
 	if c := status.Code(err); c != codes.InvalidArgument {
 		t.Errorf("expected InvalidArgument, got %s: %v", c, err)
 	}
 }
 
-// TestCreateDeployment_Replicas_ZeroNormalizesToOne: proto3 zero
-// value (replicas=0) on the wire normalizes to 1 -- the
-// single-instance default that matches Beat 1+2 behavior.
-func TestCreateDeployment_Replicas_ZeroNormalizesToOne(t *testing.T) {
+// TestCreateDeployment_ReplicasSpec_ZeroNormalizesToOne: a
+// replicas_spec entry with replicas=0 (proto3 zero-value) expands to
+// 1 slot -- the single-instance default that preserves Ch 6's 1:1
+// mapping (instance_id = deploy_id when totalSlots == 1).
+func TestCreateDeployment_ReplicasSpec_ZeroNormalizesToOne(t *testing.T) {
 	svc, _, _ := newSvcWithDeploy(t)
+	dep := okDep()
+	dep.InstanceId = "" // auto-provision via replicas_spec
 	resp, err := svc.CreateDeployment(context.Background(), &provisionerv1.CreateDeploymentRequest{
-		Deployment: okDep(),
+		Deployment: dep,
 		Wait:       true,
-		Replicas:   0,
+		ReplicasSpec: []*provisionerv1.ReplicaSpec{{
+			Provider:     "runpod",
+			Requirements: &provisionerv1.ResourceRequirements{Class: provisioners.GPUClassSmall},
+			// Replicas omitted -> proto3 zero-value -> normalizes to 1.
+		}},
 	})
 	if err != nil {
 		t.Fatalf("replicas=0 should succeed (normalize to 1): %v", err)

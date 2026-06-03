@@ -169,20 +169,30 @@ func runDeploymentDeploy(cmd *cobra.Command, args []string) error {
 		Deployment: dep,
 		Wait:       deployWait,
 	}
+	// v0.2 ch7-beat3.10: all auto-provision flows through
+	// replicas_spec. Translate the legacy --provider/--class/etc
+	// flags into a single-entry replicas_spec on the way down.
+	// Pinned-instance form (--instance) leaves replicas_spec empty
+	// -- placeDeployment in the service handles that case.
 	if len(replicasSpec) > 0 {
 		req.ReplicasSpec = replicasSpec
-	} else {
-		req.Provider = deployProvider
-		req.Region = deployRegion
-		req.Replicas = deployReplicas
-		req.Requirements = &provisionerv1.ResourceRequirements{
-			Class:     deployClass,
-			Sku:       deploySKU,
-			MinVramGb: deployMinVRAM,
-			MinRamGb:  deployMinRAM,
-			MinDiskGb: deployMinDisk,
-			GpuCount:  deployGPUCount,
-		}
+	} else if deployInstanceID == "" {
+		// Auto-provision: build a single instance group from the
+		// homogeneous flag set. --replicas N folds into the group's
+		// replicas count.
+		req.ReplicasSpec = []*provisionerv1.ReplicaSpec{{
+			Provider: deployProvider,
+			Region:   deployRegion,
+			Replicas: deployReplicas,
+			Requirements: &provisionerv1.ResourceRequirements{
+				Class:     deployClass,
+				Sku:       deploySKU,
+				MinVramGb: deployMinVRAM,
+				MinRamGb:  deployMinRAM,
+				MinDiskGb: deployMinDisk,
+				GpuCount:  deployGPUCount,
+			},
+		}}
 	}
 
 	if deployDryRun {

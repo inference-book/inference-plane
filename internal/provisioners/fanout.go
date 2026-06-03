@@ -15,16 +15,22 @@ import (
 )
 
 // replicaInstanceID names the per-replica Instance backing slot i of a
-// multi-replica Deployment. Beat 1+2's 1:1 mapping continues to use
-// the bare deploy id; multi-replica fan-out appends -r0, -r1, ... so
-// each replica's Instance record can be looked up independently
-// (iplane instance describe my-llama-r1 → the GPU behind slot 1).
+// multi-replica Deployment. The naming convention has two cases:
+//
+//   - totalSlots == 1: single-instance deployment -> use the deploy_id
+//     itself (no -r0 suffix). Preserves Ch 6's 1:1 mapping where
+//     `iplane instance describe my-llama` finds the GPU pod directly.
+//   - totalSlots > 1: multi-replica -> deploy_id-r0, -r1, ... so each
+//     replica's Instance record looks up independently.
 //
 // Stable naming -- no collision risk with arbitrary operator-supplied
 // instance ids because deploy ids cannot contain "-r<digits>" by
 // ValidateID's character set. Predictable for operators reading state.
-func replicaInstanceID(deployID string, i int) string {
-	return fmt.Sprintf("%s-r%d", deployID, i)
+func replicaInstanceID(deployID string, slot, totalSlots int) string {
+	if totalSlots == 1 {
+		return deployID
+	}
+	return fmt.Sprintf("%s-r%d", deployID, slot)
 }
 
 // fanOutResult carries one replica's outcome back to the aggregator.
@@ -171,10 +177,16 @@ func (s *Service) ScaleDeployment(ctx context.Context, req *provisionerv1.ScaleD
 	}
 
 	// Plan: synthesize the new slot ids. Used for both dry-run
-	// preview and the actual provision path.
+	// preview and the actual provision path. After scale the total
+	// slot count is current+len(specs); we pass that as totalSlots
+	// so the carve-out for single-instance naming doesn't apply
+	// (scale-up always results in totalSlots > 1, so new slots get
+	// the -rN form even when growing from a single-instance
+	// deployment that named slot 0 as the bare deploy_id).
+	totalSlots := current + len(specs)
 	plannedIDs := make([]string, len(specs))
 	for i := range specs {
-		plannedIDs[i] = replicaInstanceID(id, current+i)
+		plannedIDs[i] = replicaInstanceID(id, current+i, totalSlots)
 	}
 	if req.GetDryRun() {
 		return &provisionerv1.ScaleDeploymentResponse{
@@ -259,7 +271,7 @@ func (s *Service) anchorReplicaSpec(file *State, rec *provisionerv1.Deployment) 
 //     scale-up cannot make that better.)
 func (s *Service) appendReplicas(ctx context.Context, dep *provisionerv1.Deployment, deployID string, specs []*provisionerv1.ReplicaSpec, currentCount int) {
 	delta := len(specs)
-	successes, failureReasons := s.provisionSlots(ctx, specs, dep, deployID, currentCount, s.recordAppendedSlots)
+	successes, failureReasons := s.provisionSlots(ctx, specs, dep, deployID, currentCount, currentCount+len(specs), s.recordAppendedSlots)
 	s.applyScaleAggregate(deployID, delta, successes, failureReasons)
 }
 
@@ -316,7 +328,7 @@ func (s *Service) applyScaleAggregate(deployID string, delta, successes int, fai
 // CP/DP-1: this method imports nothing from internal/router or
 // internal/dataplane; it stays on the control-plane side of the
 // constraint.
-func (s *Service) createMultiReplicaDeployment(ctx context.Context, req *provisionerv1.CreateDeploymentRequest, count int) (*provisionerv1.CreateDeploymentResponse, error) {
+func (s *Service) createMultiReplicaDeployment(ctx context.Context, req *provisionerv1.CreateDeploymentRequest, specs []*provisionerv1.ReplicaSpec) (*provisionerv1.CreateDeploymentResponse, error) {
 	dep := req.GetDeployment()
 	var record *provisionerv1.Deployment
 	var alreadyExisted bool
@@ -360,17 +372,6 @@ func (s *Service) createMultiReplicaDeployment(ctx context.Context, req *provisi
 	}
 	if alreadyExisted {
 		return &provisionerv1.CreateDeploymentResponse{Deployment: record, AlreadyExisted: true}, nil
-	}
-
-	specs, specErr := resolveCreateReplicaSpecs(req)
-	if specErr != nil {
-		return nil, specErr
-	}
-	// Defensive: the caller (CreateDeployment) already gated this
-	// branch on replicas > 1 OR replicas_spec set. If specs is short
-	// here, it's a programmer error.
-	if len(specs) != count {
-		return nil, status.Errorf(codes.Internal, "spec count %d != requested replica count %d", len(specs), count)
 	}
 
 	runCtx := context.Background()
@@ -419,7 +420,7 @@ func (s *Service) createMultiReplicaDeployment(ctx context.Context, req *provisi
 // wait=true, or in a detached background goroutine when wait=false.
 func (s *Service) fanOutProvision(ctx context.Context, req *provisionerv1.CreateDeploymentRequest, deployID string, specs []*provisionerv1.ReplicaSpec) {
 	count := len(specs)
-	successes, failureReasons := s.provisionSlots(ctx, specs, req.GetDeployment(), deployID, 0, s.recordCreateSlots)
+	successes, failureReasons := s.provisionSlots(ctx, specs, req.GetDeployment(), deployID, 0, len(specs), s.recordCreateSlots)
 	s.applyAggregateState(deployID, count, successes, failureReasons)
 }
 
@@ -437,9 +438,9 @@ func (s *Service) fanOutProvision(ctx context.Context, req *provisionerv1.Create
 // provider's Deployer (resolved via deployerFor on the per-slot
 // Instance). The SSH key per-slot is loaded by provider name; a
 // keystore failure for one provider doesn't break other slots.
-func (s *Service) provisionSlots(ctx context.Context, specs []*provisionerv1.ReplicaSpec, dep *provisionerv1.Deployment, deployID string, startingSlot int, recordSlots func(deployID string, placements []*provisionerv1.Instance, startingSlot int)) (int, []string) {
+func (s *Service) provisionSlots(ctx context.Context, specs []*provisionerv1.ReplicaSpec, dep *provisionerv1.Deployment, deployID string, startingSlot, totalSlots int, recordSlots func(deployID string, placements []*provisionerv1.Instance, startingSlot int)) (int, []string) {
 	count := len(specs)
-	placements, placeErrs := s.placeSlots(ctx, specs, dep.GetImage(), deployID, startingSlot)
+	placements, placeErrs := s.placeSlots(ctx, specs, dep.GetImage(), deployID, startingSlot, totalSlots)
 	// Stash the per-slot specs on the Service so recordSlots can
 	// pick them up (the recordSlots signature is shared between
 	// create/scale variants; passing specs through would have meant
@@ -457,7 +458,7 @@ func (s *Service) provisionSlots(ctx context.Context, specs []*provisionerv1.Rep
 		slot := startingSlot + i
 		if inst == nil {
 			results <- fanOutResult{
-				instanceID: replicaInstanceID(deployID, slot),
+				instanceID: replicaInstanceID(deployID, slot, totalSlots),
 				err:        placeErrs[i],
 			}
 			continue
@@ -534,7 +535,7 @@ func (s *Service) replicaKey(providerName string) (*sshkeys.KeyPair, error) {
 // Idempotent: placeReplicaInstance reuses an existing Instance
 // record if one already exists at the synthesized id (re-runs of a
 // failed CreateDeployment don't double-rent).
-func (s *Service) placeSlots(ctx context.Context, specs []*provisionerv1.ReplicaSpec, baseImage, deployID string, startingSlot int) ([]*provisionerv1.Instance, []error) {
+func (s *Service) placeSlots(ctx context.Context, specs []*provisionerv1.ReplicaSpec, baseImage, deployID string, startingSlot, totalSlots int) ([]*provisionerv1.Instance, []error) {
 	count := len(specs)
 	placements := make([]*provisionerv1.Instance, count)
 	placeErrs := make([]error, count)
@@ -543,7 +544,7 @@ func (s *Service) placeSlots(ctx context.Context, specs []*provisionerv1.Replica
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			inst, err := s.placeReplicaInstance(ctx, specs[i], baseImage, deployID, startingSlot+i)
+			inst, err := s.placeReplicaInstance(ctx, specs[i], baseImage, deployID, startingSlot+i, totalSlots)
 			if err != nil {
 				placeErrs[i] = err
 				return
@@ -580,6 +581,16 @@ func (s *Service) recordCreateSlots(deployID string, placements []*provisionerv1
 			if inst != nil {
 				rec.InstanceIds[i] = inst.GetId()
 			}
+		}
+		// Single-instance carve-out: preserve Ch 6's 1:1 mapping
+		// by also populating the singular dep.instance_id for the
+		// count==1 case. The slot's id is the deploy_id itself
+		// (per replicaInstanceID's totalSlots==1 rule), so this is
+		// just mirroring the field. Multi-replica leaves
+		// dep.instance_id empty; readers consult instance_ids[]
+		// via EffectiveInstanceIDs.
+		if count == 1 && placements[0] != nil {
+			rec.InstanceId = placements[0].GetId()
 		}
 		// Stamp replica_specs in lockstep with the other arrays.
 		// Each slot's spec is the operator's intent for that slot
@@ -631,23 +642,6 @@ func (s *Service) recordAppendedSlots(deployID string, placements []*provisioner
 		}
 		return nil
 	})
-}
-
-// loadFanOutKey returns the SSH keypair shared across all N replicas
-// (one provider per fan-out in this PR; heterogeneous-provider key
-// loading per slot is #143's job). Returns nil if the key store is
-// unconfigured or EnsureKeyPair fails; the caller treats nil as
-// "every replica fails with a clear error" rather than aborting the
-// whole fan-out.
-func (s *Service) loadFanOutKey(req *provisionerv1.CreateDeploymentRequest) *sshkeys.KeyPair {
-	if s.keyStore == nil {
-		return nil
-	}
-	key, err := s.keyStore.EnsureKeyPair(s.operatorID, req.GetProvider())
-	if err != nil {
-		return nil
-	}
-	return key
 }
 
 // launchReplica runs one replica's executor in a goroutine and emits
@@ -823,7 +817,7 @@ func (s *Service) readSlotEndpoint(deployID string, slot int) string {
 // Idempotent: if an Instance already exists at the synthesized id,
 // reuse it (re-runs of a partially-failed CreateDeployment don't
 // double-rent the slot).
-func (s *Service) placeReplicaInstance(_ context.Context, spec *provisionerv1.ReplicaSpec, baseImage, deployID string, slot int) (*provisionerv1.Instance, error) {
+func (s *Service) placeReplicaInstance(_ context.Context, spec *provisionerv1.ReplicaSpec, baseImage, deployID string, slot, totalSlots int) (*provisionerv1.Instance, error) {
 	if spec == nil {
 		return nil, status.Error(codes.InvalidArgument, "replica spec is required")
 	}
@@ -839,7 +833,7 @@ func (s *Service) placeReplicaInstance(_ context.Context, spec *provisionerv1.Re
 		return nil, status.Errorf(codes.InvalidArgument, "replica slot r%d: unknown provider %q", slot, providerName)
 	}
 
-	instanceID := replicaInstanceID(deployID, slot)
+	instanceID := replicaInstanceID(deployID, slot, totalSlots)
 	if f, err := s.store.Read(); err == nil {
 		if existing, ok := f.Instances[instanceID]; ok {
 			return existing, nil
@@ -862,39 +856,59 @@ func (s *Service) placeReplicaInstance(_ context.Context, spec *provisionerv1.Re
 	return inst, nil
 }
 
-// resolveCreateReplicaSpecs converts a CreateDeploymentRequest into a
-// list of per-slot ReplicaSpecs. Returns:
+// resolveCreateReplicaSpecs expands a CreateDeploymentRequest's
+// replicas_spec from the compressed instance-group form (each entry
+// carries replicas=N) into the per-slot form the fan-out machinery
+// uses (one ReplicaSpec per slot, replicas=1 implicit). v0.2
+// ch7-beat3.10 (#143 + refactor).
 //
-//   - replicas_spec set -> the list verbatim (heterogeneous).
-//   - replicas_spec empty + replicas > 0 -> N copies of the singular
-//     (provider, region, requirements) triple (homogeneous).
+// Example:
 //
-// The two forms are mutually exclusive: if both are set, returns
-// InvalidArgument. The single ReplicaSpec built from homogeneous
-// fields is the *degenerate* of the heterogeneous case -- the rest
-// of the fan-out machinery (placeReplicaInstance, provisionSlots)
-// cares only about the per-slot specs, not which form filled them.
+//	request: [{runpod, small, replicas=3}, {vast, medium, replicas=1}]
+//	output:  [{runpod,small,1}, {runpod,small,1}, {runpod,small,1},
+//	          {vast,medium,1}]
+//
+// Validation:
+//   - Each entry must name a provider and requirements (the per-slot
+//     placeReplicaInstance enforces this further; we surface a clearer
+//     error here for empty entries).
+//   - replicas=0 normalizes to 1 (proto3 zero-value semantics).
+//   - replicas<0 is invalid.
+//   - len(replicas_spec)==0 returns nil so callers can branch on
+//     "single-instance via dep.instance_id" vs "auto-provision via
+//     replicas_spec".
 func resolveCreateReplicaSpecs(req *provisionerv1.CreateDeploymentRequest) ([]*provisionerv1.ReplicaSpec, error) {
-	specs := req.GetReplicasSpec()
-	replicas := req.GetReplicas()
-	if replicas == 0 {
-		replicas = 1
+	groups := req.GetReplicasSpec()
+	if len(groups) == 0 {
+		return nil, nil
 	}
-	if len(specs) > 0 {
-		if req.GetReplicas() > 1 || req.GetProvider() != "" || req.GetRequirements() != nil {
-			return nil, status.Error(codes.InvalidArgument, "replicas_spec is mutually exclusive with the singular provider / requirements / replicas fields -- use one form per call")
+	var out []*provisionerv1.ReplicaSpec
+	for i, g := range groups {
+		if g == nil {
+			return nil, status.Errorf(codes.InvalidArgument, "replicas_spec entry %d is nil", i)
 		}
-		return specs, nil
-	}
-	// Homogeneous: build N copies of the singular spec.
-	homo := &provisionerv1.ReplicaSpec{
-		Provider:     req.GetProvider(),
-		Region:       req.GetRegion(),
-		Requirements: req.GetRequirements(),
-	}
-	out := make([]*provisionerv1.ReplicaSpec, replicas)
-	for i := range out {
-		out[i] = homo
+		count := g.GetReplicas()
+		if count == 0 {
+			count = 1 // proto3 zero-value normalization
+		}
+		if count < 0 {
+			return nil, status.Errorf(codes.InvalidArgument, "replicas_spec entry %d has replicas=%d (must be >= 0)", i, count)
+		}
+		// Expand: emit `count` entries, each with replicas=1 implicit.
+		// Share the spec pointer across the expanded entries -- the
+		// per-slot view is read-only after expansion (place + executor
+		// don't mutate). One allocation per expanded slot for the
+		// inner struct so persisted Deployment.replica_specs entries
+		// can be inspected independently in describe / debug output
+		// without entries aliasing each other.
+		for range int(count) {
+			out = append(out, &provisionerv1.ReplicaSpec{
+				Provider:     g.GetProvider(),
+				Region:       g.GetRegion(),
+				Requirements: g.GetRequirements(),
+				// replicas left zero == 1 on the persisted form.
+			})
+		}
 	}
 	return out, nil
 }

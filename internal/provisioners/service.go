@@ -852,37 +852,26 @@ func (s *Service) CreateDeployment(ctx context.Context, req *provisionerv1.Creat
 	if dep.GetModel() == "" {
 		return nil, status.Error(codes.InvalidArgument, "deployment.model is required")
 	}
-	// v0.2 ch7-beat3.2 / #84: --replicas N plumbed through. v0.2
-	// ch7-beat3.7 (#138) implemented homogeneous fan-out. v0.2
-	// ch7-beat3.9 (#143) extends with heterogeneous: replicas_spec
-	// names per-slot (provider, class) so the same Deployment can
-	// span providers (1 runpod + 1 vast + 1 lambda) -- iplane's
-	// load-bearing differentiator from k8s / Auto Scaling Groups.
+	// v0.2 ch7-beat3.10 (#143 + refactor): all auto-provision flows
+	// through replicas_spec. Each entry is one instance group of N
+	// units (replicas=N field on each entry). The "single instance"
+	// case is replicas_spec = [{provider, requirements, replicas=1}];
+	// "3 small RunPods" is [{runpod, small, replicas=3}]; "1 runpod +
+	// 1 vast" is [{runpod, small, 1}, {vast, medium, 1}].
 	//
-	// Validation:
-	//   - replicas + replicas_spec mutually exclusive (caller picks
-	//     one form per call).
-	//   - replicas < 0: invalid.
-	//   - replicas_spec entries with empty provider / nil
-	//     requirements: invalid (per-slot, surfaced by
-	//     resolveCreateReplicaSpecs / placeReplicaInstance).
-	//   - Multi-replica + operator-supplied instance_id /
-	//     instance_ids: fan-out always auto-provisions; pinned
-	//     instances are incoherent.
-	replicas := req.GetReplicas()
-	hetero := req.GetReplicasSpec()
-	if replicas < 0 {
-		return nil, status.Errorf(codes.InvalidArgument, "replicas must be >= 0 (got %d)", replicas)
+	// The pre-existing "deploy onto a pinned instance" path remains:
+	// dep.instance_id set + replicas_spec empty -> dispatch to
+	// placeDeployment below. Mutually exclusive with replicas_spec.
+	specs, specsErr := resolveCreateReplicaSpecs(req)
+	if specsErr != nil {
+		return nil, specsErr
 	}
-	multiReplica := len(hetero) > 0 || replicas > 1
+	multiReplica := len(specs) > 0
 	if multiReplica && len(dep.GetInstanceIds()) > 0 {
-		return nil, status.Errorf(codes.InvalidArgument, "deployment.instance_ids cannot be combined with multi-replica deployments; fan-out synthesizes ids deterministically")
+		return nil, status.Errorf(codes.InvalidArgument, "deployment.instance_ids cannot be combined with replicas_spec; fan-out synthesizes ids deterministically")
 	}
 	if multiReplica && dep.GetInstanceId() != "" {
-		return nil, status.Errorf(codes.InvalidArgument, "deployment.instance_id cannot be combined with multi-replica deployments; fan-out always auto-provisions")
-	}
-	if replicas == 0 && len(hetero) == 0 {
-		replicas = 1 // proto3 zero-value -> single-instance default
+		return nil, status.Errorf(codes.InvalidArgument, "deployment.instance_id cannot be combined with replicas_spec; fan-out always auto-provisions")
 	}
 
 	// Pre-flight: resolve the model spec through the configured
@@ -910,18 +899,12 @@ func (s *Service) CreateDeployment(ctx context.Context, req *provisionerv1.Creat
 		dep.Env = merged
 	}
 
-	// v0.2 ch7-beat3.7 (#138): multi-replica path. The single-instance
-	// flow below assumes a 1:1 deploy->instance mapping (placeDeployment
-	// returns one Instance). Multi-replica fan-out synthesizes N
-	// per-replica Instances inside fanOutProvision and never touches
-	// the singular dep.instance_id, so we branch before placeDeployment
-	// and run a parallel persist + fan-out path.
+	// v0.2 ch7-beat3.10 (#143 + refactor): auto-provision flows
+	// through replicas_spec. createMultiReplicaDeployment branches
+	// off here so the single-instance pinned path below stays
+	// unchanged.
 	if multiReplica {
-		count := int(replicas)
-		if len(hetero) > 0 {
-			count = len(hetero)
-		}
-		return s.createMultiReplicaDeployment(ctx, req, count)
+		return s.createMultiReplicaDeployment(ctx, req, specs)
 	}
 
 	// Resolve the target instance: place the deployment. v0.1's
@@ -1084,14 +1067,26 @@ func (s *Service) finalizeInstanceAfterDeploy(ctx context.Context, inst *provisi
 		return
 	}
 	d, ok := file.Deployments[depID]
-	if !ok || d.GetState() != provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING {
+	if !ok {
 		return
 	}
 	cur, ok := file.Instances[inst.GetId()]
 	if !ok || cur.GetState() == provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE {
 		return
 	}
-	podID := d.GetContainerId()
+	// v0.2 ch7-beat3.10 (#143 refactor): the pod id lives on the
+	// per-replica Instance (stamped by patchDeploymentSlot's
+	// container_id handling), not on the Deployment singular -- the
+	// multi-replica path doesn't populate dep.container_id at all.
+	// Fall back to the legacy dep.container_id for single-instance
+	// records that predate the refactor.
+	podID := cur.GetProviderId()
+	if podID == "" {
+		podID = d.GetContainerId()
+	}
+	if podID == "" {
+		return
+	}
 	provider, ok := s.providers[cur.GetProvider()]
 	if !ok {
 		return
@@ -1157,56 +1152,25 @@ func (s *Service) providerAsDeployer(inst *provisionerv1.Instance) (Deployer, bo
 // resolve the SKU and spawn the engine pod. The instance shares the
 // deployment id (for v0.1's 1:1 mapping they are two views -- GPU vs
 // model -- of the same pod).
-func (s *Service) placeDeployment(ctx context.Context, req *provisionerv1.CreateDeploymentRequest) (*provisionerv1.Instance, error) {
+func (s *Service) placeDeployment(_ context.Context, req *provisionerv1.CreateDeploymentRequest) (*provisionerv1.Instance, error) {
 	dep := req.GetDeployment()
 	file, err := s.store.Read()
 	if err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 
-	// Explicit placement: deploy onto a named, existing instance.
-	if dep.GetInstanceId() != "" {
-		inst, ok := file.Instances[dep.GetInstanceId()]
-		if !ok {
-			return nil, status.Errorf(codes.InvalidArgument, "instance %q does not exist", dep.GetInstanceId())
-		}
-		return inst, nil
+	// v0.2 ch7-beat3.10 (#143 + refactor): the only path through
+	// placeDeployment is the pinned-instance form (dep.instance_id
+	// set). Auto-provisioning flows through replicas_spec /
+	// createMultiReplicaDeployment now -- the single-entry
+	// replicas_spec=[{provider, requirements, replicas=1}] form
+	// replaces the old "no instance_id, auto-provision" shortcut.
+	if dep.GetInstanceId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "deployment requires either dep.instance_id (pinned) or replicas_spec (auto-provision)")
 	}
-
-	// Auto-provision: synthesize a fresh instance for this deployment.
-	reqs := req.GetRequirements()
-	if reqs == nil {
-		return nil, status.Error(codes.InvalidArgument, "deployment without an explicit instance requires resource requirements (--class, --min-vram-gb, or --sku)")
-	}
-	providerName := req.GetProvider()
-	if providerName == "" {
-		return nil, status.Error(codes.InvalidArgument, "deployment without an explicit instance requires a provider")
-	}
-	if _, ok := s.providers[providerName]; !ok {
-		return nil, status.Errorf(codes.InvalidArgument, "unknown provider %q", providerName)
-	}
-
-	// The instance shares the deployment id (1:1 in v0.1). Its Spec
-	// carries the engine image as base_image + the requirements, so
-	// the Deployer resolves the SKU and runs the engine image as the
-	// pod. If a same-id instance already exists (idempotent re-deploy),
-	// reuse it.
-	if existing, ok := file.Instances[dep.GetId()]; ok {
-		return existing, nil
-	}
-	spec := &provisionerv1.Spec{
-		Id:           dep.GetId(),
-		Provider:     providerName,
-		Region:       req.GetRegion(),
-		BaseImage:    dep.GetImage(),
-		Requirements: reqs,
-	}
-	if err := ValidateAndExpandRequirements(spec); err != nil {
-		return nil, status.Error(codes.InvalidArgument, err.Error())
-	}
-	inst := newPendingInstance(spec, providerName, s.clock())
-	if err := s.patchRecord(inst.GetId(), inst); err != nil {
-		return nil, status.Errorf(codes.Internal, "record placed instance: %v", err)
+	inst, ok := file.Instances[dep.GetInstanceId()]
+	if !ok {
+		return nil, status.Errorf(codes.InvalidArgument, "instance %q does not exist", dep.GetInstanceId())
 	}
 	return inst, nil
 }
