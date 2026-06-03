@@ -226,15 +226,18 @@ func checkProviderAvailable(name string) error {
 	if instanceServiceURL != "" {
 		return nil // remote server decides
 	}
-	switch name {
-	case provisioners.ProviderLocal:
+	if name == provisioners.ProviderLocal {
 		return nil
-	case provisioners.ProviderRunPod:
-		if os.Getenv("RUNPOD_API_KEY") == "" {
-			return fmt.Errorf("provider runpod requires RUNPOD_API_KEY in env (or pass --service-url to forward to a running iplane serve)")
+	}
+	// Every other supported provider has a required API key env. The
+	// providerAPIKeyEnv mapping is the source of truth -- providers
+	// added to that map automatically become accepted here. Unknown
+	// providers fall through to the explicit-error branch.
+	if keyEnv := providerAPIKeyEnv(name); keyEnv != "" {
+		if err := ensureProviderAPIKey(name); err != nil {
+			return err
 		}
 		return nil
-	default:
-		return fmt.Errorf("unknown provider %q (supported: local, runpod)", name)
 	}
+	return fmt.Errorf("unknown provider %q (supported: local, runpod, vast, lambdalabs)", name)
 }

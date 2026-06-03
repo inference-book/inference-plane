@@ -128,6 +128,15 @@ func runUp(cmd *cobra.Command, _ []string) error {
 			"  (no IPLANE_OTEL_ENDPOINT set; engine will run without telemetry. Pass --otel-endpoint, set IPLANE_OTEL_ENDPOINT, or --no-telemetry to silence this.)")
 	}
 
+	// iplane up is RunPod-only in v0.2 because the in-process Service
+	// it constructs at line ~402 hardcodes runpod.New(runpod.NewClient).
+	// Operators who want vast / lambdalabs use `iplane deployment
+	// deploy --provider <name>` against a running iplane serve; that
+	// path goes through buildLocalService which knows about every
+	// registered provider.
+	if upProvider != provisioners.ProviderRunPod {
+		return fmt.Errorf("iplane up supports --provider runpod only in v0.2 (got %q); for other providers, run `iplane serve` and use `iplane deployment deploy --provider %s`", upProvider, upProvider)
+	}
 	apiKey := os.Getenv("RUNPOD_API_KEY")
 	if apiKey == "" {
 		return fmt.Errorf("RUNPOD_API_KEY is required (iplane up provisions a real RunPod pod)")
@@ -615,8 +624,8 @@ func init() {
 	f := upCmd.Flags()
 	f.StringVar(&upModel, "model", "",
 		`HF model id, e.g. Qwen/Qwen2.5-1.5B-Instruct (required)`)
-	f.StringVar(&upProvider, "provider", provisioners.ProviderRunPod,
-		`provider to provision on (only runpod is deployable in v0.1)`)
+	f.StringVar(&upProvider, "provider", defaultProvider(provisioners.ProviderRunPod),
+		`provider to provision on, e.g. runpod (default: `+EnvProvider+` env, else runpod)`)
 	f.StringVar(&upClass, "class", provisioners.GPUClassSmall,
 		`gpu class: small | medium | large | xlarge`)
 	f.StringVar(&upImage, "image", upDefaultImage,
