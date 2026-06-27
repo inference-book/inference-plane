@@ -52,7 +52,6 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/panyam/demokit"
-	"github.com/panyam/demokit/tui"
 
 	"github.com/inference-book/inference-plane/examples/common"
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
@@ -539,9 +538,7 @@ func main() {
 		"Re-runnable: bring up `iplane serve` once and run this demo again; the detect-and-reuse step on `deploy` will skip provisioning. Demos 05 and 06 (Beat 2 and Beat 3) attach to the same daemon and the same deployment.",
 	)
 
-	if demokit.IsTUI() {
-		demo.WithRenderer(tui.New())
-	}
+	common.SetupRenderer(demo)
 
 	demo.Execute()
 }

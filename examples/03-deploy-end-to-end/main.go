@@ -40,7 +40,6 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/panyam/demokit"
-	"github.com/panyam/demokit/tui"
 
 	"github.com/inference-book/inference-plane/examples/common"
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
@@ -540,9 +539,7 @@ func runDemo() {
 		"The instance + deployment records remain in the state file as TERMINATED -- an audit trail of what ran. Re-running provisions a fresh pod (each run gets a new timestamped id).",
 	)
 
-	if demokit.IsTUI() {
-		demo.WithRenderer(tui.New())
-	}
+	common.SetupRenderer(demo)
 
 	demo.Execute()
 }

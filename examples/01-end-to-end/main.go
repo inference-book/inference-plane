@@ -35,8 +35,8 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/panyam/demokit"
-	"github.com/panyam/demokit/tui"
 
+	"github.com/inference-book/inference-plane/examples/common"
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
 	"github.com/inference-book/inference-plane/gen/go/provisioner/v1/provisionerv1connect"
 	"github.com/inference-book/inference-plane/internal/provisioners"
@@ -354,9 +354,7 @@ func runDemo() {
 		"Re-running this demo with the same id reuses the terminated record's slot (id is reusable; idempotency adoption only fires for pending/active records).",
 	)
 
-	if demokit.IsTUI() {
-		demo.WithRenderer(tui.New())
-	}
+	common.SetupRenderer(demo)
 
 	demo.Execute()
 }

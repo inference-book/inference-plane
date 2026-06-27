@@ -30,8 +30,8 @@ import (
 	"syscall"
 
 	"github.com/panyam/demokit"
-	"github.com/panyam/demokit/tui"
 
+	"github.com/inference-book/inference-plane/examples/common"
 	"github.com/inference-book/inference-plane/internal/provisioners"
 )
 
@@ -286,9 +286,7 @@ func main() {
 		"Two transports exercise the same Service contract: this walkthrough drives the CLI; 01-end-to-end drives the gRPC client. Operators pick the one that fits their workflow.",
 	)
 
-	if demokit.IsTUI() {
-		demo.WithRenderer(tui.New())
-	}
+	common.SetupRenderer(demo)
 
 	demo.Execute()
 }
