@@ -1,4 +1,4 @@
-.PHONY: build up down pull smoke load logs dashboards clean check-pins help install
+.PHONY: build up down pull smoke load logs dashboards clean check-pins help install examples
 
 PKG    := ./cmd/iplane
 
@@ -49,6 +49,9 @@ load: ## Generate synthetic traffic against the running stack (safe with mock ba
 
 test: ## Run unit tests (no live stack needed)
 	go test ./...
+
+examples: ## Build the demokit walkthroughs (separate module under examples/; keeps demokit out of the control-plane deps)
+	cd examples && go build ./...
 
 # ── Inspection ──────────────────────────────────────────────────────────
 logs: ## Tail logs from all services
