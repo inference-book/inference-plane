@@ -80,6 +80,11 @@ cd examples/04-router-in-path
 make demo
 ```
 
+`make demo` drives a prebuilt `iplane` (the same binary terminal 2
+runs); it does not compile the control plane. Resolution order is
+`--bin`, then `$IPLANE_BIN`, then the repo's `bin/iplane`, then `iplane`
+on `$PATH`. If none resolve it fails fast with a `make build` hint.
+
 The walkthrough is interactive at two steps: "Choose a model size"
 (default 1.5B) and "Leave the deployment running, or destroy it now"
 (default: leave). Press Enter through both for the cheapest path.

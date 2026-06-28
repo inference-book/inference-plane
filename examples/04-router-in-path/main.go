@@ -43,8 +43,6 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -88,7 +86,7 @@ func main() {
 	region := flag.String("region", "", "region override (default: unpinned)")
 	loadRPS := flag.Float64("load-rps", 5.0, "iplane load --rps to fire after the deployment is RUNNING")
 	loadDuration := flag.Duration("load-duration", 30*time.Second, "iplane load --duration")
-	binPath := flag.String("bin", "", "path to a prebuilt iplane binary; built from source if empty")
+	binPath := flag.String("bin", "", "path to a prebuilt iplane binary; falls back to $IPLANE_BIN, bin/iplane, then $PATH")
 
 	flag.CommandLine.Parse(demokit.FilterArgs(os.Args[1:],
 		demokit.ValueFlag("--record"),
@@ -104,17 +102,13 @@ func main() {
 		log.Fatal(err)
 	}
 
-	// Build the CLI binary so iplane load drives the local checkout
-	// (not whatever stale iplane sits on $PATH).
-	iplane := *binPath
-	if iplane == "" {
-		built, err := buildIplane()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "build iplane: %v\n", err)
-			os.Exit(1)
-		}
-		iplane = built
-		defer os.RemoveAll(filepath.Dir(iplane))
+	// Locate a prebuilt iplane so `iplane load` drives this checkout. The
+	// demo assumes one exists (build it with `make build`/`make install`);
+	// it no longer compiles the control plane itself. See ResolveIplane
+	// for the --bin / IPLANE_BIN / bin/iplane / PATH resolution order.
+	iplane, err := common.ResolveIplane(*binPath)
+	if err != nil {
+		log.Fatal(err)
 	}
 
 	provisionerClient := provisionerv1connect.NewProvisionerServiceClient(http.DefaultClient, *url)
@@ -599,32 +593,6 @@ func abortDemo(cleanup func(), format string, args ...any) *demokit.StepResult {
 	}
 	os.Exit(1)
 	return nil
-}
-
-// buildIplane compiles the local checkout's iplane binary into a temp dir.
-// Resolves the cmd/iplane path from the source file's location via
-// runtime.Caller so the build works regardless of the operator's cwd
-// (running via `make demo`, `go run ./examples/04-router-in-path`, or
-// directly via the built binary all work).
-func buildIplane() (string, error) {
-	_, srcFile, _, ok := runtime.Caller(0)
-	if !ok {
-		return "", fmt.Errorf("runtime.Caller failed; cannot locate cmd/iplane")
-	}
-	cmdDir := filepath.Join(filepath.Dir(srcFile), "..", "..", "cmd", "iplane")
-	dir, err := os.MkdirTemp("", "iplane-router-example-*")
-	if err != nil {
-		return "", err
-	}
-	bin := filepath.Join(dir, "iplane")
-	cmd := exec.Command("go", "build", "-o", bin, cmdDir)
-	cmd.Stdout = os.Stderr
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		os.RemoveAll(dir)
-		return "", fmt.Errorf("go build: %w", err)
-	}
-	return bin, nil
 }
 
 // indentBlock prefixes every line with two spaces so embedded command
