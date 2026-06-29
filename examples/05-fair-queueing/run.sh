@@ -20,8 +20,8 @@
 #     (See deploy/config.yaml for the full template.)
 #   - A RUNNING deployment exists. Easiest: run examples/04-router-in-path
 #     first (it leaves the deployment alive by default).
-#   - Local observability stack (`make up`) so the Grafana panels
-#     populate.
+#   - Local observability stack (`make infra-up`) so the Grafana
+#     panels populate.
 #
 # Usage:
 #   bash examples/05-fair-queueing/run.sh <deployment-id>
@@ -67,10 +67,28 @@ if ! curl -fsS -o /dev/null "${SERVICE_URL}/healthz" 2>/dev/null; then
   fi
 fi
 
+# Resolve the deployment's model from the daemon. `iplane load --model`
+# is required (no default); the engine validates that the body's `model`
+# field matches what the pod is serving, so we query the source of truth
+# instead of asking the operator to retype it.
+if ! command -v jq >/dev/null 2>&1; then
+  echo "ERROR: jq is required to resolve the deployment model. brew install jq (or apt-get install jq)." >&2
+  exit 1
+fi
+DEMO_MODEL="$("${IPLANE}" deployment describe "${DEPLOY_ID}" \
+  --service-url "${SERVICE_URL}" --output json 2>/dev/null \
+  | jq -r '.model // empty')"
+if [[ -z "${DEMO_MODEL}" ]]; then
+  echo "ERROR: could not resolve model for deployment ${DEPLOY_ID}; is the id correct?" >&2
+  echo "  hint: iplane deployment list --service-url ${SERVICE_URL}" >&2
+  exit 1
+fi
+
 echo "==============================================================="
 echo "Demo 05 — fair-queueing (interactive cuts ahead of batch)"
 echo "==============================================================="
 echo "  deployment    : ${DEPLOY_ID}"
+echo "  model         : ${DEMO_MODEL}"
 echo "  service URL   : ${SERVICE_URL}"
 echo "  duration      : ${DURATION}"
 echo "  alice (int)   : ${INTERACTIVE_RPS} rps, priority=interactive"
@@ -100,6 +118,7 @@ trap 'rm -f "${alice_log}" "${bob_log}"' EXIT
 "${IPLANE}" load \
   --target "${DEPLOY_ID}" \
   --service-url "${SERVICE_URL}" \
+  --model "${DEMO_MODEL}" \
   --rps "${INTERACTIVE_RPS}" \
   --duration "${DURATION}" \
   --priority interactive \
@@ -113,6 +132,7 @@ alice_pid=$!
 "${IPLANE}" load \
   --target "${DEPLOY_ID}" \
   --service-url "${SERVICE_URL}" \
+  --model "${DEMO_MODEL}" \
   --rps "${BATCH_RPS}" \
   --duration "${DURATION}" \
   --priority batch \

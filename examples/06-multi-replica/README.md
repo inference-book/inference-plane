@@ -53,8 +53,8 @@ are in `cmd/iplane/cmd/deployment_scale.go` (Beat 3.4, #86).
    provisions a single-replica deployment and leaves it alive by
    default. Pass that deployment's ID into this demo's `run.sh`.
 
-3. **Local observability stack** (`make up`) so the Grafana panels
-   populate. Not required for the script to run; only for the
+3. **Local observability stack** (`make infra-up`) so the Grafana
+   panels populate. Not required for the script to run; only for the
    visual side of the story.
 
 ## Run

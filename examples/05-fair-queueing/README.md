@@ -57,7 +57,7 @@ sequenceDiagram
 
 2. **A RUNNING deployment.** The easiest way: run [`examples/04-router-in-path`](../04-router-in-path/) first — it leaves a deployment alive by default (its final step prompts the operator to keep it for demos 05/06).
 
-3. **Local observability stack** (`make up`) so the Grafana panels populate.
+3. **Local observability stack** (`make infra-up`) so the Grafana panels populate.
 
 ## Run
 
