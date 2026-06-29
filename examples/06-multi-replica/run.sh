@@ -102,18 +102,31 @@ case "${DEMO_STATE}" in
     ;;
 esac
 
-# Demo 06 scales 1 -> 2 -> 3. Scale-down is unimplemented in v0.2 (see
-# issue 145), so a re-run against a deployment that's already at >1
-# replicas would hit the unimplemented error mid-run. Detect this up
-# front and bail with a clear recovery hint.
+# Demo 06 sweeps from the deployment's CURRENT replica count up to
+# MAX_REPLICAS (3). Scale-down is unimplemented in v0.2 (issue 145),
+# so we can't reset back to 1 between runs. Instead, the demo adapts:
+# whichever counts are already at-or-above current, we just snapshot;
+# whichever are above, we scale up + wait_healthy + snapshot.
+#
+#   current=1 -> full sweep: snapshot(1), scale-snapshot(2), scale-snapshot(3)
+#   current=2 -> partial:    snapshot(2), scale-snapshot(3)
+#   current=3 -> single:     snapshot(3)
+#
+# This means a rerun against an already-scaled deployment refreshes
+# the snapshot of the current count without paying the destroy +
+# reprovision cost. The chapter narrative (plateau-vs-linear shape)
+# is best with the full sweep from 1; partial sweeps are a fine
+# "what does my cluster look like right now?" diagnostic.
 CURRENT_REPLICAS=$(echo "${DESC}" | jq -r '(.instance_ids // []) | length')
-if [[ "${CURRENT_REPLICAS}" -gt 1 ]]; then
-  echo "ERROR: deployment ${DEPLOY_ID} is currently at ${CURRENT_REPLICAS} replicas." >&2
-  echo "  Demo 06 starts from replicas=1 and scales up to 3. Scale-down is not yet" >&2
-  echo "  implemented (#145), so we cannot reset to 1 in-place. Recover by destroying" >&2
-  echo "  this deployment and rerunning examples/04-router-in-path to get a fresh one:" >&2
-  echo "    iplane deployment destroy ${DEPLOY_ID} --service-url ${SERVICE_URL}" >&2
-  echo "    cd examples/04-router-in-path && make demo" >&2
+MAX_REPLICAS=3
+if [[ "${CURRENT_REPLICAS}" -gt "${MAX_REPLICAS}" ]]; then
+  echo "ERROR: deployment ${DEPLOY_ID} is at ${CURRENT_REPLICAS} replicas (>${MAX_REPLICAS})." >&2
+  echo "  Demo 06 sweeps up to ${MAX_REPLICAS}; current count exceeds the demo's range." >&2
+  echo "  Reprovision via examples/04-router-in-path to get a 1-replica baseline." >&2
+  exit 1
+fi
+if [[ "${CURRENT_REPLICAS}" -lt 1 ]]; then
+  echo "ERROR: deployment ${DEPLOY_ID} has no instances (state inconsistent)." >&2
   exit 1
 fi
 
@@ -225,35 +238,51 @@ snapshot() {
   printf "  actual_rps=%.1f  target_rps=%.1f  ratio=%s  p95=%sms\n" "${actual}" "${target}" "${ratio}" "${p95}"
 }
 
-# === Baseline (replicas=1) ===
-echo "[1/3] snapshot @ replicas=1"
-snapshot 1 "${snapshot_log_1}"
+# Adaptive sweep from CURRENT_REPLICAS up to MAX_REPLICAS. For each
+# count we either snapshot (current count) or scale-then-snapshot
+# (higher counts). Counts below current are skipped -- scale-down is
+# unimplemented, and the chapter narrative tolerates a partial sweep
+# (the "scale UP from N" story is still legible without the prefix).
+SNAPSHOT_COUNTS=()
+for n in 1 2 "${MAX_REPLICAS}"; do
+  if [[ "${n}" -ge "${CURRENT_REPLICAS}" && "${n}" -le "${MAX_REPLICAS}" ]]; then
+    SNAPSHOT_COUNTS+=("${n}")
+  fi
+done
+# De-dup (MAX_REPLICAS=3 appears twice when current is 3 because the
+# list literal is "1 2 3").
+SNAPSHOT_COUNTS=($(printf '%s\n' "${SNAPSHOT_COUNTS[@]}" | awk '!seen[$0]++'))
+TOTAL_SNAPS="${#SNAPSHOT_COUNTS[@]}"
+
+echo "Sweep plan: current=${CURRENT_REPLICAS} -> ${SNAPSHOT_COUNTS[*]} (${TOTAL_SNAPS} snapshots)"
+if [[ "${CURRENT_REPLICAS}" -gt 1 ]]; then
+  echo "  (deployment already at ${CURRENT_REPLICAS}; skipping the lower-count baseline)"
+  echo "  (scale-down is unimplemented per issue 145; rerun examples/04 to reset to 1)"
+fi
 echo ""
 
-# === Scale to 2, poll healthy, snapshot ===
-echo "[2/3] scaling to 2 replicas ..."
-"${IPLANE}" deployment scale "${DEPLOY_ID}" 2 \
-  --service-url "${SERVICE_URL}" --wait
-wait_healthy 2
-echo "[2/3] snapshot @ replicas=2"
-snapshot 2 "${snapshot_log_2}"
-echo ""
-
-# === Scale to 3, poll healthy, snapshot ===
-echo "[3/3] scaling to 3 replicas ..."
-"${IPLANE}" deployment scale "${DEPLOY_ID}" 3 \
-  --service-url "${SERVICE_URL}" --wait
-wait_healthy 3
-echo "[3/3] snapshot @ replicas=3"
-snapshot 3 "${snapshot_log_3}"
-echo ""
+snap_idx=0
+for n in "${SNAPSHOT_COUNTS[@]}"; do
+  snap_idx=$((snap_idx + 1))
+  if [[ "${n}" -gt "${CURRENT_REPLICAS}" ]]; then
+    echo "[${snap_idx}/${TOTAL_SNAPS}] scaling to ${n} replicas ..."
+    "${IPLANE}" deployment scale "${DEPLOY_ID}" "${n}" \
+      --service-url "${SERVICE_URL}" --wait
+    wait_healthy "${n}"
+    CURRENT_REPLICAS="${n}"
+  fi
+  echo "[${snap_idx}/${TOTAL_SNAPS}] snapshot @ replicas=${n}"
+  log_var="snapshot_log_${n}"
+  snapshot "${n}" "${!log_var}"
+  echo ""
+done
 
 # === Summary table + saturation hint ===
 echo "==============================================================="
 echo "Throughput summary"
 echo "==============================================================="
 printf "%-10s %12s %12s %10s %14s\n" "Replicas" "actual_rps" "target_rps" "ratio" "latency_p95ms"
-for n in 1 2 3; do
+for n in "${SNAPSHOT_COUNTS[@]}"; do
   log_var="snapshot_log_${n}"
   log="${!log_var}"
   # Same JSON-line grep as the inline snapshot parse: load's banner
@@ -271,25 +300,28 @@ for n in 1 2 3; do
   printf "%-10s %12.1f %12.1f %10s %14s\n" "${n}" "${actual}" "${target}" "${ratio}" "${p95}"
 done
 
-# Saturation hint: at replicas=1, ratio close to 1.0 means the
-# baseline isn't pressing the engine -- the scale-up won't reveal
-# headroom because there's no headroom to reveal. Threshold 0.85
-# is a soft signal; the chapter narrative wants the baseline at
-# 0.4-0.7.
-base_json=$(grep -m1 '^{' "${snapshot_log_1}")
-base_actual=$(echo "${base_json}" | jq -r '.actual_rps // 0')
-base_target=$(echo "${base_json}" | jq -r '.target_rps // 0')
-base_ratio=$(awk -v a="${base_actual}" -v t="${base_target}" 'BEGIN { if (t > 0) print a/t; else print 0 }')
-above_threshold=$(awk -v r="${base_ratio}" 'BEGIN { print (r >= 0.95) ? "yes" : "no" }')
-echo ""
-if [[ "${above_threshold}" == "yes" ]]; then
-  echo "NOTE: replicas=1 ratio = $(printf '%.2f' "${base_ratio}") -- one replica is NOT saturated at DEMO_RPS=${RPS}."
-  echo "      The scale-up won't reveal much headroom because the engine has spare capacity at the baseline."
-  echo "      Re-run with a higher rate to see the chapter's plateau-vs-linear shape:"
-  echo "          DEMO_RPS=$(( RPS * 3 )) bash $0 ${DEPLOY_ID}"
+# Saturation hint reads from the lowest-count snapshot we actually
+# took. The chapter narrative wants the baseline ratio at 0.4-0.7; if
+# it's >= 0.95 the engine has spare capacity and the scale-up won't
+# reveal much. Skipped when the sweep started above 1 (no
+# single-replica baseline to compare against).
+BASELINE_N="${SNAPSHOT_COUNTS[0]}"
+if [[ "${BASELINE_N}" == "1" ]]; then
+  base_json=$(grep -m1 '^{' "${snapshot_log_1}")
+  base_actual=$(echo "${base_json}" | jq -r '.actual_rps // 0')
+  base_target=$(echo "${base_json}" | jq -r '.target_rps // 0')
+  base_ratio=$(awk -v a="${base_actual}" -v t="${base_target}" 'BEGIN { if (t > 0) print a/t; else print 0 }')
+  above_threshold=$(awk -v r="${base_ratio}" 'BEGIN { print (r >= 0.95) ? "yes" : "no" }')
+  echo ""
+  if [[ "${above_threshold}" == "yes" ]]; then
+    echo "NOTE: replicas=1 ratio = $(printf '%.2f' "${base_ratio}") -- one replica is NOT saturated at DEMO_RPS=${RPS}."
+    echo "      The scale-up won't reveal much headroom because the engine has spare capacity at the baseline."
+    echo "      Re-run with a higher rate to see the chapter's plateau-vs-linear shape:"
+    echo "          DEMO_RPS=$(( RPS * 3 )) bash $0 ${DEPLOY_ID}"
+  fi
 fi
 
 echo ""
-echo "Done. The deployment is left at replicas=3 -- scale back down"
-echo "via 'iplane deployment scale ${DEPLOY_ID} 1 --wait' if you're"
-echo "running on a paid provider."
+echo "Done. The deployment is left at replicas=${MAX_REPLICAS} -- scale back down"
+echo "via 'iplane deployment scale ${DEPLOY_ID} 1 --wait' once #145 lands; for now"
+echo "the only reset is 'iplane deployment destroy ${DEPLOY_ID}' + rerun examples/04."
