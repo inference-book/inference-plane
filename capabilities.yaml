@@ -18,6 +18,546 @@
 
 snapshots:
 
+  - tag: ch07-final
+    alias: v0.2.0
+    chapter: 7
+    chapter_title: "Routing, Queueing, and the Control Plane in the Data Path"
+    branch: release/v0.2
+    date: 2026-06-29
+
+    summary: |
+      iplane moves back into the inference data path. A request router
+      sits in front of one or more engine replicas, replacing v0.1's
+      "operator dials the engine proxy URL directly" shape. Three beats
+      ship: (1) the router with two URL shapes (OpenAI-exact flat with
+      body-peek routing, and an unambiguous deploy-id URL that's any-
+      method, any-sub-path); (2) a bounded waiting room with strict-
+      priority dispatch and per-tenant weighted fair-share within each
+      lane; (3) multi-replica fan-out with per-replica health, auto-
+      quarantine, round-robin selection, and heterogeneous fleets that
+      mix providers (RunPod + Vast.ai + Lambda Labs) under one
+      deployment id. The chapter's flagship demo trio (04 router-in-
+      path, 05 fair-queueing, 06 multi-replica throughput curve)
+      reproduces the narrative end-to-end against a real-engine deploy
+      on RunPod; all three reuse one long-lived deployment via the
+      detect-and-reuse pattern. Idle-TTL replaces the v0.1 manual-
+      destroy as the default cost guard; the reaper self-heals through
+      transient provider errors by retrying stuck destroys.
+
+    capabilities:
+
+      - name: Request router in the data path
+        status: shipped
+        notes: |
+          `internal/router/` mounts on the daemon's HTTP server as
+          (path, handler) pairs supplied via `WithDataPlaneRoutes`.
+          Two URL shapes:
+          (a) the OpenAI-exact flat URL `POST /v1/chat/completions`
+          which body-peeks the `model` field to find a RUNNING
+          deployment (no other interpretation of the body; the engine
+          sees bytes byte-for-byte); (b) the unambiguous deploy-id URL
+          `/v1/{deploy_id}/v1/{rest...}` which is any-method,
+          any-sub-path -- forwards anything the engine exposes
+          (`GET /v1/models`, `POST /v1/chat/completions`, future
+          `/v1/embeddings`) without router-side changes. Reverse-
+          proxy implementation (`httputil.ReverseProxy`) with W3C
+          TraceContext + Baggage propagated to the engine on the
+          outbound. Request-level metrics (`inference_requests_total`,
+          `inference_request_duration`, `inference_tokens_generated`)
+          tick at the router, populating the v0.2 Grafana dashboard.
+          Token counts come from the JSON response body or SSE
+          stream (parsed by `tokenCountingWriter`).
+        prs: [109, 110, 111, 115, 116, 117, 119, 120, 127]
+        docs: ["internal/router/router.go", "examples/04-router-in-path/"]
+
+      - name: Idle-TTL reaper + TouchDeployment + --no-idle-destroy pin
+        status: shipped
+        notes: |
+          The chapter's leak-protection trio. The reaper sweeps the
+          state file on a 30s tick; deployments whose
+          `now - last_activity_at > idle_ttl_seconds` get destroyed
+          (idempotent, calls the deployer's Destroy). TouchDeployment
+          is fired by the router on every inference request so an
+          actively-served deployment never gets reaped from under
+          live traffic. Server-side debounce (5s default, configurable
+          via `router.touch_debounce_interval`) coalesces touches so
+          the per-request hot path doesn't pay a state.json read+write
+          tax. `--no-idle-destroy=true` is the operator's "pin against
+          the reaper" override for deployments that must survive idle
+          periods. The reaper now also retries stuck destroys: a
+          TERMINATING deployment whose previous destroy attempt hit a
+          transient provider error is re-tried (capped at 3 retries)
+          so a single API timeout doesn't permanently strand a pod.
+        prs: [122, 123, 124]
+        related_issues: [165]
+        docs: ["internal/provisioners/lifecycle/reaper.go", "internal/provisioners/runpod/deployer.go"]
+
+      - name: Bounded waiting room with strict-priority dispatch
+        status: shipped
+        notes: |
+          `internal/scheduler/` ships the interactive-first scheduler.
+          Two lanes (interactive and batch) each have a bounded sub-
+          queue; servicers (configurable worker pool, default 0 =
+          scheduler off / Beat 1 direct-forward path) pull from the
+          interactive lane first, then batch. ErrQueueFull triggers
+          a 503 with `Retry-After: 1` (the bounded-buffer M/M/k/N
+          shape teaches backpressure as a first-class signal). Per-
+          lane capacity is independently tunable. `iplane.queue.depth`
+          gauge + `iplane.queue.wait.seconds` histogram + per-request
+          `iplane.queue.wait_ms` span attribute feed three panels of
+          the v0.2 dashboard; the three signals answer three distinct
+          operator questions about one queue cell.
+        prs: [131, 132, 133, 134, 135]
+        docs: ["internal/scheduler/interactive_first.go", "examples/05-fair-queueing/"]
+
+      - name: Per-tenant weighted fair-share within a lane
+        status: shipped
+        notes: |
+          Within each priority lane, traffic from different tenants
+          (asserted via `X-IPlane-Tenant` header today; real auth in
+          Part V) lands in per-tenant sub-queues. The scheduler picks
+          a tenant via weighted random selection across non-empty
+          sub-queues. Operator configures per-tenant weights in
+          `router.queue.tenant_weights`; tenants not listed inherit
+          weight 1. The chapter narrative: stateless lottery converges
+          to the same long-run share as deficit accounting with less
+          state.
+        prs: [133]
+
+      - name: Priority is a request property, not a deployment property
+        status: shipped
+        notes: |
+          The router resolves effective priority per-request:
+          `X-IPlane-Priority` header > deployment default (proto
+          field, optional) > INTERACTIVE. Engines are priority-blind --
+          the chapter's pattern is "abstractions stop at the proxy
+          boundary." A reserved-field comment on the Deployment proto
+          (field 22) records the design decision so a future change
+          doesn't put priority back on the wrong artifact. PR 131
+          corrected this mid-review and the reasoning landed as a
+          pattern callout.
+        prs: [131]
+
+      - name: Multi-replica deployment model
+        status: shipped
+        notes: |
+          One stable Deployment ID, N backing Instances. The
+          Deployment carries parallel arrays:
+          `instance_ids[] / engine_endpoints[] / unhealthy_instance_ids[]`
+          all indexed by replica slot. `iplane deployment scale <id> N`
+          (scale-up only in v0.2; scale-down deferred to v0.3, issue
+          145) is the operator's primary capacity verb. `DEGRADED` is
+          the first-class aggregate state for partial provisioning
+          failure -- not all-or-nothing, the operator sees the slot
+          breakdown via `iplane deployment describe -o json`. Auto-
+          provision flows through `replicas_spec` + the fan-out path
+          (`createMultiReplicaDeployment`); the singular instance_id
+          form on Deployment mirrors slot 0 for backward compat.
+        prs: [137, 139, 144, 146]
+        docs: ["protos/provisioner/v1/types.proto", "internal/provisioners/fanout.go"]
+
+      - name: Router fan-out via round-robin replica selection
+        status: shipped
+        notes: |
+          The router picks a replica per request via round-robin
+          across the deployment's healthy set
+          (`instance_ids[] - unhealthy_instance_ids[]`). Empty
+          endpoint slots (provisioning-in-progress) are skipped
+          inline; quarantined slots are skipped via the unhealthy
+          set. No per-request state on the router side; round-robin
+          cursor is per-deployment. Default chosen for its lack of
+          per-replica state -- smarter policies (least-loaded, prefix-
+          cache affinity) compose through a `RoutingPolicy` interface
+          seam (see "Routing policy seam for Ch 8") so they can swap
+          in without touching the router data path.
+        prs: [140]
+        docs: ["internal/router/policy/"]
+
+      - name: Per-replica health + auto-quarantine + observability
+        status: shipped
+        notes: |
+          `internal/healthcheck/` polls each replica's `/health` via
+          the engine_endpoint on a 10s tick. After `failure_threshold`
+          (3) consecutive failures, the replica is added to the
+          deployment's `unhealthy_instance_ids` set and the router
+          skips it. After `success_threshold` (3) consecutive passes
+          on a quarantined replica, it is restored. New metrics:
+          `iplane.router.replica.in_flight` gauge (per replica id)
+          and `iplane.router.decisions.total` counter (labels:
+          deploy_id, replica_id, outcome=picked|no_replicas) so the
+          chapter's "what is the router actually doing" question has
+          observability behind it.
+        prs: [141, 142]
+        docs: ["internal/healthcheck/"]
+
+      - name: Heterogeneous fleets via ReplicaSpec
+        status: shipped
+        notes: |
+          One deployment can pull replicas from multiple providers
+          simultaneously via repeated `ReplicaSpec.replicas`. Each
+          spec carries (provider, region, requirements, replicas
+          count); the auto-provision fan-out groups slots by spec
+          and dispatches concurrent provisioning across providers.
+          The homogeneous case is a degenerate one-spec form (one
+          provider, one region, replicas=N). The chapter's
+          differentiator beat: a real example deploys 1 replica each
+          to RunPod + Vast.ai + Lambda Labs under one deployment id;
+          the router fans across all three transparently.
+        prs: [148, 149]
+        docs: ["protos/provisioner/v1/types.proto"]
+
+      - name: Multi-cloud provider catalog -- Vast.ai + Lambda Labs
+        status: shipped
+        notes: |
+          Two new provider adapters land via the existing Provisioner
+          interface, demonstrating the contract holds for two real
+          provider shapes that differ from RunPod: Vast.ai is a
+          marketplace (bid-style instance discovery; `vast.Provider`
+          satisfies Provisioner only -- engine launch goes through the
+          sshdocker.Executor fallback). Lambda Labs is a fixed-catalog
+          provider with HTTP-Basic auth (not Bearer) and `provision +
+          ssh-config + docker-run` shape; also routes through the
+          sshdocker.Executor. `IPLANE_PROVIDER` env var sets the
+          default provider for CLI commands; `ProviderAPIKeyEnv`
+          mapping makes adding future providers a single-line change.
+          Probe-first methodology (curl the API before writing Go)
+          surfaced provider quirks early -- captured as a chapter
+          sidebar.
+        prs: [152, 153, 154, 155]
+        docs: ["internal/provisioners/vast/", "internal/provisioners/lambdalabs/", "internal/provisioners/apikey.go"]
+
+      - name: Routing policy seam for Ch 8 prefix-cache affinity
+        status: shipped
+        notes: |
+          Interface-only seam. `internal/router/policy/` defines a
+          `RoutingPolicy` that takes (request, deployment, replicas)
+          and returns the chosen replica. Round-robin is the v0.2
+          default impl; Ch 8 will land a prefix-cache-affinity impl
+          that composes through the same interface without touching
+          router data-path code. The chapter's pattern: build the
+          seam now, fill it later.
+        prs: [148]
+        docs: ["internal/router/policy/policy.go"]
+
+      - name: Demo trio -- 04 router-in-path, 05 fair-queueing, 06 multi-replica
+        status: shipped
+        notes: |
+          The chapter's hands-on spine. `examples/04-router-in-path/`
+          (demokit Go walkthrough) drives a chat completion through
+          the router and exercises both URL shapes; `examples/05-
+          fair-queueing/` (bash) fires two parallel `iplane load`
+          processes with different priority/tenant headers to show
+          strict-priority dispatch as alice's p95 stays bounded
+          while bob's batch queue grows; `examples/06-multi-replica/`
+          (bash) scales 1 -> 2 -> 3 against the same deployment and
+          snapshots throughput between each step, rendering the
+          plateau-vs-linear curve. All three reuse one long-lived
+          deployment via the detect-and-reuse pattern (one bringup,
+          three observations). Each demo bundles its own
+          `config.yaml` for daemon-side knobs (scheduler on/off,
+          servicers count) so demo narratives that need different
+          daemon configurations don't collide.
+        prs: [127, 136, 157]
+        docs: ["examples/04-router-in-path/", "examples/05-fair-queueing/", "examples/06-multi-replica/"]
+
+      - name: "CP/DP-1 architectural constraint enforced by `make check-constraints`"
+        status: shipped
+        notes: |
+          `CONSTRAINTS.md`'s CP/DP-1: data-plane code
+          (`internal/router/`, `internal/dataplane/`) reaches control-
+          plane state only via the generated gRPC client -- never via
+          direct `internal/provisioners` import. `make check-
+          constraints` is a CI gate that greps for the forbidden
+          import. Makes the eventual data-plane split into a separate
+          binary a mechanical refactor instead of a code-archaeology
+          dig.
+        prs: [63]
+        docs: ["CONSTRAINTS.md", "tests/constraints/cpdp1_test.go"]
+
+      - name: Cost metrics labeled from daemon env vars (deferred refactor)
+        status: partial
+        notes: |
+          v0.1 inherited from v0.2: cost-metric labels (provider,
+          gpu_type, billing_mode) come from `IPLANE_DEPLOYMENT_*` env
+          vars set on the daemon. Works for single-deployment shape
+          but breaks for heterogeneous fleets where one deployment
+          has replicas across multiple providers -- the env-var-
+          labeled metrics can't describe that. Issue 163 tracks the
+          refactor to derive labels from the Instance record at
+          recording time. Provider Rate Catalog panel still works
+          (its labels come from providers.yaml, not env vars).
+        related_issues: [163]
+
+    deferred_to_v0.3:
+
+      - name: Multi-replica destroy of all slots
+        status: deferred
+        moved_to: v0.3
+        notes: |
+          `DestroyDeployment` today terminates slot 0 only; slots
+          1..N-1 are left running on the provider. Operator workaround
+          is `iplane instance destroy` per slot, or destroying via the
+          provider console.
+        related_issues: [160]
+
+      - name: sshdocker VM destroy on Vast/Lambda
+        status: deferred
+        moved_to: v0.3
+        notes: |
+          For sshdocker-routed deployments (Vast.ai, Lambda Labs),
+          DestroyDeployment stops the engine container inside the VM
+          but doesn't terminate the VM itself. Operator workaround
+          is `iplane instance destroy` to terminate the VM.
+        related_issues: [161]
+
+      - name: scale-down semantics
+        status: deferred
+        moved_to: v0.3
+        notes: |
+          `iplane deployment scale <id> N` only supports N >=
+          current. Going DOWN (N < current) requires the
+          drain-then-destroy design that v0.3 will work through.
+          Operator workaround for re-running demos: destroy +
+          reprovision.
+        related_issues: [145]
+
+      - name: Proactive state reconciler
+        status: deferred
+        moved_to: v0.3
+        notes: |
+          iplane state is eventually consistent with provider reality
+          via the reaper's destroy attempts (which converge through
+          404 = success). Drift surfaces only when iplane initiates
+          something; out-of-band changes (operator deletes pod via
+          provider console) aren't detected until reaper or operator
+          notices. Issue 166 designs the proactive sweep.
+        related_issues: [166]
+
+      - name: Store API per-record refactor
+        status: deferred
+        moved_to: v0.3
+        notes: |
+          Whole-state Read/Update API is starting to bite at
+          concurrent load. TouchDeployment debouncing (5s default)
+          patches the worst symptom; DescribeDeployment in the hot
+          path is the next layer. Issue 170 designs the per-record
+          API with caching-per-Store-impl so backend swaps don't
+          re-litigate caching.
+        related_issues: [170]
+
+      - name: Hygiene CLI verbs (scale-down drain, deploy restart, logs, exec, model catalog)
+        status: deferred
+        moved_to: v0.3
+        notes: |
+          Several v0.2 milestone hygiene items shipped partially or
+          not at all. Tracked: `iplane deployment unpin` (#91),
+          `auto-respawn after quarantine` (#93), `iplane deployment
+          restart` (#98), `iplane instance drain` (#97), `iplane logs`
+          (#100), `iplane exec` (#101), `iplane model list/describe`
+          (#96), `iplane deployment reload-model` (#99). System-
+          completeness work, not narrative-blocking for Ch 7.
+        related_issues: [91, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103]
+
+    providers_supported:
+      - name: runpod
+        status: full
+        notes: |
+          Image-native Deployer (the pod IS the engine container).
+          v0.2 fixes: Hardware/metadata on Instance proto, exact-
+          match List filter, capacity-resilient SKU defaults,
+          Instance.provider_id read by Destroy so multi-replica
+          deploys don't silently leak.
+      - name: vast
+        status: full
+        notes: |
+          Marketplace-style provider. Provisioner only -- engine
+          launch via sshdocker.Executor fallback. v0.2 ch7-beat3.11.
+      - name: lambda_labs
+        status: full
+        notes: |
+          Fixed-catalog provider with HTTP-Basic auth. Provisioner
+          only -- engine launch via sshdocker.Executor fallback.
+          v0.2 ch7-beat3.12.
+      - name: local
+        status: zero-cost on-ramp
+        notes: |
+          Same as v0.1. Useful for testing the failure-mode contract
+          without any provider API key.
+
+    cli_surface:
+      - iplane deployment {deploy,describe,destroy,list,query,wait,watch,models,status,touch,scale}
+      - iplane instance {create,list,describe,destroy,ssh,wait}
+      - iplane up
+      - iplane serve
+      - iplane load                  # gains --target / --priority / --tenant / --stream / --output / --workers
+      - iplane telemetry url
+      - iplane gen-names
+      # Persistent root flags from v0.1 carry forward:
+      - --config
+      - --skip-model-validation
+
+    environment_variables:
+      required_for_runpod:
+        - name: RUNPOD_API_KEY
+          notes: Scoped key (rpa_... prefix) with REST scope.
+      required_for_vast:
+        - name: VAST_API_KEY
+      required_for_lambda:
+        - name: LAMBDA_API_KEY
+      recommended:
+        - name: IPLANE_OTEL_ENDPOINT
+        - name: IPLANE_OTEL_HEADERS
+        - name: HF_TOKEN
+      optional:
+        - name: IPLANE_PROVIDER
+          notes: Default provider for CLI commands and demo binaries when `--provider` is omitted. Falls back to `runpod`.
+        - name: IPLANE_SERVICE_URL
+          notes: Sets the default `--service-url` for CLI verbs (e.g. `http://localhost:8080`).
+        - name: IPLANE_TELEMETRY_OTLP_ENDPOINT
+          notes: Override for the daemon's OTLP exporter endpoint. Useful for compose-mode (`otel-collector:4317`).
+        - name: IPLANE_SKIP_MODEL_VALIDATION
+        - name: IPLANE_RUNPOD_DEBUG
+
+    known_limitations:
+      - id: multi-replica-destroy-leaks-slots
+        notes: |
+          DestroyDeployment terminates slot 0 only; slots 1..N-1 leak
+          on the provider until manual cleanup. Issue 160. Operator
+          workaround: `iplane instance destroy` per slot.
+      - id: sshdocker-destroy-leaks-vm
+        notes: |
+          For Vast/Lambda deployments, DestroyDeployment stops the
+          engine container but leaves the VM running. Issue 161.
+          Operator workaround: `iplane instance destroy`.
+      - id: scale-down-unimplemented
+        notes: |
+          `iplane deployment scale <id> N` requires N >= current
+          replica count. Going down requires destroy + reprovision.
+          Issue 145.
+      - id: cost-metric-labels-static
+        notes: |
+          Cost-metric labels come from daemon env vars, not from the
+          Instance record. For homogeneous deployments this works;
+          for heterogeneous fleets it mis-labels. Issue 163.
+      - id: state-store-whole-file-rw
+        notes: |
+          Every state read/write goes through the entire state.json.
+          TouchDeployment is debounced server-side (5s); other reads
+          (DescribeDeployment per router request) still pay the
+          whole-state tax. Issue 170 refactors the Store API.
+      - id: in-memory-touch-cache-resets-on-restart
+        notes: |
+          Service.touchSeen (the debounce ledger) is in-memory only.
+          A daemon restart resets it -- worst case is a few extra
+          writes per deployment after restart. Acceptable trade vs.
+          adding a proto field for persistence.
+
+    patterns_introduced:
+      - name: abstractions-stop-at-the-proxy-boundary
+        notes: |
+          Control-plane concepts the downstream service doesn't
+          consume must not leak through. The router strips
+          tenant/priority headers before forwarding to the engine;
+          engines stay policy-blind and metric-cardinality-bounded.
+      - name: request-level-policy-over-per-resource-policy
+        notes: |
+          When policy is a property of "what's being asked for," put
+          it on the request, not the resource. The resource stays
+          policy-blind and reusable across policies. Priority is the
+          v0.2 example; the principle generalizes to any
+          per-request-shaped property.
+      - name: bounded-buffers-and-early-refusal
+        notes: |
+          Backpressure as a first-class signal beats latency growth
+          and cascading timeouts. M/M/k/N + 503 Retry-After is the
+          shape. Generalizes to any service with finite capacity
+          downstream.
+      - name: three-observability-signals-for-one-cell
+        notes: |
+          Gauge for now, histogram for distribution, span attribute
+          for individual request. Match each to a distinct operator
+          question.
+      - name: stable-name-changing-backing
+        notes: |
+          Operators name the abstraction (Deployment ID), not the
+          instances. The control plane absorbs the bookkeeping of
+          which slots are healthy. Generalizes to DNS, service
+          discovery, and load balancer pools.
+      - name: partial-success-as-first-class-outcome
+        notes: |
+          At N>1, all-or-nothing semantics force operators into
+          manual recovery for problems the control plane should
+          absorb. DEGRADED names the in-between.
+      - name: passive-failure-handling-over-active-cancellation
+        notes: |
+          When a downstream goes bad, stop sending new traffic; do
+          not try to abort in-flight work. Bounded failure mode
+          beats the cancellation-semantics morass.
+      - name: one-shape-for-everything-simple-as-degenerate
+        notes: |
+          When an API could split into a simple form and a general
+          form, prefer the general form and let the simple form be
+          the degenerate case. ReplicaSpec's heterogeneous shape is
+          the example; homogeneous = one-spec.
+      - name: probe-before-you-code
+        notes: |
+          When integrating with an unfamiliar wire contract, curl
+          the API before writing the client. Documentation describes
+          the API the vendor wishes they shipped; the wire describes
+          the API they actually shipped.
+      - name: demos-should-self-diagnose
+        notes: |
+          A demo that silently produces flat output when its
+          preconditions are not met confuses the reader. Build the
+          self-check into the script and print a hint when the
+          assumption fails. Demo 06's saturation detector and
+          demos 05/06's model + state preflight are the v0.2
+          examples.
+      - name: detect-and-reuse-over-recreate
+        notes: |
+          When multiple demos or scripts target the same logical
+          resource, check for an existing one before creating a
+          new one. Keeps the reproduction story coherent and
+          amortizes bringup cost across runs.
+
+    metric_vocabulary:
+      reliably_emitted:
+        # Router signals (newly ticking in v0.2 after the data-path
+        # router landed).
+        - name: inference_requests_total
+          type: counter
+          labels: [deploy_id, model, tenant_id, priority, replica_id, status]
+        - name: inference_request_duration
+          type: histogram
+          unit: seconds
+          labels: [deploy_id, model, tenant_id, priority, replica_id, status]
+        - name: inference_tokens_generated
+          type: counter
+          labels: [deploy_id, model, tenant_id, priority, replica_id]
+        # Queue signals (when servicers > 0).
+        - name: iplane_queue_depth
+          type: gauge
+          labels: [deploy_id, tenant_id, lane]
+        - name: iplane_queue_wait_seconds
+          type: histogram
+          unit: seconds
+          labels: [deploy_id, tenant_id, lane]
+        # Replica signals.
+        - name: iplane_replica_in_flight
+          type: gauge
+          labels: [deploy_id, replica_id]
+        - name: iplane_router_decisions_total
+          type: counter
+          labels: [deploy_id, replica_id, outcome]
+        # Reaper signal.
+        - name: iplane_reaper_destroys_total
+          type: counter
+          labels: [reason]
+        # Cost signal (unchanged from v0.1; labels still from env vars).
+        - name: gpu_effective_rate_usd_per_second
+          type: observable gauge
+          source: providers.yaml + `internal/metrics/cost.go`
+
   - tag: ch06-final
     alias: v0.1.0
     chapter: 6
