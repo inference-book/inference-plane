@@ -175,11 +175,20 @@ snapshot() {
     return ${rc}
   fi
   # Inline read of the headline numbers; full JSON kept in the log
-  # for the end-of-run table.
-  local actual target ratio p95
-  actual=$(jq -r '.actual_rps' < "${out}")
-  target=$(jq -r '.target_rps' < "${out}")
-  p95=$(jq -r '.latency_p95_ms' < "${out}")
+  # for the end-of-run table. `iplane load --output json` writes the
+  # summary JSON to stdout and a start-of-run banner to stderr; the
+  # `2>&1` above merges them into one file, so we grep for the JSON
+  # line (the one starting with '{') before piping to jq.
+  local actual target ratio p95 json
+  json=$(grep -m1 '^{' "${out}")
+  if [[ -z "${json}" ]]; then
+    echo "  WARN: no JSON summary in load output; check ${out}." >&2
+    cat "${out}" >&2
+    return 1
+  fi
+  actual=$(echo "${json}" | jq -r '.actual_rps')
+  target=$(echo "${json}" | jq -r '.target_rps')
+  p95=$(echo "${json}" | jq -r '.latency_p95_ms')
   ratio=$(awk -v a="${actual}" -v t="${target}" 'BEGIN { if (t > 0) printf "%.2f", a/t; else print "n/a" }')
   printf "  actual_rps=%.1f  target_rps=%.1f  ratio=%s  p95=%sms\n" "${actual}" "${target}" "${ratio}" "${p95}"
 }
