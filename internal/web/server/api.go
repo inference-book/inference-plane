@@ -1,26 +1,28 @@
-// Package server wires the HTTP-side bindings on top of the in-process
-// gRPC server. Two HTTP surfaces share one mux:
+// Package server wires the HTTP-side bindings on the daemon's HTTP
+// listener. Three surfaces share one mux:
 //
-//  1. OpenAI-compatible REST/JSON at the wire shape OpenAI documents:
-//     POST /v1/completions, POST /v1/chat/completions, GET /health.
-//     Hand-written http.Handlers (see openai.go) decode/encode the
-//     JSON. We do NOT use grpc-gateway here -- protojson serializes
-//     int64 fields as JSON strings and enum values as their proto
-//     names ("STATUS_SERVING"), neither of which matches OpenAI's
-//     wire format. Owning the translation explicitly keeps the public
-//     contract honest.
+//  1. GET /health -- hand-written health probe that calls the loopback
+//     HealthService.Check and returns the simple {"status":"ok"} shape
+//     operators expect (see openai.go's handleHealth). We do NOT use
+//     grpc-gateway here -- protojson would emit the enum as
+//     "STATUS_SERVING", which doesn't match operator expectations.
 //
 //  2. Connect-RPC handlers at the generated paths
-//     (/inferenceplane.v1.InferenceService/Complete, etc.). Connect
-//     clients hit these directly with Connect protocol, gRPC clients
-//     hit the same paths with HTTP/2 + protobuf. This is the typed
-//     surface -- the proto types are the contract.
+//     (/inferenceplane.v1.InferenceService/Complete,
+//     /provisioner.v1.ProvisionerService/..., etc.). Connect clients
+//     hit these directly with Connect protocol, gRPC clients hit the
+//     same paths with HTTP/2 + protobuf. This is the typed surface --
+//     the proto types are the contract.
 //
-// Both surfaces ultimately call the same in-process gRPC server. The
-// connect adapters and the OpenAI handlers both use a gRPC client that
-// dials the loopback gRPC listener. Single source of truth for the
-// implementation, two transport bindings for callers, with hand-coded
-// JSON shaping for the OpenAI public surface.
+//  3. The v0.2 data-plane router's OpenAI-compatible POST paths
+//     (POST /v1/chat/completions, POST /v1/{deploy_id}/v1/...), mounted
+//     via WithDataPlaneRoutes. The router owns body-peek + per-deploy
+//     dispatch + streaming pass-through to the engine pod.
+//
+// The Inference Connect handlers still dial the loopback gRPC listener
+// (single source of truth for in-process inference). The provisioner
+// and deployment Connect handlers are direct adapters around the
+// in-daemon *provisioners.Service per CP/DP-1 (see WithProvisionerHandler).
 package server
 
 import (
@@ -96,15 +98,17 @@ func WithDataPlaneRoutes(routes map[string]http.Handler) Option {
 
 // New constructs an API serving:
 //
-//	POST /v1/completions       -> OpenAI handler -> InferenceService.Complete
-//	POST /v1/chat/completions  -> OpenAI handler -> InferenceService.ChatComplete
-//	GET  /health               -> OpenAI handler -> HealthService.Check
+//	GET  /health                                  -> hand-written -> HealthService.Check
 //	/inferenceplane.v1.InferenceService/{Method}  -> Connect-RPC + gRPC
 //	/inferenceplane.v1.HealthService/{Method}     -> Connect-RPC + gRPC
 //
+// The v0.2 OpenAI-compatible POST paths (/v1/chat/completions, etc.)
+// are owned by the data-plane router and mounted via
+// WithDataPlaneRoutes by the daemon.
+//
 // grpcAddr is the address of the in-process gRPC server (typically
-// 127.0.0.1:9090). Both the OpenAI handlers and the connect adapters
-// dial it via local gRPC clients.
+// 127.0.0.1:9090). The /health handler and the Inference Connect
+// adapter dial it via local gRPC clients.
 func New(_ context.Context, grpcAddr string, logger *slog.Logger, opts ...Option) (*API, error) {
 	conn, err := grpc.NewClient(grpcAddr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -123,7 +127,7 @@ func New(_ context.Context, grpcAddr string, logger *slog.Logger, opts ...Option
 		opt(a)
 	}
 
-	a.registerOpenAIHandlers()
+	a.registerHealthHandler()
 	if err := a.registerConnectHandlers(); err != nil {
 		return nil, fmt.Errorf("server: connect handlers: %w", err)
 	}
@@ -148,13 +152,11 @@ func (a *API) Handler() http.Handler {
 	return a.mux
 }
 
-// registerOpenAIHandlers mounts the public OpenAI-compatible REST
-// routes. Method+path patterns require Go 1.22+; the more specific
-// patterns take precedence over any catch-all.
-func (a *API) registerOpenAIHandlers() {
+// registerHealthHandler mounts GET /health. The v0.2 router owns the
+// public OpenAI-compatible POST paths (/v1/chat/completions etc.) and
+// mounts them via WithDataPlaneRoutes.
+func (a *API) registerHealthHandler() {
 	a.mux.HandleFunc("GET /health", a.handleHealth)
-	a.mux.HandleFunc("POST /v1/completions", a.handleComplete)
-	a.mux.HandleFunc("POST /v1/chat/completions", a.handleChatComplete)
 }
 
 // registerConnectHandlers mounts connect-rpc handlers at their
