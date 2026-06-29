@@ -1,0 +1,58 @@
+# Demo 06 iplane serve config -- multi-replica throughput-curve.
+#
+# Differs from the global deploy/config.yaml in router.queue:
+# the scheduler is enabled with two servicers and per-lane capacity
+# of 256. Multi-replica fan-out itself works with servicers=0 (the
+# router just round-robins across replicas inline), but the
+# throughput-curve story benefits from queueing at replicas=1 (where
+# the engine is saturated) -- otherwise the load tool sees the
+# bottleneck as client-side worker exhaustion instead of router-side
+# backpressure.
+#
+# If you change the global deploy/config.yaml, audit this file for
+# drift. The only intentional difference is the router.queue block.
+
+server:
+  addr: ":8080"
+  read_timeout_sec: 60
+  write_timeout_sec: 600
+  shutdown_sec: 30
+
+backend:
+  engine: "mock"
+  url: ""
+  name: "mock"
+
+telemetry:
+  service_name: "inference-plane"
+  environment: "dev"
+  sample_ratio: 1.0
+
+deployment:
+  provider: "runpod"
+  gpu_type: "a10g"
+  billing_mode: "metered_per_second"
+  instance_id: ""
+
+router:
+  # Demo 06 override: scheduler ON for visible router-side
+  # backpressure at replicas=1. As the demo scales to 2 and 3
+  # replicas, the queue drains and actual_rps approaches target_rps.
+  queue:
+    servicers: 2
+    capacity: 256
+    in_flight_cap: 0
+    interactive:
+      servicers: 2
+      capacity: 256
+    batch:
+      servicers: 2
+      capacity: 256
+    tenant_weights: {}
+
+health:
+  poll_interval: 10s
+  failure_threshold: 3
+  success_threshold: 3
+  probe_timeout: 2s
+  max_concurrent: 32

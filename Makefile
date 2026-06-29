@@ -1,4 +1,4 @@
-.PHONY: build up down infra-up infra-down serve rebuild pull smoke load logs dashboards clean check-pins help install examples
+.PHONY: build up down infra-up infra-down rebuild pull smoke load logs dashboards clean check-pins help install examples
 
 PKG    := ./cmd/iplane
 
@@ -18,12 +18,14 @@ build: ## Compile the iplane binary into bin/
 # ── Stack lifecycle ─────────────────────────────────────────────────────
 # Two paths share one compose file via profiles:
 #   * `infra-up`/`infra-down` (default profile): obs services only.
-#     Pair with `make serve` for the dev loop -- iplane runs on the
-#     host, restarts are a Go build + binary respawn.
+#     Pair with `make serve` from a specific demo dir (e.g.
+#     `cd examples/05-fair-queueing && make serve`) so the daemon picks
+#     up the demo's config.yaml. Demos that don't ship a config.yaml
+#     fall back to the global deploy/config.yaml.
 #   * `up`/`down` (--profile fullstack): everything in Docker, including
 #     the controlplane container built from the local Dockerfile.
 #     This is the reader's one-command path.
-infra-up: ## Bring up infra only (obs services); host iplane via `make serve`
+infra-up: ## Bring up infra only (obs services); host iplane via `cd examples/<demo> && make serve`
 	docker compose --env-file pinned-versions.env -f deploy/docker-compose.yaml up -d
 
 infra-down: ## Tear down infra services
@@ -34,10 +36,6 @@ up: ## Bring up the full stack incl. controlplane container (the readers' path)
 
 down: ## Tear the full stack down
 	docker compose --env-file pinned-versions.env -f deploy/docker-compose.yaml --profile fullstack down
-
-serve: build ## Run iplane serve on the host (infra expected via `make infra-up`)
-	IPLANE_BACKEND_URL=http://127.0.0.1:8000 \
-	./bin/iplane serve
 
 pull: ## Pre-pull external images (skips the locally-built controlplane)
 	docker compose --env-file pinned-versions.env -f deploy/docker-compose.yaml --profile fullstack pull --ignore-buildable

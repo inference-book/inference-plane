@@ -57,7 +57,15 @@ sequenceDiagram
 
 2. **A RUNNING deployment.** The easiest way: run [`examples/04-router-in-path`](../04-router-in-path/) first — it leaves a deployment alive by default (its final step prompts the operator to keep it for demos 05/06).
 
-3. **Local observability stack** (`make infra-up`) so the Grafana panels populate.
+3. **Local observability stack** (`make infra-up` from the repo root) so the Grafana panels populate.
+
+4. **`iplane serve` running with this demo's config**:
+
+   ```
+   cd examples/05-fair-queueing && make serve
+   ```
+
+   The demo's `config.yaml` enables the scheduler (`router.queue.servicers: 2`). Running `make serve` from the repo root (or from another demo dir) would use the global config — scheduler off — and the priority story would not fire.
 
 ## Run
 

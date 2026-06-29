@@ -14,7 +14,10 @@
 #   replicas=3 : approaches target_rps if the engine can serve it
 #
 # Prerequisites:
-#   - `iplane serve` running (router in the data path).
+#   - `iplane serve` running with this demo's config:
+#       cd examples/06-multi-replica && make serve
+#     The demo's config.yaml enables the scheduler so router-side
+#     backpressure is visible at replicas=1 before the scale-up.
 #   - A running deployment at replicas=1 (run
 #     examples/04-router-in-path first to leave one alive).
 #   - For the clean throughput picture: engine: vllm. With mock,

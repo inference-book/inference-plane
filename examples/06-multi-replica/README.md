@@ -53,9 +53,18 @@ are in `cmd/iplane/cmd/deployment_scale.go` (Beat 3.4, #86).
    provisions a single-replica deployment and leaves it alive by
    default. Pass that deployment's ID into this demo's `run.sh`.
 
-3. **Local observability stack** (`make infra-up`) so the Grafana
-   panels populate. Not required for the script to run; only for the
-   visual side of the story.
+3. **Local observability stack** (`make infra-up` from the repo root)
+   so the Grafana panels populate. Not required for the script to run;
+   only for the visual side of the story.
+
+4. **`iplane serve` running with this demo's config**:
+
+   ```
+   cd examples/06-multi-replica && make serve
+   ```
+
+   The demo's `config.yaml` enables the scheduler so router-side
+   backpressure is visible at `replicas=1` before the scale-up.
 
 ## Run
 
