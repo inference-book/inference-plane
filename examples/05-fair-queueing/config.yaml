@@ -1,0 +1,59 @@
+# Demo 05 iplane serve config -- fair-queueing walkthrough.
+#
+# Differs from the global deploy/config.yaml ONLY in router.queue:
+# the scheduler is enabled with two servicers and per-lane capacity of
+# 256 so alice (interactive) and bob (batch) actually queue under
+# saturation. Without these overrides, servicers=0 takes the direct-
+# forward path (Beat 1 narrative, demo 04 territory) and the priority
+# story doesn't fire -- both clients just split the engine's
+# throughput equally.
+#
+# If you change the global deploy/config.yaml, audit this file for
+# drift. The only intentional difference is the router.queue block.
+
+server:
+  addr: ":8080"
+  read_timeout_sec: 60
+  write_timeout_sec: 600
+  shutdown_sec: 30
+
+backend:
+  engine: "mock"
+  url: ""
+  name: "mock"
+
+telemetry:
+  service_name: "inference-plane"
+  environment: "dev"
+  sample_ratio: 1.0
+
+deployment:
+  provider: "runpod"
+  gpu_type: "a10g"
+  billing_mode: "metered_per_second"
+  instance_id: ""
+
+router:
+  # Demo 05 override: scheduler ON, two servicers, per-lane bounded
+  # buffer. Strict-priority dispatch means alice's interactive lane
+  # cuts ahead of bob's batch lane whenever both are non-empty.
+  # The chapter's fair-queueing story is the visible divergence of
+  # alice's p95 (sub-100ms) vs bob's (multi-second) under saturation.
+  queue:
+    servicers: 2
+    capacity: 256
+    in_flight_cap: 0
+    interactive:
+      servicers: 2
+      capacity: 256
+    batch:
+      servicers: 2
+      capacity: 256
+    tenant_weights: {}
+
+health:
+  poll_interval: 10s
+  failure_threshold: 3
+  success_threshold: 3
+  probe_timeout: 2s
+  max_concurrent: 32

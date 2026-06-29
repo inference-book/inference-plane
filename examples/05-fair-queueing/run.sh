@@ -14,14 +14,17 @@
 # panels to see the effect live.
 #
 # Prerequisites:
-#   - `iplane serve` running with the scheduler enabled. Minimum:
-#       router.queue.servicers: 2
-#       router.queue.capacity: 256
-#     (See deploy/config.yaml for the full template.)
+#   - `iplane serve` running with this demo's config:
+#       cd examples/05-fair-queueing && make serve
+#     The demo's config.yaml enables the scheduler so the priority
+#     lane separation actually fires. Running iplane serve with the
+#     global deploy/config.yaml takes the direct-forward path
+#     (scheduler off) and the chapter's fair-queueing story does not
+#     materialize.
 #   - A RUNNING deployment exists. Easiest: run examples/04-router-in-path
 #     first (it leaves the deployment alive by default).
-#   - Local observability stack (`make infra-up`) so the Grafana
-#     panels populate.
+#   - Local observability stack (`make infra-up` from the repo root)
+#     so the Grafana panels populate.
 #
 # Usage:
 #   bash examples/05-fair-queueing/run.sh <deployment-id>

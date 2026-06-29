@@ -7,9 +7,9 @@ Reference implementation of the control plane for *Inference Is All You Need* (A
 | Command            | Purpose                                                |
 | ------------------ | ------------------------------------------------------ |
 | `make help`        | List all targets                                       |
-| `make infra-up`    | Bring up infra only (obs services); pair with `make serve` |
+| `make infra-up`    | Bring up infra only (obs services); pair with per-demo `make serve` |
 | `make infra-down`  | Tear down infra services                               |
-| `make serve`       | Run `iplane serve` on the host (dev loop)              |
+| `cd examples/<demo> && make serve` | Run `iplane serve` with that demo's config.yaml (falls back to `deploy/config.yaml` if none) |
 | `make up`          | Full stack incl. controlplane container (`--profile fullstack`; readers' path) |
 | `make down`        | Tear the full stack down                               |
 | `make rebuild`     | Rebuild local Docker images without starting           |
