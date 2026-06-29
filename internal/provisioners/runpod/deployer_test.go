@@ -441,6 +441,43 @@ func TestDestroy_AutoProvisionedReadsInstanceProviderID(t *testing.T) {
 	}
 }
 
+// TestDestroy_TransientError_StaysTerminating pins the issue-165
+// behavior: a 5xx (or network-error) from RunPod during DELETE should
+// NOT mark the deployment FAILED. It leaves the deployment in
+// TERMINATING so the reaper's TERMINATING-sweep can retry. Marking
+// FAILED on a transient blip permanently strands the pod (the
+// production failure shape that triggered this fix).
+func TestDestroy_TransientError_StaysTerminating(t *testing.T) {
+	f := &fakeRunPod{t: t, respond: func(method, path string, body []byte) (int, string) {
+		if method == "DELETE" {
+			return 503, `{"error":"service unavailable"}`
+		}
+		return 500, "{}"
+	}}
+	srv := httptest.NewServer(f.handler())
+	t.Cleanup(srv.Close)
+	client := NewClient("test-api-key", WithBaseURL(srv.URL), WithHTTPClient(srv.Client()))
+	p := New(client)
+
+	dep := okDep()
+	dep.ContainerId = "rp-engine-x"
+
+	c := &collector{}
+	if err := p.Destroy(context.Background(), dep, okInst(), nil, c.emit); err == nil {
+		t.Fatalf("Destroy: want error, got nil")
+	}
+	// Last state must be TERMINATING (not FAILED) so the reaper picks
+	// up the retry. Walk the updates: there should be no FAILED emit.
+	for _, u := range c.updates {
+		if u.State == provisionerv1.DeploymentState_DEPLOYMENT_STATE_FAILED {
+			t.Fatalf("transient 503 emitted FAILED; expected to stay TERMINATING. updates=%+v", c.updates)
+		}
+	}
+	if c.lastState() != provisionerv1.DeploymentState_DEPLOYMENT_STATE_TERMINATING {
+		t.Errorf("last state = %v, want TERMINATING (so reaper retries)", c.lastState())
+	}
+}
+
 // collector mirrors the sshdocker test helper -- captures every emit
 // so tests can assert on the sequence.
 type collector struct {

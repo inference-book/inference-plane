@@ -124,9 +124,12 @@ func TestReaper_ZeroTTL_Skipped(t *testing.T) {
 }
 
 func TestReaper_NonRunningStates_Skipped(t *testing.T) {
-	// Reaper only touches RUNNING. Destroying STARTING / CONFIGURING
-	// would clobber an in-progress deploy; FAILED / TERMINATED /
-	// TERMINATING are already done; DEGRADED stays for diagnostics.
+	// Reaper only touches RUNNING (idle reap) or TERMINATING (retry
+	// stuck destroy). STARTING/CONFIGURING/PENDING would clobber an
+	// in-progress deploy; FAILED is a permanent give-up; TERMINATED
+	// is already done; DEGRADED stays for diagnostics.
+	//
+	// TERMINATING is covered by TestReaper_TerminatingState_RetriesDestroy.
 	now := time.Now()
 	stale := now.Add(-1 * time.Hour) // way past any reasonable TTL
 	cases := []provisionerv1.DeploymentState{
@@ -134,7 +137,6 @@ func TestReaper_NonRunningStates_Skipped(t *testing.T) {
 		provisionerv1.DeploymentState_DEPLOYMENT_STATE_STARTING,
 		provisionerv1.DeploymentState_DEPLOYMENT_STATE_CONFIGURING,
 		provisionerv1.DeploymentState_DEPLOYMENT_STATE_DEGRADED,
-		provisionerv1.DeploymentState_DEPLOYMENT_STATE_TERMINATING,
 		provisionerv1.DeploymentState_DEPLOYMENT_STATE_TERMINATED,
 		provisionerv1.DeploymentState_DEPLOYMENT_STATE_FAILED,
 	}
@@ -248,5 +250,86 @@ func TestReaper_Run_StopsOnContextCancel(t *testing.T) {
 		// Good -- loop exited.
 	case <-time.After(1 * time.Second):
 		t.Fatal("reaper.Run did not exit within 1s of context cancellation")
+	}
+}
+
+// flakyService is a fakeService that returns destroyErr for the first
+// N DestroyDeployment calls, then succeeds. Tests the reaper's retry
+// behavior for TERMINATING deployments (issue 165) without coupling
+// to wall-clock or real provider APIs.
+type flakyService struct {
+	fakeService
+	failuresRemaining atomic.Int32
+}
+
+func (f *flakyService) DestroyDeployment(ctx context.Context, req *provisionerv1.DestroyDeploymentRequest) (*provisionerv1.DestroyDeploymentResponse, error) {
+	if f.failuresRemaining.Load() > 0 {
+		f.failuresRemaining.Add(-1)
+		f.fakeService.destroyCalls.Add(1)
+		return nil, errors.New("simulated transient destroy failure")
+	}
+	return f.fakeService.DestroyDeployment(ctx, req)
+}
+
+// TestReaper_TerminatingState_RetriesDestroy verifies the reaper picks
+// up stuck-TERMINATING deployments and retries the destroy. Mirrors
+// the production failure shape: a transient RunPod API error left the
+// deployment in TERMINATING after a prior sweep; the next sweep should
+// retry and (when the transient condition clears) succeed.
+func TestReaper_TerminatingState_RetriesDestroy(t *testing.T) {
+	svc := &flakyService{}
+	svc.fakeService.deployments = []*provisionerv1.Deployment{
+		dep("stuck", provisionerv1.DeploymentState_DEPLOYMENT_STATE_TERMINATING, 0, time.Time{}),
+	}
+	svc.failuresRemaining.Store(1)
+
+	r := New(svc, WithClock(fixedClock(time.Now())))
+
+	// First sweep: destroy fails transiently. Deployment stays TERMINATING.
+	r.RunOnce(context.Background())
+	if got := svc.fakeService.destroyCalls.Load(); got != 1 {
+		t.Fatalf("first sweep destroy count = %d, want 1", got)
+	}
+
+	// Second sweep: destroy succeeds.
+	r.RunOnce(context.Background())
+	if got := svc.fakeService.destroyCalls.Load(); got != 2 {
+		t.Fatalf("second sweep cumulative destroy count = %d, want 2", got)
+	}
+	if len(svc.fakeService.destroyed) != 1 || svc.fakeService.destroyed[0] != "stuck" {
+		t.Errorf("destroyed = %v, want [stuck]", svc.fakeService.destroyed)
+	}
+	// Retry counter should be cleared after success so future sweeps
+	// against the same id (unusual but legal) start fresh.
+	if r.destroyRetries["stuck"] != 0 {
+		t.Errorf("destroyRetries[stuck] = %d, want 0 after successful retry", r.destroyRetries["stuck"])
+	}
+}
+
+// TestReaper_TerminatingState_CapsRetries verifies the reaper stops
+// retrying after MaxDestroyRetries failures, so a genuinely broken
+// pod doesn't hammer the provider API forever.
+func TestReaper_TerminatingState_CapsRetries(t *testing.T) {
+	svc := &flakyService{}
+	svc.fakeService.deployments = []*provisionerv1.Deployment{
+		dep("never-ends", provisionerv1.DeploymentState_DEPLOYMENT_STATE_TERMINATING, 0, time.Time{}),
+	}
+	// More failures than we'll allow attempts.
+	svc.failuresRemaining.Store(int32(MaxDestroyRetries + 5))
+
+	r := New(svc, WithClock(fixedClock(time.Now())))
+
+	// Sweep MaxDestroyRetries times: each fails, counter increments.
+	for i := 0; i < MaxDestroyRetries; i++ {
+		r.RunOnce(context.Background())
+	}
+	if got := svc.fakeService.destroyCalls.Load(); got != int32(MaxDestroyRetries) {
+		t.Fatalf("after %d sweeps destroy count = %d, want %d", MaxDestroyRetries, got, MaxDestroyRetries)
+	}
+
+	// One more sweep: cap exceeded, no further DestroyDeployment call.
+	r.RunOnce(context.Background())
+	if got := svc.fakeService.destroyCalls.Load(); got != int32(MaxDestroyRetries) {
+		t.Errorf("post-cap sweep destroy count = %d, want still %d (cap should suppress)", got, MaxDestroyRetries)
 	}
 }
