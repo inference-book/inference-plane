@@ -31,6 +31,10 @@
 #   IPLANE_SERVICE_URL    daemon URL (default http://localhost:8080)
 #   DEMO_RPS              target rate per snapshot (default 30)
 #   DEMO_DURATION         traffic duration per snapshot (default 30s)
+#   DEMO_WORKERS          --workers passed to `iplane load` (default
+#                         is auto-sized as max(8, RPS * 4) so the
+#                         client can actually push DEMO_RPS against
+#                         engines with multi-second per-request times)
 #   DEMO_HEALTH_TIMEOUT   seconds to wait for new replicas healthy
 #                         after a scale-up (default 300)
 
@@ -98,6 +102,32 @@ case "${DEMO_STATE}" in
     ;;
 esac
 
+# Demo 06 scales 1 -> 2 -> 3. Scale-down is unimplemented in v0.2 (see
+# issue 145), so a re-run against a deployment that's already at >1
+# replicas would hit the unimplemented error mid-run. Detect this up
+# front and bail with a clear recovery hint.
+CURRENT_REPLICAS=$(echo "${DESC}" | jq -r '(.instance_ids // []) | length')
+if [[ "${CURRENT_REPLICAS}" -gt 1 ]]; then
+  echo "ERROR: deployment ${DEPLOY_ID} is currently at ${CURRENT_REPLICAS} replicas." >&2
+  echo "  Demo 06 starts from replicas=1 and scales up to 3. Scale-down is not yet" >&2
+  echo "  implemented (#145), so we cannot reset to 1 in-place. Recover by destroying" >&2
+  echo "  this deployment and rerunning examples/04-router-in-path to get a fresh one:" >&2
+  echo "    iplane deployment destroy ${DEPLOY_ID} --service-url ${SERVICE_URL}" >&2
+  echo "    cd examples/04-router-in-path && make demo" >&2
+  exit 1
+fi
+
+# Auto-size --workers from DEMO_RPS so the load client can actually
+# drive the target rate. The load tool defaults to 8 workers, sized
+# for near-zero per-request time (mock-backend assumption). Real
+# engines see 1-3s/request, which means 8 workers can sustain
+# 8/3 ~= 2.7 rps max regardless of how many replicas serve.
+#
+# Formula: ceil(RPS * 4), floored at 8. Factor 4 covers worst-case
+# ~4s/request with headroom; over-provisioning idle workers is cheap
+# (each is just a goroutine waiting on HTTP). Override via DEMO_WORKERS.
+DEMO_WORKERS="${DEMO_WORKERS:-$(awk -v r="${RPS}" 'BEGIN { w = int(r * 4 + 0.999); if (w < 8) w = 8; printf "%d", w }')}"
+
 echo "==============================================================="
 echo "Demo 06 -- multi-replica throughput curve"
 echo "==============================================================="
@@ -105,6 +135,7 @@ echo "  deployment      : ${DEPLOY_ID}"
 echo "  model           : ${DEMO_MODEL}"
 echo "  service URL     : ${SERVICE_URL}"
 echo "  target RPS      : ${RPS}"
+echo "  load workers    : ${DEMO_WORKERS}  (auto-sized from RPS; override via DEMO_WORKERS)"
 echo "  per-snapshot    : ${DURATION}"
 echo "  health timeout  : ${HEALTH_TIMEOUT}s"
 echo ""
@@ -163,6 +194,7 @@ snapshot() {
     --model "${DEMO_MODEL}" \
     --rps "${RPS}" \
     --duration "${DURATION}" \
+    --workers "${DEMO_WORKERS}" \
     --max-tokens 60 \
     --chat-fraction 1.0 \
     --output json \
@@ -224,9 +256,17 @@ printf "%-10s %12s %12s %10s %14s\n" "Replicas" "actual_rps" "target_rps" "ratio
 for n in 1 2 3; do
   log_var="snapshot_log_${n}"
   log="${!log_var}"
-  actual=$(jq -r '.actual_rps // 0'    < "${log}")
-  target=$(jq -r '.target_rps // 0'    < "${log}")
-  p95=$(jq -r    '.latency_p95_ms // 0' < "${log}")
+  # Same JSON-line grep as the inline snapshot parse: load's banner
+  # goes to stderr but `2>&1` merges it into the log, so we have to
+  # pull the summary line out before piping to jq.
+  json=$(grep -m1 '^{' "${log}")
+  if [[ -z "${json}" ]]; then
+    printf "%-10s %12s %12s %10s %14s\n" "${n}" "n/a" "n/a" "n/a" "n/a"
+    continue
+  fi
+  actual=$(echo "${json}" | jq -r '.actual_rps // 0')
+  target=$(echo "${json}" | jq -r '.target_rps // 0')
+  p95=$(echo "${json}" | jq -r '.latency_p95_ms // 0')
   ratio=$(awk -v a="${actual}" -v t="${target}" 'BEGIN { if (t > 0) printf "%.2f", a/t; else print "n/a" }')
   printf "%-10s %12.1f %12.1f %10s %14s\n" "${n}" "${actual}" "${target}" "${ratio}" "${p95}"
 done
@@ -236,8 +276,9 @@ done
 # headroom because there's no headroom to reveal. Threshold 0.85
 # is a soft signal; the chapter narrative wants the baseline at
 # 0.4-0.7.
-base_actual=$(jq -r '.actual_rps' < "${snapshot_log_1}")
-base_target=$(jq -r '.target_rps' < "${snapshot_log_1}")
+base_json=$(grep -m1 '^{' "${snapshot_log_1}")
+base_actual=$(echo "${base_json}" | jq -r '.actual_rps // 0')
+base_target=$(echo "${base_json}" | jq -r '.target_rps // 0')
 base_ratio=$(awk -v a="${base_actual}" -v t="${base_target}" 'BEGIN { if (t > 0) print a/t; else print 0 }')
 above_threshold=$(awk -v r="${base_ratio}" 'BEGIN { print (r >= 0.95) ? "yes" : "no" }')
 echo ""
