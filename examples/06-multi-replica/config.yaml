@@ -35,18 +35,27 @@ deployment:
   instance_id: ""
 
 router:
-  # Demo 06 override: scheduler ON for visible router-side
-  # backpressure at replicas=1. As the demo scales to 2 and 3
-  # replicas, the queue drains and actual_rps approaches target_rps.
+  # Demo 06 override: scheduler ON with enough dispatcher concurrency
+  # (servicers=16) that all replicas can be busy simultaneously. The
+  # chapter's narrative is "throughput scales with replicas"; if
+  # `servicers` is smaller than the number of replicas, the scheduler
+  # caps dispatch and adding replicas doesn't help -- the queue
+  # becomes the bottleneck instead of the engines.
+  #
+  # Demo 05's narrative wants the opposite (small dispatcher window
+  # so the queue actually builds and priority lanes are visible);
+  # that's why 05's config keeps servicers=2 while 06 bumps it.
+  # in_flight_cap stays 0 (unlimited per-deployment); the only cap
+  # is the scheduler's worker pool.
   queue:
-    servicers: 2
+    servicers: 16
     capacity: 256
     in_flight_cap: 0
     interactive:
-      servicers: 2
+      servicers: 16
       capacity: 256
     batch:
-      servicers: 2
+      servicers: 16
       capacity: 256
     tenant_weights: {}
 
