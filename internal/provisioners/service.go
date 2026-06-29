@@ -1352,25 +1352,23 @@ func (s *Service) TouchDeployment(ctx context.Context, req *provisionerv1.TouchD
 	}
 	now := s.clock()
 
-	// Debounce: skip the disk write if we persisted a touch for this
-	// deploy_id within touchDebounceInterval. Caller (router hot path)
-	// doesn't read the response body; CLI callers run at low rates
-	// and rarely hit the skip path. On skip, do a cheap Read to keep
-	// the response shape consistent for callers that DO read it.
+	// Debounce: skip BOTH the disk write AND the disk read when we
+	// persisted a touch for this deploy_id within touchDebounceInterval.
+	// The router hot path is fire-and-forget; it never reads the
+	// response body, so an empty response is fine. CLI callers run
+	// at minutes-cadence (operator-triggered) and will reliably hit
+	// the write path, where the full Deployment record is populated.
+	//
+	// Earlier iteration kept a cheap Read on the skip path to populate
+	// the response, but with 30 rps of debounced touches that's still
+	// 30 state.json reads/sec -- enough to add measurable latency
+	// from RPC overhead + kernel syscalls even with the page cache hot.
 	if s.touchDebounceInterval > 0 {
 		s.touchSeenMu.Lock()
 		lastWritten, hasIt := s.touchSeen[id]
 		s.touchSeenMu.Unlock()
 		if hasIt && now.Sub(lastWritten) < s.touchDebounceInterval {
-			state, err := s.store.Read()
-			if err != nil {
-				return nil, status.Error(codes.Internal, err.Error())
-			}
-			dep, ok := state.Deployments[id]
-			if !ok {
-				return nil, status.Errorf(codes.NotFound, "no deployment with id %q", id)
-			}
-			return &provisionerv1.TouchDeploymentResponse{Deployment: dep}, nil
+			return &provisionerv1.TouchDeploymentResponse{}, nil
 		}
 	}
 
