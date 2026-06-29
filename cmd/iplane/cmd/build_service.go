@@ -37,7 +37,7 @@ import (
 //   - lambdalabs: included only when LAMBDA_API_KEY is set in env.
 //     v0.2 ch7-beat3.12 (#151). VM-style provider; the engine
 //     container runs via the sshdocker executor.
-func buildLocalService(store *file.Store, operatorID string) (*provisioners.Service, error) {
+func buildLocalService(store *file.Store, operatorID string, extra ...provisioners.Option) (*provisioners.Service, error) {
 	keyStore, err := sshkeys.New(sshkeys.WithDir(filepath.Join(store.Dir(), "keys")))
 	if err != nil {
 		return nil, fmt.Errorf("open ssh key store: %w", err)
@@ -56,9 +56,11 @@ func buildLocalService(store *file.Store, operatorID string) (*provisioners.Serv
 
 	executor := sshdocker.NewExecutor()
 
-	return provisioners.New(providers, store, operatorID,
+	opts := []provisioners.Option{
 		provisioners.WithKeyStore(keyStore),
 		provisioners.WithDeploymentExecutor(executor),
 		provisioners.WithModelStore(modelStoreForCLI()),
-	), nil
+	}
+	opts = append(opts, extra...)
+	return provisioners.New(providers, store, operatorID, opts...), nil
 }

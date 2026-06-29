@@ -46,4 +46,7 @@ serve: ## Run iplane serve with this demo's config (or fall back to global)
 	cd $(REPO_ROOT) && IPLANE_BACKEND_URL=http://127.0.0.1:8000 \
 	  ./bin/iplane serve --config $$CFG
 
-.PHONY: serve
+install:
+	cd ../../ ; make install
+
+.PHONY: serve install

@@ -67,7 +67,42 @@ type Service struct {
 	// another (today there is at most one in-flight per Service).
 	pendingReplicaSpecs   []*provisionerv1.ReplicaSpec
 	pendingReplicaSpecsMu sync.Mutex
+
+	// touchDebounceInterval is the minimum wall-clock gap between
+	// two persisted TouchDeployment writes for the same deploy_id.
+	// Defaults to DefaultTouchDebounceInterval; operators can tune
+	// via WithTouchDebounceInterval (Service option) or
+	// config.router.touch_debounce_interval (daemon-level config).
+	touchDebounceInterval time.Duration
+
+	// touchSeen caches the wall-clock moment we last persisted a
+	// TouchDeployment for a given deploy_id. Subsequent calls within
+	// touchDebounceInterval skip the store.Update (and its full
+	// state.json read+write) and return a cheap Read instead.
+	//
+	// Why: the router fires touch on EVERY inference request, and
+	// store.Update reads + writes the entire state.json under flock.
+	// Under v0.2 multi-replica load this serialized 16 concurrent
+	// scheduler dispatches behind a single 26KB disk read+write
+	// cycle, exploding p95 from the engine-native ~1.2s to ~25s.
+	// Coalescing per-deploy_id touches at the server keeps the
+	// activity-stamping invariant intact (the reaper's idle TTL
+	// is 30 min; 5s of stamp lag is harmless) while pulling the
+	// disk IO out of the hot path.
+	touchSeenMu sync.Mutex
+	touchSeen   map[string]time.Time
 }
+
+// DefaultTouchDebounceInterval is the minimum wall-clock gap between
+// two TouchDeployment writes for the same deploy_id when no explicit
+// interval is set. The router fires touch on every inference request;
+// without this debounce, each request takes a full state.json
+// read+write tax. The default is small enough that the reaper's
+// per-deployment idle-TTL judgment stays accurate (30 min idle TTL
+// vs 5s coalesce = three orders of magnitude headroom). Operators
+// can override via WithTouchDebounceInterval (Service option) or
+// config.router.touch_debounce_interval (daemon-level config).
+const DefaultTouchDebounceInterval = 5 * time.Second
 
 // keyEnsurer is the narrow interface the Service uses to fetch an
 // SSH key pair for the (operator, provider) scope. Satisfied by
@@ -106,16 +141,32 @@ func WithModelStore(ms modelstores.ModelStore) Option {
 	return func(s *Service) { s.modelStore = ms }
 }
 
+// WithTouchDebounceInterval overrides the minimum wall-clock gap
+// between two persisted TouchDeployment writes for the same
+// deploy_id. Lower = fresher last_activity_at on disk (the reaper
+// sees recent touches sooner). Higher = less disk IO on the
+// request hot path. Zero disables debouncing entirely (every
+// touch hits disk -- the v0.1 behavior, retained for tests that
+// need synchronous touch semantics).
+//
+// Default is DefaultTouchDebounceInterval. Tests typically use 0
+// so they can assert touch ordering precisely.
+func WithTouchDebounceInterval(d time.Duration) Option {
+	return func(s *Service) { s.touchDebounceInterval = d }
+}
+
 // New constructs a Service. Providers are keyed by their Name() so the
 // service can dispatch by spec.provider without an interface assertion
 // at call time.
 func New(providers []Provider, store Store, operatorID string, opts ...Option) *Service {
 	s := &Service{
-		providers:  make(map[string]Provider, len(providers)),
-		store:      store,
-		modelStore: modelstores.Passthrough{}, // safe default; overridden by WithModelStore
-		operatorID: operatorID,
-		clock:      time.Now,
+		providers:             make(map[string]Provider, len(providers)),
+		store:                 store,
+		modelStore:            modelstores.Passthrough{}, // safe default; overridden by WithModelStore
+		operatorID:            operatorID,
+		clock:                 time.Now,
+		touchDebounceInterval: DefaultTouchDebounceInterval,
+		touchSeen:             map[string]time.Time{},
 	}
 	for _, p := range providers {
 		s.providers[p.Name()] = p
@@ -1299,19 +1350,47 @@ func (s *Service) TouchDeployment(ctx context.Context, req *provisionerv1.TouchD
 	if err := ValidateID(id); err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
+	now := s.clock()
+
+	// Debounce: skip the disk write if we persisted a touch for this
+	// deploy_id within touchDebounceInterval. Caller (router hot path)
+	// doesn't read the response body; CLI callers run at low rates
+	// and rarely hit the skip path. On skip, do a cheap Read to keep
+	// the response shape consistent for callers that DO read it.
+	if s.touchDebounceInterval > 0 {
+		s.touchSeenMu.Lock()
+		lastWritten, hasIt := s.touchSeen[id]
+		s.touchSeenMu.Unlock()
+		if hasIt && now.Sub(lastWritten) < s.touchDebounceInterval {
+			state, err := s.store.Read()
+			if err != nil {
+				return nil, status.Error(codes.Internal, err.Error())
+			}
+			dep, ok := state.Deployments[id]
+			if !ok {
+				return nil, status.Errorf(codes.NotFound, "no deployment with id %q", id)
+			}
+			return &provisionerv1.TouchDeploymentResponse{Deployment: dep}, nil
+		}
+	}
+
 	var rec *provisionerv1.Deployment
 	err := s.store.Update(func(state *State) error {
 		dep, ok := state.Deployments[id]
 		if !ok {
 			return status.Errorf(codes.NotFound, "no deployment with id %q", id)
 		}
-		dep.LastActivityAt = timestamppb.New(s.clock())
+		dep.LastActivityAt = timestamppb.New(now)
 		rec = dep
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
+
+	s.touchSeenMu.Lock()
+	s.touchSeen[id] = now
+	s.touchSeenMu.Unlock()
 	return &provisionerv1.TouchDeploymentResponse{Deployment: rec}, nil
 }
 

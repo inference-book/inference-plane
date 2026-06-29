@@ -123,6 +123,7 @@ func registerServeDefaults() {
 	// hostname. Override via IPLANE_TELEMETRY_OTLP_ENDPOINT in compose
 	// (e.g. "otel-collector:4317" for the container-network path).
 	viper.SetDefault("telemetry.otlp_endpoint", "127.0.0.1:4317")
+	viper.SetDefault("router.touch_debounce_interval", provisioners.DefaultTouchDebounceInterval)
 	viper.SetDefault("telemetry.service_name", "inference-plane")
 	viper.SetDefault("telemetry.environment", "dev")
 	viper.SetDefault("telemetry.sample_ratio", 1.0)
@@ -284,7 +285,9 @@ func runServe(parent context.Context) error {
 	}
 	defer releaseLock()
 
-	provisionerSvc, err := buildLocalService(stateStore, "default")
+	provisionerSvc, err := buildLocalService(stateStore, "default",
+		provisioners.WithTouchDebounceInterval(cfg.Router.TouchDebounceInterval),
+	)
 	if err != nil {
 		return fmt.Errorf("build provisioner service: %w", err)
 	}
@@ -372,7 +375,8 @@ func runServe(parent context.Context) error {
 		"interactive_servicers", cfg.Router.Queue.Interactive.Servicers,
 		"interactive_capacity", cfg.Router.Queue.Interactive.Capacity,
 		"batch_servicers", cfg.Router.Queue.Batch.Servicers,
-		"batch_capacity", cfg.Router.Queue.Batch.Capacity)
+		"batch_capacity", cfg.Router.Queue.Batch.Capacity,
+		"touch_debounce_interval", cfg.Router.TouchDebounceInterval)
 
 	api, err := server.New(parent, grpcAddr, logger,
 		server.WithProvisionerHandler(provisioners.NewConnectProvisionerAdapter(provisionerSvc)),

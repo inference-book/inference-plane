@@ -6,7 +6,10 @@
 // validation rules but not the precedence logic.
 package config
 
-import "errors"
+import (
+	"errors"
+	"time"
+)
 
 // Config is the top-level deployment config.
 type Config struct {
@@ -21,6 +24,16 @@ type Config struct {
 // queue; future beats will add per-replica selection knobs here.
 type RouterConfig struct {
 	Queue QueueConfig `yaml:"queue"`
+
+	// TouchDebounceInterval is the minimum wall-clock gap between two
+	// persisted TouchDeployment writes for the same deploy_id. The
+	// router fires touch on every inference request; without
+	// debouncing, each request takes a full state.json read+write
+	// tax. Default is 5s. Lower = fresher last_activity_at on disk
+	// (the reaper sees recent touches sooner). Higher = less disk IO
+	// on the hot path. Zero disables debouncing (every touch hits
+	// disk -- v0.1 behavior).
+	TouchDebounceInterval time.Duration `yaml:"touch_debounce_interval"`
 }
 
 // QueueConfig parameterizes the M/M/k waiting room in front of the
