@@ -67,10 +67,24 @@ if ! curl -fsS -o /dev/null "${SERVICE_URL}/healthz" 2>/dev/null \
   exit 1
 fi
 
+# Resolve the deployment's model from the daemon. `iplane load --model`
+# is required (no default); the engine validates that the body's `model`
+# field matches what the pod is serving, so we query the source of truth
+# instead of asking the operator to retype it.
+DEMO_MODEL="$("${IPLANE}" deployment describe "${DEPLOY_ID}" \
+  --service-url "${SERVICE_URL}" --output json 2>/dev/null \
+  | jq -r '.model // empty')"
+if [[ -z "${DEMO_MODEL}" ]]; then
+  echo "ERROR: could not resolve model for deployment ${DEPLOY_ID}; is the id correct?" >&2
+  echo "  hint: iplane deployment list --service-url ${SERVICE_URL}" >&2
+  exit 1
+fi
+
 echo "==============================================================="
 echo "Demo 06 -- multi-replica throughput curve"
 echo "==============================================================="
 echo "  deployment      : ${DEPLOY_ID}"
+echo "  model           : ${DEMO_MODEL}"
 echo "  service URL     : ${SERVICE_URL}"
 echo "  target RPS      : ${RPS}"
 echo "  per-snapshot    : ${DURATION}"
@@ -128,6 +142,7 @@ snapshot() {
   "${IPLANE}" load \
     --target "${DEPLOY_ID}" \
     --service-url "${SERVICE_URL}" \
+    --model "${DEMO_MODEL}" \
     --rps "${RPS}" \
     --duration "${DURATION}" \
     --max-tokens 60 \
