@@ -116,11 +116,11 @@ func TestSpawn_HappyPath(t *testing.T) {
 	if inst.GetHourlyRateUsd() != 0.39 {
 		t.Errorf("HourlyRateUsd = %v, want 0.39", inst.GetHourlyRateUsd())
 	}
-	if inst.GetGpu().GetSku() != "NVIDIA RTX A5000" {
-		t.Errorf("Sku = %q, want cheapest 24GB SKU (A5000)", inst.GetGpu().GetSku())
+	if inst.GetHardware().GetGpuSku() != "NVIDIA RTX A5000" {
+		t.Errorf("GpuSku = %q, want cheapest 24GB SKU (A5000)", inst.GetHardware().GetGpuSku())
 	}
-	if inst.GetGpu().GetVramGb() != 24 {
-		t.Errorf("VramGb = %d, want 24", inst.GetGpu().GetVramGb())
+	if inst.GetHardware().GetGpuVramMb() != 24*1024 {
+		t.Errorf("GpuVramMb = %d, want %d (24 GB)", inst.GetHardware().GetGpuVramMb(), 24*1024)
 	}
 	if inst.GetRegion() != "US-CA-1" {
 		t.Errorf("Region = %q, want US-CA-1", inst.GetRegion())
@@ -281,8 +281,8 @@ func TestSpawn_FollowupFailure_FallsBackToMinimalInstance(t *testing.T) {
 	if inst.GetProviderId() != "rp-7c8e" {
 		t.Errorf("ProviderId = %q, want rp-7c8e", inst.GetProviderId())
 	}
-	if inst.GetGpu().GetSku() != "NVIDIA RTX A5000" {
-		t.Errorf("fallback should carry the resolved SKU; got %q", inst.GetGpu().GetSku())
+	if inst.GetHardware().GetGpuSku() != "NVIDIA RTX A5000" {
+		t.Errorf("fallback should carry the resolved SKU; got %q", inst.GetHardware().GetGpuSku())
 	}
 }
 
@@ -587,8 +587,8 @@ func TestDescribe_HappyPath(t *testing.T) {
 	if inst.GetSsh().GetHost() != "1.2.3.4" {
 		t.Errorf("Ssh.Host = %q, want 1.2.3.4", inst.GetSsh().GetHost())
 	}
-	if inst.GetGpu().GetVramGb() != 24 {
-		t.Errorf("Gpu.VramGb = %d, want 24", inst.GetGpu().GetVramGb())
+	if inst.GetHardware().GetGpuVramMb() != 24*1024 {
+		t.Errorf("Hardware.GpuVramMb = %d, want %d (24 GB)", inst.GetHardware().GetGpuVramMb(), 24*1024)
 	}
 	if inst.GetSpec().GetTags()[provisioners.TagID] != "my-pod" {
 		t.Errorf("name-decoded tag iplane-id = %q, want my-pod", inst.GetSpec().GetTags()[provisioners.TagID])

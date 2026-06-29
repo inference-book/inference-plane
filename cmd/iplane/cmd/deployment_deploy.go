@@ -42,7 +42,11 @@ var (
 	deployMinRAM     int32
 	deployMinDisk    int32
 	deployGPUCount   int32
-	deployDebugShell bool
+	deployDebugShell    bool
+	deployIdleTTL       time.Duration
+	deployNoIdleDestroy bool
+	deployReplicas      int32
+	deployReplicaSpecs  []string
 	deployOtelEndpoint string
 	deployOtelHeaders  map[string]string
 	deployWait       bool
@@ -102,13 +106,29 @@ func runDeploymentDeploy(cmd *cobra.Command, args []string) error {
 	if deployModel == "" {
 		return fmt.Errorf("--model is required")
 	}
+	// Parse heterogeneous --replica flags up front so the validation
+	// below knows which auto-provision form is in use.
+	replicasSpec, err := parseReplicaSpecs(deployReplicaSpecs)
+	if err != nil {
+		return err
+	}
 	// Auto-provision needs a provider + a way to resolve the GPU.
-	if deployInstanceID == "" {
+	// Heterogeneous (--replica) carries the per-slot info inline, so
+	// the singular --provider / --class checks below don't apply.
+	if deployInstanceID == "" && len(replicasSpec) == 0 {
 		if deployProvider == "" {
-			return fmt.Errorf("--provider is required when --instance is not given (auto-provision)")
+			return fmt.Errorf("--provider is required when --instance and --replica are not given (auto-provision)")
 		}
 		if deployClass == "" && deploySKU == "" && deployMinVRAM == 0 {
 			return fmt.Errorf("auto-provision requires one of --class, --sku, or --min-vram-gb")
+		}
+	}
+	if len(replicasSpec) > 0 {
+		if deployProvider != "" || deployClass != "" || deploySKU != "" || deployMinVRAM != 0 {
+			return fmt.Errorf("--replica is mutually exclusive with --provider / --class / --sku / --min-vram-gb (use one form per call)")
+		}
+		if deployReplicas != 1 {
+			return fmt.Errorf("--replica is mutually exclusive with --replicas; the count is len(--replica)")
 		}
 	}
 
@@ -134,28 +154,45 @@ func runDeploymentDeploy(cmd *cobra.Command, args []string) error {
 	engineEnv := mergeOtelEnv(deployEnv, deployOtelEndpoint, deployOtelHeaders)
 
 	dep := &provisionerv1.Deployment{
-		Id:         id,
-		InstanceId: deployInstanceID,
-		Image:      deployImage,
-		Model:      deployModel,
-		EnginePort: deployEnginePort,
-		EngineArgs: deployEngineArgs,
-		Env:        engineEnv,
-		DebugShell: deployDebugShell,
+		Id:             id,
+		InstanceId:     deployInstanceID,
+		Image:          deployImage,
+		Model:          deployModel,
+		EnginePort:     deployEnginePort,
+		EngineArgs:     deployEngineArgs,
+		Env:            engineEnv,
+		DebugShell:     deployDebugShell,
+		IdleTtlSeconds: int32(deployIdleTTL.Seconds()),
+		NoIdleDestroy:  deployNoIdleDestroy,
 	}
 	req := &provisionerv1.CreateDeploymentRequest{
 		Deployment: dep,
 		Wait:       deployWait,
-		Provider:   deployProvider,
-		Region:     deployRegion,
-		Requirements: &provisionerv1.ResourceRequirements{
-			Class:     deployClass,
-			Sku:       deploySKU,
-			MinVramGb: deployMinVRAM,
-			MinRamGb:  deployMinRAM,
-			MinDiskGb: deployMinDisk,
-			GpuCount:  deployGPUCount,
-		},
+	}
+	// v0.2 ch7-beat3.10: all auto-provision flows through
+	// replicas_spec. Translate the legacy --provider/--class/etc
+	// flags into a single-entry replicas_spec on the way down.
+	// Pinned-instance form (--instance) leaves replicas_spec empty
+	// -- placeDeployment in the service handles that case.
+	if len(replicasSpec) > 0 {
+		req.ReplicasSpec = replicasSpec
+	} else if deployInstanceID == "" {
+		// Auto-provision: build a single instance group from the
+		// homogeneous flag set. --replicas N folds into the group's
+		// replicas count.
+		req.ReplicasSpec = []*provisionerv1.ReplicaSpec{{
+			Provider: deployProvider,
+			Region:   deployRegion,
+			Replicas: deployReplicas,
+			Requirements: &provisionerv1.ResourceRequirements{
+				Class:     deployClass,
+				Sku:       deploySKU,
+				MinVramGb: deployMinVRAM,
+				MinRamGb:  deployMinRAM,
+				MinDiskGb: deployMinDisk,
+				GpuCount:  deployGPUCount,
+			},
+		}}
 	}
 
 	if deployDryRun {
@@ -199,8 +236,8 @@ func init() {
 	f := deploymentDeployCmd.Flags()
 	f.StringVar(&deployInstanceID, "instance", "",
 		`place onto an existing instance (omit to auto-provision a fresh one)`)
-	f.StringVar(&deployProvider, "provider", "",
-		`provider to auto-provision on, e.g. runpod (required when --instance is omitted)`)
+	f.StringVar(&deployProvider, "provider", defaultProvider(""),
+		`provider to auto-provision on, e.g. runpod (required when --instance is omitted; falls back to `+EnvProvider+` env when unset)`)
 	f.StringVar(&deployRegion, "region", "", `region hint for auto-provisioning (optional)`)
 	f.StringVar(&deployImage, "image", "", `engine container image, e.g. vllm/vllm-openai:v0.7.0 (required)`)
 	f.StringVar(&deployModel, "model", "",
@@ -220,6 +257,15 @@ func init() {
 		`OTLP endpoint URL for the engine to ship traces/metrics to (default: IPLANE_OTEL_ENDPOINT env). Sets OTEL_EXPORTER_OTLP_ENDPOINT on the pod. Examples: Grafana Cloud Free's OTLP HTTP URL, or 'iplane telemetry url' for a cloudflared tunnel to the local stack.`)
 	f.StringToStringVar(&deployOtelHeaders, "otel-headers", parseOtelHeadersEnv(os.Getenv("IPLANE_OTEL_HEADERS")),
 		`OTLP request headers, KEY=VALUE (repeatable; default: IPLANE_OTEL_HEADERS env, comma-separated). Sets OTEL_EXPORTER_OTLP_HEADERS on the pod. Grafana Cloud uses 'Authorization=Basic <token>'.`)
+	f.DurationVar(&deployIdleTTL, "idle-ttl", 0,
+		`destroy the deployment after this much idle time (no inference + no operator RPCs). Default 0 = no reaping. v0.2 ch7-beat1.7.`)
+	f.BoolVar(&deployNoIdleDestroy, "no-idle-destroy", false,
+		`pin the deployment against the idle-TTL reaper. Set when the deployment is the shared anchor for a demo session and afk pauses must not reap it. v0.2 ch7-beat1.9.`)
+	f.Int32Var(&deployReplicas, "replicas", 1,
+		`number of same-shape Instances to provision at deploy time (homogeneous form). Default 1. For heterogeneous multi-provider fleets, use --replica instead. Mutually exclusive with --replica.`)
+	f.StringSliceVar(&deployReplicaSpecs, "replica", nil,
+		`per-replica spec in 'provider:class' form (e.g., runpod:small,vast:medium). Repeatable. Specifying --replica activates the heterogeneous form: each entry provisions one replica with that (provider, class) shape, so the same Deployment can span providers (1 runpod + 1 vast + 1 lambda) -- iplane's load-bearing differentiator from k8s. Mutually exclusive with --provider / --class / --replicas.`)
+
 	f.BoolVar(&deployDebugShell, "debug-shell", false,
 		`opt in to shell-level access to the engine pod (allocates a routable IP + ssh; costs more, narrows placement). Engine endpoint is unchanged either way.`)
 	f.BoolVar(&deployWait, "wait", true, `block until the engine reaches a terminal state`)

@@ -15,8 +15,9 @@ import (
 	"github.com/inference-book/inference-plane/gen/go/provisioner/v1/provisionerv1connect"
 	"github.com/inference-book/inference-plane/internal/deployments/sshdocker"
 	"github.com/inference-book/inference-plane/internal/provisioners"
-	"github.com/inference-book/inference-plane/internal/provisioners/state"
+	"github.com/inference-book/inference-plane/internal/provisioners/stores/file"
 	"github.com/inference-book/inference-plane/internal/sshkeys"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // CLI deployment tests run against a real Service over a real
@@ -88,7 +89,7 @@ func (f *fakeDeploymentExecutor) Destroy(_ context.Context, _ *provisionerv1.Dep
 type deploymentTestEnv struct {
 	server   *httptest.Server
 	svc      *provisioners.Service
-	store    *state.Store
+	store    *file.Store
 	executor *fakeDeploymentExecutor
 	stateDir string
 }
@@ -97,9 +98,9 @@ type deploymentTestEnv struct {
 // the state file, bypassing the provider's Spawn path. Used to set up
 // preconditions for deployment tests without exercising the CreateInstance
 // verb (which is a separate test surface).
-func seedActiveInstance(t *testing.T, store *state.Store, id string) {
+func seedActiveInstance(t *testing.T, store *file.Store, id string) {
 	t.Helper()
-	if err := store.Update(func(f *state.File) error {
+	if err := store.Update(func(f *provisioners.State) error {
 		f.Instances[id] = seedInstance(id)
 		return nil
 	}); err != nil {
@@ -110,9 +111,9 @@ func seedActiveInstance(t *testing.T, store *state.Store, id string) {
 func newDeploymentTestEnv(t *testing.T) *deploymentTestEnv {
 	t.Helper()
 	dir := t.TempDir()
-	store, err := state.Open(dir, "default")
+	store, err := file.Open(dir, "default")
 	if err != nil {
-		t.Fatalf("state.Open: %v", err)
+		t.Fatalf("file.Open: %v", err)
 	}
 	keyStore, err := sshkeys.New(sshkeys.WithDir(dir + "/keys"))
 	if err != nil {
@@ -153,11 +154,10 @@ func seedInstance(id string) *provisionerv1.Instance {
 		ProviderId: "mock:" + id,
 		Provider:   "mock",
 		Region:     "test",
-		Gpu: &provisionerv1.GpuInfo{
-			Class:  "small",
-			Sku:    "mock-sku",
-			Count:  1,
-			VramGb: 24,
+		Hardware: &provisionerv1.Hardware{
+			GpuSku:    "mock-sku",
+			GpuCount:  1,
+			GpuVramMb: 24 * 1024,
 		},
 		HourlyRateUsd: 0.42,
 		State:         provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE,
@@ -201,6 +201,8 @@ func resetDeploymentFlags() {
 	deployMinDisk = 0
 	deployGPUCount = 0
 	deployDebugShell = false
+	deployIdleTTL = 0
+	deployNoIdleDestroy = false
 	deployEnginePort = 8000
 	deployEngineArgs = nil
 	deployEnv = nil
@@ -220,6 +222,7 @@ func resetDeploymentFlags() {
 
 	deploymentDestroyForce = false
 	deploymentDestroyDryRun = false
+	deploymentTouchDryRun = false
 
 	querySystem = ""
 	queryMaxTokens = 256
@@ -465,6 +468,128 @@ func TestDeploymentDescribe_NotFound(t *testing.T) {
 	out, err := runDeploymentCmd(t, env, "describe", "nope")
 	if err == nil {
 		t.Fatalf("expected error; got:\n%s", out)
+	}
+}
+
+// TestDeploymentTouch_HappyPath asserts the v0.2 ch7-beat1.8 touch
+// verb hits the TouchDeployment RPC end-to-end. After touch, the
+// deployment's last_activity_at is non-nil (was nil pre-touch since
+// the seed deploy doesn't fire traffic).
+func TestDeploymentTouch_HappyPath(t *testing.T) {
+	env := newDeploymentTestEnv(t)
+	if _, err := runDeploymentCmd(t, env,
+		"deploy", "my-llama",
+		"--instance", "my-pod",
+		"--image", "vllm/vllm-openai:0.7.0",
+		"--model", "Qwen/Qwen2.5-1.5B-Instruct",
+	); err != nil {
+		t.Fatalf("seed deploy: %v", err)
+	}
+	out, err := runDeploymentCmd(t, env, "touch", "my-llama")
+	if err != nil {
+		t.Fatalf("touch: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "last activity:") {
+		t.Errorf("touch output should include last activity line; got:\n%s", out)
+	}
+}
+
+func TestDeploymentTouch_NotFound(t *testing.T) {
+	env := newDeploymentTestEnv(t)
+	out, err := runDeploymentCmd(t, env, "touch", "nope")
+	if err == nil {
+		t.Fatalf("expected error; got:\n%s", out)
+	}
+}
+
+// TestDeploymentTouch_DryRun_ReportsPlan: dry-run on a real
+// deployment shows the would-touch plan without writing.
+func TestDeploymentTouch_DryRun_ReportsPlan(t *testing.T) {
+	env := newDeploymentTestEnv(t)
+	if _, err := runDeploymentCmd(t, env,
+		"deploy", "my-llama",
+		"--instance", "my-pod",
+		"--image", "vllm/vllm-openai:0.7.0",
+		"--model", "Qwen/Qwen2.5-1.5B-Instruct",
+		"--idle-ttl", "5m",
+	); err != nil {
+		t.Fatalf("seed deploy: %v", err)
+	}
+	out, err := runDeploymentCmd(t, env, "touch", "my-llama", "--dry-run")
+	if err != nil {
+		t.Fatalf("dry-run: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "[dry-run] would touch") {
+		t.Errorf("dry-run output missing would-touch plan; got:\n%s", out)
+	}
+}
+
+// TestDeploy_NoIdleDestroyFlag_Plumbs verifies the --no-idle-destroy
+// flag lands on the persisted deployment record. Reads back via
+// describe and asserts the pinned line appears in the human output.
+func TestDeploy_NoIdleDestroyFlag_Plumbs(t *testing.T) {
+	env := newDeploymentTestEnv(t)
+	if _, err := runDeploymentCmd(t, env,
+		"deploy", "pinned-llama",
+		"--instance", "my-pod",
+		"--image", "vllm/vllm-openai:0.7.0",
+		"--model", "Qwen/Qwen2.5-1.5B-Instruct",
+		"--idle-ttl", "5m",
+		"--no-idle-destroy",
+	); err != nil {
+		t.Fatalf("seed deploy: %v", err)
+	}
+	out, err := runDeploymentCmd(t, env, "describe", "pinned-llama")
+	if err != nil {
+		t.Fatalf("describe: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "pinned:") {
+		t.Errorf("describe should report pinned: true; got:\n%s", out)
+	}
+}
+
+func TestDeploymentDescribe_NewFields_JSON(t *testing.T) {
+	// Verifies that v0.2 ch7-beat1.1's three new Deployment fields
+	// (idle_ttl_seconds, last_activity_at, no_idle_destroy) round-trip
+	// through `iplane deployment describe --output json`. Seeds the
+	// deployment directly into the state file: the CreateDeployment
+	// flow doesn't expose these fields yet (the --no-idle-destroy
+	// flag is its own follow-up ticket), so we exercise the persistence
+	// + describe-render path without depending on flag wiring that
+	// doesn't exist in this PR.
+	env := newDeploymentTestEnv(t)
+	activity := time.Date(2026, 5, 31, 12, 34, 56, 0, time.UTC)
+	if err := env.store.Update(func(f *provisioners.State) error {
+		f.Deployments["pinned-llama"] = &provisionerv1.Deployment{
+			Id:             "pinned-llama",
+			InstanceId:     "my-pod",
+			Image:          "vllm/vllm-openai:0.7.0",
+			Model:          "Qwen/Qwen2.5-7B-Instruct",
+			State:          provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING,
+			IdleTtlSeconds: 300,
+			LastActivityAt: timestamppb.New(activity),
+			NoIdleDestroy:  true,
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	out, err := runDeploymentCmd(t, env, "describe", "pinned-llama", "--output", "json")
+	if err != nil {
+		t.Fatalf("describe: %v\n%s", err, out)
+	}
+	// Match key/value pieces independently so the test stays robust to
+	// protojson's whitespace-between-colon-and-value (which has shifted
+	// between library versions).
+	for _, want := range []string{
+		`"idle_ttl_seconds":`, `300`,
+		`"last_activity_at":`, `"2026-05-31T12:34:56Z"`,
+		`"no_idle_destroy":`, `true`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("describe json missing %q; got:\n%s", want, out)
+		}
 	}
 }
 

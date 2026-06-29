@@ -13,7 +13,7 @@ import (
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
 	"github.com/inference-book/inference-plane/gen/go/provisioner/v1/provisionerv1connect"
 	"github.com/inference-book/inference-plane/internal/provisioners"
-	"github.com/inference-book/inference-plane/internal/provisioners/state"
+	"github.com/inference-book/inference-plane/internal/provisioners/stores/file"
 )
 
 // CLI tests run against a real Service over a real httptest.Server,
@@ -57,11 +57,10 @@ func (m *mockProvider) Spawn(ctx context.Context, spec *provisionerv1.Spec) (*pr
 		Provider:   m.name,
 		Spec:       spec,
 		Region:     spec.GetRegion(),
-		Gpu: &provisionerv1.GpuInfo{
-			Class:  spec.GetRequirements().GetClass(),
-			Sku:    "mock-sku",
-			Count:  1,
-			VramGb: 24,
+		Hardware: &provisionerv1.Hardware{
+			GpuSku:    "mock-sku",
+			GpuCount:  1,
+			GpuVramMb: 24 * 1024,
 		},
 		HourlyRateUsd: 0.42,
 		State:         provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE,
@@ -92,9 +91,9 @@ type testEnv struct {
 
 func newTestEnv(t *testing.T, providerName string) *testEnv {
 	t.Helper()
-	store, err := state.Open(t.TempDir(), "default")
+	store, err := file.Open(t.TempDir(), "default")
 	if err != nil {
-		t.Fatalf("state.Open: %v", err)
+		t.Fatalf("file.Open: %v", err)
 	}
 	mp := &mockProvider{name: providerName}
 	svc := provisioners.New([]provisioners.Provider{mp}, store, "default")
@@ -442,15 +441,17 @@ func TestDescribe_OutputJSON(t *testing.T) {
 	// (no envelope), matching the protojson encoding of
 	// DescribeInstanceResponse.
 	var inst struct {
-		ID  string `json:"id"`
-		GPU struct {
-			Sku string `json:"sku"`
-		} `json:"gpu"`
+		ID       string `json:"id"`
+		Hardware struct {
+			// writeProtoJSON uses UseProtoNames=true; field names
+			// stay snake_case in the JSON output.
+			GpuSku string `json:"gpu_sku"`
+		} `json:"hardware"`
 	}
 	if err := json.Unmarshal([]byte(out), &inst); err != nil {
 		t.Fatalf("output is not valid JSON: %v\n%s", err, out)
 	}
-	if inst.ID != "my-pod" || inst.GPU.Sku != "mock-sku" {
+	if inst.ID != "my-pod" || inst.Hardware.GpuSku != "mock-sku" {
 		t.Errorf("decoded instance = %+v", inst)
 	}
 }

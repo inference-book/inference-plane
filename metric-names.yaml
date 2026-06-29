@@ -48,6 +48,26 @@ metrics:
     value: gpu.effective_rate.usd_per_second
     description: Gauge of per-second cost rate for each provider/gpu_type/billing_mode combination loaded from providers.yaml. One series per provider for the cross-provider cost-projection panel.
 
+  - key: reaper_destroys_total
+    value: iplane.reaper.destroys.total
+    description: Counter of deployments destroyed by the idle-TTL reaper, labeled by reason (idle, etc.). Operator-facing signal of leak protection working.
+
+  - key: queue_depth
+    value: iplane.queue.depth
+    description: Gauge of current items waiting in the router's per-(deploy, tenant, lane) sub-queue. Updated synchronously on push/pop. Operator-facing signal for fair-share visibility (v0.2 ch7-beat2.6).
+
+  - key: queue_wait_seconds
+    value: iplane.queue.wait.seconds
+    description: Histogram of seconds an entry spent waiting in the router's queue before dispatch. Labeled by deploy_id / tenant_id / class so per-class p95 wait is the chapter's fair-queueing dashboard story.
+
+  - key: replica_in_flight
+    value: iplane.replica.in_flight
+    description: Synchronous gauge of current in-flight requests per (deploy_id, replica_id). Emitted on dispatch + on response so the value tracks live load. Demo 06's "watch replicas equalize under round-robin" panel reads this (v0.2 ch7-beat3.6, #88).
+
+  - key: router_decisions_total
+    value: iplane.router.decisions.total
+    description: Counter of routing decisions, labeled by deploy_id / replica_id / outcome. Outcomes -- "picked" when a replica was selected, "no_replicas" when all were empty/quarantined (the 503 replica_unavailable path). Complementary to inference.requests.total which counts completed requests with downstream status (v0.2 ch7-beat3.6, #88).
+
 inference_attributes:
   - key: model
     value: inference.model
@@ -77,9 +97,21 @@ labels:
     value: model
   - key: status
     value: status
+  - key: deploy_id
+    value: deploy_id
+  - key: tenant_id
+    value: tenant_id
+  - key: priority
+    value: priority
+  - key: replica_id
+    value: replica_id
+  - key: reason
+    value: reason
   - key: provider
     value: provider
   - key: gpu_type
     value: gpu_type
   - key: billing_mode
     value: billing_mode
+  - key: outcome
+    value: outcome

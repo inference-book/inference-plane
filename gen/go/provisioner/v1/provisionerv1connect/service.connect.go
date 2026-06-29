@@ -68,6 +68,12 @@ const (
 	// DeploymentServiceWatchDeploymentProcedure is the fully-qualified name of the DeploymentService's
 	// WatchDeployment RPC.
 	DeploymentServiceWatchDeploymentProcedure = "/provisioner.v1.DeploymentService/WatchDeployment"
+	// DeploymentServiceTouchDeploymentProcedure is the fully-qualified name of the DeploymentService's
+	// TouchDeployment RPC.
+	DeploymentServiceTouchDeploymentProcedure = "/provisioner.v1.DeploymentService/TouchDeployment"
+	// DeploymentServiceScaleDeploymentProcedure is the fully-qualified name of the DeploymentService's
+	// ScaleDeployment RPC.
+	DeploymentServiceScaleDeploymentProcedure = "/provisioner.v1.DeploymentService/ScaleDeployment"
 )
 
 // ProvisionerServiceClient is a client for the provisioner.v1.ProvisionerService service.
@@ -388,6 +394,34 @@ type DeploymentServiceClient interface {
 	// Logs are NOT carried on this stream -- they are a separate concern
 	// (see the followup issue for `iplane deployment logs <id> [-f]`).
 	WatchDeployment(context.Context, *connect.Request[v1.WatchDeploymentRequest]) (*connect.ServerStreamForClient[v1.DeploymentStateChangedEvent], error)
+	// TouchDeployment explicitly marks the deployment as active --
+	// updates last_activity_at to "now", resetting the idle-TTL
+	// reaper's clock. v0.2 ch7-beat1.7 callers:
+	//
+	//   - The router (per inference request, after the lookup picks
+	//     the target deployment). The router is the canonical data-
+	//     plane source of activity.
+	//   - The operator's `iplane deployment touch` CLI verb (#71),
+	//     for the "I'm still using this deployment; don't reap yet"
+	//     escape hatch when traffic is intermittent.
+	//
+	// Explicit-touch on its own RPC rather than as a side effect of
+	// DescribeDeployment or WatchDeployment: passive inspection
+	// (operator running `iplane deployment describe` to check state)
+	// must not extend the lease, or the reaper is useless.
+	TouchDeployment(context.Context, *connect.Request[v1.TouchDeploymentRequest]) (*connect.Response[v1.TouchDeploymentResponse], error)
+	// ScaleDeployment changes the replica count of a running deployment.
+	// v0.2 ch7-beat3.8 (#86) ships scale-up only: target_replicas > the
+	// current count appends new replicas by extending the slot numbering
+	// (deployment with r0,r1,r2 scaled to 5 gains r3,r4 -- existing slots
+	// are not touched, even if they're DEGRADED tombstones from a prior
+	// fan-out partial failure). Scale-down (target < current) returns
+	// UNIMPLEMENTED with a pointer to #145 where the drain-and-destroy
+	// semantics get designed.
+	//
+	// target == current is a no-op and returns the current record
+	// unchanged. target <= 0 is invalid.
+	ScaleDeployment(context.Context, *connect.Request[v1.ScaleDeploymentRequest]) (*connect.Response[v1.ScaleDeploymentResponse], error)
 }
 
 // NewDeploymentServiceClient constructs a client for the provisioner.v1.DeploymentService service.
@@ -431,6 +465,18 @@ func NewDeploymentServiceClient(httpClient connect.HTTPClient, baseURL string, o
 			connect.WithSchema(deploymentServiceMethods.ByName("WatchDeployment")),
 			connect.WithClientOptions(opts...),
 		),
+		touchDeployment: connect.NewClient[v1.TouchDeploymentRequest, v1.TouchDeploymentResponse](
+			httpClient,
+			baseURL+DeploymentServiceTouchDeploymentProcedure,
+			connect.WithSchema(deploymentServiceMethods.ByName("TouchDeployment")),
+			connect.WithClientOptions(opts...),
+		),
+		scaleDeployment: connect.NewClient[v1.ScaleDeploymentRequest, v1.ScaleDeploymentResponse](
+			httpClient,
+			baseURL+DeploymentServiceScaleDeploymentProcedure,
+			connect.WithSchema(deploymentServiceMethods.ByName("ScaleDeployment")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -441,6 +487,8 @@ type deploymentServiceClient struct {
 	listDeployments    *connect.Client[v1.ListDeploymentsRequest, v1.ListDeploymentsResponse]
 	destroyDeployment  *connect.Client[v1.DestroyDeploymentRequest, v1.DestroyDeploymentResponse]
 	watchDeployment    *connect.Client[v1.WatchDeploymentRequest, v1.DeploymentStateChangedEvent]
+	touchDeployment    *connect.Client[v1.TouchDeploymentRequest, v1.TouchDeploymentResponse]
+	scaleDeployment    *connect.Client[v1.ScaleDeploymentRequest, v1.ScaleDeploymentResponse]
 }
 
 // CreateDeployment calls provisioner.v1.DeploymentService.CreateDeployment.
@@ -466,6 +514,16 @@ func (c *deploymentServiceClient) DestroyDeployment(ctx context.Context, req *co
 // WatchDeployment calls provisioner.v1.DeploymentService.WatchDeployment.
 func (c *deploymentServiceClient) WatchDeployment(ctx context.Context, req *connect.Request[v1.WatchDeploymentRequest]) (*connect.ServerStreamForClient[v1.DeploymentStateChangedEvent], error) {
 	return c.watchDeployment.CallServerStream(ctx, req)
+}
+
+// TouchDeployment calls provisioner.v1.DeploymentService.TouchDeployment.
+func (c *deploymentServiceClient) TouchDeployment(ctx context.Context, req *connect.Request[v1.TouchDeploymentRequest]) (*connect.Response[v1.TouchDeploymentResponse], error) {
+	return c.touchDeployment.CallUnary(ctx, req)
+}
+
+// ScaleDeployment calls provisioner.v1.DeploymentService.ScaleDeployment.
+func (c *deploymentServiceClient) ScaleDeployment(ctx context.Context, req *connect.Request[v1.ScaleDeploymentRequest]) (*connect.Response[v1.ScaleDeploymentResponse], error) {
+	return c.scaleDeployment.CallUnary(ctx, req)
 }
 
 // DeploymentServiceHandler is an implementation of the provisioner.v1.DeploymentService service.
@@ -496,6 +554,34 @@ type DeploymentServiceHandler interface {
 	// Logs are NOT carried on this stream -- they are a separate concern
 	// (see the followup issue for `iplane deployment logs <id> [-f]`).
 	WatchDeployment(context.Context, *connect.Request[v1.WatchDeploymentRequest], *connect.ServerStream[v1.DeploymentStateChangedEvent]) error
+	// TouchDeployment explicitly marks the deployment as active --
+	// updates last_activity_at to "now", resetting the idle-TTL
+	// reaper's clock. v0.2 ch7-beat1.7 callers:
+	//
+	//   - The router (per inference request, after the lookup picks
+	//     the target deployment). The router is the canonical data-
+	//     plane source of activity.
+	//   - The operator's `iplane deployment touch` CLI verb (#71),
+	//     for the "I'm still using this deployment; don't reap yet"
+	//     escape hatch when traffic is intermittent.
+	//
+	// Explicit-touch on its own RPC rather than as a side effect of
+	// DescribeDeployment or WatchDeployment: passive inspection
+	// (operator running `iplane deployment describe` to check state)
+	// must not extend the lease, or the reaper is useless.
+	TouchDeployment(context.Context, *connect.Request[v1.TouchDeploymentRequest]) (*connect.Response[v1.TouchDeploymentResponse], error)
+	// ScaleDeployment changes the replica count of a running deployment.
+	// v0.2 ch7-beat3.8 (#86) ships scale-up only: target_replicas > the
+	// current count appends new replicas by extending the slot numbering
+	// (deployment with r0,r1,r2 scaled to 5 gains r3,r4 -- existing slots
+	// are not touched, even if they're DEGRADED tombstones from a prior
+	// fan-out partial failure). Scale-down (target < current) returns
+	// UNIMPLEMENTED with a pointer to #145 where the drain-and-destroy
+	// semantics get designed.
+	//
+	// target == current is a no-op and returns the current record
+	// unchanged. target <= 0 is invalid.
+	ScaleDeployment(context.Context, *connect.Request[v1.ScaleDeploymentRequest]) (*connect.Response[v1.ScaleDeploymentResponse], error)
 }
 
 // NewDeploymentServiceHandler builds an HTTP handler from the service implementation. It returns
@@ -535,6 +621,18 @@ func NewDeploymentServiceHandler(svc DeploymentServiceHandler, opts ...connect.H
 		connect.WithSchema(deploymentServiceMethods.ByName("WatchDeployment")),
 		connect.WithHandlerOptions(opts...),
 	)
+	deploymentServiceTouchDeploymentHandler := connect.NewUnaryHandler(
+		DeploymentServiceTouchDeploymentProcedure,
+		svc.TouchDeployment,
+		connect.WithSchema(deploymentServiceMethods.ByName("TouchDeployment")),
+		connect.WithHandlerOptions(opts...),
+	)
+	deploymentServiceScaleDeploymentHandler := connect.NewUnaryHandler(
+		DeploymentServiceScaleDeploymentProcedure,
+		svc.ScaleDeployment,
+		connect.WithSchema(deploymentServiceMethods.ByName("ScaleDeployment")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/provisioner.v1.DeploymentService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case DeploymentServiceCreateDeploymentProcedure:
@@ -547,6 +645,10 @@ func NewDeploymentServiceHandler(svc DeploymentServiceHandler, opts ...connect.H
 			deploymentServiceDestroyDeploymentHandler.ServeHTTP(w, r)
 		case DeploymentServiceWatchDeploymentProcedure:
 			deploymentServiceWatchDeploymentHandler.ServeHTTP(w, r)
+		case DeploymentServiceTouchDeploymentProcedure:
+			deploymentServiceTouchDeploymentHandler.ServeHTTP(w, r)
+		case DeploymentServiceScaleDeploymentProcedure:
+			deploymentServiceScaleDeploymentHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -574,4 +676,12 @@ func (UnimplementedDeploymentServiceHandler) DestroyDeployment(context.Context, 
 
 func (UnimplementedDeploymentServiceHandler) WatchDeployment(context.Context, *connect.Request[v1.WatchDeploymentRequest], *connect.ServerStream[v1.DeploymentStateChangedEvent]) error {
 	return connect.NewError(connect.CodeUnimplemented, errors.New("provisioner.v1.DeploymentService.WatchDeployment is not implemented"))
+}
+
+func (UnimplementedDeploymentServiceHandler) TouchDeployment(context.Context, *connect.Request[v1.TouchDeploymentRequest]) (*connect.Response[v1.TouchDeploymentResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("provisioner.v1.DeploymentService.TouchDeployment is not implemented"))
+}
+
+func (UnimplementedDeploymentServiceHandler) ScaleDeployment(context.Context, *connect.Request[v1.ScaleDeploymentRequest]) (*connect.Response[v1.ScaleDeploymentResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("provisioner.v1.DeploymentService.ScaleDeployment is not implemented"))
 }

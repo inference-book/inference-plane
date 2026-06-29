@@ -220,6 +220,93 @@ service DeploymentService {
   // Logs are NOT carried on this stream -- they are a separate concern
   // (see the followup issue for `iplane deployment logs <id> [-f]`).
   rpc WatchDeployment(WatchDeploymentRequest) returns (stream DeploymentStateChangedEvent);
+
+  // TouchDeployment explicitly marks the deployment as active --
+  // updates last_activity_at to "now", resetting the idle-TTL
+  // reaper's clock. v0.2 ch7-beat1.7 callers:
+  //
+  //   - The router (per inference request, after the lookup picks
+  //     the target deployment). The router is the canonical data-
+  //     plane source of activity.
+  //   - The operator's `iplane deployment touch` CLI verb (#71),
+  //     for the "I'm still using this deployment; don't reap yet"
+  //     escape hatch when traffic is intermittent.
+  //
+  // Explicit-touch on its own RPC rather than as a side effect of
+  // DescribeDeployment or WatchDeployment: passive inspection
+  // (operator running `iplane deployment describe` to check state)
+  // must not extend the lease, or the reaper is useless.
+  rpc TouchDeployment(TouchDeploymentRequest) returns (TouchDeploymentResponse);
+
+  // ScaleDeployment changes the replica count of a running deployment.
+  // v0.2 ch7-beat3.8 (#86) ships scale-up only: target_replicas > the
+  // current count appends new replicas by extending the slot numbering
+  // (deployment with r0,r1,r2 scaled to 5 gains r3,r4 -- existing slots
+  // are not touched, even if they're DEGRADED tombstones from a prior
+  // fan-out partial failure). Scale-down (target < current) returns
+  // UNIMPLEMENTED with a pointer to #145 where the drain-and-destroy
+  // semantics get designed.
+  //
+  // target == current is a no-op and returns the current record
+  // unchanged. target <= 0 is invalid.
+  rpc ScaleDeployment(ScaleDeploymentRequest) returns (ScaleDeploymentResponse);
+}
+
+message ScaleDeploymentRequest {
+  // Deployment id to scale. Must reference a RUNNING or DEGRADED
+  // deployment; PENDING / STARTING / CONFIGURING / TERMINATING /
+  // TERMINATED / FAILED records are rejected (the scale verb is for
+  // operator capacity-tuning of an already-serving deployment).
+  string id = 1;
+
+  // Target replica count. Must be > 0. v0.2 ch7-beat3.8 supports
+  // target >= current (scale-up + no-op); target < current returns
+  // UNIMPLEMENTED until #145 lands.
+  int32 target_replicas = 2;
+
+  // Wait=true blocks until the new replicas reach a terminal aggregate
+  // state (RUNNING / DEGRADED / FAILED). wait=false returns after the
+  // append starts, before the new replicas finish provisioning -- the
+  // operator polls via DescribeDeployment.
+  bool wait = 3;
+
+  // Dry-run prints what the server would do without actually
+  // provisioning. The response carries the planned new slot ids in
+  // planned_instance_ids but no state-file mutations occur. The CLI
+  // surfaces these to the operator for confirmation before re-running
+  // without --dry-run.
+  bool dry_run = 4;
+
+  // add_replicas is the heterogeneous append form (v0.2 ch7-beat3.9,
+  // #143): each entry appends one replica with its own (provider,
+  // region, requirements) shape. Mutually exclusive with
+  // target_replicas -- pick one form per call. The new replicas
+  // append at the next slot index (current_count, current_count+1, ...)
+  // like the homogeneous target_replicas path; the only difference is
+  // each new slot can name a different provider/class.
+  //
+  // Example: a deployment with 1 runpod replica scaled to add one vast
+  // and one lambda is ScaleDeployment(id, add_replicas=[vast:medium,
+  // lambda:medium]) -- post-scale the deployment has 1 runpod + 1 vast
+  // + 1 lambda, all serving the same model behind the router's
+  // round-robin distribution.
+  repeated ReplicaSpec add_replicas = 5;
+}
+
+message ScaleDeploymentResponse {
+  // The deployment record. On wait=true, reflects the terminal
+  // aggregate state after the append. On wait=false, reflects the
+  // pre-append state plus the new slot ids stamped into instance_ids
+  // (engine_endpoints still empty for the new slots).
+  //
+  // On dry_run=true, the record is the current state (not mutated);
+  // the planned slot ids appear in planned_instance_ids below.
+  Deployment deployment = 1;
+
+  // For dry_run=true: the instance_ids the server would synthesize
+  // for the new slots. Empty list when the request is a no-op or
+  // dry_run=false.
+  repeated string planned_instance_ids = 2;
 }
 
 message CreateDeploymentRequest {
@@ -227,20 +314,32 @@ message CreateDeploymentRequest {
   // When true, block until the deployment reaches RUNNING (or FAILED).
   // Default false -- async-with-LRO. CLI's `--wait` flag sets this.
   bool wait = 2;
-  // Resource requirements for the instance the deployment is placed on.
-  // Used when deployment.instance_id is empty: the scheduler provisions
-  // a fresh instance satisfying these constraints (image-as-pod
-  // providers run the engine image directly on it). Ignored when
-  // instance_id names an existing instance (the deployment lands on
-  // that instance's already-resolved hardware). Same three-layer shape
-  // as instance create: class shorthand, numeric floors, or exact sku.
-  ResourceRequirements requirements = 3;
-  // Provider to provision on when auto-provisioning (instance_id empty).
-  // Ignored when instance_id names an existing instance (its provider
-  // is used). v0.1: "runpod" is the image-native default.
-  string provider = 4;
-  // Region hint passed through to the provider when auto-provisioning.
-  string region = 5;
+
+  // replicas_spec describes the fleet to provision: each entry is one
+  // instance group of (provider, region, requirements, count) units.
+  // v0.2 ch7-beat3.10 unifies what was previously two mutually-
+  // exclusive shapes (singular `provider`/`requirements`/`replicas`
+  // for homogeneous AND `replicas_spec` for heterogeneous) into one:
+  //
+  //   - 1 small RunPod        -> [{runpod, small, 1}]
+  //   - 3 small RunPods       -> [{runpod, small, 3}]
+  //   - 1 runpod + 1 vast     -> [{runpod, small, 1}, {vast, medium, 1}]
+  //   - 2 runpod + 1 vast     -> [{runpod, small, 2}, {vast, medium, 1}]
+  //   - existing instance     -> empty replicas_spec + dep.instance_id set
+  //
+  // Each entry maps to one instance group. The chapter narrative:
+  //   - Single-entry replicas_spec = one cloud-native instance group
+  //     (the future delegation target via #147's GroupProvisioner).
+  //   - Multi-entry replicas_spec = several groups composed by iplane,
+  //     possibly across providers -- the differentiator from k8s/ASGs.
+  //
+  // The persisted Deployment.replica_specs view is the *expanded*
+  // per-slot form (one entry per slot, replicas=1 each). The expansion
+  // happens at fan-out time in resolveCreateReplicaSpecs; the wire
+  // form carries the compressed per-group form. The parallel-arrays
+  // invariant (instance_ids[i] <-> replica_specs[i]) holds on the
+  // persisted view.
+  repeated ReplicaSpec replicas_spec = 7;
 }
 
 message CreateDeploymentResponse {
@@ -299,4 +398,15 @@ message DeploymentStateChangedEvent {
   string phase = 4;
   string progress_message = 5;
   google.protobuf.Timestamp at = 6;
+}
+
+message TouchDeploymentRequest {
+  string id = 1;
+}
+
+message TouchDeploymentResponse {
+  // Echo of the post-touch record for caller convenience. Operators
+  // running `iplane deployment touch` (v0.2 ch7-beat1.8) can see the
+  // new last_activity_at without a follow-up Describe.
+  Deployment deployment = 1;
 }

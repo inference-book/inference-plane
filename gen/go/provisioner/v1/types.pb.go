@@ -9,6 +9,7 @@ package provisionerv1
 import (
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
+	structpb "google.golang.org/protobuf/types/known/structpb"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
 	reflect "reflect"
 	sync "sync"
@@ -90,6 +91,73 @@ func (InstanceState) EnumDescriptor() ([]byte, []int) {
 	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{0}
 }
 
+// Priority is the lane an inbound request joins on its way to the
+// engine. Two values in v0.2: interactive (low-latency, user-facing)
+// and batch (high-throughput, bulk). The scheduler that decides
+// which lane to drain when lands in v0.2 ch7-beat2.4; this enum
+// just labels the request so the lane structure can be plumbed.
+//
+// Priority is a request-level concept -- the router maps inbound
+// requests onto lanes based on the X-IPlane-Priority header (or a
+// router-level default for unannotated traffic). No Deployment-side
+// proto field carries a priority; the engine itself is
+// priority-blind.
+//
+// Forward-compat: numeric values are stable; appending future
+// priorities (e.g., BACKGROUND, REALTIME) does not break readers
+// pinned to ch07-final.
+type Priority int32
+
+const (
+	Priority_PRIORITY_UNSPECIFIED Priority = 0
+	// User-facing traffic; should not wait behind bulk work.
+	Priority_PRIORITY_INTERACTIVE Priority = 1
+	// Bulk traffic; tolerates higher tail latency in exchange for
+	// throughput.
+	Priority_PRIORITY_BATCH Priority = 2
+)
+
+// Enum value maps for Priority.
+var (
+	Priority_name = map[int32]string{
+		0: "PRIORITY_UNSPECIFIED",
+		1: "PRIORITY_INTERACTIVE",
+		2: "PRIORITY_BATCH",
+	}
+	Priority_value = map[string]int32{
+		"PRIORITY_UNSPECIFIED": 0,
+		"PRIORITY_INTERACTIVE": 1,
+		"PRIORITY_BATCH":       2,
+	}
+)
+
+func (x Priority) Enum() *Priority {
+	p := new(Priority)
+	*p = x
+	return p
+}
+
+func (x Priority) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (Priority) Descriptor() protoreflect.EnumDescriptor {
+	return file_provisioner_v1_types_proto_enumTypes[1].Descriptor()
+}
+
+func (Priority) Type() protoreflect.EnumType {
+	return &file_provisioner_v1_types_proto_enumTypes[1]
+}
+
+func (x Priority) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use Priority.Descriptor instead.
+func (Priority) EnumDescriptor() ([]byte, []int) {
+	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{1}
+}
+
 type DeploymentState int32
 
 const (
@@ -149,11 +217,11 @@ func (x DeploymentState) String() string {
 }
 
 func (DeploymentState) Descriptor() protoreflect.EnumDescriptor {
-	return file_provisioner_v1_types_proto_enumTypes[1].Descriptor()
+	return file_provisioner_v1_types_proto_enumTypes[2].Descriptor()
 }
 
 func (DeploymentState) Type() protoreflect.EnumType {
-	return &file_provisioner_v1_types_proto_enumTypes[1]
+	return &file_provisioner_v1_types_proto_enumTypes[2]
 }
 
 func (x DeploymentState) Number() protoreflect.EnumNumber {
@@ -162,7 +230,7 @@ func (x DeploymentState) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use DeploymentState.Descriptor instead.
 func (DeploymentState) EnumDescriptor() ([]byte, []int) {
-	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{1}
+	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{2}
 }
 
 // Spec is what the operator asks for. Provider-agnostic. Everything in
@@ -385,32 +453,60 @@ func (x *ResourceRequirements) GetSku() string {
 	return ""
 }
 
-// GpuInfo describes what was actually scheduled. Provider answers with
-// a concrete SKU and observed VRAM after the spawn.
-type GpuInfo struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Class         string                 `protobuf:"bytes,1,opt,name=class,proto3" json:"class,omitempty"`
-	Sku           string                 `protobuf:"bytes,2,opt,name=sku,proto3" json:"sku,omitempty"`
-	Count         int32                  `protobuf:"varint,3,opt,name=count,proto3" json:"count,omitempty"`
-	VramGb        int32                  `protobuf:"varint,4,opt,name=vram_gb,json=vramGb,proto3" json:"vram_gb,omitempty"`
+// Hardware is the cross-provider physical-characteristics base for
+// an Instance. Every adapter populates what its provider exposes;
+// fields the provider doesn't surface stay 0 (or "" for strings).
+//
+// **All memory fields are MB.** Units are uniform on the iplane
+// side -- adapters convert at the wire boundary so callers never
+// see provider-specific GB/GiB/MiB mismatches. The single-unit
+// convention also kills round-tripping bugs (the 24564 MB -> 23
+// GB int-truncation that bit Vast in PR for #150).
+//
+// Fields will graduate from `Instance.metadata` (the provider-
+// specific escape hatch) into Hardware as cross-provider patterns
+// become clear. The initial set is the lowest-common-denominator
+// every cloud surfaces: GPU shape, vCPU count, host RAM, host disk.
+type Hardware struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// GPU details -- provider-native SKU id, count, per-GPU VRAM.
+	// gpu_sku is the provider's literal identifier (gpu_1x_a10,
+	// RTX 4090) so it round-trips back to the provider unchanged.
+	// gpu_vram_mb is per-GPU; total VRAM is gpu_vram_mb * gpu_count.
+	GpuSku    string `protobuf:"bytes,1,opt,name=gpu_sku,json=gpuSku,proto3" json:"gpu_sku,omitempty"`
+	GpuCount  int32  `protobuf:"varint,2,opt,name=gpu_count,json=gpuCount,proto3" json:"gpu_count,omitempty"`
+	GpuVramMb int32  `protobuf:"varint,3,opt,name=gpu_vram_mb,json=gpuVramMb,proto3" json:"gpu_vram_mb,omitempty"`
+	// Host CPU -- virtual CPUs the operator's container sees and
+	// the model string for diagnostic output. Optional; left zero
+	// when the provider doesn't expose vCPU info on the rented
+	// instance record.
+	Vcpus    int32  `protobuf:"varint,10,opt,name=vcpus,proto3" json:"vcpus,omitempty"`
+	CpuModel string `protobuf:"bytes,11,opt,name=cpu_model,json=cpuModel,proto3" json:"cpu_model,omitempty"`
+	// Host RAM (system memory available to the container). MB.
+	CpuRamMb int32 `protobuf:"varint,12,opt,name=cpu_ram_mb,json=cpuRamMb,proto3" json:"cpu_ram_mb,omitempty"`
+	// Host disk allocation for this rental. MB. Lambda exposes this
+	// as `instance_type.specs.storage_gib`; Vast as the offer's
+	// `disk_space` (GB); RunPod as the pod's `containerDiskInGb`.
+	// All converted to MB at the adapter boundary.
+	DiskMb        int32 `protobuf:"varint,20,opt,name=disk_mb,json=diskMb,proto3" json:"disk_mb,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *GpuInfo) Reset() {
-	*x = GpuInfo{}
+func (x *Hardware) Reset() {
+	*x = Hardware{}
 	mi := &file_provisioner_v1_types_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *GpuInfo) String() string {
+func (x *Hardware) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*GpuInfo) ProtoMessage() {}
+func (*Hardware) ProtoMessage() {}
 
-func (x *GpuInfo) ProtoReflect() protoreflect.Message {
+func (x *Hardware) ProtoReflect() protoreflect.Message {
 	mi := &file_provisioner_v1_types_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -422,35 +518,56 @@ func (x *GpuInfo) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use GpuInfo.ProtoReflect.Descriptor instead.
-func (*GpuInfo) Descriptor() ([]byte, []int) {
+// Deprecated: Use Hardware.ProtoReflect.Descriptor instead.
+func (*Hardware) Descriptor() ([]byte, []int) {
 	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{2}
 }
 
-func (x *GpuInfo) GetClass() string {
+func (x *Hardware) GetGpuSku() string {
 	if x != nil {
-		return x.Class
+		return x.GpuSku
 	}
 	return ""
 }
 
-func (x *GpuInfo) GetSku() string {
+func (x *Hardware) GetGpuCount() int32 {
 	if x != nil {
-		return x.Sku
-	}
-	return ""
-}
-
-func (x *GpuInfo) GetCount() int32 {
-	if x != nil {
-		return x.Count
+		return x.GpuCount
 	}
 	return 0
 }
 
-func (x *GpuInfo) GetVramGb() int32 {
+func (x *Hardware) GetGpuVramMb() int32 {
 	if x != nil {
-		return x.VramGb
+		return x.GpuVramMb
+	}
+	return 0
+}
+
+func (x *Hardware) GetVcpus() int32 {
+	if x != nil {
+		return x.Vcpus
+	}
+	return 0
+}
+
+func (x *Hardware) GetCpuModel() string {
+	if x != nil {
+		return x.CpuModel
+	}
+	return ""
+}
+
+func (x *Hardware) GetCpuRamMb() int32 {
+	if x != nil {
+		return x.CpuRamMb
+	}
+	return 0
+}
+
+func (x *Hardware) GetDiskMb() int32 {
+	if x != nil {
+		return x.DiskMb
 	}
 	return 0
 }
@@ -541,8 +658,11 @@ type Instance struct {
 	// Region as actually scheduled by the provider (may differ from
 	// spec.region if the provider auto-selects a sub-zone).
 	Region string `protobuf:"bytes,5,opt,name=region,proto3" json:"region,omitempty"`
-	// GPU as actually scheduled (concrete SKU, observed VRAM).
-	Gpu *GpuInfo `protobuf:"bytes,6,opt,name=gpu,proto3" json:"gpu,omitempty"`
+	// Hardware as actually scheduled (concrete SKU + cross-provider
+	// CPU/RAM/disk base). Replaces the v0.1 GpuInfo field which was
+	// deleted pre-publication (no `reserved` marker per the no-
+	// reserved-fields-pre-publication memory).
+	Hardware *Hardware `protobuf:"bytes,6,opt,name=hardware,proto3" json:"hardware,omitempty"`
 	// What the operator is being billed at the moment of Spawn. Loaded
 	// from providers.yaml then confirmed against the provider's response
 	// where available.
@@ -565,7 +685,28 @@ type Instance struct {
 	// version without losing or rejecting unknown fields -- the
 	// forward-compatibility property the state file owes any reader
 	// pinned to ch06-final.
-	ProviderData  []byte `protobuf:"bytes,14,opt,name=provider_data,json=providerData,proto3" json:"provider_data,omitempty"`
+	ProviderData []byte `protobuf:"bytes,14,opt,name=provider_data,json=providerData,proto3" json:"provider_data,omitempty"`
+	// Provider-specific raw data the adapter wants to preserve outside
+	// the typed `Hardware` base. Keys follow the convention
+	// "<provider>.<field>" (e.g. "vast.reliability2",
+	// "lambda.region_description", "runpod.machine_id") so cross-
+	// provider readers can branch on the prefix.
+	//
+	// google.protobuf.Value preserves type fidelity (number, string,
+	// bool, null, struct, list) so downstream code reads
+	// `meta["vast.reliability2"].GetNumberValue()` and
+	// `meta["vast.verification"].GetStringValue()` without per-key
+	// string parsing. JSON serialization is transparent --
+	// `iplane instance describe`'s output preserves the original
+	// type.
+	//
+	// Useful for: leak detection (vast.machine_id, runpod.machine_id),
+	// routing-policy hints (vast.verification, vast.reliability2),
+	// Lambda-side capability flags (lambda.actions_migrate), and any
+	// field the chapter doesn't surface yet but might want later.
+	// Fields with cross-provider patterns graduate into `Hardware`;
+	// metadata is the staging ground.
+	Metadata      map[string]*structpb.Value `protobuf:"bytes,15,rep,name=metadata,proto3" json:"metadata,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -635,9 +776,9 @@ func (x *Instance) GetRegion() string {
 	return ""
 }
 
-func (x *Instance) GetGpu() *GpuInfo {
+func (x *Instance) GetHardware() *Hardware {
 	if x != nil {
-		return x.Gpu
+		return x.Hardware
 	}
 	return nil
 }
@@ -694,6 +835,13 @@ func (x *Instance) GetFailureReason() string {
 func (x *Instance) GetProviderData() []byte {
 	if x != nil {
 		return x.ProviderData
+	}
+	return nil
+}
+
+func (x *Instance) GetMetadata() map[string]*structpb.Value {
+	if x != nil {
+		return x.Metadata
 	}
 	return nil
 }
@@ -844,7 +992,132 @@ type Deployment struct {
 	// Default false: the engine port goes through the provider's
 	// managed proxy (no publicIp on RunPod, in-cluster service URL on
 	// k8s) -- cheapest capacity, no debug side-channel.
-	DebugShell    bool `protobuf:"varint,18,opt,name=debug_shell,json=debugShell,proto3" json:"debug_shell,omitempty"`
+	DebugShell bool `protobuf:"varint,18,opt,name=debug_shell,json=debugShell,proto3" json:"debug_shell,omitempty"`
+	// idle_ttl_seconds is the inactivity window after which v0.2's idle
+	// reaper destroys this deployment. Zero means "TTL not set by
+	// operator"; the reaper applies the profile default at evaluation
+	// time (demo profile is low single-digit minutes; dev and prod
+	// profiles longer). Mutated only at CreateDeployment time in v0.2.
+	// Reads land in the reaper ticket; this field is persistence-only
+	// until then.
+	IdleTtlSeconds int32 `protobuf:"varint,19,opt,name=idle_ttl_seconds,json=idleTtlSeconds,proto3" json:"idle_ttl_seconds,omitempty"`
+	// last_activity_at is the timestamp of the most recent activity
+	// against this deployment. Activity covers two sources:
+	//   - the data plane: an inference request entering the router.
+	//   - the control plane: an operator-facing RPC against this
+	//     deployment (describe, watch, touch).
+	//
+	// Nil means "never touched since creation"; the reaper treats nil
+	// with a non-zero TTL the same as last_activity_at = created_at.
+	// Written by the router and by DeploymentService RPC handlers;
+	// read by the reaper. Touch (v0.2 ch7-beat1.8) is the operator-
+	// facing reset.
+	LastActivityAt *timestamppb.Timestamp `protobuf:"bytes,20,opt,name=last_activity_at,json=lastActivityAt,proto3" json:"last_activity_at,omitempty"`
+	// no_idle_destroy pins the deployment: when true, the idle reaper
+	// skips it entirely. Operator sets it at CreateDeployment time
+	// (--no-idle-destroy flag in v0.2 ch7-beat1.9); flipping it later
+	// requires the unpin verb (system-hygiene). Use case: the shared
+	// deployment across Ch 7's demos is pinned at the start of the
+	// session so afk pauses do not tear it down.
+	NoIdleDestroy bool `protobuf:"varint,21,opt,name=no_idle_destroy,json=noIdleDestroy,proto3" json:"no_idle_destroy,omitempty"`
+	// instance_ids is the full list of Instances that back this
+	// Deployment (v0.2 ch7-beat3.1). One Deployment, N Instances --
+	// each Instance was provisioned independently and may differ in
+	// provider / GPU class / region. Beat 3 fan-out (#84) writes
+	// this list at CreateDeployment time (for the --replicas N sugar)
+	// or via the add-instance verb (for heterogeneous composition).
+	// Beat 3 router fan-out (#85) reads this list to pick which
+	// engine endpoint a request goes to.
+	//
+	// Backward-compat with v0.1's single-instance contract: when
+	// instance_ids is empty (legacy 1.2 records), readers treat the
+	// singular `instance_id` field as the only entry. The
+	// EffectiveInstanceIDs helper (added in #84) encapsulates this
+	// fallback so callers don't branch on emptiness themselves.
+	//
+	// The singular `instance_id` field at slot 2 stays for v0.1
+	// backward-compat: for one-instance deployments it remains the
+	// canonical primary; for multi-instance deployments it equals
+	// instance_ids[0] (the first-provisioned instance).
+	InstanceIds []string `protobuf:"bytes,24,rep,name=instance_ids,json=instanceIds,proto3" json:"instance_ids,omitempty"`
+	// engine_endpoints is the parallel list to instance_ids: position i
+	// holds the engine endpoint URL for instance_ids[i], or empty
+	// string while that instance hasn't reached RUNNING yet (v0.2
+	// ch7-beat3.2 / #84-#85). Maintained by the Service as the single
+	// writer; the router reads it to pick which endpoint a request
+	// goes to via round-robin (and future per-replica policies).
+	//
+	// Invariant: when populated, len(engine_endpoints) ==
+	// len(instance_ids). Empty list (Beat 1+2 single-instance
+	// Deployments) means "fall back to the singular engine_endpoint
+	// field at slot 17." The EffectiveEndpoints helper encapsulates
+	// this fallback.
+	//
+	// Why denormalized on Deployment rather than fetched per-request
+	// from each Instance: the Service is the single writer of
+	// deployment state and naturally knows both the instance set and
+	// each engine's endpoint at deploy time. Snapshot-on-Deployment
+	// means the router does 1 RPC per request (DescribeDeployment)
+	// instead of 1 + N. Consistency is the Service's problem -- a
+	// future cache invalidator (#88+) layers on top without
+	// restructuring this field.
+	EngineEndpoints []string `protobuf:"bytes,25,rep,name=engine_endpoints,json=engineEndpoints,proto3" json:"engine_endpoints,omitempty"`
+	// unhealthy_instance_ids is the parallel set of Instance IDs that
+	// the health-poll loop has currently marked unhealthy. Position-
+	// independent: the router treats membership in this set as the
+	// signal to skip the corresponding entry in instance_ids /
+	// engine_endpoints. v0.2 ch7-beat3.5 (#87).
+	//
+	// Why a parallel set, not a state flag on each instance: the
+	// router already does an effective_endpoints lookup per request;
+	// adding a small set membership check is O(k) where k = number
+	// of replicas (small). A per-instance state enum would have
+	// required a proto restructure to `repeated Replica` and would
+	// have invalidated the parallel-arrays shape #84/#85 just
+	// landed on.
+	//
+	// Mutation contract: only the health-poll loop writes this field.
+	// It calls Quarantine(deploy, instance) on the deployment service
+	// after K consecutive /health failures, and Restore(deploy,
+	// instance) after K consecutive successes when previously
+	// quarantined. The engine endpoint in engine_endpoints[i] is
+	// preserved across quarantine; restore is set-removal, not
+	// re-discovery.
+	//
+	// Persistence: this field is persisted to the state file so
+	// operator-visible quarantine state survives daemon restart. The
+	// K-of-K streak counters are in-memory only; a restart resets
+	// them, which means a quarantined replica may take an extra K
+	// ticks to restore after the daemon comes back -- acceptable
+	// since restart is rare.
+	UnhealthyInstanceIds []string `protobuf:"bytes,26,rep,name=unhealthy_instance_ids,json=unhealthyInstanceIds,proto3" json:"unhealthy_instance_ids,omitempty"`
+	// replica_specs records the per-slot ReplicaSpec each slot was
+	// originally provisioned from (heterogeneous form) or derived
+	// from (homogeneous form: one entry replicated len(instance_ids)
+	// times via resolveCreateReplicaSpecs). Parallel to instance_ids
+	// / engine_endpoints / unhealthy_instance_ids; position i is the
+	// spec for instance_ids[i]. v0.2 ch7-beat3.9 (#143).
+	//
+	// This is the operator's *intent* shape: class="small" stays
+	// "small" here even after the provider resolved it to a concrete
+	// SKU at rent time (the resolved form lives on Instance.spec.
+	// requirements -- two complementary views).
+	//
+	// Used by:
+	//   - #93's reconciliation loop: retry a failed slot with the
+	//     same spec the operator asked for, even if the dead
+	//     Instance is gone from the state file.
+	//   - Scale operations: anchor off dep.replica_specs[0] instead
+	//     of looking up the slot-0 Instance for the homogeneous
+	//     target_replicas form.
+	//   - Describe / audit: surface what the operator actually
+	//     asked for, not just what got rented.
+	//
+	// Empty list for Beat 1+2 single-instance legacy deployments
+	// (which fell back to the singular instance_id). Beat 3
+	// deployments always populate this in lockstep with the other
+	// parallel arrays.
+	ReplicaSpecs  []*ReplicaSpec `protobuf:"bytes,27,rep,name=replica_specs,json=replicaSpecs,proto3" json:"replica_specs,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1005,11 +1278,167 @@ func (x *Deployment) GetDebugShell() bool {
 	return false
 }
 
+func (x *Deployment) GetIdleTtlSeconds() int32 {
+	if x != nil {
+		return x.IdleTtlSeconds
+	}
+	return 0
+}
+
+func (x *Deployment) GetLastActivityAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.LastActivityAt
+	}
+	return nil
+}
+
+func (x *Deployment) GetNoIdleDestroy() bool {
+	if x != nil {
+		return x.NoIdleDestroy
+	}
+	return false
+}
+
+func (x *Deployment) GetInstanceIds() []string {
+	if x != nil {
+		return x.InstanceIds
+	}
+	return nil
+}
+
+func (x *Deployment) GetEngineEndpoints() []string {
+	if x != nil {
+		return x.EngineEndpoints
+	}
+	return nil
+}
+
+func (x *Deployment) GetUnhealthyInstanceIds() []string {
+	if x != nil {
+		return x.UnhealthyInstanceIds
+	}
+	return nil
+}
+
+func (x *Deployment) GetReplicaSpecs() []*ReplicaSpec {
+	if x != nil {
+		return x.ReplicaSpecs
+	}
+	return nil
+}
+
+// ReplicaSpec describes one *instance group* in the fleet: N units
+// of one (provider, region, requirements) shape. Used in two ways:
+//
+//   - Request form: CreateDeploymentRequest.replicas_spec /
+//     ScaleDeploymentRequest.add_replicas. The operator submits a
+//     compact list -- e.g., [{runpod, small, replicas=3}] for "three
+//     small RunPods" or [{runpod, small, 2}, {vast, medium, 1}] for
+//     "two small RunPods plus one medium Vast." replicas defaults to
+//     1 when omitted (proto3 zero-value semantics; Service normalizes
+//     on receive).
+//
+//   - Persisted form: Deployment.replica_specs is the *expanded*
+//     per-slot view: one entry per actual slot, always replicas=1.
+//     resolveCreateReplicaSpecs expands a request's compressed form
+//     into the per-slot list. The expansion direction is fixed: the
+//     parallel-arrays invariant (instance_ids[i] <-> replica_specs[i])
+//     stays clean, and #93's reconciliation reads one spec per slot
+//     without having to do count arithmetic.
+//
+// The instance-group framing is the architectural seam that #147's
+// cloud-native delegation reads: one ReplicaSpec entry with
+// replicas=N is literally a fleet description that can map directly
+// to AWS ASGs / GCP MIGs / RunPod fleet APIs (when providers ship
+// the corresponding GroupProvisioner capability). Heterogeneous
+// requests stay on iplane-side fan-out because no single cloud's
+// group primitive spans clouds.
+//
+// Lives in types.proto (not service.proto) because Deployment
+// references it -- types.proto can't import service.proto, so the
+// shared message belongs here.
+type ReplicaSpec struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Provider to provision this group's replicas on. Required.
+	Provider string `protobuf:"bytes,1,opt,name=provider,proto3" json:"provider,omitempty"`
+	// Region hint passed to the provider when supported. Optional.
+	Region string `protobuf:"bytes,2,opt,name=region,proto3" json:"region,omitempty"`
+	// Resource requirements shared by all replicas in this group.
+	// Same three-layer shape as the original homogeneous form:
+	// class shorthand, numeric floors, or exact sku. Required.
+	Requirements *ResourceRequirements `protobuf:"bytes,3,opt,name=requirements,proto3" json:"requirements,omitempty"`
+	// Number of replicas in this group. Default 0 means 1 (proto3
+	// zero-value normalization). On the persisted Deployment.replica_specs
+	// view this is always 1 (the request's compressed N expands to
+	// N one-each entries).
+	Replicas      int32 `protobuf:"varint,4,opt,name=replicas,proto3" json:"replicas,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReplicaSpec) Reset() {
+	*x = ReplicaSpec{}
+	mi := &file_provisioner_v1_types_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReplicaSpec) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReplicaSpec) ProtoMessage() {}
+
+func (x *ReplicaSpec) ProtoReflect() protoreflect.Message {
+	mi := &file_provisioner_v1_types_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReplicaSpec.ProtoReflect.Descriptor instead.
+func (*ReplicaSpec) Descriptor() ([]byte, []int) {
+	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *ReplicaSpec) GetProvider() string {
+	if x != nil {
+		return x.Provider
+	}
+	return ""
+}
+
+func (x *ReplicaSpec) GetRegion() string {
+	if x != nil {
+		return x.Region
+	}
+	return ""
+}
+
+func (x *ReplicaSpec) GetRequirements() *ResourceRequirements {
+	if x != nil {
+		return x.Requirements
+	}
+	return nil
+}
+
+func (x *ReplicaSpec) GetReplicas() int32 {
+	if x != nil {
+		return x.Replicas
+	}
+	return 0
+}
+
 var File_provisioner_v1_types_proto protoreflect.FileDescriptor
 
 const file_provisioner_v1_types_proto_rawDesc = "" +
 	"\n" +
-	"\x1aprovisioner/v1/types.proto\x12\x0eprovisioner.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xa0\x02\n" +
+	"\x1aprovisioner/v1/types.proto\x12\x0eprovisioner.v1\x1a\x1cgoogle/protobuf/struct.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\xa0\x02\n" +
 	"\x04Spec\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1a\n" +
 	"\bprovider\x18\x02 \x01(\tR\bprovider\x12\x16\n" +
@@ -1028,24 +1457,29 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"min_ram_gb\x18\x03 \x01(\x05R\bminRamGb\x12\x1b\n" +
 	"\tgpu_count\x18\x04 \x01(\x05R\bgpuCount\x12\x14\n" +
 	"\x05class\x18\x05 \x01(\tR\x05class\x12\x10\n" +
-	"\x03sku\x18\x06 \x01(\tR\x03sku\"`\n" +
-	"\aGpuInfo\x12\x14\n" +
-	"\x05class\x18\x01 \x01(\tR\x05class\x12\x10\n" +
-	"\x03sku\x18\x02 \x01(\tR\x03sku\x12\x14\n" +
-	"\x05count\x18\x03 \x01(\x05R\x05count\x12\x17\n" +
-	"\avram_gb\x18\x04 \x01(\x05R\x06vramGb\"G\n" +
+	"\x03sku\x18\x06 \x01(\tR\x03sku\"\xca\x01\n" +
+	"\bHardware\x12\x17\n" +
+	"\agpu_sku\x18\x01 \x01(\tR\x06gpuSku\x12\x1b\n" +
+	"\tgpu_count\x18\x02 \x01(\x05R\bgpuCount\x12\x1e\n" +
+	"\vgpu_vram_mb\x18\x03 \x01(\x05R\tgpuVramMb\x12\x14\n" +
+	"\x05vcpus\x18\n" +
+	" \x01(\x05R\x05vcpus\x12\x1b\n" +
+	"\tcpu_model\x18\v \x01(\tR\bcpuModel\x12\x1c\n" +
+	"\n" +
+	"cpu_ram_mb\x18\f \x01(\x05R\bcpuRamMb\x12\x17\n" +
+	"\adisk_mb\x18\x14 \x01(\x05R\x06diskMb\"G\n" +
 	"\tSshTarget\x12\x12\n" +
 	"\x04host\x18\x01 \x01(\tR\x04host\x12\x12\n" +
 	"\x04port\x18\x02 \x01(\x05R\x04port\x12\x12\n" +
-	"\x04user\x18\x03 \x01(\tR\x04user\"\xd5\x04\n" +
+	"\x04user\x18\x03 \x01(\tR\x04user\"\xf9\x05\n" +
 	"\bInstance\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1f\n" +
 	"\vprovider_id\x18\x02 \x01(\tR\n" +
 	"providerId\x12\x1a\n" +
 	"\bprovider\x18\x03 \x01(\tR\bprovider\x12(\n" +
 	"\x04spec\x18\x04 \x01(\v2\x14.provisioner.v1.SpecR\x04spec\x12\x16\n" +
-	"\x06region\x18\x05 \x01(\tR\x06region\x12)\n" +
-	"\x03gpu\x18\x06 \x01(\v2\x17.provisioner.v1.GpuInfoR\x03gpu\x12&\n" +
+	"\x06region\x18\x05 \x01(\tR\x06region\x124\n" +
+	"\bhardware\x18\x06 \x01(\v2\x18.provisioner.v1.HardwareR\bhardware\x12&\n" +
 	"\x0fhourly_rate_usd\x18\a \x01(\x01R\rhourlyRateUsd\x123\n" +
 	"\x05state\x18\b \x01(\x0e2\x1d.provisioner.v1.InstanceStateR\x05state\x129\n" +
 	"\n" +
@@ -1055,7 +1489,11 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"\rterminated_at\x18\v \x01(\v2\x1a.google.protobuf.TimestampR\fterminatedAt\x12+\n" +
 	"\x03ssh\x18\f \x01(\v2\x19.provisioner.v1.SshTargetR\x03ssh\x12%\n" +
 	"\x0efailure_reason\x18\r \x01(\tR\rfailureReason\x12#\n" +
-	"\rprovider_data\x18\x0e \x01(\fR\fproviderData\"\xac\x02\n" +
+	"\rprovider_data\x18\x0e \x01(\fR\fproviderData\x12B\n" +
+	"\bmetadata\x18\x0f \x03(\v2&.provisioner.v1.Instance.MetadataEntryR\bmetadata\x1aS\n" +
+	"\rMetadataEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12,\n" +
+	"\x05value\x18\x02 \x01(\v2\x16.google.protobuf.ValueR\x05value:\x028\x01\"\xac\x02\n" +
 	"\vInstanceRef\x12\x1f\n" +
 	"\vprovider_id\x18\x01 \x01(\tR\n" +
 	"providerId\x12%\n" +
@@ -1066,7 +1504,7 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"created_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x1a7\n" +
 	"\tTagsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xa3\x06\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x81\t\n" +
 	"\n" +
 	"Deployment\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1f\n" +
@@ -1093,17 +1531,33 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"\fcontainer_id\x18\x10 \x01(\tR\vcontainerId\x12'\n" +
 	"\x0fengine_endpoint\x18\x11 \x01(\tR\x0eengineEndpoint\x12\x1f\n" +
 	"\vdebug_shell\x18\x12 \x01(\bR\n" +
-	"debugShell\x1a6\n" +
+	"debugShell\x12(\n" +
+	"\x10idle_ttl_seconds\x18\x13 \x01(\x05R\x0eidleTtlSeconds\x12D\n" +
+	"\x10last_activity_at\x18\x14 \x01(\v2\x1a.google.protobuf.TimestampR\x0elastActivityAt\x12&\n" +
+	"\x0fno_idle_destroy\x18\x15 \x01(\bR\rnoIdleDestroy\x12!\n" +
+	"\finstance_ids\x18\x18 \x03(\tR\vinstanceIds\x12)\n" +
+	"\x10engine_endpoints\x18\x19 \x03(\tR\x0fengineEndpoints\x124\n" +
+	"\x16unhealthy_instance_ids\x18\x1a \x03(\tR\x14unhealthyInstanceIds\x12@\n" +
+	"\rreplica_specs\x18\x1b \x03(\v2\x1b.provisioner.v1.ReplicaSpecR\freplicaSpecs\x1a6\n" +
 	"\bEnvEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01*\xc0\x01\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xa7\x01\n" +
+	"\vReplicaSpec\x12\x1a\n" +
+	"\bprovider\x18\x01 \x01(\tR\bprovider\x12\x16\n" +
+	"\x06region\x18\x02 \x01(\tR\x06region\x12H\n" +
+	"\frequirements\x18\x03 \x01(\v2$.provisioner.v1.ResourceRequirementsR\frequirements\x12\x1a\n" +
+	"\breplicas\x18\x04 \x01(\x05R\breplicas*\xc0\x01\n" +
 	"\rInstanceState\x12\x1e\n" +
 	"\x1aINSTANCE_STATE_UNSPECIFIED\x10\x00\x12\x1a\n" +
 	"\x16INSTANCE_STATE_PENDING\x10\x01\x12\x19\n" +
 	"\x15INSTANCE_STATE_ACTIVE\x10\x02\x12\x1e\n" +
 	"\x1aINSTANCE_STATE_TERMINATING\x10\x03\x12\x1d\n" +
 	"\x19INSTANCE_STATE_TERMINATED\x10\x04\x12\x19\n" +
-	"\x15INSTANCE_STATE_FAILED\x10\x05*\xaf\x02\n" +
+	"\x15INSTANCE_STATE_FAILED\x10\x05*R\n" +
+	"\bPriority\x12\x18\n" +
+	"\x14PRIORITY_UNSPECIFIED\x10\x00\x12\x18\n" +
+	"\x14PRIORITY_INTERACTIVE\x10\x01\x12\x12\n" +
+	"\x0ePRIORITY_BATCH\x10\x02*\xaf\x02\n" +
 	"\x0fDeploymentState\x12 \n" +
 	"\x1cDEPLOYMENT_STATE_UNSPECIFIED\x10\x00\x12\x1c\n" +
 	"\x18DEPLOYMENT_STATE_PENDING\x10\x01\x12\x1d\n" +
@@ -1129,46 +1583,55 @@ func file_provisioner_v1_types_proto_rawDescGZIP() []byte {
 	return file_provisioner_v1_types_proto_rawDescData
 }
 
-var file_provisioner_v1_types_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_provisioner_v1_types_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
+var file_provisioner_v1_types_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
+var file_provisioner_v1_types_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
 var file_provisioner_v1_types_proto_goTypes = []any{
 	(InstanceState)(0),            // 0: provisioner.v1.InstanceState
-	(DeploymentState)(0),          // 1: provisioner.v1.DeploymentState
-	(*Spec)(nil),                  // 2: provisioner.v1.Spec
-	(*ResourceRequirements)(nil),  // 3: provisioner.v1.ResourceRequirements
-	(*GpuInfo)(nil),               // 4: provisioner.v1.GpuInfo
-	(*SshTarget)(nil),             // 5: provisioner.v1.SshTarget
-	(*Instance)(nil),              // 6: provisioner.v1.Instance
-	(*InstanceRef)(nil),           // 7: provisioner.v1.InstanceRef
-	(*Deployment)(nil),            // 8: provisioner.v1.Deployment
-	nil,                           // 9: provisioner.v1.Spec.TagsEntry
-	nil,                           // 10: provisioner.v1.InstanceRef.TagsEntry
-	nil,                           // 11: provisioner.v1.Deployment.EnvEntry
-	(*timestamppb.Timestamp)(nil), // 12: google.protobuf.Timestamp
+	(Priority)(0),                 // 1: provisioner.v1.Priority
+	(DeploymentState)(0),          // 2: provisioner.v1.DeploymentState
+	(*Spec)(nil),                  // 3: provisioner.v1.Spec
+	(*ResourceRequirements)(nil),  // 4: provisioner.v1.ResourceRequirements
+	(*Hardware)(nil),              // 5: provisioner.v1.Hardware
+	(*SshTarget)(nil),             // 6: provisioner.v1.SshTarget
+	(*Instance)(nil),              // 7: provisioner.v1.Instance
+	(*InstanceRef)(nil),           // 8: provisioner.v1.InstanceRef
+	(*Deployment)(nil),            // 9: provisioner.v1.Deployment
+	(*ReplicaSpec)(nil),           // 10: provisioner.v1.ReplicaSpec
+	nil,                           // 11: provisioner.v1.Spec.TagsEntry
+	nil,                           // 12: provisioner.v1.Instance.MetadataEntry
+	nil,                           // 13: provisioner.v1.InstanceRef.TagsEntry
+	nil,                           // 14: provisioner.v1.Deployment.EnvEntry
+	(*timestamppb.Timestamp)(nil), // 15: google.protobuf.Timestamp
+	(*structpb.Value)(nil),        // 16: google.protobuf.Value
 }
 var file_provisioner_v1_types_proto_depIdxs = []int32{
-	3,  // 0: provisioner.v1.Spec.requirements:type_name -> provisioner.v1.ResourceRequirements
-	9,  // 1: provisioner.v1.Spec.tags:type_name -> provisioner.v1.Spec.TagsEntry
-	2,  // 2: provisioner.v1.Instance.spec:type_name -> provisioner.v1.Spec
-	4,  // 3: provisioner.v1.Instance.gpu:type_name -> provisioner.v1.GpuInfo
+	4,  // 0: provisioner.v1.Spec.requirements:type_name -> provisioner.v1.ResourceRequirements
+	11, // 1: provisioner.v1.Spec.tags:type_name -> provisioner.v1.Spec.TagsEntry
+	3,  // 2: provisioner.v1.Instance.spec:type_name -> provisioner.v1.Spec
+	5,  // 3: provisioner.v1.Instance.hardware:type_name -> provisioner.v1.Hardware
 	0,  // 4: provisioner.v1.Instance.state:type_name -> provisioner.v1.InstanceState
-	12, // 5: provisioner.v1.Instance.created_at:type_name -> google.protobuf.Timestamp
-	12, // 6: provisioner.v1.Instance.activated_at:type_name -> google.protobuf.Timestamp
-	12, // 7: provisioner.v1.Instance.terminated_at:type_name -> google.protobuf.Timestamp
-	5,  // 8: provisioner.v1.Instance.ssh:type_name -> provisioner.v1.SshTarget
-	10, // 9: provisioner.v1.InstanceRef.tags:type_name -> provisioner.v1.InstanceRef.TagsEntry
-	12, // 10: provisioner.v1.InstanceRef.created_at:type_name -> google.protobuf.Timestamp
-	11, // 11: provisioner.v1.Deployment.env:type_name -> provisioner.v1.Deployment.EnvEntry
-	1,  // 12: provisioner.v1.Deployment.state:type_name -> provisioner.v1.DeploymentState
-	12, // 13: provisioner.v1.Deployment.created_at:type_name -> google.protobuf.Timestamp
-	12, // 14: provisioner.v1.Deployment.started_at:type_name -> google.protobuf.Timestamp
-	12, // 15: provisioner.v1.Deployment.ready_at:type_name -> google.protobuf.Timestamp
-	12, // 16: provisioner.v1.Deployment.terminated_at:type_name -> google.protobuf.Timestamp
-	17, // [17:17] is the sub-list for method output_type
-	17, // [17:17] is the sub-list for method input_type
-	17, // [17:17] is the sub-list for extension type_name
-	17, // [17:17] is the sub-list for extension extendee
-	0,  // [0:17] is the sub-list for field type_name
+	15, // 5: provisioner.v1.Instance.created_at:type_name -> google.protobuf.Timestamp
+	15, // 6: provisioner.v1.Instance.activated_at:type_name -> google.protobuf.Timestamp
+	15, // 7: provisioner.v1.Instance.terminated_at:type_name -> google.protobuf.Timestamp
+	6,  // 8: provisioner.v1.Instance.ssh:type_name -> provisioner.v1.SshTarget
+	12, // 9: provisioner.v1.Instance.metadata:type_name -> provisioner.v1.Instance.MetadataEntry
+	13, // 10: provisioner.v1.InstanceRef.tags:type_name -> provisioner.v1.InstanceRef.TagsEntry
+	15, // 11: provisioner.v1.InstanceRef.created_at:type_name -> google.protobuf.Timestamp
+	14, // 12: provisioner.v1.Deployment.env:type_name -> provisioner.v1.Deployment.EnvEntry
+	2,  // 13: provisioner.v1.Deployment.state:type_name -> provisioner.v1.DeploymentState
+	15, // 14: provisioner.v1.Deployment.created_at:type_name -> google.protobuf.Timestamp
+	15, // 15: provisioner.v1.Deployment.started_at:type_name -> google.protobuf.Timestamp
+	15, // 16: provisioner.v1.Deployment.ready_at:type_name -> google.protobuf.Timestamp
+	15, // 17: provisioner.v1.Deployment.terminated_at:type_name -> google.protobuf.Timestamp
+	15, // 18: provisioner.v1.Deployment.last_activity_at:type_name -> google.protobuf.Timestamp
+	10, // 19: provisioner.v1.Deployment.replica_specs:type_name -> provisioner.v1.ReplicaSpec
+	4,  // 20: provisioner.v1.ReplicaSpec.requirements:type_name -> provisioner.v1.ResourceRequirements
+	16, // 21: provisioner.v1.Instance.MetadataEntry.value:type_name -> google.protobuf.Value
+	22, // [22:22] is the sub-list for method output_type
+	22, // [22:22] is the sub-list for method input_type
+	22, // [22:22] is the sub-list for extension type_name
+	22, // [22:22] is the sub-list for extension extendee
+	0,  // [0:22] is the sub-list for field type_name
 }
 
 func init() { file_provisioner_v1_types_proto_init() }
@@ -1181,8 +1644,8 @@ func file_provisioner_v1_types_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_provisioner_v1_types_proto_rawDesc), len(file_provisioner_v1_types_proto_rawDesc)),
-			NumEnums:      2,
-			NumMessages:   10,
+			NumEnums:      3,
+			NumMessages:   12,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

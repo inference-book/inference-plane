@@ -14,7 +14,7 @@
 //	cmd/iplane  -->  provisioners.Service  -->  Provider (RunPod, Local)
 //	                       |
 //	                       v
-//	              provisioners/state (JSON state file with flock)
+//	              provisioners/stores/file (JSON state file with flock)
 //
 // The Service owns the failure-mode contract (idempotency lookup,
 // pending -> active hygiene, self-heal on next list). Provider
@@ -140,6 +140,10 @@ const (
 const (
 	ProviderLocal  = "local"
 	ProviderRunPod = "runpod"
+	ProviderVast   = "vast"
+	// ProviderLambdaLabs follows in #151. Const reserved here so the
+	// future PR's diff stays small.
+	ProviderLambdaLabs = "lambdalabs"
 )
 
 // GPU class taxonomy. The chapter teaches one vocabulary across providers;

@@ -48,6 +48,17 @@ func writeDeploymentDetail(w io.Writer, dep *provisionerv1.Deployment) {
 	if endpoint := dep.GetEngineEndpoint(); endpoint != "" {
 		fmt.Fprintf(w, "engine endpoint: %s\n", endpoint)
 	}
+	// v0.2 ch7-beat1.3b: when a running daemon is the data source,
+	// render the OpenAI-compat base URL (the flat /v1 endpoint that
+	// routes by model-in-body). This is what operators paste into
+	// OpenAI SDKs. The deploy-id form lives as an explicit-deployment
+	// escape hatch and is documented in CLI help rather than shouted
+	// in every describe.
+	if dep.GetState() == provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING && deploymentServiceURL != "" {
+		fmt.Fprintf(w, "openai base url: %s/v1\n", deploymentServiceURL)
+		fmt.Fprintf(w, "  (model field in request body selects this deployment when set to %q)\n", dep.GetModel())
+		fmt.Fprintf(w, "  (explicit-dispatch URL: %s/v1/%s/v1)\n", deploymentServiceURL, dep.GetId())
+	}
 	if cid := dep.GetContainerId(); cid != "" {
 		fmt.Fprintf(w, "container:       %s\n", cid)
 	}
@@ -75,6 +86,23 @@ func writeDeploymentDetail(w io.Writer, dep *provisionerv1.Deployment) {
 	}
 	if ts := dep.GetTerminatedAt(); ts != nil {
 		fmt.Fprintf(w, "terminated at:   %s\n", ts.AsTime().Format(time.RFC3339))
+	}
+	if ttl := dep.GetIdleTtlSeconds(); ttl > 0 {
+		fmt.Fprintf(w, "idle ttl:        %ds\n", ttl)
+	}
+	if ts := dep.GetLastActivityAt(); ts != nil {
+		fmt.Fprintf(w, "last activity:   %s\n", ts.AsTime().Format(time.RFC3339))
+	}
+	if dep.GetNoIdleDestroy() {
+		fmt.Fprintf(w, "pinned:          true (no idle destroy)\n")
+	}
+	// v0.2 ch7-beat3.1: surface the full instance list when it's
+	// populated (multi-instance Deployments after #84 fan-out lands).
+	// For single-instance Deployments the `instance:` line above
+	// already shows the only one; we only print the list when it's
+	// > 1 entry so describe stays compact in the common case.
+	if ids := dep.GetInstanceIds(); len(ids) > 1 {
+		fmt.Fprintf(w, "instances:       %v\n", ids)
 	}
 	if reason := dep.GetFailureReason(); reason != "" {
 		fmt.Fprintf(w, "failure:         %s\n", reason)
@@ -113,6 +141,7 @@ func deploymentStateLabel(s provisionerv1.DeploymentState) string {
 	}
 	return name
 }
+
 
 // dryRunDeploy is the deploy-verb dry-run path. Mirrors the Service's
 // validation + idempotency lookup but stops at "would deploy" without

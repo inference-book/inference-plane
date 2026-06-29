@@ -5,11 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
 	"github.com/inference-book/inference-plane/internal/modelstores"
-	"github.com/inference-book/inference-plane/internal/provisioners/state"
 	"github.com/inference-book/inference-plane/internal/sshkeys"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -50,13 +50,59 @@ type Service struct {
 	provisionerv1.UnimplementedDeploymentServiceServer
 
 	providers  map[string]Provider
-	store      *state.Store
+	store      Store
 	keyStore   keyEnsurer
 	executor   DeploymentExecutor
 	modelStore modelstores.ModelStore
 	operatorID string
 	clock      func() time.Time
+
+	// pendingReplicaSpecs is the per-fan-out stash that
+	// provisionSlots writes and recordCreateSlots / recordAppendedSlots
+	// reads. Threading the specs through every recordSlots variant
+	// would have widened a signature shared with the create path's
+	// "no specs to record" case; a single-element stash keeps the
+	// data flow contained to fanout.go. Mutex-guarded so the
+	// pattern survives if a future fan-out runs concurrent with
+	// another (today there is at most one in-flight per Service).
+	pendingReplicaSpecs   []*provisionerv1.ReplicaSpec
+	pendingReplicaSpecsMu sync.Mutex
+
+	// touchDebounceInterval is the minimum wall-clock gap between
+	// two persisted TouchDeployment writes for the same deploy_id.
+	// Defaults to DefaultTouchDebounceInterval; operators can tune
+	// via WithTouchDebounceInterval (Service option) or
+	// config.router.touch_debounce_interval (daemon-level config).
+	touchDebounceInterval time.Duration
+
+	// touchSeen caches the wall-clock moment we last persisted a
+	// TouchDeployment for a given deploy_id. Subsequent calls within
+	// touchDebounceInterval skip the store.Update (and its full
+	// state.json read+write) and return a cheap Read instead.
+	//
+	// Why: the router fires touch on EVERY inference request, and
+	// store.Update reads + writes the entire state.json under flock.
+	// Under v0.2 multi-replica load this serialized 16 concurrent
+	// scheduler dispatches behind a single 26KB disk read+write
+	// cycle, exploding p95 from the engine-native ~1.2s to ~25s.
+	// Coalescing per-deploy_id touches at the server keeps the
+	// activity-stamping invariant intact (the reaper's idle TTL
+	// is 30 min; 5s of stamp lag is harmless) while pulling the
+	// disk IO out of the hot path.
+	touchSeenMu sync.Mutex
+	touchSeen   map[string]time.Time
 }
+
+// DefaultTouchDebounceInterval is the minimum wall-clock gap between
+// two TouchDeployment writes for the same deploy_id when no explicit
+// interval is set. The router fires touch on every inference request;
+// without this debounce, each request takes a full state.json
+// read+write tax. The default is small enough that the reaper's
+// per-deployment idle-TTL judgment stays accurate (30 min idle TTL
+// vs 5s coalesce = three orders of magnitude headroom). Operators
+// can override via WithTouchDebounceInterval (Service option) or
+// config.router.touch_debounce_interval (daemon-level config).
+const DefaultTouchDebounceInterval = 5 * time.Second
 
 // keyEnsurer is the narrow interface the Service uses to fetch an
 // SSH key pair for the (operator, provider) scope. Satisfied by
@@ -95,16 +141,32 @@ func WithModelStore(ms modelstores.ModelStore) Option {
 	return func(s *Service) { s.modelStore = ms }
 }
 
+// WithTouchDebounceInterval overrides the minimum wall-clock gap
+// between two persisted TouchDeployment writes for the same
+// deploy_id. Lower = fresher last_activity_at on disk (the reaper
+// sees recent touches sooner). Higher = less disk IO on the
+// request hot path. Zero disables debouncing entirely (every
+// touch hits disk -- the v0.1 behavior, retained for tests that
+// need synchronous touch semantics).
+//
+// Default is DefaultTouchDebounceInterval. Tests typically use 0
+// so they can assert touch ordering precisely.
+func WithTouchDebounceInterval(d time.Duration) Option {
+	return func(s *Service) { s.touchDebounceInterval = d }
+}
+
 // New constructs a Service. Providers are keyed by their Name() so the
 // service can dispatch by spec.provider without an interface assertion
 // at call time.
-func New(providers []Provider, store *state.Store, operatorID string, opts ...Option) *Service {
+func New(providers []Provider, store Store, operatorID string, opts ...Option) *Service {
 	s := &Service{
-		providers:  make(map[string]Provider, len(providers)),
-		store:      store,
-		modelStore: modelstores.Passthrough{}, // safe default; overridden by WithModelStore
-		operatorID: operatorID,
-		clock:      time.Now,
+		providers:             make(map[string]Provider, len(providers)),
+		store:                 store,
+		modelStore:            modelstores.Passthrough{}, // safe default; overridden by WithModelStore
+		operatorID:            operatorID,
+		clock:                 time.Now,
+		touchDebounceInterval: DefaultTouchDebounceInterval,
+		touchSeen:             map[string]time.Time{},
 	}
 	for _, p := range providers {
 		s.providers[p.Name()] = p
@@ -151,7 +213,7 @@ func (s *Service) CreateInstance(ctx context.Context, req *provisionerv1.CreateI
 	var record *provisionerv1.Instance
 	var alreadyExisted bool
 	var claimedPending bool
-	err := s.store.Update(func(f *state.File) error {
+	err := s.store.Update(func(f *State) error {
 		if existing, ok := f.Instances[spec.GetId()]; ok {
 			switch existing.GetState() {
 			case provisionerv1.InstanceState_INSTANCE_STATE_PENDING, provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE:
@@ -261,7 +323,7 @@ func (s *Service) DestroyInstance(ctx context.Context, req *provisionerv1.Destro
 	var record *provisionerv1.Instance
 	var providerID string
 	var providerName string
-	err := s.store.Update(func(f *state.File) error {
+	err := s.store.Update(func(f *State) error {
 		existing, ok := f.Instances[id]
 		if !ok {
 			return fmt.Errorf("no instance with id %q", id)
@@ -310,7 +372,7 @@ func (s *Service) DestroyInstance(ctx context.Context, req *provisionerv1.Destro
 
 	// Step 3: patch.
 	now := timestamppb.New(s.clock())
-	patchErr := s.store.Update(func(f *state.File) error {
+	patchErr := s.store.Update(func(f *State) error {
 		existing, ok := f.Instances[id]
 		if !ok {
 			return nil
@@ -574,7 +636,7 @@ func (s *Service) ListInstances(ctx context.Context, req *provisionerv1.ListInst
 			// If we are pending, leave it -- user inspects and decides.
 			if st == provisionerv1.InstanceState_INSTANCE_STATE_TERMINATING {
 				now := timestamppb.New(s.clock())
-				_ = s.store.Update(func(f *state.File) error {
+				_ = s.store.Update(func(f *State) error {
 					if rec, ok := f.Instances[id]; ok {
 						rec.State = provisionerv1.InstanceState_INSTANCE_STATE_TERMINATED
 						rec.TerminatedAt = now
@@ -614,7 +676,7 @@ func (s *Service) ListInstances(ctx context.Context, req *provisionerv1.ListInst
 // given id, taking the flock for the duration. Idempotent: if the
 // record was removed concurrently, the patch silently re-creates it.
 func (s *Service) patchRecord(id string, inst *provisionerv1.Instance) error {
-	return s.store.Update(func(f *state.File) error {
+	return s.store.Update(func(f *State) error {
 		f.Instances[id] = inst
 		return nil
 	})
@@ -792,7 +854,7 @@ func refToInstance(ref *provisionerv1.InstanceRef, providerName string) *provisi
 //
 // Phase 2's deployment surface. The same Service struct implements both
 // gRPC servers (ProvisionerServiceServer + DeploymentServiceServer)
-// sharing state.Store + provider registry + key store. The
+// sharing the Store + provider registry + key store. The
 // instance<->deployment cross-reference via instance_id is a same-
 // package map lookup.
 
@@ -841,6 +903,27 @@ func (s *Service) CreateDeployment(ctx context.Context, req *provisionerv1.Creat
 	if dep.GetModel() == "" {
 		return nil, status.Error(codes.InvalidArgument, "deployment.model is required")
 	}
+	// v0.2 ch7-beat3.10 (#143 + refactor): all auto-provision flows
+	// through replicas_spec. Each entry is one instance group of N
+	// units (replicas=N field on each entry). The "single instance"
+	// case is replicas_spec = [{provider, requirements, replicas=1}];
+	// "3 small RunPods" is [{runpod, small, replicas=3}]; "1 runpod +
+	// 1 vast" is [{runpod, small, 1}, {vast, medium, 1}].
+	//
+	// The pre-existing "deploy onto a pinned instance" path remains:
+	// dep.instance_id set + replicas_spec empty -> dispatch to
+	// placeDeployment below. Mutually exclusive with replicas_spec.
+	specs, specsErr := resolveCreateReplicaSpecs(req)
+	if specsErr != nil {
+		return nil, specsErr
+	}
+	multiReplica := len(specs) > 0
+	if multiReplica && len(dep.GetInstanceIds()) > 0 {
+		return nil, status.Errorf(codes.InvalidArgument, "deployment.instance_ids cannot be combined with replicas_spec; fan-out synthesizes ids deterministically")
+	}
+	if multiReplica && dep.GetInstanceId() != "" {
+		return nil, status.Errorf(codes.InvalidArgument, "deployment.instance_id cannot be combined with replicas_spec; fan-out always auto-provisions")
+	}
 
 	// Pre-flight: resolve the model spec through the configured
 	// ModelStore. Default is Passthrough (no validation); production
@@ -865,6 +948,14 @@ func (s *Service) CreateDeployment(ctx context.Context, req *provisionerv1.Creat
 			merged[k] = v
 		}
 		dep.Env = merged
+	}
+
+	// v0.2 ch7-beat3.10 (#143 + refactor): auto-provision flows
+	// through replicas_spec. createMultiReplicaDeployment branches
+	// off here so the single-instance pinned path below stays
+	// unchanged.
+	if multiReplica {
+		return s.createMultiReplicaDeployment(ctx, req, specs)
 	}
 
 	// Resolve the target instance: place the deployment. v0.1's
@@ -897,7 +988,7 @@ func (s *Service) CreateDeployment(ctx context.Context, req *provisionerv1.Creat
 	// Idempotency on (operator, deployment id).
 	var record *provisionerv1.Deployment
 	var alreadyExisted bool
-	err = s.store.Update(func(f *state.File) error {
+	err = s.store.Update(func(f *State) error {
 		if existing, ok := f.Deployments[dep.GetId()]; ok {
 			switch existing.GetState() {
 			case provisionerv1.DeploymentState_DEPLOYMENT_STATE_PENDING,
@@ -922,15 +1013,28 @@ func (s *Service) CreateDeployment(ctx context.Context, req *provisionerv1.Creat
 		}
 		now := timestamppb.New(s.clock())
 		record = &provisionerv1.Deployment{
-			Id:         dep.GetId(),
-			InstanceId: dep.GetInstanceId(),
-			Image:      dep.GetImage(),
-			Model:      dep.GetModel(),
-			EngineArgs: dep.GetEngineArgs(),
-			Env:        dep.GetEnv(),
-			EnginePort: dep.GetEnginePort(),
-			State:      provisionerv1.DeploymentState_DEPLOYMENT_STATE_PENDING,
-			CreatedAt:  now,
+			Id:             dep.GetId(),
+			InstanceId:     dep.GetInstanceId(),
+			Image:          dep.GetImage(),
+			Model:          dep.GetModel(),
+			EngineArgs:     dep.GetEngineArgs(),
+			Env:            dep.GetEnv(),
+			EnginePort:     dep.GetEnginePort(),
+			State:          provisionerv1.DeploymentState_DEPLOYMENT_STATE_PENDING,
+			CreatedAt:      now,
+			DebugShell:     dep.GetDebugShell(),
+			IdleTtlSeconds: dep.GetIdleTtlSeconds(),
+			NoIdleDestroy:  dep.GetNoIdleDestroy(),
+		}
+		// v0.2 ch7-beat3.1: instance_ids is the canonical multi-
+		// instance list. #83 leaves it empty on Service-driven
+		// creates -- Beat 1+2 deployments are single-instance and
+		// fall back to the singular `instance_id` field via
+		// EffectiveInstanceIDs (added in #84). Future operator-
+		// supplied lists (heterogeneous fleets) get respected
+		// verbatim; pre-populate from request if present.
+		if ids := dep.GetInstanceIds(); len(ids) > 0 {
+			record.InstanceIds = append(record.InstanceIds, ids...)
 		}
 		f.Deployments[dep.GetId()] = record
 		return nil
@@ -1014,14 +1118,26 @@ func (s *Service) finalizeInstanceAfterDeploy(ctx context.Context, inst *provisi
 		return
 	}
 	d, ok := file.Deployments[depID]
-	if !ok || d.GetState() != provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING {
+	if !ok {
 		return
 	}
 	cur, ok := file.Instances[inst.GetId()]
 	if !ok || cur.GetState() == provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE {
 		return
 	}
-	podID := d.GetContainerId()
+	// v0.2 ch7-beat3.10 (#143 refactor): the pod id lives on the
+	// per-replica Instance (stamped by patchDeploymentSlot's
+	// container_id handling), not on the Deployment singular -- the
+	// multi-replica path doesn't populate dep.container_id at all.
+	// Fall back to the legacy dep.container_id for single-instance
+	// records that predate the refactor.
+	podID := cur.GetProviderId()
+	if podID == "" {
+		podID = d.GetContainerId()
+	}
+	if podID == "" {
+		return
+	}
 	provider, ok := s.providers[cur.GetProvider()]
 	if !ok {
 		return
@@ -1087,56 +1203,25 @@ func (s *Service) providerAsDeployer(inst *provisionerv1.Instance) (Deployer, bo
 // resolve the SKU and spawn the engine pod. The instance shares the
 // deployment id (for v0.1's 1:1 mapping they are two views -- GPU vs
 // model -- of the same pod).
-func (s *Service) placeDeployment(ctx context.Context, req *provisionerv1.CreateDeploymentRequest) (*provisionerv1.Instance, error) {
+func (s *Service) placeDeployment(_ context.Context, req *provisionerv1.CreateDeploymentRequest) (*provisionerv1.Instance, error) {
 	dep := req.GetDeployment()
 	file, err := s.store.Read()
 	if err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 
-	// Explicit placement: deploy onto a named, existing instance.
-	if dep.GetInstanceId() != "" {
-		inst, ok := file.Instances[dep.GetInstanceId()]
-		if !ok {
-			return nil, status.Errorf(codes.InvalidArgument, "instance %q does not exist", dep.GetInstanceId())
-		}
-		return inst, nil
+	// v0.2 ch7-beat3.10 (#143 + refactor): the only path through
+	// placeDeployment is the pinned-instance form (dep.instance_id
+	// set). Auto-provisioning flows through replicas_spec /
+	// createMultiReplicaDeployment now -- the single-entry
+	// replicas_spec=[{provider, requirements, replicas=1}] form
+	// replaces the old "no instance_id, auto-provision" shortcut.
+	if dep.GetInstanceId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "deployment requires either dep.instance_id (pinned) or replicas_spec (auto-provision)")
 	}
-
-	// Auto-provision: synthesize a fresh instance for this deployment.
-	reqs := req.GetRequirements()
-	if reqs == nil {
-		return nil, status.Error(codes.InvalidArgument, "deployment without an explicit instance requires resource requirements (--class, --min-vram-gb, or --sku)")
-	}
-	providerName := req.GetProvider()
-	if providerName == "" {
-		return nil, status.Error(codes.InvalidArgument, "deployment without an explicit instance requires a provider")
-	}
-	if _, ok := s.providers[providerName]; !ok {
-		return nil, status.Errorf(codes.InvalidArgument, "unknown provider %q", providerName)
-	}
-
-	// The instance shares the deployment id (1:1 in v0.1). Its Spec
-	// carries the engine image as base_image + the requirements, so
-	// the Deployer resolves the SKU and runs the engine image as the
-	// pod. If a same-id instance already exists (idempotent re-deploy),
-	// reuse it.
-	if existing, ok := file.Instances[dep.GetId()]; ok {
-		return existing, nil
-	}
-	spec := &provisionerv1.Spec{
-		Id:           dep.GetId(),
-		Provider:     providerName,
-		Region:       req.GetRegion(),
-		BaseImage:    dep.GetImage(),
-		Requirements: reqs,
-	}
-	if err := ValidateAndExpandRequirements(spec); err != nil {
-		return nil, status.Error(codes.InvalidArgument, err.Error())
-	}
-	inst := newPendingInstance(spec, providerName, s.clock())
-	if err := s.patchRecord(inst.GetId(), inst); err != nil {
-		return nil, status.Errorf(codes.Internal, "record placed instance: %v", err)
+	inst, ok := file.Instances[dep.GetInstanceId()]
+	if !ok {
+		return nil, status.Errorf(codes.InvalidArgument, "instance %q does not exist", dep.GetInstanceId())
 	}
 	return inst, nil
 }
@@ -1169,7 +1254,7 @@ func (e executorAsDeployer) Destroy(ctx context.Context, dep *provisionerv1.Depl
 // terminal state observers will see whatever last successfully
 // wrote.
 func (s *Service) patchDeployment(id string, u DeployStateUpdate) error {
-	return s.store.Update(func(f *state.File) error {
+	return s.store.Update(func(f *State) error {
 		rec, ok := f.Deployments[id]
 		if !ok {
 			return nil
@@ -1193,6 +1278,14 @@ func (s *Service) patchDeployment(id string, u DeployStateUpdate) error {
 		}
 		if u.EngineEndpoint != "" {
 			rec.EngineEndpoint = u.EngineEndpoint
+			// v0.2 ch7-beat3.2 / #84: maintain the parallel
+			// engine_endpoints list. For single-instance deployments
+			// (the only path in this scaffolding PR), the list has
+			// one slot mirroring the singular endpoint. Multi-instance
+			// fan-out (follow-up to #84) will populate each slot as
+			// per-instance deploys reach RUNNING; the router reads
+			// the list via EffectiveEndpoints.
+			rec.EngineEndpoints = []string{u.EngineEndpoint}
 		}
 		if u.FailureReason != "" {
 			rec.FailureReason = u.FailureReason
@@ -1217,6 +1310,11 @@ func (s *Service) patchDeployment(id string, u DeployStateUpdate) error {
 }
 
 // DescribeDeployment returns the local-state record for one deployment.
+// Pure read -- no side effects. v0.2 ch7-beat1.7 callers that want to
+// mark this deployment as active (the router's per-request lookup,
+// the operator's `iplane deployment touch` verb) call TouchDeployment
+// explicitly; passive inspection via this RPC does not extend the
+// idle-TTL reaper's lease.
 func (s *Service) DescribeDeployment(ctx context.Context, req *provisionerv1.DescribeDeploymentRequest) (*provisionerv1.DescribeDeploymentResponse, error) {
 	id := req.GetId()
 	if err := ValidateID(id); err != nil {
@@ -1231,6 +1329,156 @@ func (s *Service) DescribeDeployment(ctx context.Context, req *provisionerv1.Des
 		return nil, status.Errorf(codes.NotFound, "no deployment with id %q", id)
 	}
 	return &provisionerv1.DescribeDeploymentResponse{Deployment: rec}, nil
+}
+
+// TouchDeployment marks the deployment as active -- bumps
+// last_activity_at to "now", resetting the idle-TTL reaper's clock.
+// Returns the updated record.
+//
+// v0.2 ch7-beat1.7 callers:
+//
+//   - The router (per inference request, after the lookup picks the
+//     target deployment). Canonical data-plane source of activity.
+//   - The operator's `iplane deployment touch` CLI verb (#71), the
+//     "I'm still using this thing, do not reap yet" escape hatch.
+//
+// NotFound surfaces normally (so the operator's touch verb prints a
+// useful error). The touch itself is in the locked Update path; the
+// returned record reflects the post-touch state.
+func (s *Service) TouchDeployment(ctx context.Context, req *provisionerv1.TouchDeploymentRequest) (*provisionerv1.TouchDeploymentResponse, error) {
+	id := req.GetId()
+	if err := ValidateID(id); err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	now := s.clock()
+
+	// Debounce: skip BOTH the disk write AND the disk read when we
+	// persisted a touch for this deploy_id within touchDebounceInterval.
+	// The router hot path is fire-and-forget; it never reads the
+	// response body, so an empty response is fine. CLI callers run
+	// at minutes-cadence (operator-triggered) and will reliably hit
+	// the write path, where the full Deployment record is populated.
+	//
+	// Earlier iteration kept a cheap Read on the skip path to populate
+	// the response, but with 30 rps of debounced touches that's still
+	// 30 state.json reads/sec -- enough to add measurable latency
+	// from RPC overhead + kernel syscalls even with the page cache hot.
+	if s.touchDebounceInterval > 0 {
+		s.touchSeenMu.Lock()
+		lastWritten, hasIt := s.touchSeen[id]
+		s.touchSeenMu.Unlock()
+		if hasIt && now.Sub(lastWritten) < s.touchDebounceInterval {
+			return &provisionerv1.TouchDeploymentResponse{}, nil
+		}
+	}
+
+	var rec *provisionerv1.Deployment
+	err := s.store.Update(func(state *State) error {
+		dep, ok := state.Deployments[id]
+		if !ok {
+			return status.Errorf(codes.NotFound, "no deployment with id %q", id)
+		}
+		dep.LastActivityAt = timestamppb.New(now)
+		rec = dep
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	s.touchSeenMu.Lock()
+	s.touchSeen[id] = now
+	s.touchSeenMu.Unlock()
+	return &provisionerv1.TouchDeploymentResponse{Deployment: rec}, nil
+}
+
+// touchDeployment updates last_activity_at on the named deployment to
+// "now" via the service clock. Used as a side effect of operator
+// interest -- the v0.2 ch7-beat1.7 reaper reads last_activity_at to
+// decide whether a deployment is idle.
+//
+// Best-effort by design: a state-store write failure is logged but
+// doesn't propagate to the RPC caller. last_activity is a leak-
+// protection signal, not load-bearing for the operator's request. A
+// missed touch at worst causes a one-tick-late reap, which is fine.
+//
+// Performance note: every router request flows through
+// DescribeDeployment which flows through this. For v0.2 demo
+// workloads (1-100 req/s) the per-request state.Update is fine
+// (atomic temp+rename ~1ms on SSD). Future: batch touches in-memory
+// + flush periodically when this becomes a hot path.
+func (s *Service) touchDeployment(id string) {
+	_ = s.store.Update(func(state *State) error {
+		dep, ok := state.Deployments[id]
+		if !ok || dep == nil {
+			return nil
+		}
+		dep.LastActivityAt = timestamppb.New(s.clock())
+		return nil
+	})
+}
+
+// Quarantine adds instanceID to the deployment's unhealthy_instance_ids
+// set. The router (#85's pickReplica) skips endpoints whose instance_id
+// is in this set, removing the replica from rotation until Restore is
+// called. v0.2 ch7-beat3.5 (#87).
+//
+// Idempotent: calling on a replica that is already in the set is a
+// no-op. Silently no-ops if the deployment was destroyed concurrently
+// (the health-poll loop snapshots the deployment list and can race
+// against Destroy). Returns nil in that case rather than NotFound --
+// the caller is internal, doesn't bubble up to an operator, and the
+// next tick will not find this deployment to quarantine again.
+//
+// Mutation is performed under the state-file flock via store.Update,
+// matching the rest of the service. The endpoint URL in
+// engine_endpoints[i] is preserved across quarantine; restoration is
+// set-removal, not endpoint-rediscovery.
+func (s *Service) Quarantine(deployID, instanceID string) error {
+	if deployID == "" || instanceID == "" {
+		return nil
+	}
+	return s.store.Update(func(state *State) error {
+		dep, ok := state.Deployments[deployID]
+		if !ok || dep == nil {
+			return nil
+		}
+		for _, id := range dep.UnhealthyInstanceIds {
+			if id == instanceID {
+				return nil
+			}
+		}
+		dep.UnhealthyInstanceIds = append(dep.UnhealthyInstanceIds, instanceID)
+		return nil
+	})
+}
+
+// Restore removes instanceID from the deployment's unhealthy_instance_ids
+// set, returning the replica to the router's rotation. Idempotent: a
+// no-op if the instance is not currently quarantined, and a silent
+// no-op if the deployment has been destroyed.
+//
+// Pairs with Quarantine; called by the health-poll loop after K
+// consecutive successful /health probes on a previously-quarantined
+// replica.
+func (s *Service) Restore(deployID, instanceID string) error {
+	if deployID == "" || instanceID == "" {
+		return nil
+	}
+	return s.store.Update(func(state *State) error {
+		dep, ok := state.Deployments[deployID]
+		if !ok || dep == nil {
+			return nil
+		}
+		ids := dep.UnhealthyInstanceIds
+		for i, id := range ids {
+			if id == instanceID {
+				dep.UnhealthyInstanceIds = append(ids[:i], ids[i+1:]...)
+				return nil
+			}
+		}
+		return nil
+	})
 }
 
 // ListDeployments returns deployments with optional instance_id +
@@ -1264,7 +1512,7 @@ func (s *Service) DestroyDeployment(ctx context.Context, req *provisionerv1.Dest
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 	var rec *provisionerv1.Deployment
-	err := s.store.Update(func(f *state.File) error {
+	err := s.store.Update(func(f *State) error {
 		existing, ok := f.Deployments[id]
 		if !ok {
 			return fmt.Errorf("no deployment with id %q", id)
@@ -1357,6 +1605,9 @@ func (s *Service) WatchDeployment(req *provisionerv1.WatchDeploymentRequest, str
 	if err := ValidateID(id); err != nil {
 		return status.Error(codes.InvalidArgument, err.Error())
 	}
+	// Watch is pure read -- callers that need to mark activity call
+	// TouchDeployment explicitly. (Same reasoning as DescribeDeployment:
+	// passive observation must not extend the reaper's lease.)
 	pollEvery := 500 * time.Millisecond
 
 	ticker := time.NewTicker(pollEvery)

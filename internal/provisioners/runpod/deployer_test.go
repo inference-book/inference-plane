@@ -33,11 +33,10 @@ func okInst() *provisionerv1.Instance {
 		Id:         "my-pod",
 		Provider:   "runpod",
 		ProviderId: "rp-base",
-		Gpu: &provisionerv1.GpuInfo{
-			Sku:    "NVIDIA RTX A5000",
-			Class:  "small",
-			Count:  1,
-			VramGb: 24,
+		Hardware: &provisionerv1.Hardware{
+			GpuSku:    "NVIDIA RTX A5000",
+			GpuCount:  1,
+			GpuVramMb: 24 * 1024,
 		},
 	}
 }
@@ -152,7 +151,7 @@ func TestDeploy_NoSKU_OnInstance_GoesToFAILED(t *testing.T) {
 	p := New(client)
 
 	inst := okInst()
-	inst.Gpu = nil // no resolved GPU
+	inst.Hardware = nil // no resolved GPU
 
 	c := &collector{}
 	if err := p.Deploy(context.Background(), okDep(), inst, nil, c.emit); err == nil {
@@ -197,7 +196,7 @@ func TestDeploy_SKUFromRequirements_AutoProvisioned(t *testing.T) {
 	)
 
 	inst := okInst()
-	inst.Gpu = nil // PENDING shell, GPU not yet resolved
+	inst.Hardware = nil // PENDING shell, GPU not yet resolved
 	inst.Spec = &provisionerv1.Spec{
 		Requirements: &provisionerv1.ResourceRequirements{
 			Sku:      "NVIDIA RTX A5000",
@@ -245,7 +244,7 @@ func TestDeploy_PassesFullSKUListWhenAutoProvisioned(t *testing.T) {
 	)
 
 	inst := okInst()
-	inst.Gpu = nil
+	inst.Hardware = nil
 	inst.Spec = &provisionerv1.Spec{
 		Requirements: &provisionerv1.ResourceRequirements{
 			MinVramGb: 24,
@@ -372,8 +371,10 @@ func TestDestroy_HappyPath(t *testing.T) {
 }
 
 func TestDestroy_AlreadyGone_StillTERMINATED(t *testing.T) {
-	// No container id on record -- treat as "nothing to do, already
-	// terminal." Mirrors sshdocker's idempotent destroy.
+	// No pod id anywhere on record -- treat as "nothing to do, already
+	// terminal." Mirrors sshdocker's idempotent destroy. Both
+	// dep.container_id (v0.1 1:1 shape) AND inst.provider_id (v0.2
+	// auto-provision shape) must be empty for this branch to fire.
 	called := atomic.Int32{}
 	f := &fakeRunPod{t: t, respond: func(method, path string, body []byte) (int, string) {
 		called.Add(1)
@@ -386,16 +387,94 @@ func TestDestroy_AlreadyGone_StillTERMINATED(t *testing.T) {
 
 	dep := okDep()
 	dep.ContainerId = ""
+	inst := okInst()
+	inst.ProviderId = ""
 
 	c := &collector{}
-	if err := p.Destroy(context.Background(), dep, okInst(), nil, c.emit); err != nil {
+	if err := p.Destroy(context.Background(), dep, inst, nil, c.emit); err != nil {
 		t.Fatalf("Destroy: %v", err)
 	}
 	if c.lastState() != provisionerv1.DeploymentState_DEPLOYMENT_STATE_TERMINATED {
 		t.Errorf("final state = %v, want TERMINATED", c.lastState())
 	}
 	if got := called.Load(); got != 0 {
-		t.Errorf("DELETE should not fire when no container id; got %d calls", got)
+		t.Errorf("DELETE should not fire when no pod id; got %d calls", got)
+	}
+}
+
+// TestDestroy_AutoProvisionedReadsInstanceProviderID is the regression
+// gate for the leaked-pod bug. v0.2 auto-provisioned deployments stamp
+// the RunPod pod id onto Instance.provider_id (not Deployment.container_id
+// -- that's reserved for the v0.1 1:1 singular shape). When the deployer
+// ignored the inst parameter and read only dep.GetContainerId(), Destroy
+// silently no-op'd and the pod stayed alive on RunPod's side. This test
+// pins the inst.provider_id fallback so the regression cannot recur.
+func TestDestroy_AutoProvisionedReadsInstanceProviderID(t *testing.T) {
+	var deletedPath atomic.Value
+	f := &fakeRunPod{t: t, respond: func(method, path string, body []byte) (int, string) {
+		if method == "DELETE" {
+			deletedPath.Store(path)
+			return 204, ""
+		}
+		return 500, "{}"
+	}}
+	srv := httptest.NewServer(f.handler())
+	t.Cleanup(srv.Close)
+	client := NewClient("test-api-key", WithBaseURL(srv.URL), WithHTTPClient(srv.Client()))
+	p := New(client)
+
+	dep := okDep()
+	dep.ContainerId = "" // v0.2 auto-provision: container_id NOT on the Deployment
+	inst := okInst()
+	inst.ProviderId = "mw0gmuyupiujzr" // ... it's on the Instance
+
+	c := &collector{}
+	if err := p.Destroy(context.Background(), dep, inst, nil, c.emit); err != nil {
+		t.Fatalf("Destroy: %v", err)
+	}
+	if c.lastState() != provisionerv1.DeploymentState_DEPLOYMENT_STATE_TERMINATED {
+		t.Errorf("final state = %v, want TERMINATED", c.lastState())
+	}
+	got, _ := deletedPath.Load().(string)
+	if got != "/pods/mw0gmuyupiujzr" {
+		t.Errorf("DELETE path = %q, want /pods/mw0gmuyupiujzr (regression: deployer ignored inst.provider_id)", got)
+	}
+}
+
+// TestDestroy_TransientError_StaysTerminating pins the issue-165
+// behavior: a 5xx (or network-error) from RunPod during DELETE should
+// NOT mark the deployment FAILED. It leaves the deployment in
+// TERMINATING so the reaper's TERMINATING-sweep can retry. Marking
+// FAILED on a transient blip permanently strands the pod (the
+// production failure shape that triggered this fix).
+func TestDestroy_TransientError_StaysTerminating(t *testing.T) {
+	f := &fakeRunPod{t: t, respond: func(method, path string, body []byte) (int, string) {
+		if method == "DELETE" {
+			return 503, `{"error":"service unavailable"}`
+		}
+		return 500, "{}"
+	}}
+	srv := httptest.NewServer(f.handler())
+	t.Cleanup(srv.Close)
+	client := NewClient("test-api-key", WithBaseURL(srv.URL), WithHTTPClient(srv.Client()))
+	p := New(client)
+
+	dep := okDep()
+	dep.ContainerId = "rp-engine-x"
+
+	c := &collector{}
+	if err := p.Destroy(context.Background(), dep, okInst(), nil, c.emit); err == nil {
+		t.Fatalf("Destroy: want error, got nil")
+	}
+	// Last state must be TERMINATING (not FAILED) so the reaper picks
+	// up the retry. Walk the updates: there should be no FAILED emit.
+	for _, u := range c.updates {
+		if u.State == provisionerv1.DeploymentState_DEPLOYMENT_STATE_FAILED {
+			t.Fatalf("transient 503 emitted FAILED; expected to stay TERMINATING. updates=%+v", c.updates)
+		}
+	}
+	if c.lastState() != provisionerv1.DeploymentState_DEPLOYMENT_STATE_TERMINATING {
+		t.Errorf("last state = %v, want TERMINATING (so reaper retries)", c.lastState())
 	}
 }
 

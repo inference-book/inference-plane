@@ -1,0 +1,650 @@
+package file
+
+import (
+	"errors"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
+	"github.com/inference-book/inference-plane/internal/provisioners"
+	"google.golang.org/protobuf/types/known/timestamppb"
+)
+
+func newStore(t *testing.T) *Store {
+	t.Helper()
+	s, err := Open(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	return s
+}
+
+func TestOpen_CreatesDir(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "nested", "iplane")
+	s, err := Open(dir, "default")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Errorf("Open did not create dir: %v", err)
+	}
+	if s.Path() != filepath.Join(dir, "state.json") {
+		t.Errorf("Path() = %q, want state.json under dir", s.Path())
+	}
+}
+
+func TestRead_EmptyFileReturnsDefault(t *testing.T) {
+	s := newStore(t)
+	f, err := s.Read()
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if len(f.Instances) != 0 {
+		t.Errorf("Instances should be empty, got %d", len(f.Instances))
+	}
+	if len(f.Deployments) != 0 {
+		t.Errorf("Deployments should be empty, got %d", len(f.Deployments))
+	}
+
+	// File-format envelope fields (SchemaVersion, Backend, OperatorID)
+	// are file-backend-specific and not part of provisioners.State.
+	// Reach into the internal readFromDisk to verify the envelope
+	// stamps correctly on an empty-file read.
+	env, err := s.readFromDisk()
+	if err != nil {
+		t.Fatalf("readFromDisk: %v", err)
+	}
+	if env.SchemaVersion != SchemaVersion {
+		t.Errorf("envelope SchemaVersion = %q, want %q", env.SchemaVersion, SchemaVersion)
+	}
+	if env.Backend != BackendLocalFile {
+		t.Errorf("envelope Backend = %q, want %q", env.Backend, BackendLocalFile)
+	}
+	if env.OperatorID != "default" {
+		t.Errorf("envelope OperatorID = %q, want default", env.OperatorID)
+	}
+}
+
+func TestDeployment_RoundTripPersistence(t *testing.T) {
+	s := newStore(t)
+	want := &provisionerv1.Deployment{
+		Id:             "my-llama",
+		InstanceId:     "my-pod",
+		Image:          "vllm/vllm-openai:0.7.0",
+		Model:          "Qwen/Qwen2.5-7B-Instruct",
+		EngineArgs:     []string{"--gpu-memory-utilization", "0.9"},
+		Env:            map[string]string{"HF_TOKEN": "tok_redacted"},
+		EnginePort:     8000,
+		State:          provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING,
+		CurrentPhase:   "engine:serving",
+		ContainerId:    "abc1234",
+		EngineEndpoint: "http://1.2.3.4:8000",
+	}
+	if err := s.Update(func(f *provisioners.State) error {
+		f.Deployments["my-llama"] = want
+		return nil
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	got, err := s.Read()
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	dep, ok := got.Deployments["my-llama"]
+	if !ok {
+		t.Fatal("deployment my-llama missing after round-trip")
+	}
+	if dep.GetId() != want.Id {
+		t.Errorf("Id = %q, want %q", dep.GetId(), want.Id)
+	}
+	if dep.GetInstanceId() != want.InstanceId {
+		t.Errorf("InstanceId = %q, want %q", dep.GetInstanceId(), want.InstanceId)
+	}
+	if dep.GetImage() != want.Image {
+		t.Errorf("Image = %q, want %q", dep.GetImage(), want.Image)
+	}
+	if dep.GetModel() != want.Model {
+		t.Errorf("Model = %q, want %q", dep.GetModel(), want.Model)
+	}
+	if dep.GetState() != want.State {
+		t.Errorf("State = %v, want RUNNING", dep.GetState())
+	}
+	if dep.GetContainerId() != want.ContainerId {
+		t.Errorf("ContainerId = %q, want %q", dep.GetContainerId(), want.ContainerId)
+	}
+	if dep.GetEngineEndpoint() != want.EngineEndpoint {
+		t.Errorf("EngineEndpoint = %q, want %q", dep.GetEngineEndpoint(), want.EngineEndpoint)
+	}
+}
+
+func TestDeployment_NewFields_RoundTrip(t *testing.T) {
+	s := newStore(t)
+	activity := time.Date(2026, 5, 31, 12, 34, 56, 0, time.UTC)
+	want := &provisionerv1.Deployment{
+		Id:             "pinned-llama",
+		InstanceId:     "my-pod",
+		Image:          "vllm/vllm-openai:0.7.0",
+		Model:          "Qwen/Qwen2.5-7B-Instruct",
+		State:          provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING,
+		IdleTtlSeconds: 300,
+		LastActivityAt: timestamppb.New(activity),
+		NoIdleDestroy:  true,
+	}
+	if err := s.Update(func(f *provisioners.State) error {
+		f.Deployments["pinned-llama"] = want
+		return nil
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	got, err := s.Read()
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	dep, ok := got.Deployments["pinned-llama"]
+	if !ok {
+		t.Fatal("deployment pinned-llama missing after round-trip")
+	}
+	if dep.GetIdleTtlSeconds() != 300 {
+		t.Errorf("IdleTtlSeconds = %d, want 300", dep.GetIdleTtlSeconds())
+	}
+	if !dep.GetNoIdleDestroy() {
+		t.Errorf("NoIdleDestroy = false, want true")
+	}
+	if dep.GetLastActivityAt() == nil {
+		t.Fatal("LastActivityAt = nil, want non-nil")
+	}
+	if !dep.GetLastActivityAt().AsTime().Equal(activity) {
+		t.Errorf("LastActivityAt = %v, want %v", dep.GetLastActivityAt().AsTime(), activity)
+	}
+}
+
+func TestDeployment_ForwardCompat_OldRecordLoadsAsZero(t *testing.T) {
+	// A state file written before v0.2 ch7-beat1.1 has no idle_ttl_seconds /
+	// last_activity_at / no_idle_destroy on the Deployment. A v0.2 reader
+	// must load it with zero values for those fields (the reaper's
+	// "TTL not set / pin not set" path), no error.
+	s := newStore(t)
+	raw := `{
+  "schema_version": "1.1",
+  "backend": "local-file",
+  "operator_id": "default",
+  "instances": {},
+  "deployments": {
+    "old-llama": {
+      "id": "old-llama",
+      "instance_id": "my-pod",
+      "image": "vllm/vllm-openai:0.7.0",
+      "model": "Qwen/Qwen2.5-7B-Instruct",
+      "state": "DEPLOYMENT_STATE_RUNNING"
+    }
+  }
+}`
+	if err := os.WriteFile(s.Path(), []byte(raw), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	f, err := s.Read()
+	if err != nil {
+		t.Fatalf("Read should tolerate v0.1-shaped Deployment: %v", err)
+	}
+	dep, ok := f.Deployments["old-llama"]
+	if !ok {
+		t.Fatal("deployment old-llama missing")
+	}
+	if dep.GetIdleTtlSeconds() != 0 {
+		t.Errorf("IdleTtlSeconds = %d, want 0 (zero default)", dep.GetIdleTtlSeconds())
+	}
+	if dep.GetNoIdleDestroy() {
+		t.Errorf("NoIdleDestroy = true, want false (zero default)")
+	}
+	if dep.GetLastActivityAt() != nil {
+		t.Errorf("LastActivityAt = %v, want nil (zero default)", dep.GetLastActivityAt())
+	}
+}
+
+func TestSchemaVersion_BumpedTo1Dot5(t *testing.T) {
+	s := newStore(t)
+	if err := s.Update(func(f *provisioners.State) error { return nil }); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	raw, err := os.ReadFile(s.Path())
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if !strings.Contains(string(raw), `"schema_version": "1.5"`) {
+		t.Errorf("on-disk envelope missing schema_version=1.5; got:\n%s", raw)
+	}
+}
+
+// TestDeployment_InstanceIds_RoundTrip: a Deployment record with
+// instance_ids=[a, b, c] written via Update reads back unchanged.
+// v0.2 ch7-beat3.1 acceptance: state-file write/read preserves the
+// multi-instance list (heterogeneous fleet case).
+func TestDeployment_InstanceIds_RoundTrip(t *testing.T) {
+	s := newStore(t)
+	want := &provisionerv1.Deployment{
+		Id:          "multi-instance-llama",
+		InstanceId:  "runpod-a", // singular = primary instance
+		InstanceIds: []string{"runpod-a", "vast-b", "lambda-c"},
+		Image:       "vllm/vllm-openai:0.7.0",
+		Model:       "Qwen/Qwen2.5-7B-Instruct",
+		State:       provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING,
+	}
+	if err := s.Update(func(f *provisioners.State) error {
+		f.Deployments["multi-instance-llama"] = want
+		return nil
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	got, err := s.Read()
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	dep, ok := got.Deployments["multi-instance-llama"]
+	if !ok {
+		t.Fatal("deployment missing after round-trip")
+	}
+	gotIDs := dep.GetInstanceIds()
+	if len(gotIDs) != 3 {
+		t.Fatalf("InstanceIds = %v, want 3 entries", gotIDs)
+	}
+	for i, v := range []string{"runpod-a", "vast-b", "lambda-c"} {
+		if gotIDs[i] != v {
+			t.Errorf("InstanceIds[%d] = %q, want %q (round-trip preservation broken)", i, gotIDs[i], v)
+		}
+	}
+}
+
+// TestDeployment_InstanceIds_ForwardCompat: a v0.2-early state file
+// (schema 1.2, only singular instance_id) loads cleanly with an
+// EMPTY instance_ids list. Downstream readers handle this via
+// EffectiveInstanceIDs (added in #84): empty list falls back to
+// [instance_id] so single-instance Beat 1+2 deployments work
+// unchanged after the schema bump.
+func TestDeployment_InstanceIds_ForwardCompat(t *testing.T) {
+	s := newStore(t)
+	raw := `{
+  "schema_version": "1.2",
+  "backend": "local-file",
+  "operator_id": "default",
+  "instances": {},
+  "deployments": {
+    "legacy-llama": {
+      "id": "legacy-llama",
+      "instance_id": "my-pod",
+      "image": "vllm/vllm-openai:0.7.0",
+      "model": "Qwen/Qwen2.5-7B-Instruct",
+      "state": "DEPLOYMENT_STATE_RUNNING"
+    }
+  }
+}`
+	if err := os.WriteFile(s.Path(), []byte(raw), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	f, err := s.Read()
+	if err != nil {
+		t.Fatalf("Read should tolerate v0.2-early Deployment: %v", err)
+	}
+	dep, ok := f.Deployments["legacy-llama"]
+	if !ok {
+		t.Fatal("legacy-llama missing")
+	}
+	if got := dep.GetInstanceIds(); len(got) != 0 {
+		t.Errorf("legacy record InstanceIds = %v, want empty (no field present in 1.2)", got)
+	}
+	if dep.GetInstanceId() != "my-pod" {
+		t.Errorf("singular instance_id = %q, want my-pod (must still load)", dep.GetInstanceId())
+	}
+}
+
+func TestUpdate_WriteThenRead(t *testing.T) {
+	s := newStore(t)
+	want := &provisionerv1.Instance{
+		Id:       "my-pod",
+		Provider: "local",
+		State:    provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE,
+	}
+	if err := s.Update(func(f *provisioners.State) error {
+		f.Instances["my-pod"] = want
+		return nil
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	got, err := s.Read()
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	inst, ok := got.Instances["my-pod"]
+	if !ok {
+		t.Fatal("instance my-pod missing after round-trip")
+	}
+	if inst.GetId() != "my-pod" {
+		t.Errorf("Id = %q, want my-pod", inst.GetId())
+	}
+	if inst.GetState() != provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE {
+		t.Errorf("State = %v, want ACTIVE", inst.GetState())
+	}
+}
+
+func TestUpdate_AbortOnFnError(t *testing.T) {
+	s := newStore(t)
+	wantErr := "boom"
+	err := s.Update(func(f *provisioners.State) error {
+		f.Instances["should-not-persist"] = &provisionerv1.Instance{Id: "ghost"}
+		return errFromString(wantErr)
+	})
+	if err == nil || err.Error() != wantErr {
+		t.Errorf("Update error = %v, want %q", err, wantErr)
+	}
+	got, _ := s.Read()
+	if _, ok := got.Instances["should-not-persist"]; ok {
+		t.Error("ghost record persisted despite fn error")
+	}
+}
+
+func TestUpdate_AtomicWrite_NoTornFiles(t *testing.T) {
+	s := newStore(t)
+	// Fill with one instance, then verify after Update the file is
+	// well-formed JSON (not a half-written torn file). The atomicity
+	// comes from temp-file-then-rename in writeToDisk; this test asserts
+	// the file is always valid by reading it back after every Update.
+	for i := range 25 {
+		id := "pod-" + itoa(i)
+		err := s.Update(func(f *provisioners.State) error {
+			f.Instances[id] = &provisionerv1.Instance{Id: id, State: provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("Update %d: %v", i, err)
+		}
+		f, err := s.Read()
+		if err != nil {
+			t.Fatalf("Read after Update %d: %v", i, err)
+		}
+		if len(f.Instances) != i+1 {
+			t.Fatalf("after Update %d: expected %d instances, got %d", i, i+1, len(f.Instances))
+		}
+	}
+}
+
+func TestUpdate_FlockSerializesConcurrentWriters(t *testing.T) {
+	// Two goroutines racing Update on the same Store. The flock should
+	// serialize them so the final state has BOTH increments, not one
+	// (which would happen if read-modify-write was non-atomic).
+	s := newStore(t)
+	if err := s.Update(func(f *provisioners.State) error {
+		f.Instances["counter"] = &provisionerv1.Instance{Id: "counter"}
+		return nil
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	var counter atomic.Int32
+	var wg sync.WaitGroup
+	const n = 50
+	for range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			err := s.Update(func(f *provisioners.State) error {
+				existing := f.Instances["counter"]
+				existing.HourlyRateUsd++
+				counter.Add(1)
+				return nil
+			})
+			if err != nil {
+				t.Errorf("concurrent Update: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+	if int(counter.Load()) != n {
+		t.Errorf("update calls = %d, want %d", counter.Load(), n)
+	}
+	f, _ := s.Read()
+	if int(f.Instances["counter"].GetHourlyRateUsd()) != n {
+		t.Errorf("HourlyRateUsd = %v, want %d -- flock did not serialize updates", f.Instances["counter"].GetHourlyRateUsd(), n)
+	}
+}
+
+func TestRead_ForwardCompat_UnknownFieldsTolerated(t *testing.T) {
+	// A v0.2 writer adds a new top-level field; the v0.1 reader must
+	// not choke. protojson with DiscardUnknown=true on instances and
+	// json's default top-level tolerance covers this.
+	s := newStore(t)
+	raw := `{
+  "schema_version": "1",
+  "backend": "local-file",
+  "operator_id": "default",
+  "future_field": "from a newer iplane",
+  "instances": {
+    "my-pod": {
+      "id": "my-pod",
+      "state": "INSTANCE_STATE_ACTIVE",
+      "future_instance_field": "also from a newer iplane"
+    }
+  }
+}`
+	if err := os.WriteFile(s.Path(), []byte(raw), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	f, err := s.Read()
+	if err != nil {
+		t.Fatalf("Read should tolerate unknown fields: %v", err)
+	}
+	if inst, ok := f.Instances["my-pod"]; !ok || inst.GetState() != provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE {
+		t.Errorf("instance not parsed correctly: %+v", inst)
+	}
+}
+
+// TestLockForLifetime_AllowsConcurrentUpdates verifies Update calls
+// inside an active LockForLifetime session do not self-deadlock on a
+// second flock against the already-held lock. Without the in-session
+// skip, the daemon's Update calls would block forever.
+func TestLockForLifetime_AllowsConcurrentUpdates(t *testing.T) {
+	s := newStore(t)
+	release, err := s.LockForLifetime()
+	if err != nil {
+		t.Fatalf("LockForLifetime: %v", err)
+	}
+	defer release()
+
+	for i := range 5 {
+		id := "pod-" + itoa(i)
+		if err := s.Update(func(f *provisioners.State) error {
+			f.Instances[id] = &provisionerv1.Instance{Id: id}
+			return nil
+		}); err != nil {
+			t.Fatalf("Update %d: %v", i, err)
+		}
+	}
+	f, err := s.Read()
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if got := len(f.Instances); got != 5 {
+		t.Errorf("instance count = %d, want 5", got)
+	}
+}
+
+// TestLockForLifetime_RefusesSecondHolder verifies the non-blocking
+// flock semantics: a second LockForLifetime against the same store
+// directory returns *ErrLockHeld immediately, with the first holder's
+// PID populated from the lock-pid sidecar.
+func TestLockForLifetime_RefusesSecondHolder(t *testing.T) {
+	dir := t.TempDir()
+	first, err := Open(dir, "default")
+	if err != nil {
+		t.Fatalf("Open first: %v", err)
+	}
+	release, err := first.LockForLifetime()
+	if err != nil {
+		t.Fatalf("first LockForLifetime: %v", err)
+	}
+	defer release()
+
+	second, err := Open(dir, "default")
+	if err != nil {
+		t.Fatalf("Open second: %v", err)
+	}
+	_, err = second.LockForLifetime()
+	if err == nil {
+		t.Fatal("second LockForLifetime: expected error, got nil")
+	}
+	var held *ErrLockHeld
+	if !errors.As(err, &held) {
+		t.Fatalf("expected *ErrLockHeld, got %T: %v", err, err)
+	}
+	if held.HolderPID != os.Getpid() {
+		t.Errorf("HolderPID = %d, want our own PID %d", held.HolderPID, os.Getpid())
+	}
+	if held.Path != dir {
+		t.Errorf("Path = %q, want %q", held.Path, dir)
+	}
+}
+
+// TestLockForLifetime_ReleaseAllowsReacquisition verifies the release
+// func actually frees the flock and clears the sidecar. After release,
+// another Open + LockForLifetime succeeds with no error.
+func TestLockForLifetime_ReleaseAllowsReacquisition(t *testing.T) {
+	dir := t.TempDir()
+	s1, _ := Open(dir, "default")
+	release1, err := s1.LockForLifetime()
+	if err != nil {
+		t.Fatalf("first LockForLifetime: %v", err)
+	}
+	release1()
+
+	s2, _ := Open(dir, "default")
+	release2, err := s2.LockForLifetime()
+	if err != nil {
+		t.Fatalf("second LockForLifetime after release: %v", err)
+	}
+	defer release2()
+}
+
+// TestLockForLifetime_ReleaseIsIdempotent guards against double-defer
+// patterns in callers. Release must not panic, error, or otherwise
+// misbehave when called twice.
+func TestLockForLifetime_ReleaseIsIdempotent(t *testing.T) {
+	s := newStore(t)
+	release, err := s.LockForLifetime()
+	if err != nil {
+		t.Fatalf("LockForLifetime: %v", err)
+	}
+	release()
+	release()
+	if s.heldLock != nil {
+		t.Error("heldLock should be nil after release")
+	}
+}
+
+// TestLockForLifetime_PIDSidecarRemovedOnRelease verifies the sidecar
+// file is removed on release so the next LockForLifetime against the
+// same dir does not report a stale PID.
+func TestLockForLifetime_PIDSidecarRemovedOnRelease(t *testing.T) {
+	s := newStore(t)
+	release, err := s.LockForLifetime()
+	if err != nil {
+		t.Fatalf("LockForLifetime: %v", err)
+	}
+	sidecar := filepath.Join(s.dir, ".lock-pid")
+	if _, err := os.Stat(sidecar); err != nil {
+		t.Fatalf("sidecar should exist while lock is held: %v", err)
+	}
+	release()
+	if _, err := os.Stat(sidecar); !os.IsNotExist(err) {
+		t.Errorf("sidecar should be removed after release; stat err = %v", err)
+	}
+}
+
+// TestLock_FDSurvivesGC is the regression test for the flock GC bug.
+//
+// The original lock() returned an int (the raw file descriptor) and let
+// the *os.File go out of scope. Go's runtime registers a finalizer on
+// every *os.File that closes the underlying FD when the value becomes
+// unreachable. Closing the FD silently released the flock AND -- worse
+// -- handed the FD slot back to the OS, which could reuse it for a
+// completely unrelated socket (a gRPC stream, say). unlock's later
+// syscall.Close on the same numeric FD would then tear down whatever
+// now lived there, manifesting as "unexpected EOF" on the gRPC client.
+//
+// The fix is to return *os.File from lock() so the caller's stack
+// holds a reference for the entire locked section. This test guards
+// against anyone "simplifying" the signature back to int.
+func TestLock_FDSurvivesGC(t *testing.T) {
+	s := newStore(t)
+	f, err := s.lock()
+	if err != nil {
+		t.Fatalf("lock: %v", err)
+	}
+	defer s.unlock(f)
+
+	// Force several GC cycles. If lock() ever stops keeping the
+	// *os.File reachable, the finalizer would close the FD here.
+	for i := 0; i < 16; i++ {
+		runtime.GC()
+	}
+
+	// Proof: the FD is still ours. A closed-then-recycled FD would
+	// either fail this write or write to something unrelated.
+	if _, err := f.Write([]byte("alive\n")); err != nil {
+		t.Fatalf("lock FD died across GC -- finalizer must have closed it: %v", err)
+	}
+}
+
+// TestUpdate_SurvivesGCPressure exercises the public Update entry point
+// under GC pressure. A regression in lock()'s lifetime management would
+// surface as a stray Close on a recycled FD; with the fix in place,
+// every Update returns clean and the stored values are consistent.
+func TestUpdate_SurvivesGCPressure(t *testing.T) {
+	s := newStore(t)
+	for i := 0; i < 32; i++ {
+		err := s.Update(func(f *provisioners.State) error {
+			// Force GC inside the locked section. If lock's *os.File
+			// were collectable here, this is exactly when the
+			// finalizer would fire and close the lock FD.
+			runtime.GC()
+			runtime.GC()
+			f.Instances["k-"+itoa(i)] = &provisionerv1.Instance{
+				Id:    "k-" + itoa(i),
+				State: provisionerv1.InstanceState_INSTANCE_STATE_PENDING,
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("Update #%d: %v", i, err)
+		}
+	}
+	out, err := s.Read()
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if got := len(out.Instances); got != 32 {
+		t.Errorf("instance count = %d, want 32", got)
+	}
+}
+
+// errString is the cheapest way to make an error from a literal in tests.
+type errString string
+
+func (e errString) Error() string { return string(e) }
+func errFromString(s string) error { return errString(s) }
+
+func itoa(i int) string {
+	if i == 0 {
+		return "0"
+	}
+	var b [20]byte
+	pos := len(b)
+	for i > 0 {
+		pos--
+		b[pos] = byte('0' + i%10)
+		i /= 10
+	}
+	return string(b[pos:])
+}

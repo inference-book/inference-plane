@@ -69,6 +69,12 @@ services:
   # use the IPLANE_ prefix with dotted keys flattened to underscores
   # (so `deployment.provider` -> IPLANE_DEPLOYMENT_PROVIDER).
   controlplane:
+    # Gated behind the `fullstack` profile so the default `docker compose
+    # up -d` brings up infra only (obs services). The dev loop is then
+    # `make infra-up` + `make serve` (host binary, fast iterate). The
+    # full-Docker reader path is `make up`, which passes --profile
+    # fullstack so this container starts alongside infra.
+    profiles: ["fullstack"]
     build:
       context: ..
       dockerfile: Dockerfile
@@ -88,12 +94,26 @@ services:
       - ./providers.yaml:/app/providers.yaml:ro
     environment:
       IPLANE_BACKEND_URL: http://vllm:8000
-      OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
+      # IPLANE_TELEMETRY_OTLP_ENDPOINT (not OTEL_EXPORTER_OTLP_ENDPOINT):
+      # iplane reads its OTLP endpoint via viper with the IPLANE_ prefix;
+      # the standard OTel env var is invisible to the binding and the
+      # daemon would fall back to the default. Keep both names equivalent
+      # for operators reading config: the IPLANE_-prefixed one is what
+      # iplane reads.
+      IPLANE_TELEMETRY_OTLP_ENDPOINT: otel-collector:4317
       # Per-instance labels for cost metrics. Override via .env.local.
       IPLANE_DEPLOYMENT_PROVIDER: ${IPLANE_DEPLOYMENT_PROVIDER:-runpod}
       IPLANE_DEPLOYMENT_GPU_TYPE: ${IPLANE_DEPLOYMENT_GPU_TYPE:-a10g}
       IPLANE_DEPLOYMENT_BILLING_MODE: ${IPLANE_DEPLOYMENT_BILLING_MODE:-metered_per_second}
       IPLANE_DEPLOYMENT_INSTANCE_ID: ${IPLANE_DEPLOYMENT_INSTANCE_ID:-}
+      # Provider API keys + HF token, propagated from the operator's
+      # shell (or .env.local via `docker compose --env-file`). Unset
+      # keys arrive as empty strings; buildLocalService skips the
+      # matching provider, matching CLI behavior.
+      RUNPOD_API_KEY: ${RUNPOD_API_KEY:-}
+      VAST_API_KEY: ${VAST_API_KEY:-}
+      LAMBDA_API_KEY: ${LAMBDA_API_KEY:-}
+      HF_TOKEN: ${HF_TOKEN:-}
     restart: unless-stopped
 
   # ── Observability collector ──────────────────────────────────────

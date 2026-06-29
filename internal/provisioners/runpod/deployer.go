@@ -2,7 +2,9 @@ package runpod
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -98,8 +100,25 @@ func (p *Provider) Deploy(ctx context.Context, dep *provisionerv1.Deployment, in
 
 // Destroy terminates the engine pod via DELETE /pods/{id}.
 // Idempotent: 404 from RunPod is treated as success (already gone).
-func (p *Provider) Destroy(ctx context.Context, dep *provisionerv1.Deployment, _ *provisionerv1.Instance, _ *sshkeys.KeyPair, emit func(provisioners.DeployStateUpdate)) error {
+//
+// Pod ID lookup order:
+//
+//  1. dep.container_id -- the v0.1 1:1 shape (singular Instance ==
+//     Deployment, pod id stamped on the Deployment record).
+//  2. inst.provider_id -- the v0.2 multi-replica auto-provision shape
+//     (each replica has its own Instance, pod id lives on the Instance;
+//     dep.container_id is null per fanout.patchDeploymentSlot's
+//     "reserved for singular" comment).
+//
+// Before the inst fallback existed, multi-replica destroys silently
+// no-op'd because dep.container_id was always null and the pod stayed
+// alive on RunPod -- a state-vs-reality leak the operator had no way
+// to see without checking the RunPod console.
+func (p *Provider) Destroy(ctx context.Context, dep *provisionerv1.Deployment, inst *provisionerv1.Instance, _ *sshkeys.KeyPair, emit func(provisioners.DeployStateUpdate)) error {
 	podID := dep.GetContainerId()
+	if podID == "" && inst != nil {
+		podID = inst.GetProviderId()
+	}
 	if podID == "" {
 		// Nothing to do server-side; just transition.
 		emit(provisioners.DeployStateUpdate{
@@ -117,6 +136,20 @@ func (p *Provider) Destroy(ctx context.Context, dep *provisionerv1.Deployment, _
 	})
 
 	if err := p.Terminate(ctx, podID); err != nil {
+		// Transient errors (network timeout, 5xx) leave the deployment
+		// in TERMINATING with a failure_reason. The reaper sweeps
+		// TERMINATING deployments whose updated_at is stale and retries
+		// destroy -- a single network blip doesn't permanently strand
+		// the pod. Permanent errors (auth, 4xx other than 404) go to
+		// FAILED for operator action.
+		if isTransientTerminateErr(err) {
+			emit(provisioners.DeployStateUpdate{
+				State:         provisionerv1.DeploymentState_DEPLOYMENT_STATE_TERMINATING,
+				Phase:         "runpod:terminate",
+				FailureReason: fmt.Sprintf("runpod:terminate (transient, will retry): %v", err),
+			})
+			return fmt.Errorf("runpod:terminate (transient): %w", err)
+		}
 		return failedf(emit, "runpod:terminate", err)
 	}
 
@@ -146,7 +179,7 @@ func buildEnginePodRequest(dep *provisionerv1.Deployment, inst *provisionerv1.In
 	//     free capacity, not just the cheapest. Mitigates the common
 	//     "no capacity on A5000 right now" 500.
 	var gpuSKUs []string
-	if sku := inst.GetGpu().GetSku(); sku != "" {
+	if sku := inst.GetHardware().GetGpuSku(); sku != "" {
 		gpuSKUs = []string{sku}
 	} else {
 		reqs := inst.GetSpec().GetRequirements()
@@ -190,7 +223,7 @@ func buildEnginePodRequest(dep *provisionerv1.Deployment, inst *provisionerv1.In
 
 	// GPU count: from the resolved instance if present, else the
 	// requirements, else 1.
-	gpuCount := int(inst.GetGpu().GetCount())
+	gpuCount := int(inst.GetHardware().GetGpuCount())
 	if gpuCount <= 0 {
 		gpuCount = int(inst.GetSpec().GetRequirements().GetGpuCount())
 	}
@@ -342,6 +375,42 @@ func httpProbeHealth(ctx context.Context, url string) (bool, string, error) {
 	}
 	defer resp.Body.Close()
 	return resp.StatusCode/100 == 2, resp.Status, nil
+}
+
+// isTransientTerminateErr returns true when a DELETE /pods/{id} error
+// is the kind that's worth retrying (network timeout, 5xx, 408, 429).
+// 4xx-other-than-404 -- and 404 is already swallowed upstream as
+// "pod already gone" -- mean the operator's input is wrong, not the
+// network: retrying would loop without making progress, so we mark
+// FAILED and let the reaper give up.
+//
+// The reaper retries TERMINATING deployments (issue 165 / option B);
+// the deployer signals "retry me" by leaving the deployment in
+// TERMINATING and returning the error here.
+func isTransientTerminateErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return true
+	}
+	var pe *provisioners.ProviderError
+	if errors.As(err, &pe) {
+		if pe.HTTP == 0 {
+			// No HTTP status = transport-level failure (DNS, dial
+			// timeout, connection reset). Always transient.
+			return true
+		}
+		// 5xx, plus 408 Request Timeout and 429 Too Many Requests
+		// (RunPod returns 429 under bursts; backing off is the right
+		// move, not giving up).
+		return pe.HTTP >= 500 || pe.HTTP == 408 || pe.HTTP == 429
+	}
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		return true
+	}
+	return false
 }
 
 // failedf emits a FAILED state update with the wrapped error reason

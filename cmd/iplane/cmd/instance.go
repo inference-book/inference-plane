@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -13,11 +14,7 @@ import (
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
 	"github.com/inference-book/inference-plane/gen/go/provisioner/v1/provisionerv1connect"
 	"github.com/inference-book/inference-plane/internal/provisioners"
-	"github.com/inference-book/inference-plane/internal/provisioners/local"
-	"github.com/inference-book/inference-plane/internal/provisioners/runpod"
-	"github.com/inference-book/inference-plane/internal/deployments/sshdocker"
-	"github.com/inference-book/inference-plane/internal/provisioners/state"
-	"github.com/inference-book/inference-plane/internal/sshkeys"
+	"github.com/inference-book/inference-plane/internal/provisioners/stores/file"
 )
 
 // Shared flags on the instance group. Each subcommand reads them via
@@ -155,11 +152,11 @@ func init() {
 	pf.StringVar(&instanceOutput, "output", "table",
 		`output format: table | json`)
 	pf.StringVar(&instanceServiceURL, "service-url", os.Getenv("IPLANE_SERVICE_URL"),
-		`when set, forward to a running iplane serve at this URL (e.g. http://localhost:9091)`)
+		`when set, forward to a running iplane serve at this URL (e.g. http://localhost:8080). Default: empty = in-process mode (CLI opens the state file directly). Honors $IPLANE_SERVICE_URL.`)
 }
 
 // resolveStateDir returns the explicit --state-dir if set, else
-// ~/.iplane (creating it implicitly via state.Open). Fails fast when
+// ~/.iplane (creating it implicitly via file.Open). Fails fast when
 // the home dir is unavailable -- the alternative would be silently
 // landing state in $CWD, which is a worse surprise.
 func resolveStateDir() (string, error) {
@@ -196,44 +193,28 @@ func buildClient() (provisionerClient, error) {
 	if err != nil {
 		return nil, err
 	}
-	store, err := state.Open(dir, instanceOperatorID)
+	store, err := file.Open(dir, instanceOperatorID)
 	if err != nil {
 		return nil, fmt.Errorf("open state store: %w", err)
 	}
-
-	// Open the SSH key store alongside the state store. iplane's
-	// chapter narrative keeps key management invisible: the CLI
-	// generates a per-(operator, provider) Ed25519 key on first
-	// `iplane instance create runpod ...` and registers it with
-	// RunPod's account so newly-created pods get it auto-installed.
-	// Operators never type ssh-keygen, never see the file.
-	//
-	// Layout: <state-dir>/keys/signing_keys/<safeClientID>.json,
-	// 0600 perms (oneauth's FSKeyStore handles both). Filesystem
-	// permissions are the encryption-at-rest model for v0.1; same
-	// trust model as ~/.ssh/id_rsa.
-	keyStore, err := sshkeys.New(sshkeys.WithDir(filepath.Join(dir, "keys")))
-	if err != nil {
-		return nil, fmt.Errorf("open ssh key store: %w", err)
+	// Acquire the lifetime lock so a running iplane serve daemon
+	// surfaces as a clear error instead of a silent hang. The release
+	// func is dropped on purpose: the CLI process exits within
+	// seconds, and the kernel reclaims the FD (and therefore the
+	// flock) on exit. The PID sidecar is left behind but is harmless
+	// because LockForLifetime checks the flock itself, not the
+	// sidecar; sidecar is informational only.
+	if _, err := store.LockForLifetime(); err != nil {
+		var held *file.ErrLockHeld
+		if errors.As(err, &held) {
+			if held.HolderPID != 0 {
+				return nil, fmt.Errorf("iplane serve is running at PID %d (state %s); pass --service-url to route through it or stop the daemon", held.HolderPID, held.Path)
+			}
+			return nil, fmt.Errorf("state directory %q is locked by another process; pass --service-url to route through it or stop the holder", held.Path)
+		}
+		return nil, fmt.Errorf("acquire state lock: %w", err)
 	}
-
-	providers := []provisioners.Provider{local.New()}
-	if key := os.Getenv("RUNPOD_API_KEY"); key != "" {
-		providers = append(providers, runpod.New(runpod.NewClient(key)))
-	}
-
-	// Wire the SSH+docker deployment executor. Production uses the
-	// real SSH dial; the executor reads Instance.ssh + the loaded
-	// key pair to dial each deployment's target pod. Local provider
-	// instances have no ssh.host so deployments against them are
-	// rejected at the Service layer before the executor is invoked.
-	executor := sshdocker.NewExecutor()
-
-	return provisioners.New(providers, store, instanceOperatorID,
-		provisioners.WithKeyStore(keyStore),
-		provisioners.WithDeploymentExecutor(executor),
-		provisioners.WithModelStore(modelStoreForCLI()),
-	), nil
+	return buildLocalService(store, instanceOperatorID)
 }
 
 // checkProviderAvailable surfaces the "you asked for runpod but
@@ -245,15 +226,18 @@ func checkProviderAvailable(name string) error {
 	if instanceServiceURL != "" {
 		return nil // remote server decides
 	}
-	switch name {
-	case provisioners.ProviderLocal:
+	if name == provisioners.ProviderLocal {
 		return nil
-	case provisioners.ProviderRunPod:
-		if os.Getenv("RUNPOD_API_KEY") == "" {
-			return fmt.Errorf("provider runpod requires RUNPOD_API_KEY in env (or pass --service-url to forward to a running iplane serve)")
+	}
+	// Every other supported provider has a required API key env. The
+	// providerAPIKeyEnv mapping is the source of truth -- providers
+	// added to that map automatically become accepted here. Unknown
+	// providers fall through to the explicit-error branch.
+	if keyEnv := providerAPIKeyEnv(name); keyEnv != "" {
+		if err := ensureProviderAPIKey(name); err != nil {
+			return err
 		}
 		return nil
-	default:
-		return fmt.Errorf("unknown provider %q (supported: local, runpod)", name)
 	}
+	return fmt.Errorf("unknown provider %q (supported: local, runpod, vast, lambdalabs)", name)
 }

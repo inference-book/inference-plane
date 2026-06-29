@@ -17,6 +17,7 @@ import (
 
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
 	"github.com/inference-book/inference-plane/internal/provisioners"
+	"github.com/inference-book/inference-plane/internal/provisioners/stores/file"
 )
 
 // mockUpClient is a hand-built fake of the upClient interface. Keeps
@@ -311,6 +312,60 @@ func TestParseOtelHeadersEnv_UsedByUpFlag(t *testing.T) {
 	if got["Authorization"] != "Basic abc" || got["x-tenant"] != "42" {
 		t.Errorf("parseOtelHeadersEnv = %+v, want both headers", got)
 	}
+}
+
+// TestUp_RouterServerMountsFlatChatCompletions asserts the v0.2
+// ch7-beat1.10 wiring: the in-process router server started by
+// `iplane up` actually mounts the flat /v1/chat/completions handler
+// and consults the supplied Service for model lookups.
+//
+// The model "no-such-model" doesn't exist in the supplied Service's
+// state -- the router's flat handler should return the OpenAI-shaped
+// `model_not_available` 404 (router) rather than http.ServeMux's
+// bare 404 (would mean the route wasn't mounted) or a connection
+// refused (would mean the server isn't running).
+func TestUp_RouterServerMountsFlatChatCompletions(t *testing.T) {
+	dir := t.TempDir()
+	// Build a real-but-empty Service through the same constructor
+	// path runUp uses. Using local-only providers + no key store +
+	// no executor is fine; the router only calls DescribeDeployment
+	// and ListDeployments, neither of which exercises provider
+	// adapters.
+	svc, err := newEmptyServiceForTest(dir)
+	if err != nil {
+		t.Fatalf("build service: %v", err)
+	}
+
+	srv := startUpRouterServer(svc, nil)
+	defer srv.Close()
+
+	resp, err := http.Post(srv.URL+"/v1/chat/completions", "application/json",
+		strings.NewReader(`{"model":"no-such-model","messages":[]}`))
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 404 (router mounted); body=%s", resp.StatusCode, body)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "model_not_available") {
+		t.Errorf("response should be router-shaped error (type=model_not_available); got: %s", body)
+	}
+}
+
+// newEmptyServiceForTest builds a minimal *provisioners.Service
+// against an empty state directory. No providers (the test never
+// triggers a Spawn), no key store, no executor. Returns the bare
+// Service so router-wiring tests can drive ListDeployments /
+// DescribeDeployment without standing up the full adapter graph.
+func newEmptyServiceForTest(dir string) (*provisioners.Service, error) {
+	store, err := file.Open(dir, "default")
+	if err != nil {
+		return nil, err
+	}
+	return provisioners.New(nil, store, "default"), nil
 }
 
 // Note on missing tests:

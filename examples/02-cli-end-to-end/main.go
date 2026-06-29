@@ -30,15 +30,15 @@ import (
 	"syscall"
 
 	"github.com/panyam/demokit"
-	"github.com/panyam/demokit/tui"
 
+	"github.com/inference-book/inference-plane/examples/common"
 	"github.com/inference-book/inference-plane/internal/provisioners"
 )
 
 func main() {
 	provider := flag.String("provider", provisioners.ProviderLocal, "provider to use (local | runpod)")
 	stateDir := flag.String("state-dir", "/tmp/iplane-cli-example", "state file directory (state.json + .lock land here)")
-	binPath := flag.String("bin", "", "path to a prebuilt iplane binary; built from source if empty")
+	binPath := flag.String("bin", "", "path to a prebuilt iplane binary; falls back to $IPLANE_BIN, bin/iplane, then $PATH")
 	flag.CommandLine.Parse(demokit.FilterArgs(os.Args[1:],
 		demokit.ValueFlag("--record"),
 		demokit.ValueFlag("--replay"),
@@ -51,18 +51,14 @@ func main() {
 		os.Exit(2)
 	}
 
-	// Build the CLI binary into a temp location so the demo is
-	// guaranteed to drive the local checkout (not whatever stale
-	// iplane is on $PATH). Skipped if --bin is supplied.
-	iplane := *binPath
-	if iplane == "" {
-		built, err := buildIplane()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "build iplane: %v\n", err)
-			os.Exit(1)
-		}
-		iplane = built
-		defer os.RemoveAll(filepath.Dir(iplane))
+	// Locate a prebuilt iplane to drive. The demo assumes one exists
+	// (build it with `make build`/`make install`); it no longer compiles
+	// the control plane itself. See ResolveIplane for the --bin /
+	// IPLANE_BIN / bin/iplane / PATH resolution order.
+	iplane, err := common.ResolveIplane(*binPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
 	}
 
 	// Stable id (not time-stamped) so the demoID embedded in the
@@ -286,9 +282,7 @@ func main() {
 		"Two transports exercise the same Service contract: this walkthrough drives the CLI; 01-end-to-end drives the gRPC client. Operators pick the one that fits their workflow.",
 	)
 
-	if demokit.IsTUI() {
-		demo.WithRenderer(tui.New())
-	}
+	common.SetupRenderer(demo)
 
 	demo.Execute()
 }
@@ -313,25 +307,6 @@ func runIplane(bin, stateDir string, args ...string) ([]byte, error) {
 	cmd.Stderr = &buf
 	err := cmd.Run()
 	return buf.Bytes(), err
-}
-
-// buildIplane compiles the local checkout's iplane binary into a temp
-// dir. Returns the absolute path. Caller is responsible for cleanup
-// (os.RemoveAll on the parent dir).
-func buildIplane() (string, error) {
-	dir, err := os.MkdirTemp("", "iplane-cli-example-*")
-	if err != nil {
-		return "", err
-	}
-	bin := filepath.Join(dir, "iplane")
-	cmd := exec.Command("go", "build", "-o", bin, "../../../cmd/iplane")
-	cmd.Stdout = os.Stderr
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		os.RemoveAll(dir)
-		return "", fmt.Errorf("go build: %w", err)
-	}
-	return bin, nil
 }
 
 // indentBlock prefixes every line with two spaces so the CLI output

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -21,12 +22,17 @@ import (
 	"google.golang.org/grpc/status"
 
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
+	"github.com/inference-book/inference-plane/gen/go/provisioner/v1/provisionerv1connect"
+	"github.com/inference-book/inference-plane/internal/config"
 	"github.com/inference-book/inference-plane/internal/deployments/sshdocker"
+	"github.com/inference-book/inference-plane/internal/metrics"
 	"github.com/inference-book/inference-plane/internal/provisioners"
 	"github.com/inference-book/inference-plane/internal/provisioners/local"
 	"github.com/inference-book/inference-plane/internal/provisioners/runpod"
-	"github.com/inference-book/inference-plane/internal/provisioners/state"
+	"github.com/inference-book/inference-plane/internal/provisioners/stores/file"
+	"github.com/inference-book/inference-plane/internal/router"
 	"github.com/inference-book/inference-plane/internal/sshkeys"
+	"github.com/inference-book/inference-plane/internal/telemetry"
 )
 
 // `iplane up` — the chapter's flagship one-liner. Provisions a GPU,
@@ -56,8 +62,10 @@ var (
 	upID           string
 	upTimeout      time.Duration
 	upNoChat       bool
-	upDebugShell   bool
-	upMaxTokens    int32
+	upDebugShell    bool
+	upIdleTTL       time.Duration
+	upNoIdleDestroy bool
+	upMaxTokens     int32
 	upTemperature  float64
 )
 
@@ -120,6 +128,15 @@ func runUp(cmd *cobra.Command, _ []string) error {
 			"  (no IPLANE_OTEL_ENDPOINT set; engine will run without telemetry. Pass --otel-endpoint, set IPLANE_OTEL_ENDPOINT, or --no-telemetry to silence this.)")
 	}
 
+	// iplane up is RunPod-only in v0.2 because the in-process Service
+	// it constructs at line ~402 hardcodes runpod.New(runpod.NewClient).
+	// Operators who want vast / lambdalabs use `iplane deployment
+	// deploy --provider <name>` against a running iplane serve; that
+	// path goes through buildLocalService which knows about every
+	// registered provider.
+	if upProvider != provisioners.ProviderRunPod {
+		return fmt.Errorf("iplane up supports --provider runpod only in v0.2 (got %q); for other providers, run `iplane serve` and use `iplane deployment deploy --provider %s`", upProvider, upProvider)
+	}
 	apiKey := os.Getenv("RUNPOD_API_KEY")
 	if apiKey == "" {
 		return fmt.Errorf("RUNPOD_API_KEY is required (iplane up provisions a real RunPod pod)")
@@ -129,11 +146,28 @@ func runUp(cmd *cobra.Command, _ []string) error {
 	// v0.1: it's the one-shot operator verb, no separate `iplane serve`
 	// needed. Operators who want forward-to-remote can use the explicit
 	// `iplane deployment deploy` against an `iplane serve`.
-	cli, cleanup, err := newInProcessUpClient(apiKey)
+	cli, provisionerSvc, cleanup, err := newInProcessUpClient(apiKey)
 	if err != nil {
 		return err
 	}
 	defer cleanup()
+
+	// v0.2 ch7-beat1.10 acceptance #2: when the operator has an OTLP
+	// sink configured, init the iplane-up process's own telemetry so
+	// the router's metrics + spans land in Tempo/Mimir with
+	// service.name=iplane-up. Distinguishes `up` traffic from `serve`
+	// traffic in the same dashboard. Skip the init if no endpoint is
+	// set or --no-telemetry is on; recorder stays nil and the router
+	// is nil-safe.
+	recorder, telShutdown := initUpTelemetry(cmd, upOtelEndpoint, upNoTelemetry)
+	defer func() {
+		if telShutdown == nil {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = telShutdown(ctx)
+	}()
 
 	// Signal handler: Ctrl-C (and SIGTERM) trigger DestroyDeployment.
 	// Operators expect Ctrl-C from `iplane up` to behave like `docker
@@ -189,18 +223,23 @@ func runUp(cmd *cobra.Command, _ []string) error {
 	depEnv := buildUpEngineEnv(upOtelEndpoint, upOtelHeaders, upNoTelemetry)
 	resp, err := cli.CreateDeployment(provCtx, &provisionerv1.CreateDeploymentRequest{
 		Deployment: &provisionerv1.Deployment{
-			Id:         upID,
-			Image:      upImage,
-			Model:      upModel,
-			EnginePort: 8000,
-			Env:        depEnv,
-			DebugShell: upDebugShell,
+			Id:             upID,
+			Image:          upImage,
+			Model:          upModel,
+			EnginePort:     8000,
+			Env:            depEnv,
+			DebugShell:     upDebugShell,
+			IdleTtlSeconds: int32(upIdleTTL.Seconds()),
+			NoIdleDestroy:  upNoIdleDestroy,
 		},
-		Provider: upProvider,
-		Region:   upRegion,
-		Requirements: &provisionerv1.ResourceRequirements{
-			Class: upClass,
-		},
+		ReplicasSpec: []*provisionerv1.ReplicaSpec{{
+			Provider: upProvider,
+			Region:   upRegion,
+			Requirements: &provisionerv1.ResourceRequirements{
+				Class: upClass,
+			},
+			Replicas: 1,
+		}},
 		Wait: true,
 	})
 	watchCancel() // stop the progress watcher once Create returns
@@ -216,16 +255,30 @@ func runUp(cmd *cobra.Command, _ []string) error {
 			strings.TrimPrefix(dep.GetState().String(), "DEPLOYMENT_STATE_"),
 			dep.GetFailureReason())
 	}
-	endpoint := dep.GetEngineEndpoint()
-	if endpoint == "" {
+	engineEndpoint := dep.GetEngineEndpoint()
+	if engineEndpoint == "" {
 		return fmt.Errorf("deploy reached RUNNING but engine_endpoint is empty")
 	}
+
+	// v0.2 ch7-beat1.10: start the data-plane router in-process so
+	// the REPL exercises the same metrics / traces / streaming code
+	// the `iplane serve` daemon does. Without this, `iplane up`'s
+	// REPL would dial the engine proxy URL directly and silently
+	// skip the router entirely.
+	upServer := startUpRouterServer(provisionerSvc, recorder)
+	defer upServer.Close()
+	// endpoint is what the REPL dials. Used to be the engine proxy
+	// URL directly; now it's the iplane router URL, with the router
+	// forwarding to the engine. Same OpenAI surface the chapter's
+	// flat-URL contract promises.
+	endpoint := upServer.URL
 
 	out := cmd.OutOrStdout()
 	fmt.Fprintln(out)
 	fmt.Fprintf(out, "  deployment:    %s\n", upID)
 	fmt.Fprintf(out, "  model:         %s\n", upModel)
-	fmt.Fprintf(out, "  endpoint:      %s\n", endpoint)
+	fmt.Fprintf(out, "  iplane url:    %s/v1   (model=%s in request body)\n", endpoint, upModel)
+	fmt.Fprintf(out, "  engine url:    %s   (internal; the router forwards here)\n", engineEndpoint)
 	if depEnv["OTEL_EXPORTER_OTLP_ENDPOINT"] != "" {
 		fmt.Fprintf(out, "  telemetry:     shipping to %s\n", depEnv["OTEL_EXPORTER_OTLP_ENDPOINT"])
 	} else {
@@ -269,18 +322,89 @@ type upClient interface {
 // newInProcessUpClient stands up the same Service shape the deployment
 // verbs use (state file + RunPod adapter + sshdocker fallback executor).
 // Returns the client and a cleanup func the caller defers.
-func newInProcessUpClient(apiKey string) (upClient, func(), error) {
+// initUpTelemetry wires the iplane-up process's own OTel SDK when the
+// operator has an OTLP sink configured. Returns the metrics Recorder
+// (nil-safe; passed to the router) and a shutdown function (nil when
+// telemetry was skipped). Skips silently in three cases:
+//
+//   - --no-telemetry flag set on iplane up
+//   - --otel-endpoint empty (operator did not configure a sink; emitting
+//     to nothing generates SDK log noise without value)
+//   - telemetry.Init returns an error (warn, proceed without telemetry)
+//
+// service.name is hardcoded to "iplane-up" so dashboards and Tempo
+// queries can split the up-driven traffic from the serve-driven
+// traffic in the same backend.
+func initUpTelemetry(cmd *cobra.Command, endpoint string, noTelemetry bool) (*metrics.Recorder, telemetry.Shutdown) {
+	if noTelemetry || endpoint == "" {
+		return nil, nil
+	}
+	telCfg := config.TelemetryConfig{
+		OTLPEndpoint: endpoint,
+		ServiceName:  "iplane-up",
+		Environment:  "dev",
+		SampleRatio:  1.0, // short-lived CLI runs; capture everything
+	}
+	sh, err := telemetry.Init(cmd.Context(), telCfg, config.DeploymentConfig{})
+	if err != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "  (telemetry init failed: %v; proceeding without)\n", err)
+		return nil, nil
+	}
+	recorder, rErr := metrics.NewRecorder()
+	if rErr != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "  (metrics recorder init failed: %v; proceeding without)\n", rErr)
+		return nil, sh
+	}
+	return recorder, sh
+}
+
+// startUpRouterServer stands up an in-process HTTP server that hosts
+// the v0.2 data-plane router pointed at the supplied Service. Returns
+// the server (caller defers Close).
+//
+// Two surfaces share one mux:
+//
+//   - DeploymentService Connect handler -- the router's internal
+//     DescribeDeployment / ListDeployments calls hit this.
+//   - Router's chat-completion / completions routes (both
+//     deploy-id and flat URL families) -- what the REPL POSTs to.
+//
+// The Connect client the router uses to look up deployments
+// loopback-dials this same server's URL. Mirrors what
+// cmd/iplane/cmd/serve.go does in the daemon path; that wiring
+// being already tested by daemonHarness covers the shape this
+// helper relies on. Extracted as a standalone function so tests
+// can drive it without going through runUp's full lifecycle.
+func startUpRouterServer(svc *provisioners.Service, recorder *metrics.Recorder) *httptest.Server {
+	mux := http.NewServeMux()
+	depAdapter := provisioners.NewConnectDeploymentAdapter(svc)
+	depPath, depHandler := provisionerv1connect.NewDeploymentServiceHandler(depAdapter)
+	mux.Handle(depPath, depHandler)
+
+	upServer := httptest.NewServer(mux)
+
+	deploymentRouter := router.New(
+		provisionerv1connect.NewDeploymentServiceClient(http.DefaultClient, upServer.URL),
+		recorder, // nil-safe; non-nil when iplane up inited its own telemetry
+	)
+	for pattern, h := range deploymentRouter.Handle() {
+		mux.Handle(pattern, h)
+	}
+	return upServer
+}
+
+func newInProcessUpClient(apiKey string) (upClient, *provisioners.Service, func(), error) {
 	dir, err := resolveDeploymentStateDir()
 	if err != nil {
-		return nil, func() {}, err
+		return nil, nil, func() {}, err
 	}
-	store, err := state.Open(dir, deploymentOperatorID)
+	store, err := file.Open(dir, deploymentOperatorID)
 	if err != nil {
-		return nil, func() {}, fmt.Errorf("open state store: %w", err)
+		return nil, nil, func() {}, fmt.Errorf("open state store: %w", err)
 	}
 	keyStore, err := sshkeys.New(sshkeys.WithDir(filepath.Join(dir, "keys")))
 	if err != nil {
-		return nil, func() {}, fmt.Errorf("open ssh key store: %w", err)
+		return nil, nil, func() {}, fmt.Errorf("open ssh key store: %w", err)
 	}
 	providers := []provisioners.Provider{
 		local.New(),
@@ -291,7 +415,7 @@ func newInProcessUpClient(apiKey string) (upClient, func(), error) {
 		provisioners.WithDeploymentExecutor(sshdocker.NewExecutor()),
 		provisioners.WithModelStore(modelStoreForCLI()),
 	)
-	return &inProcessDeploymentClient{svc: svc}, func() {}, nil
+	return &inProcessDeploymentClient{svc: svc}, svc, func() {}, nil
 }
 
 // buildUpEngineEnv computes the engine env map: OTel propagation
@@ -500,8 +624,8 @@ func init() {
 	f := upCmd.Flags()
 	f.StringVar(&upModel, "model", "",
 		`HF model id, e.g. Qwen/Qwen2.5-1.5B-Instruct (required)`)
-	f.StringVar(&upProvider, "provider", provisioners.ProviderRunPod,
-		`provider to provision on (only runpod is deployable in v0.1)`)
+	f.StringVar(&upProvider, "provider", defaultProvider(provisioners.ProviderRunPod),
+		`provider to provision on, e.g. runpod (default: `+EnvProvider+` env, else runpod)`)
 	f.StringVar(&upClass, "class", provisioners.GPUClassSmall,
 		`gpu class: small | medium | large | xlarge`)
 	f.StringVar(&upImage, "image", upDefaultImage,
@@ -522,6 +646,10 @@ func init() {
 		`skip the chat REPL; print endpoint and block on Ctrl-C instead`)
 	f.BoolVar(&upDebugShell, "debug-shell", false,
 		`opt in to publicIp + sshd on the engine pod (costs more, narrows placement)`)
+	f.DurationVar(&upIdleTTL, "idle-ttl", 30*time.Minute,
+		`destroy the deployment after this much idle time. The reaper protects against forgotten 'iplane up' sessions billing all night. Default 30m balances demo runs and afk pauses; set 0 to disable.`)
+	f.BoolVar(&upNoIdleDestroy, "no-idle-destroy", false,
+		`pin the deployment against the reaper. Overrides --idle-ttl: when set, the deployment survives regardless of idle time. For the smoke-demo / shared-deployment scenario where afk pauses must not reap.`)
 	f.Int32Var(&upMaxTokens, "max-tokens", 256,
 		`max completion tokens per chat turn`)
 	f.Float64Var(&upTemperature, "temperature", 0.7,

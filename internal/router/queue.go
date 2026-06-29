@@ -1,0 +1,167 @@
+package router
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"time"
+
+	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
+	"github.com/inference-book/inference-plane/internal/scheduler"
+	"github.com/inference-book/inference-plane/internal/stores/queue"
+)
+
+// queueEntry is the payload submitted to the scheduler when the
+// router has a scheduler configured. The HTTP handler goroutine
+// resolves the deployment + priority, then submits an entry and
+// blocks on done; the scheduler worker pops, runs the full
+// instrumented dispatch (`handleWithObservability`), and closes done.
+//
+// The ResponseWriter and Request are owned exclusively by whichever
+// goroutine holds them at any given moment: handler owns them until
+// Submit, scheduler worker owns them after dispatch starts. The
+// handler's blocking on done keeps the underlying http.Server
+// goroutine alive so the ResponseWriter stays valid for the worker's
+// writes.
+//
+// TenantID + Priority are captured into struct fields (in addition
+// to living on req's context) so the scheduler can route to the
+// right (lane, tenant) sub-queue and per-tenant fair-share works
+// without unmarshaling the context every call.
+//
+// enqueuedAt is stamped by the scheduler at Submit time and read at
+// dispatch to compute queue-wait-time (v0.2 ch7-beat2.6 metric).
+// Unexported because it's an implementation detail of the
+// scheduler<->router observer contract; the schedulerEntry wrapper
+// exposes it via StampEnqueued / EnqueuedAt methods.
+type queueEntry struct {
+	w                 http.ResponseWriter
+	req               *http.Request
+	dep               *provisionerv1.Deployment
+	stripDeployPrefix bool
+	done              chan struct{}
+	TenantID          string
+	Priority          provisionerv1.Priority
+
+	enqueuedAt time.Time
+}
+
+// DeploymentID satisfies scheduler.Entry. The scheduler's
+// in-flight cap uses this as the bucket key.
+func (e *queueEntry) DeploymentID() string {
+	if e.dep == nil {
+		return ""
+	}
+	return e.dep.GetId()
+}
+
+// PriorityLabel satisfies scheduler.Entry's Priority() string
+// method. Named PriorityLabel here so it doesn't shadow the
+// queueEntry.Priority field (the typed proto enum).
+func (e *queueEntry) priorityLabelString() string {
+	return priorityLabel(e.Priority)
+}
+
+// Priority satisfies scheduler.Entry. Returns the string label
+// (LaneInteractive | LaneBatch).
+func (e *queueEntry) PriorityLabel() string {
+	return e.priorityLabelString()
+}
+
+// schedulerEntry adapts queueEntry to scheduler.Entry plus the
+// optional TenantIdentifier + EnqueueTimestamper interfaces the
+// scheduler uses for fair-share routing and wait-time tracking.
+// Doing it on the queueEntry type itself would conflict with
+// queueEntry.Priority (the proto enum field); a thin wrapper that
+// exposes the right method names keeps the field naming clean.
+type schedulerEntry struct {
+	*queueEntry
+}
+
+func (s schedulerEntry) Priority() string         { return s.priorityLabelString() }
+func (s schedulerEntry) DeploymentID() string     { return s.queueEntry.DeploymentID() }
+func (s schedulerEntry) Tenant() string           { return s.queueEntry.TenantID }
+func (s schedulerEntry) StampEnqueued(t time.Time) { s.queueEntry.enqueuedAt = t }
+func (s schedulerEntry) EnqueuedAt() time.Time    { return s.queueEntry.enqueuedAt }
+
+// queueWaitCtxKey is the unexported context key the dispatcher uses
+// to pass the per-request queue-wait duration (milliseconds) into
+// handleWithObservability. Set only on the queued path; the direct-
+// forward path leaves it unset and the span attribute is simply
+// not recorded.
+type queueWaitCtxKey struct{}
+
+// dispatchEntry is the scheduler-facing handler. Closes done after
+// the proxy call returns. The scheduler's root context is
+// intentionally NOT propagated into the proxy call -- the per-request
+// context lives on entry.req and is what the proxy + tracer use.
+// Scheduler ctx would cancel mid-request on daemon shutdown, mangling
+// streaming responses; relying on the request ctx means
+// client-disconnect cancels the upstream and server-shutdown drains
+// in-flight cleanly.
+//
+// v0.2 ch7-beat2.7: dispatchEntry stashes the queue-wait duration
+// on the request context so handleWithObservability can stamp the
+// router span with `iplane.queue.wait_ms`. The chapter's trace
+// narrative reads "this request waited 240ms in the queue, then
+// took 1.2s at the engine" directly off the span attributes.
+func (r *Router) dispatchEntry(_ context.Context, e scheduler.Entry) {
+	se := e.(schedulerEntry).queueEntry
+	defer close(se.done)
+	if !se.enqueuedAt.IsZero() {
+		waitMs := time.Since(se.enqueuedAt).Milliseconds()
+		ctx := context.WithValue(se.req.Context(), queueWaitCtxKey{}, waitMs)
+		se.req = se.req.WithContext(ctx)
+	}
+	r.handleWithObservability(se.w, se.req, se.dep, se.stripDeployPrefix)
+}
+
+// enqueueOrServe is the fork point. It first resolves the effective
+// priority for this request (header > deployment default >
+// INTERACTIVE), stashes it on the request ctx + entry, then routes:
+// if a scheduler is configured, Submit + block on done; otherwise
+// dispatch inline (Beat 1 direct-forward path).
+//
+// On ErrQueueFull, returns 503 + Retry-After: 1. The chapter teaches
+// this as the bounded-buffer backpressure shape (M/M/k/N -- arrivals
+// beyond the buffer are rejected).
+func (r *Router) enqueueOrServe(w http.ResponseWriter, req *http.Request, dep *provisionerv1.Deployment, stripDeployPrefix bool) {
+	priority := effectivePriority(req.Context(), dep)
+	// Re-stash on ctx so handleWithObservability reads the effective
+	// (post-fallback) value, not the bare header value the middleware
+	// stored. The two-write pattern matches withTenant + the inline
+	// effectivePriority resolver.
+	ctx := context.WithValue(req.Context(), priorityCtxKey{}, priority)
+	req = req.WithContext(ctx)
+
+	if r.scheduler == nil {
+		r.handleWithObservability(w, req, dep, stripDeployPrefix)
+		return
+	}
+	entry := &queueEntry{
+		w:                 w,
+		req:               req,
+		dep:               dep,
+		stripDeployPrefix: stripDeployPrefix,
+		done:              make(chan struct{}),
+		TenantID:          tenantFromContext(req.Context()),
+		Priority:          priority,
+	}
+	if err := r.scheduler.Submit(schedulerEntry{entry}); err != nil {
+		switch {
+		case errors.Is(err, queue.ErrQueueFull):
+			w.Header().Set("Retry-After", "1")
+			writeOpenAIError(w, http.StatusServiceUnavailable,
+				"router queue is full; retry shortly", "queue_full")
+		case errors.Is(err, queue.ErrClosed),
+			errors.Is(err, scheduler.ErrSchedulerClosed):
+			writeOpenAIError(w, http.StatusServiceUnavailable,
+				"router is shutting down", "router_shutting_down")
+		default:
+			writeOpenAIError(w, http.StatusInternalServerError,
+				"router queue submit failed: "+err.Error(), "internal_error")
+		}
+		return
+	}
+	<-entry.done
+}

@@ -143,7 +143,7 @@ func renderCreateResult(cmd *cobra.Command, resp *provisionerv1.CreateInstanceRe
 	fmt.Fprintf(out, "  provider:     %s\n", inst.GetProvider())
 	fmt.Fprintf(out, "  provider id:  %s\n", inst.GetProviderId())
 	fmt.Fprintf(out, "  state:        %s\n", instanceStateLabel(inst.GetState()))
-	if sku := inst.GetGpu().GetSku(); sku != "" {
+	if sku := inst.GetHardware().GetGpuSku(); sku != "" {
 		fmt.Fprintf(out, "  sku:          %s\n", sku)
 	}
 	if rate := inst.GetHourlyRateUsd(); rate > 0 {

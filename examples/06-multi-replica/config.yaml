@@ -1,0 +1,67 @@
+# Demo 06 iplane serve config -- multi-replica throughput-curve.
+#
+# Differs from the global deploy/config.yaml in router.queue:
+# the scheduler is enabled with two servicers and per-lane capacity
+# of 256. Multi-replica fan-out itself works with servicers=0 (the
+# router just round-robins across replicas inline), but the
+# throughput-curve story benefits from queueing at replicas=1 (where
+# the engine is saturated) -- otherwise the load tool sees the
+# bottleneck as client-side worker exhaustion instead of router-side
+# backpressure.
+#
+# If you change the global deploy/config.yaml, audit this file for
+# drift. The only intentional difference is the router.queue block.
+
+server:
+  addr: ":8080"
+  read_timeout_sec: 60
+  write_timeout_sec: 600
+  shutdown_sec: 30
+
+backend:
+  engine: "mock"
+  url: ""
+  name: "mock"
+
+telemetry:
+  service_name: "inference-plane"
+  environment: "dev"
+  sample_ratio: 1.0
+
+deployment:
+  provider: "runpod"
+  gpu_type: "a10g"
+  billing_mode: "metered_per_second"
+  instance_id: ""
+
+router:
+  # Demo 06 override: scheduler ON with enough dispatcher concurrency
+  # (servicers=16) that all replicas can be busy simultaneously. The
+  # chapter's narrative is "throughput scales with replicas"; if
+  # `servicers` is smaller than the number of replicas, the scheduler
+  # caps dispatch and adding replicas doesn't help -- the queue
+  # becomes the bottleneck instead of the engines.
+  #
+  # Demo 05's narrative wants the opposite (small dispatcher window
+  # so the queue actually builds and priority lanes are visible);
+  # that's why 05's config keeps servicers=2 while 06 bumps it.
+  # in_flight_cap stays 0 (unlimited per-deployment); the only cap
+  # is the scheduler's worker pool.
+  queue:
+    servicers: 16
+    capacity: 256
+    in_flight_cap: 0
+    interactive:
+      servicers: 16
+      capacity: 256
+    batch:
+      servicers: 16
+      capacity: 256
+    tenant_weights: {}
+
+health:
+  poll_interval: 10s
+  failure_threshold: 3
+  success_threshold: 3
+  probe_timeout: 2s
+  max_concurrent: 32

@@ -6,11 +6,14 @@ This is the sibling of [01-end-to-end/](../01-end-to-end/), which exercises the 
 
 ## Run (local, the default)
 
+The demo drives a prebuilt `iplane` binary (it does not compile the control plane itself). Build it once from the repo root, then run:
+
 ```bash
-make demo
+make build        # repo root: produces bin/iplane
+make demo         # examples/02-cli-end-to-end
 ```
 
-Zero cost, no env vars. Builds `iplane` from the local checkout into a temp dir and shell-exec's it.
+Zero cost, no env vars. The binary is resolved via `--bin`, then `$IPLANE_BIN`, then the repo's `bin/iplane`, then `iplane` on `$PATH` (so `make install` works too).
 
 ## Run (runpod)
 

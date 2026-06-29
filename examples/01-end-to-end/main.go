@@ -35,14 +35,14 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/panyam/demokit"
-	"github.com/panyam/demokit/tui"
 
+	"github.com/inference-book/inference-plane/examples/common"
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
 	"github.com/inference-book/inference-plane/gen/go/provisioner/v1/provisionerv1connect"
 	"github.com/inference-book/inference-plane/internal/provisioners"
 	"github.com/inference-book/inference-plane/internal/provisioners/local"
 	"github.com/inference-book/inference-plane/internal/provisioners/runpod"
-	"github.com/inference-book/inference-plane/internal/provisioners/state"
+	"github.com/inference-book/inference-plane/internal/provisioners/stores/file"
 )
 
 func main() {
@@ -63,9 +63,9 @@ func serve() {
 	operatorID := flag.String("operator", "default", "operator id stamped on instances")
 	flag.CommandLine.Parse(demokit.FilterArgs(os.Args[1:], demokit.BoolFlag("--serve")))
 
-	store, err := state.Open(*stateDir, *operatorID)
+	store, err := file.Open(*stateDir, *operatorID)
 	if err != nil {
-		log.Fatalf("state.Open: %v", err)
+		log.Fatalf("file.Open: %v", err)
 	}
 
 	providers := []provisioners.Provider{local.New()}
@@ -234,7 +234,7 @@ func runDemo() {
 			fmt.Printf("  iplane id:       %s\n", inst.GetId())
 			fmt.Printf("  provider id:     %s\n", inst.GetProviderId())
 			fmt.Printf("  state:           %s\n", inst.GetState())
-			fmt.Printf("  resolved SKU:    %s\n", inst.GetGpu().GetSku())
+			fmt.Printf("  resolved SKU:    %s\n", inst.GetHardware().GetGpuSku())
 			fmt.Printf("  hourly rate:     $%.4f/hr\n", inst.GetHourlyRateUsd())
 			fmt.Printf("  already existed: %v\n", resp.Msg.GetAlreadyExisted())
 			return nil
@@ -254,8 +254,8 @@ func runDemo() {
 				return abortDemo(cleanup, "DescribeInstance: %v", err)
 			}
 			inst := resp.Msg.GetInstance()
-			fmt.Printf("  state file says: state=%s, gpu=%s (%dGB), rate=$%.4f/hr\n",
-				inst.GetState(), inst.GetGpu().GetSku(), inst.GetGpu().GetVramGb(), inst.GetHourlyRateUsd())
+			fmt.Printf("  state file says: state=%s, gpu=%s (%d MB), rate=$%.4f/hr\n",
+				inst.GetState(), inst.GetHardware().GetGpuSku(), inst.GetHardware().GetGpuVramMb(), inst.GetHourlyRateUsd())
 			return nil
 		})
 
@@ -354,9 +354,7 @@ func runDemo() {
 		"Re-running this demo with the same id reuses the terminated record's slot (id is reusable; idempotency adoption only fires for pending/active records).",
 	)
 
-	if demokit.IsTUI() {
-		demo.WithRenderer(tui.New())
-	}
+	common.SetupRenderer(demo)
 
 	demo.Execute()
 }

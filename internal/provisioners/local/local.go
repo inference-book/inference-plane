@@ -27,6 +27,7 @@ import (
 
 	"github.com/inference-book/inference-plane/internal/provisioners"
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
+	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -86,7 +87,8 @@ func (p *Provider) Spawn(ctx context.Context, spec *provisionerv1.Spec) (*provis
 		Provider:      p.Name(),
 		Spec:          spec,
 		Region:        spec.Region,
-		Gpu:           p.gpuInfo(),
+		Hardware:      p.hardware(),
+		Metadata:      p.metadata(),
 		HourlyRateUsd: 0,
 		State:         provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE,
 		CreatedAt:     now,
@@ -143,15 +145,26 @@ func (p *Provider) List(ctx context.Context, filter map[string]string) ([]*provi
 	return nil, nil
 }
 
-// gpuInfo constructs a fresh GpuInfo proto from the cached detection.
-// Cloned per call so the Service can mutate the returned Instance
-// without aliasing.
-func (p *Provider) gpuInfo() *provisionerv1.GpuInfo {
-	return &provisionerv1.GpuInfo{
-		Class:  p.detected.class,
-		Sku:    p.detected.sku,
-		Count:  int32(p.detected.count),
-		VramGb: int32(p.detected.vramGB),
+// hardware constructs a fresh Hardware proto from the cached
+// detection. Cloned per call so the Service can mutate the
+// returned Instance without aliasing.
+func (p *Provider) hardware() *provisionerv1.Hardware {
+	return &provisionerv1.Hardware{
+		GpuSku:    p.detected.sku,
+		GpuCount:  int32(p.detected.count),
+		GpuVramMb: int32(p.detected.vramGB * 1024),
+	}
+}
+
+// metadata holds local's iplane-class shorthand (since Hardware
+// doesn't carry the class taxonomy directly). Other adapters
+// follow the same convention: class lives in metadata.
+func (p *Provider) metadata() map[string]*structpb.Value {
+	if p.detected.class == "" {
+		return nil
+	}
+	return map[string]*structpb.Value{
+		"local.class": structpb.NewStringValue(p.detected.class),
 	}
 }
 

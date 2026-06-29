@@ -61,4 +61,4 @@ providers:
     amort_months: 36
     avg_power_watts: 350
     power_usd_per_kwh: 0.12
-    notes: "single-card workstation; effective rate ~ \$0.12/hr at 100% utilization"
+    notes: "single-card workstation; effective rate ~ $0.12/hr at 100% utilization"

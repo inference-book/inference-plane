@@ -29,10 +29,15 @@ import (
 // services that need to emit metrics. nil-safe at the call site so
 // tests that don't init telemetry still work (no-op recorder).
 type Recorder struct {
-	requests       metric.Int64Counter
-	duration       metric.Float64Histogram
-	tokens         metric.Int64Counter
-	backendHealthy metric.Int64Gauge
+	requests         metric.Int64Counter
+	duration         metric.Float64Histogram
+	tokens           metric.Int64Counter
+	backendHealthy   metric.Int64Gauge
+	reaperDestroys   metric.Int64Counter
+	queueDepth       metric.Int64Gauge
+	queueWait        metric.Float64Histogram
+	replicaInFlight  metric.Int64Gauge
+	routerDecisions  metric.Int64Counter
 }
 
 // NewRecorder builds the four instruments via the global MeterProvider.
@@ -88,11 +93,72 @@ func NewRecorder() (*Recorder, error) {
 		return nil, fmt.Errorf("metrics: health gauge: %w", err)
 	}
 
+	reaperDestroys, err := meter.Int64Counter(
+		telemetry.MetricReaperDestroysTotal,
+		metric.WithDescription("Deployments destroyed by the idle-TTL reaper, labeled by reason."),
+		metric.WithUnit("{deployment}"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("metrics: reaper counter: %w", err)
+	}
+
+	queueDepth, err := meter.Int64Gauge(
+		telemetry.MetricQueueDepth,
+		metric.WithDescription("Current items waiting in the router's per-(deploy, tenant, lane) sub-queue."),
+		metric.WithUnit("{request}"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("metrics: queue depth gauge: %w", err)
+	}
+
+	// Wait-time histogram buckets cover the operator-observable
+	// spectrum: sub-second (interactive p50), a few seconds (under
+	// queue pressure), tens of seconds (saturated batch). Same
+	// shape as the request-duration histogram so dashboards can
+	// stack the two for the chapter's queue-vs-engine-time
+	// breakdown.
+	queueWait, err := meter.Float64Histogram(
+		telemetry.MetricQueueWaitSeconds,
+		metric.WithDescription("Seconds an entry spent waiting in the router's queue before dispatch."),
+		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(0.001, 0.01, 0.1, 0.5, 1, 2, 5, 10, 30),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("metrics: queue wait histogram: %w", err)
+	}
+
+	// Synchronous gauge -- the router records the current in-flight
+	// count after every push (dispatch) and pop (response). OTel
+	// last-value semantics give the dashboard "what's happening right
+	// now"; no callback / async observation needed.
+	replicaInFlight, err := meter.Int64Gauge(
+		telemetry.MetricReplicaInFlight,
+		metric.WithDescription("Current in-flight requests per (deploy_id, replica_id)."),
+		metric.WithUnit("{request}"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("metrics: replica in-flight gauge: %w", err)
+	}
+
+	routerDecisions, err := meter.Int64Counter(
+		telemetry.MetricRouterDecisionsTotal,
+		metric.WithDescription("Routing decisions at the router, labeled by deploy_id / replica_id / outcome."),
+		metric.WithUnit("{decision}"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("metrics: router decisions counter: %w", err)
+	}
+
 	return &Recorder{
-		requests:       requests,
-		duration:       duration,
-		tokens:         tokens,
-		backendHealthy: healthy,
+		requests:        requests,
+		duration:        duration,
+		tokens:          tokens,
+		backendHealthy:  healthy,
+		reaperDestroys:  reaperDestroys,
+		queueDepth:      queueDepth,
+		queueWait:       queueWait,
+		replicaInFlight: replicaInFlight,
+		routerDecisions: routerDecisions,
 	}, nil
 }
 
@@ -140,4 +206,166 @@ func (r *Recorder) SetBackendHealth(ctx context.Context, healthy bool) {
 		v = 1
 	}
 	r.backendHealthy.Record(ctx, v)
+}
+
+// RecordRouterRequest emits the request-rate counter and the
+// duration histogram for one inference request that flowed through
+// the v0.2 data-plane router. Reuses the v0.1 instruments
+// (inference.requests.total, inference.request.duration) so existing
+// dashboards and alert rules see the new traffic alongside any
+// remaining v0.1 emissions; the label set extends with deploy_id and
+// tenant_id so the router's flow can be filtered out separately.
+//
+// tenantID is the optional v0.2 Beat-2 scaffold field. v0.2 Beat-1
+// emits an empty string here so the label cardinality stays at one
+// value until Beat 2 wires per-tenant identification through the
+// router.
+//
+// status is the outcome label, mirroring RecordRequest's convention:
+// "success", "client_error", "backend_error", "client_closed", etc.
+//
+// nil-safe: handlers that hold a nil Recorder (tests, daemon
+// constructed without telemetry init) get a no-op rather than a
+// panic.
+func (r *Recorder) RecordRouterRequest(ctx context.Context, deployID, model, tenantID, priority, replicaID, status string, durationSec float64) {
+	if r == nil {
+		return
+	}
+	attrs := metric.WithAttributes(
+		attribute.String(telemetry.LabelDeployID, deployID),
+		attribute.String(telemetry.LabelModel, model),
+		attribute.String(telemetry.LabelTenantID, tenantID),
+		attribute.String(telemetry.LabelPriority, priority),
+		attribute.String(telemetry.LabelReplicaID, replicaID),
+		attribute.String(telemetry.LabelStatus, status),
+	)
+	r.requests.Add(ctx, 1, attrs)
+	r.duration.Record(ctx, durationSec, attrs)
+}
+
+// RecordReaperDestroy bumps the reaper-destroys counter for a single
+// reap event. reason labels the cause -- "idle" for idle-TTL expiry,
+// "explicit" if a future cost-aware sweep adds richer reasons.
+//
+// nil-safe so daemons constructed without telemetry init (some test
+// harnesses) get a no-op rather than a panic.
+func (r *Recorder) RecordReaperDestroy(ctx context.Context, reason string) {
+	if r == nil {
+		return
+	}
+	r.reaperDestroys.Add(ctx, 1, metric.WithAttributes(
+		attribute.String(telemetry.LabelReason, reason),
+	))
+}
+
+// RecordRouterTokens adds n to the tokens-generated counter for a
+// router-mediated inference, labeled by deploy_id / model / tenant_id.
+// Same instrument as RecordTokens; the extra labels make the router's
+// contribution distinguishable from v0.1 inference-service emissions.
+//
+// Skip calling this when n is zero or unknown (e.g., a streaming
+// request whose engine did not emit a `usage` frame) -- recording
+// zeros pollutes the counter without adding signal.
+func (r *Recorder) RecordRouterTokens(ctx context.Context, deployID, model, tenantID, priority, replicaID string, n int64) {
+	if r == nil || n <= 0 {
+		return
+	}
+	r.tokens.Add(ctx, n, metric.WithAttributes(
+		attribute.String(telemetry.LabelDeployID, deployID),
+		attribute.String(telemetry.LabelModel, model),
+		attribute.String(telemetry.LabelTenantID, tenantID),
+		attribute.String(telemetry.LabelPriority, priority),
+		attribute.String(telemetry.LabelReplicaID, replicaID),
+	))
+}
+
+// RecordQueueDepth emits one observation of the queue-depth gauge
+// for the (deploy_id, tenant_id, priority) cell. Called by the
+// scheduler observer on every push + pop so the dashboard sees
+// live depth changes.
+//
+// Synchronous gauge (not async/observable) because the scheduler
+// already owns the source of truth and emits cheaply; a callback-
+// based observable gauge would need a periodic scrape of the same
+// state with no operator-visible difference.
+//
+// nil-safe.
+func (r *Recorder) RecordQueueDepth(ctx context.Context, deployID, tenantID, priority string, depth int64) {
+	if r == nil {
+		return
+	}
+	r.queueDepth.Record(ctx, depth, metric.WithAttributes(
+		attribute.String(telemetry.LabelDeployID, deployID),
+		attribute.String(telemetry.LabelTenantID, tenantID),
+		attribute.String(telemetry.LabelPriority, priority),
+	))
+}
+
+// RecordQueueWait records one wait-duration observation in the
+// queue-wait histogram. Called by the scheduler observer when an
+// entry exits the queue. Zero / negative durations are dropped --
+// they indicate the entry came from an Entry impl that doesn't
+// stamp enqueue time (test no-ops) and recording them would skew
+// the histogram toward 0.
+//
+// nil-safe.
+func (r *Recorder) RecordQueueWait(ctx context.Context, deployID, tenantID, priority string, waitSec float64) {
+	if r == nil || waitSec <= 0 {
+		return
+	}
+	r.queueWait.Record(ctx, waitSec, metric.WithAttributes(
+		attribute.String(telemetry.LabelDeployID, deployID),
+		attribute.String(telemetry.LabelTenantID, tenantID),
+		attribute.String(telemetry.LabelPriority, priority),
+	))
+}
+
+// RecordReplicaInFlight records the current in-flight request count
+// for (deployID, replicaID) into the synchronous gauge. The router
+// calls this after every push (dispatch) and pop (response) so
+// dashboards see live load. The chapter narrative: "watch the per-
+// replica bars equalize under round-robin" (v0.2 ch7-beat3.6 demo
+// 06's act-3 punchline).
+//
+// Synchronous gauge (not async/observable) because the router owns
+// the source of truth and emits cheaply on each transition. A
+// callback-based observable gauge would need a periodic scrape of
+// the same state with no operator-visible difference -- mirrors the
+// same decision RecordQueueDepth made.
+//
+// nil-safe so handlers holding a nil Recorder (tests) get a no-op
+// rather than a panic.
+func (r *Recorder) RecordReplicaInFlight(ctx context.Context, deployID, replicaID string, current int64) {
+	if r == nil {
+		return
+	}
+	r.replicaInFlight.Record(ctx, current, metric.WithAttributes(
+		attribute.String(telemetry.LabelDeployID, deployID),
+		attribute.String(telemetry.LabelReplicaID, replicaID),
+	))
+}
+
+// RecordRouterDecision bumps the router-decisions counter for one
+// routing attempt. outcome is "picked" when pickReplica returned a
+// replica, "no_replicas" when every slot was empty or quarantined
+// (the 503 replica_unavailable path). replicaID is the chosen
+// replica's id on "picked"; empty string on "no_replicas".
+//
+// Why a separate counter from inference.requests.total: that one
+// counts completed requests with downstream engine status (success,
+// backend_error, etc.). This counts routing decisions at the
+// router seam regardless of what the engine did downstream --
+// useful for spotting "we keep getting 503s before hitting the
+// engine."
+//
+// nil-safe.
+func (r *Recorder) RecordRouterDecision(ctx context.Context, deployID, replicaID, outcome string) {
+	if r == nil {
+		return
+	}
+	r.routerDecisions.Add(ctx, 1, metric.WithAttributes(
+		attribute.String(telemetry.LabelDeployID, deployID),
+		attribute.String(telemetry.LabelReplicaID, replicaID),
+		attribute.String(telemetry.LabelOutcome, outcome),
+	))
 }

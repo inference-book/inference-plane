@@ -40,15 +40,15 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/panyam/demokit"
-	"github.com/panyam/demokit/tui"
 
+	"github.com/inference-book/inference-plane/examples/common"
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
 	"github.com/inference-book/inference-plane/gen/go/provisioner/v1/provisionerv1connect"
 	"github.com/inference-book/inference-plane/internal/deployments/sshdocker"
 	"github.com/inference-book/inference-plane/internal/provisioners"
 	"github.com/inference-book/inference-plane/internal/provisioners/local"
 	"github.com/inference-book/inference-plane/internal/provisioners/runpod"
-	"github.com/inference-book/inference-plane/internal/provisioners/state"
+	"github.com/inference-book/inference-plane/internal/provisioners/stores/file"
 	"github.com/inference-book/inference-plane/internal/sshkeys"
 )
 
@@ -105,9 +105,9 @@ func serve() {
 		log.Fatal("RUNPOD_API_KEY is required (this example deploys to a real RunPod pod). Set it in the server's env before `make serve`.")
 	}
 
-	store, err := state.Open(*stateDir, *operatorID)
+	store, err := file.Open(*stateDir, *operatorID)
 	if err != nil {
-		log.Fatalf("state.Open: %v", err)
+		log.Fatalf("file.Open: %v", err)
 	}
 	keyStore, err := sshkeys.New(sshkeys.WithDir(*stateDir + "/keys"))
 	if err != nil {
@@ -144,7 +144,8 @@ func serve() {
 
 func runDemo() {
 	url := flag.String("url", "http://localhost:9091", "iplane service URL")
-	provider := flag.String("provider", provisioners.ProviderRunPod, "provider to use (only runpod is deployable in v0.1)")
+	provider := flag.String("provider", common.DefaultProvider(),
+		"provider to use (default: "+common.EnvProvider+" env, else runpod)")
 	region := flag.String("region", "", "region override (default: unpinned, RunPod schedules where capacity exists)")
 	flag.CommandLine.Parse(demokit.FilterArgs(os.Args[1:],
 		demokit.ValueFlag("--record"),
@@ -153,8 +154,11 @@ func runDemo() {
 		demokit.ValueFlag("--input-timeout"),
 	))
 
-	if *provider != provisioners.ProviderRunPod {
-		log.Fatalf("only --provider runpod is deployable in v0.1 (got %q); local instances have no SSH endpoint", *provider)
+	if !common.IsDeployableProvider(*provider) {
+		log.Fatalf("provider %q is not deployable (local has no SSH endpoint); set --provider or %s to runpod, vast, or lambdalabs", *provider, common.EnvProvider)
+	}
+	if err := common.EnsureProviderAPIKey(*provider); err != nil {
+		log.Fatal(err)
 	}
 
 	provisionerClient := provisionerv1connect.NewProvisionerServiceClient(http.DefaultClient, *url)
@@ -337,10 +341,13 @@ func runDemo() {
 					EnginePort: defaultEnginePort,
 					Env:        depEnv,
 				},
-				Provider:     *provider,
-				Region:       *region,
-				Requirements: &provisionerv1.ResourceRequirements{Class: provisioners.GPUClassSmall},
-				Wait:         true,
+				ReplicasSpec: []*provisionerv1.ReplicaSpec{{
+					Provider:     *provider,
+					Region:       *region,
+					Requirements: &provisionerv1.ResourceRequirements{Class: provisioners.GPUClassSmall},
+					Replicas:     1,
+				}},
+				Wait: true,
 			}))
 			watchCancel() // stop the watcher as soon as CreateDeployment returns
 			if err != nil {
@@ -532,9 +539,7 @@ func runDemo() {
 		"The instance + deployment records remain in the state file as TERMINATED -- an audit trail of what ran. Re-running provisions a fresh pod (each run gets a new timestamped id).",
 	)
 
-	if demokit.IsTUI() {
-		demo.WithRenderer(tui.New())
-	}
+	common.SetupRenderer(demo)
 
 	demo.Execute()
 }
@@ -588,3 +593,4 @@ func abortDemo(cleanup func(), format string, args ...any) *demokit.StepResult {
 	os.Exit(1)
 	return nil // unreachable
 }
+
