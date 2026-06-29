@@ -37,7 +37,6 @@ down: ## Tear the full stack down
 
 serve: build ## Run iplane serve on the host (infra expected via `make infra-up`)
 	IPLANE_BACKEND_URL=http://127.0.0.1:8000 \
-	OTEL_EXPORTER_OTLP_ENDPOINT=127.0.0.1:4317 \
 	./bin/iplane serve
 
 pull: ## Pre-pull external images (skips the locally-built controlplane)

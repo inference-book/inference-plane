@@ -94,7 +94,13 @@ services:
       - ./providers.yaml:/app/providers.yaml:ro
     environment:
       IPLANE_BACKEND_URL: http://vllm:8000
-      OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
+      # IPLANE_TELEMETRY_OTLP_ENDPOINT (not OTEL_EXPORTER_OTLP_ENDPOINT):
+      # iplane reads its OTLP endpoint via viper with the IPLANE_ prefix;
+      # the standard OTel env var is invisible to the binding and the
+      # daemon would fall back to the default. Keep both names equivalent
+      # for operators reading config: the IPLANE_-prefixed one is what
+      # iplane reads.
+      IPLANE_TELEMETRY_OTLP_ENDPOINT: otel-collector:4317
       # Per-instance labels for cost metrics. Override via .env.local.
       IPLANE_DEPLOYMENT_PROVIDER: ${IPLANE_DEPLOYMENT_PROVIDER:-runpod}
       IPLANE_DEPLOYMENT_GPU_TYPE: ${IPLANE_DEPLOYMENT_GPU_TYPE:-a10g}

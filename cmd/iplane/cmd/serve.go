@@ -117,7 +117,12 @@ func registerServeDefaults() {
 	viper.SetDefault("backend.url", "")
 	viper.SetDefault("backend.name", "mock")
 
-	viper.SetDefault("telemetry.otlp_endpoint", "localhost:4317")
+	// 127.0.0.1 (not localhost): the compose otel-collector binds
+	// 127.0.0.1:4317 IPv4-only, and gRPC's name resolver on macOS
+	// Docker returns "produced zero addresses" for the "localhost"
+	// hostname. Override via IPLANE_TELEMETRY_OTLP_ENDPOINT in compose
+	// (e.g. "otel-collector:4317" for the container-network path).
+	viper.SetDefault("telemetry.otlp_endpoint", "127.0.0.1:4317")
 	viper.SetDefault("telemetry.service_name", "inference-plane")
 	viper.SetDefault("telemetry.environment", "dev")
 	viper.SetDefault("telemetry.sample_ratio", 1.0)
