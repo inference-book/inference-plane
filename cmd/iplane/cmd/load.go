@@ -101,8 +101,8 @@ func init() {
 		"target requests per second")
 	loadCmd.Flags().DurationVar(&loadDuration, "duration", time.Minute,
 		"total duration to generate traffic")
-	loadCmd.Flags().StringVar(&loadModel, "model", "mock",
-		"model name to send in requests")
+	loadCmd.Flags().StringVar(&loadModel, "model", "",
+		"model name in the request body. Required in --url (flat) mode: the router body-peeks this field to pick the deployment. In --target mode the deploy-id URL routes explicitly and this field is sent verbatim (engines ignore it). Get the exact string from `iplane deployment list`.")
 	loadCmd.Flags().IntVar(&loadMaxTokens, "max-tokens", 100,
 		"max output tokens per request")
 	loadCmd.Flags().Float64Var(&loadChatFraction, "chat-fraction", 0.4,
@@ -155,6 +155,9 @@ func runLoad(parent context.Context) error {
 	}
 	if loadOutput != "text" && loadOutput != "json" {
 		return fmt.Errorf("--output must be one of: text, json (got %q)", loadOutput)
+	}
+	if loadModel == "" {
+		return errors.New("--model is required (no default; get the exact string from `iplane deployment list`)")
 	}
 	base, chatPath, completionsPath, err := loadEndpoint()
 	if err != nil {

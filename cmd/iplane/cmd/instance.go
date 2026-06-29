@@ -152,7 +152,7 @@ func init() {
 	pf.StringVar(&instanceOutput, "output", "table",
 		`output format: table | json`)
 	pf.StringVar(&instanceServiceURL, "service-url", os.Getenv("IPLANE_SERVICE_URL"),
-		`when set, forward to a running iplane serve at this URL (e.g. http://localhost:9091)`)
+		`when set, forward to a running iplane serve at this URL (e.g. http://localhost:8080). Default: empty = in-process mode (CLI opens the state file directly). Honors $IPLANE_SERVICE_URL.`)
 }
 
 // resolveStateDir returns the explicit --state-dir if set, else

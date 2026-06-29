@@ -4,21 +4,24 @@ Reference implementation of the control plane for *Inference Is All You Need* (A
 
 ## Quick-ref commands
 
-| Command          | Purpose                                                |
-| ---------------- | ------------------------------------------------------ |
-| `make help`      | List all targets                                       |
-| `make up`        | Bring up the full stack (vLLM + control plane + obs)   |
-| `make down`      | Tear it down                                           |
-| `make smoke`     | Go integration tests against a live stack              |
-| `make load`      | Synthetic traffic generator (works against mock or vllm) |
-| `make test`      | Unit tests (no live stack needed)                      |
-| `make build`     | Compile `bin/controlplane`                             |
-| `make build-image` | Build the controlplane Docker image without starting |
-| `make check-pins`  | Verify `pinned-versions.env` matches book's `.tex`   |
-| `make check-names` | Verify generated names match `metric-names.yaml`     |
-| `make check-constraints` | Verify architectural constraints (CP/DP-1, ...) |
-| `make gen-names` | Regenerate `internal/telemetry/names.go` + book `.tex` |
-| `cd protos && make gen` | Regenerate proto code into `gen/`               |
+| Command            | Purpose                                                |
+| ------------------ | ------------------------------------------------------ |
+| `make help`        | List all targets                                       |
+| `make infra-up`    | Bring up infra only (obs services); pair with `make serve` |
+| `make infra-down`  | Tear down infra services                               |
+| `make serve`       | Run `iplane serve` on the host (dev loop)              |
+| `make up`          | Full stack incl. controlplane container (`--profile fullstack`; readers' path) |
+| `make down`        | Tear the full stack down                               |
+| `make rebuild`     | Rebuild local Docker images without starting           |
+| `make smoke`       | Go integration tests against a live stack              |
+| `make load`        | Synthetic traffic generator (works against mock or vllm) |
+| `make test`        | Unit tests (no live stack needed)                      |
+| `make build`       | Compile `bin/iplane`                                   |
+| `make check-pins`  | Verify `pinned-versions.env` matches book's `.tex`     |
+| `make check-names` | Verify generated names match `metric-names.yaml`       |
+| `make check-constraints` | Verify architectural constraints (CP/DP-1, ...)  |
+| `make gen-names`   | Regenerate `internal/telemetry/names.go` + book `.tex` |
+| `cd protos && make gen` | Regenerate proto code into `gen/`                 |
 
 ## Conventions
 

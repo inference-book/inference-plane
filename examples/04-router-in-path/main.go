@@ -24,11 +24,12 @@
 // `model` in the body) and the deploy-id URL
 // (`/v1/<deploy-id>/v1/models`) for sanity checks.
 //
-// Cost: ~$0.05 (1.5B default) up to ~$0.25 (7B). The pod is created with
-// `--no-idle-destroy` so demos 05 and 06 can re-use it without paying
-// for a fresh provisioning cycle. The last step prompts the operator to
-// destroy or leave running; default is LEAVE, matching the shared-daemon
-// design.
+// Cost: ~$0.05 (1.5B default) up to ~$0.25 (7B). The pod is created
+// with `--idle-ttl=30m`, so demos 05 and 06 attaching within 30 minutes
+// keep it alive via router traffic; a forgotten pod gets reaped after
+// 30 minutes of pure idleness instead of billing overnight. The last
+// step prompts the operator to destroy or leave running; default is
+// LEAVE, matching the shared-daemon design.
 package main
 
 import (
@@ -118,16 +119,36 @@ func main() {
 	// never auto-destroyed -- the cleanup closure leaves them alone so
 	// demos 05 and 06 can land on the same pod. The destroy step at
 	// the end is opt-in.
+	// Per-run state captured during steps. Declared before the
+	// cleanup closure so the closure captures them (the closure prints
+	// recovery info for survivors when an abort happens after step 4).
 	var (
-		mu              sync.Mutex
-		createdDeploy   string
-		createdInstance string
-		cleanupCalled   bool
+		mu               sync.Mutex
+		createdDeploy    string
+		createdInstance  string
+		cleanupCalled    bool
+		finalStepHandled bool
+		chosenSize       string
+		activeDeployID   string
+		activeModel      string
+		activeEngineURL  string
+		reusedExisting   bool
 	)
 	cleanup := func() {
 		mu.Lock()
 		defer mu.Unlock()
 		if cleanupCalled {
+			// Step 4 sets cleanupCalled=true once the deployment is
+			// RUNNING, so a later-step abort (or Ctrl-C) keeps the pod
+			// alive for the next `make demo` run. Print the survivor
+			// + recovery commands so the operator isn't blind to it.
+			// reusedExisting pods belong to a longer-lived workflow --
+			// don't tell the operator to destroy them.
+			if !finalStepHandled && activeDeployID != "" && !reusedExisting {
+				fmt.Fprintf(os.Stderr, "\nDeployment %s left running (demo did not reach the final step).\n", activeDeployID)
+				fmt.Fprintf(os.Stderr, "  Destroy:   iplane deployment destroy %s --service-url %s\n", activeDeployID, *url)
+				fmt.Fprintf(os.Stderr, "  Or rerun:  the next demo run detects-and-reuses this pod at step 4.\n")
+			}
 			return
 		}
 		cleanupCalled = true
@@ -166,18 +187,12 @@ func main() {
 		os.Exit(1)
 	}()
 
-	// Per-run state captured during steps. Set during pick-model and
-	// the deployment-or-reuse step; read by every step downstream.
-	var (
-		chosenSize      string
-		activeDeployID  string
-		activeModel     string
-		activeEngineURL string
-		reusedExisting  bool
-	)
+	// (Per-run state captured during steps is declared above the
+	// cleanup closure so the closure captures it for the survivor
+	// recovery message.)
 
 	demo := demokit.New("Router in path (Beat 1 closer)").
-		Description("Drive a chat completion through the v0.2 control plane router, fire synthetic load to populate the v0.2 Grafana dashboard, and walk the resulting Tempo trace. Operator runs `iplane serve` separately; the deployment is created with --no-idle-destroy so demos 05 and 06 can reuse it.").
+		Description("Drive a chat completion through the v0.2 control plane router, fire synthetic load to populate the v0.2 Grafana dashboard, and walk the resulting Tempo trace. Operator runs `iplane serve` separately; the deployment is created with --idle-ttl=30m so demos 05 and 06 can reuse it across a single session and a forgotten pod gets reaped automatically.").
 		Dir("04-router-in-path").
 		MaxSteps(40).
 		Actors(
@@ -197,7 +212,7 @@ func main() {
 		fmt.Sprintf("Tempo:         %s", *tempoURL),
 		fmt.Sprintf("Provider:      %s", *provider),
 		fmt.Sprintf("Load profile:  %.1f rps for %s after deploy is RUNNING", *loadRPS, *loadDuration),
-		"Cost: ~$0.05 (1.5B default) up to ~$0.25 (7B). Pod stays alive by default (--no-idle-destroy) so 05/06 can reuse it; opt in to destroy at the end if you're done for the day.",
+		"Cost: ~$0.05 (1.5B default) up to ~$0.25 (7B). Pod stays alive on `--idle-ttl=30m`: router traffic from 05/06 keeps it warm, and a forgotten pod gets reaped automatically after 30 idle minutes. Opt in to destroy at the end if you're done immediately.",
 	)
 
 	demo.Step("Check `iplane serve` is reachable").ID("ping").
@@ -243,9 +258,9 @@ func main() {
 		})
 
 	demo.Step("Find or create a RUNNING deployment for the chosen model").ID("deploy").
-		Note("Looks for a RUNNING deployment whose Model matches the choice from the previous step. If one exists, the demo reuses it (zero cost, zero wait). Otherwise CreateDeployment with --no-idle-destroy provisions a fresh pod; the pin ensures the reaper won't destroy it between demo runs.\n\nCLI form (if you want to create it by hand instead):\n  iplane deployment deploy demo-router-<stamp> --provider runpod --class small --image " + engineImage + " --model <chosen> --no-idle-destroy --service-url " + *url).
+		Note("Looks for a RUNNING deployment whose Model matches the choice from the previous step. If one exists, the demo reuses it (zero cost, zero wait). Otherwise CreateDeployment with --idle-ttl=30m provisions a fresh pod; demos 05/06 keep it alive by sending router traffic, and a forgotten pod gets reaped automatically after 30 minutes of dormancy.\n\nCLI form (if you want to create it by hand instead):\n  iplane deployment deploy demo-router-<stamp> --provider runpod --class small --image " + engineImage + " --model <chosen> --idle-ttl=30m --service-url " + *url).
 		Arrow("Client", "iplane", "ListDeployments (filter by model)").
-		Arrow("Client", "iplane", "CreateDeployment(no-idle-destroy=true, wait=true) -- if no match").
+		Arrow("Client", "iplane", "CreateDeployment(idle-ttl=30m, wait=true) -- if no match").
 		Arrow("iplane", "RunPod", "rent pod + start engine -- if no match").
 		Arrow("iplane", "State", "patch RUNNING + engine_endpoint").
 		Run(func(ctx demokit.StepContext) *demokit.StepResult {
@@ -265,10 +280,14 @@ func main() {
 					fmt.Printf("  reusing existing %s (state=RUNNING)\n", activeDeployID)
 					fmt.Printf("  model:           %s\n", activeModel)
 					fmt.Printf("  engine endpoint: %s\n", activeEngineURL)
-					if d.GetNoIdleDestroy() {
-						fmt.Println("  reaper-safe:     --no-idle-destroy set")
-					} else {
-						fmt.Println("  note:            existing deployment does NOT have --no-idle-destroy set; reaper may evict it.")
+					switch {
+					case d.GetNoIdleDestroy():
+						fmt.Println("  reaper-safe:     --no-idle-destroy pinned (manual destroy required)")
+					case d.GetIdleTtlSeconds() > 0:
+						fmt.Printf("  reaper:          idle-ttl %s (touches reset the clock)\n",
+							time.Duration(d.GetIdleTtlSeconds())*time.Second)
+					default:
+						fmt.Println("  note:            existing deployment has no reaper config; lives until manual destroy")
 					}
 					return nil
 				}
@@ -299,7 +318,7 @@ func main() {
 					Model:          opt.id,
 					EnginePort:     defaultEnginePort,
 					Env:            depEnv,
-					NoIdleDestroy:  true,
+					IdleTtlSeconds: 30 * 60,
 				},
 				ReplicasSpec: []*provisionerv1.ReplicaSpec{{
 					Provider:     *provider,
@@ -318,19 +337,27 @@ func main() {
 				return abortDemo(cleanup, "deploy reached %s, want RUNNING (reason: %s)",
 					dep.GetState(), dep.GetFailureReason())
 			}
-			mu.Lock()
-			createdDeploy = dep.GetId()
-			createdInstance = dep.GetInstanceId()
-			mu.Unlock()
 			activeDeployID = dep.GetId()
 			activeModel = dep.GetModel()
 			activeEngineURL = dep.GetEngineEndpoint()
 			reusedExisting = false
+			// Deliberately do NOT stash createdDeploy/createdInstance.
+			// Once the deployment is RUNNING, it behaves like a reused
+			// pod from a future demo's perspective: a later-step failure
+			// (or Ctrl-C) leaves it standing so the next `make demo` run
+			// detects-and-reuses instead of provisioning fresh. The
+			// final "leave or destroy" step is the operator's explicit
+			// cleanup point. Without this, every step-5+ failure tore
+			// the pod down and the next run paid full bringup again.
+			mu.Lock()
+			cleanupCalled = true
+			mu.Unlock()
 			fmt.Printf("  created:         %s\n", activeDeployID)
 			fmt.Printf("  on instance:     %s\n", dep.GetInstanceId())
 			fmt.Printf("  model:           %s\n", activeModel)
 			fmt.Printf("  engine endpoint: %s\n", activeEngineURL)
-			fmt.Printf("  reaper-safe:     --no-idle-destroy=true\n")
+			fmt.Printf("  reaper:          idle-ttl 30m (router traffic from 05/06 keeps it alive; pure-idle gets reaped)\n")
+			fmt.Printf("  on exit:         left running for the next demo run; final step asks before destroying\n")
 			if ts := dep.GetReadyAt(); ts != nil {
 				elapsed := ts.AsTime().Sub(dep.GetCreatedAt().AsTime())
 				fmt.Printf("  cold-start:      %s\n", elapsed.Round(time.Second))
@@ -483,7 +510,7 @@ func main() {
 		})
 
 	demo.Step("Leave the deployment running, or destroy it now").ID("cleanup").
-		Note("Default: LEAVE it running. The deployment was created with --no-idle-destroy so the reaper will not evict it; demos 05 (fair-queueing) and 06 (multi-replica) will attach to the same daemon and reuse this deployment.\n\nIf you're done for the day or running this demo standalone, pick `destroy` -- billing stops as soon as the pod terminates.\n\nReused-existing deployments are never auto-destroyed here even if you pick `destroy`; the demo only tears down what THIS run created, on the assumption that an existing reusable deployment belongs to a longer-lived workflow.").
+		Note("Default: LEAVE it running. The deployment was created with --idle-ttl=30m, so demos 05 (fair-queueing) and 06 (multi-replica) attaching within 30 minutes will keep it alive via router traffic. After 30 minutes of pure idleness the reaper destroys it automatically; no forgotten overnight pods.\n\nIf you're done now, pick `destroy` to terminate immediately and stop billing.\n\nReused-existing deployments are never auto-destroyed here even if you pick `destroy`; the demo only tears down what THIS run created, on the assumption that an existing reusable deployment belongs to a longer-lived workflow.").
 		Input(demokit.Choice("leave", "destroy").
 			Named("action", "Leave the deployment for demos 05/06, or destroy it now?").
 			WithDefault("leave")).
@@ -494,7 +521,7 @@ func main() {
 				action = "leave"
 			}
 			if action == "leave" {
-				fmt.Printf("  leaving %s running (--no-idle-destroy holds the pin)\n", activeDeployID)
+				fmt.Printf("  leaving %s running (idle-ttl=30m; router traffic keeps it alive, otherwise reaped)\n", activeDeployID)
 				if reusedExisting {
 					fmt.Println("  this run reused an existing deployment; nothing to clean.")
 				}
@@ -502,6 +529,7 @@ func main() {
 				createdDeploy = ""
 				createdInstance = ""
 				cleanupCalled = true
+				finalStepHandled = true
 				mu.Unlock()
 				return nil
 			}
@@ -509,6 +537,9 @@ func main() {
 			if reusedExisting {
 				fmt.Printf("  NOT destroying %s: reused-existing deployments are kept alive even on `destroy` here.\n", activeDeployID)
 				fmt.Println("  Run `iplane deployment destroy " + activeDeployID + " --service-url " + *url + "` if you really want it gone.")
+				mu.Lock()
+				finalStepHandled = true
+				mu.Unlock()
 				return nil
 			}
 
@@ -523,6 +554,7 @@ func main() {
 			createdDeploy = ""
 			createdInstance = ""
 			cleanupCalled = true
+			finalStepHandled = true
 			mu.Unlock()
 			return nil
 		})
