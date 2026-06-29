@@ -550,20 +550,33 @@ func (r *Router) handleWithObservability(w http.ResponseWriter, req *http.Reques
 }
 
 // touchActivity fires a TouchDeployment RPC against the control
-// plane. Synchronous because the Connect roundtrip is a localhost-
-// loopback ~1ms hop on top of a 100ms+ chat-completion request --
-// the linear-flow code wins over the goroutine bookkeeping.
+// plane asynchronously. The original "synchronous because it's a 1ms
+// hop" assumption broke under v0.2 multi-replica load: each touch
+// drives `store.Update`, which reads + writes the entire state.json
+// (26KB+ in real deployments). With 16+ concurrent scheduler
+// dispatches all blocking on touch->disk-IO before reaching the
+// engine, request latency through the router exploded to 25s+ p95
+// even though direct engine hits were 1.2s. The async path keeps
+// the activity-stamping invariant intact (best-effort, one-tick-late
+// reap is fine) without taxing every request.
 //
 // Best-effort: a touch failure is logged but does NOT propagate to
 // the caller. last_activity is leak-protection metadata; missing one
 // touch causes at worst a one-tick-late reap.
-func (r *Router) touchActivity(ctx context.Context, deployID string) {
-	if _, err := r.client.TouchDeployment(ctx, connect.NewRequest(&provisionerv1.TouchDeploymentRequest{
-		Id: deployID,
-	})); err != nil {
-		slog.Default().Warn("router: TouchDeployment failed",
-			"deploy_id", deployID, "err", err)
-	}
+//
+// context.Background, not the request ctx: the request ctx is
+// canceled when the response finishes, but the touch is unrelated
+// to the request lifecycle -- we don't want to abort a write that's
+// already in flight just because the client got their reply.
+func (r *Router) touchActivity(_ context.Context, deployID string) {
+	go func() {
+		if _, err := r.client.TouchDeployment(context.Background(), connect.NewRequest(&provisionerv1.TouchDeploymentRequest{
+			Id: deployID,
+		})); err != nil {
+			slog.Default().Warn("router: TouchDeployment failed",
+				"deploy_id", deployID, "err", err)
+		}
+	}()
 }
 
 // Handle returns the (pattern, handler) pairs the caller mounts on
