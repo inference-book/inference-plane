@@ -229,12 +229,24 @@ func runServe(parent context.Context) error {
 		return fmt.Errorf("metrics: %w", err)
 	}
 
-	costProviders, err := metrics.LoadProviders("providers.yaml")
-	if err != nil {
-		// Non-fatal: a deployment without providers.yaml emits the
-		// uptime + active counters but skips the cross-provider snapshot.
-		logger.Warn("providers.yaml not loaded; cross-provider snapshot disabled", "err", err)
-		costProviders = nil
+	// Two cases distinguished here:
+	//
+	//   - File missing entirely: legitimate deployment shape (fresh
+	//     checkout, mock-only dev, custom catalog elsewhere). Warn and
+	//     proceed without the cross-provider snapshot panel.
+	//
+	//   - File present but unreadable / malformed: operator
+	//     misconfiguration. Fail fast so the broken YAML surfaces at
+	//     startup, not as a silently empty dashboard panel hours later.
+	var costProviders []metrics.Provider
+	if _, statErr := os.Stat("providers.yaml"); errors.Is(statErr, os.ErrNotExist) {
+		logger.Warn("providers.yaml not found; cross-provider snapshot disabled")
+	} else {
+		provs, err := metrics.LoadProviders("providers.yaml")
+		if err != nil {
+			return fmt.Errorf("providers.yaml: %w", err)
+		}
+		costProviders = provs
 	}
 	costRecorder, err := metrics.NewCostRecorder(metrics.Deployment{
 		Provider:    cfg.Deployment.Provider,
