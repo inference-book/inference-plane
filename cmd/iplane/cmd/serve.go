@@ -362,6 +362,18 @@ func runServe(parent context.Context) error {
 	)
 	deploymentRouter.Start(parent)
 
+	// Echo the scheduler / queue config at startup so operators can
+	// confirm which values the daemon actually loaded. Otherwise it's
+	// guesswork whether per-demo config.yaml overrides took effect.
+	logger.Info("router queue config loaded",
+		"servicers", cfg.Router.Queue.Servicers,
+		"capacity", cfg.Router.Queue.Capacity,
+		"in_flight_cap", cfg.Router.Queue.InFlightCap,
+		"interactive_servicers", cfg.Router.Queue.Interactive.Servicers,
+		"interactive_capacity", cfg.Router.Queue.Interactive.Capacity,
+		"batch_servicers", cfg.Router.Queue.Batch.Servicers,
+		"batch_capacity", cfg.Router.Queue.Batch.Capacity)
+
 	api, err := server.New(parent, grpcAddr, logger,
 		server.WithProvisionerHandler(provisioners.NewConnectProvisionerAdapter(provisionerSvc)),
 		server.WithDeploymentHandler(provisioners.NewConnectDeploymentAdapter(provisionerSvc)),
