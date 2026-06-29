@@ -600,10 +600,18 @@ func (r *Router) Handle() map[string]http.Handler {
 	deployIDHandler := middleware(r.serveDeployID)
 	flatHandler := middleware(r.serveFlat)
 	return map[string]http.Handler{
-		"POST /v1/{deploy_id}/v1/chat/completions": deployIDHandler,
-		"POST /v1/{deploy_id}/v1/completions":      deployIDHandler,
-		"POST /v1/chat/completions":                flatHandler,
-		"POST /v1/completions":                     flatHandler,
+		// Deploy-id URL: any method, any sub-path. The router strips
+		// /v1/<deploy-id> and forwards the rest to the engine. Catches
+		// POST /v1/chat/completions, GET /v1/models, POST /v1/embeddings,
+		// and anything the engine exposes -- the router stays method-
+		// and endpoint-agnostic on this surface. The "unambiguous
+		// escape hatch" the chapter narrative names.
+		"/v1/{deploy_id}/v1/{rest...}": deployIDHandler,
+		// Flat URL: POST-only. Routes by body-peeking the `model`
+		// field; GETs have no body, so the deploy-id URL is the path
+		// for those.
+		"POST /v1/chat/completions": flatHandler,
+		"POST /v1/completions":      flatHandler,
 	}
 }
 

@@ -1,4 +1,4 @@
-.PHONY: build up down pull smoke load logs dashboards clean check-pins help install examples
+.PHONY: build up down infra-up infra-down serve rebuild pull smoke load logs dashboards clean check-pins help install examples
 
 PKG    := ./cmd/iplane
 
@@ -16,17 +16,35 @@ build: ## Compile the iplane binary into bin/
 	go build -o bin/iplane ./cmd/iplane
 
 # ── Stack lifecycle ─────────────────────────────────────────────────────
-up: ## Bring up the stack (builds the controlplane image locally)
-	docker compose --env-file pinned-versions.env -f deploy/docker-compose.yaml up -d --build
+# Two paths share one compose file via profiles:
+#   * `infra-up`/`infra-down` (default profile): obs services only.
+#     Pair with `make serve` for the dev loop -- iplane runs on the
+#     host, restarts are a Go build + binary respawn.
+#   * `up`/`down` (--profile fullstack): everything in Docker, including
+#     the controlplane container built from the local Dockerfile.
+#     This is the reader's one-command path.
+infra-up: ## Bring up infra only (obs services); host iplane via `make serve`
+	docker compose --env-file pinned-versions.env -f deploy/docker-compose.yaml up -d
 
-down: ## Tear the stack down
+infra-down: ## Tear down infra services
 	docker compose --env-file pinned-versions.env -f deploy/docker-compose.yaml down
 
-pull: ## Pre-pull external images (skips the locally-built controlplane)
-	docker compose --env-file pinned-versions.env -f deploy/docker-compose.yaml pull --ignore-buildable
+up: ## Bring up the full stack incl. controlplane container (the readers' path)
+	docker compose --env-file pinned-versions.env -f deploy/docker-compose.yaml --profile fullstack up -d --build
 
-build-image: ## Build the controlplane Docker image without starting the stack
-	docker compose --env-file pinned-versions.env -f deploy/docker-compose.yaml build controlplane
+down: ## Tear the full stack down
+	docker compose --env-file pinned-versions.env -f deploy/docker-compose.yaml --profile fullstack down
+
+serve: build ## Run iplane serve on the host (infra expected via `make infra-up`)
+	IPLANE_BACKEND_URL=http://127.0.0.1:8000 \
+	OTEL_EXPORTER_OTLP_ENDPOINT=127.0.0.1:4317 \
+	./bin/iplane serve
+
+pull: ## Pre-pull external images (skips the locally-built controlplane)
+	docker compose --env-file pinned-versions.env -f deploy/docker-compose.yaml --profile fullstack pull --ignore-buildable
+
+rebuild: ## Rebuild local Docker images without starting the stack (currently: controlplane)
+	docker compose --env-file pinned-versions.env -f deploy/docker-compose.yaml --profile fullstack build
 
 # ── Verification ────────────────────────────────────────────────────────
 smoke: ## Run smoke tests against a live stack (assumes `make up` has run)

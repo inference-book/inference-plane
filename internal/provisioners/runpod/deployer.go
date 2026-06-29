@@ -98,8 +98,25 @@ func (p *Provider) Deploy(ctx context.Context, dep *provisionerv1.Deployment, in
 
 // Destroy terminates the engine pod via DELETE /pods/{id}.
 // Idempotent: 404 from RunPod is treated as success (already gone).
-func (p *Provider) Destroy(ctx context.Context, dep *provisionerv1.Deployment, _ *provisionerv1.Instance, _ *sshkeys.KeyPair, emit func(provisioners.DeployStateUpdate)) error {
+//
+// Pod ID lookup order:
+//
+//  1. dep.container_id -- the v0.1 1:1 shape (singular Instance ==
+//     Deployment, pod id stamped on the Deployment record).
+//  2. inst.provider_id -- the v0.2 multi-replica auto-provision shape
+//     (each replica has its own Instance, pod id lives on the Instance;
+//     dep.container_id is null per fanout.patchDeploymentSlot's
+//     "reserved for singular" comment).
+//
+// Before the inst fallback existed, multi-replica destroys silently
+// no-op'd because dep.container_id was always null and the pod stayed
+// alive on RunPod -- a state-vs-reality leak the operator had no way
+// to see without checking the RunPod console.
+func (p *Provider) Destroy(ctx context.Context, dep *provisionerv1.Deployment, inst *provisionerv1.Instance, _ *sshkeys.KeyPair, emit func(provisioners.DeployStateUpdate)) error {
 	podID := dep.GetContainerId()
+	if podID == "" && inst != nil {
+		podID = inst.GetProviderId()
+	}
 	if podID == "" {
 		// Nothing to do server-side; just transition.
 		emit(provisioners.DeployStateUpdate{

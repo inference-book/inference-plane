@@ -104,6 +104,11 @@ func TestNew_BootsWithDaemonOptions(t *testing.T) {
 			path:   "/v1/x/v1/chat/completions",
 			body:   `{}`,
 		},
+		{
+			name:   "GET /v1/x/v1/models (router deploy-id URL, non-POST)",
+			method: http.MethodGet,
+			path:   "/v1/x/v1/models",
+		},
 	}
 
 	for _, tc := range cases {

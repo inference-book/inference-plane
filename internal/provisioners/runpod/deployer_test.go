@@ -371,8 +371,10 @@ func TestDestroy_HappyPath(t *testing.T) {
 }
 
 func TestDestroy_AlreadyGone_StillTERMINATED(t *testing.T) {
-	// No container id on record -- treat as "nothing to do, already
-	// terminal." Mirrors sshdocker's idempotent destroy.
+	// No pod id anywhere on record -- treat as "nothing to do, already
+	// terminal." Mirrors sshdocker's idempotent destroy. Both
+	// dep.container_id (v0.1 1:1 shape) AND inst.provider_id (v0.2
+	// auto-provision shape) must be empty for this branch to fire.
 	called := atomic.Int32{}
 	f := &fakeRunPod{t: t, respond: func(method, path string, body []byte) (int, string) {
 		called.Add(1)
@@ -385,16 +387,57 @@ func TestDestroy_AlreadyGone_StillTERMINATED(t *testing.T) {
 
 	dep := okDep()
 	dep.ContainerId = ""
+	inst := okInst()
+	inst.ProviderId = ""
 
 	c := &collector{}
-	if err := p.Destroy(context.Background(), dep, okInst(), nil, c.emit); err != nil {
+	if err := p.Destroy(context.Background(), dep, inst, nil, c.emit); err != nil {
 		t.Fatalf("Destroy: %v", err)
 	}
 	if c.lastState() != provisionerv1.DeploymentState_DEPLOYMENT_STATE_TERMINATED {
 		t.Errorf("final state = %v, want TERMINATED", c.lastState())
 	}
 	if got := called.Load(); got != 0 {
-		t.Errorf("DELETE should not fire when no container id; got %d calls", got)
+		t.Errorf("DELETE should not fire when no pod id; got %d calls", got)
+	}
+}
+
+// TestDestroy_AutoProvisionedReadsInstanceProviderID is the regression
+// gate for the leaked-pod bug. v0.2 auto-provisioned deployments stamp
+// the RunPod pod id onto Instance.provider_id (not Deployment.container_id
+// -- that's reserved for the v0.1 1:1 singular shape). When the deployer
+// ignored the inst parameter and read only dep.GetContainerId(), Destroy
+// silently no-op'd and the pod stayed alive on RunPod's side. This test
+// pins the inst.provider_id fallback so the regression cannot recur.
+func TestDestroy_AutoProvisionedReadsInstanceProviderID(t *testing.T) {
+	var deletedPath atomic.Value
+	f := &fakeRunPod{t: t, respond: func(method, path string, body []byte) (int, string) {
+		if method == "DELETE" {
+			deletedPath.Store(path)
+			return 204, ""
+		}
+		return 500, "{}"
+	}}
+	srv := httptest.NewServer(f.handler())
+	t.Cleanup(srv.Close)
+	client := NewClient("test-api-key", WithBaseURL(srv.URL), WithHTTPClient(srv.Client()))
+	p := New(client)
+
+	dep := okDep()
+	dep.ContainerId = "" // v0.2 auto-provision: container_id NOT on the Deployment
+	inst := okInst()
+	inst.ProviderId = "mw0gmuyupiujzr" // ... it's on the Instance
+
+	c := &collector{}
+	if err := p.Destroy(context.Background(), dep, inst, nil, c.emit); err != nil {
+		t.Fatalf("Destroy: %v", err)
+	}
+	if c.lastState() != provisionerv1.DeploymentState_DEPLOYMENT_STATE_TERMINATED {
+		t.Errorf("final state = %v, want TERMINATED", c.lastState())
+	}
+	got, _ := deletedPath.Load().(string)
+	if got != "/pods/mw0gmuyupiujzr" {
+		t.Errorf("DELETE path = %q, want /pods/mw0gmuyupiujzr (regression: deployer ignored inst.provider_id)", got)
 	}
 }
 
