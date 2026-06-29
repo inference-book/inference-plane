@@ -59,30 +59,43 @@ else
   exit 1
 fi
 
-# Sanity-check the daemon is up.
-if ! curl -fsS -o /dev/null "${SERVICE_URL}/healthz" 2>/dev/null; then
-  if ! curl -fsS -o /dev/null "${SERVICE_URL}" 2>/dev/null; then
-    echo "ERROR: cannot reach ${SERVICE_URL}; is \`iplane serve\` running?" >&2
-    exit 1
-  fi
-fi
-
-# Resolve the deployment's model from the daemon. `iplane load --model`
-# is required (no default); the engine validates that the body's `model`
-# field matches what the pod is serving, so we query the source of truth
-# instead of asking the operator to retype it.
-if ! command -v jq >/dev/null 2>&1; then
-  echo "ERROR: jq is required to resolve the deployment model. brew install jq (or apt-get install jq)." >&2
+# Sanity-check the daemon is up. /health is iplane serve's
+# hand-coded liveness endpoint (the v0.2 router owns /v1/* but not
+# /). 200 = serving; anything else (connection refused, 503) = bail.
+if ! curl -fsS -o /dev/null "${SERVICE_URL}/health" 2>/dev/null; then
+  echo "ERROR: cannot reach ${SERVICE_URL}/health; is \`iplane serve\` running?" >&2
   exit 1
 fi
-DEMO_MODEL="$("${IPLANE}" deployment describe "${DEPLOY_ID}" \
-  --service-url "${SERVICE_URL}" --output json 2>/dev/null \
-  | jq -r '.model // empty')"
+
+# Resolve the deployment's model AND state from the daemon in one call.
+# - `iplane load --model` is required (no default); the engine
+#   validates that the body's `model` field matches what the pod is
+#   serving, so we query the source of truth.
+# - State must be RUNNING (or DEGRADED -- the demo still works against
+#   a partially-healthy fleet, just with reduced fan-out). Anything
+#   else means the deployment isn't serving and load would 4xx/5xx
+#   with cryptic errors.
+if ! command -v jq >/dev/null 2>&1; then
+  echo "ERROR: jq is required to read deployment metadata. brew install jq (or apt-get install jq)." >&2
+  exit 1
+fi
+DESC="$("${IPLANE}" deployment describe "${DEPLOY_ID}" \
+  --service-url "${SERVICE_URL}" --output json 2>/dev/null)"
+DEMO_MODEL="$(echo "${DESC}" | jq -r '.model // empty')"
+DEMO_STATE="$(echo "${DESC}" | jq -r '.state // empty')"
 if [[ -z "${DEMO_MODEL}" ]]; then
-  echo "ERROR: could not resolve model for deployment ${DEPLOY_ID}; is the id correct?" >&2
+  echo "ERROR: could not resolve deployment ${DEPLOY_ID}; is the id correct?" >&2
   echo "  hint: iplane deployment list --service-url ${SERVICE_URL}" >&2
   exit 1
 fi
+case "${DEMO_STATE}" in
+  DEPLOYMENT_STATE_RUNNING|DEPLOYMENT_STATE_DEGRADED) ;;
+  *)
+    echo "ERROR: deployment ${DEPLOY_ID} is in state ${DEMO_STATE}; need RUNNING or DEGRADED to fire load." >&2
+    echo "  hint: rerun examples/04-router-in-path to refresh the deployment, or pass a different id." >&2
+    exit 1
+    ;;
+esac
 
 echo "==============================================================="
 echo "Demo 05 — fair-queueing (interactive cuts ahead of batch)"
