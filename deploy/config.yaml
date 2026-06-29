@@ -19,7 +19,12 @@ backend:
   name: "mock"                     # label value for metrics/logs
 
 telemetry:
-  otlp_endpoint: "otel-collector:4317"
+  # otlp_endpoint deliberately unset here so the source-of-truth is
+  # the daemon's SetDefault (127.0.0.1:4317 -- works for host serve on
+  # macOS Docker without DNS shenanigans). Mode A (compose) overrides
+  # via IPLANE_TELEMETRY_OTLP_ENDPOINT=otel-collector:4317 in the
+  # controlplane service block. Viper precedence: env > config-file >
+  # default, so hardcoding here breaks Mode B silently.
   service_name: "inference-plane"
   environment: "dev"
   sample_ratio: 1.0               # sample 100% in dev; lower in prod
