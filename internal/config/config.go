@@ -21,7 +21,7 @@ type Config struct {
 }
 
 // RouterConfig configures the v0.2 data-plane router. Beat 2 adds the
-// queue; future beats will add per-replica selection knobs here.
+// queue; ch8 adds per-request routing-policy selection.
 type RouterConfig struct {
 	Queue QueueConfig `yaml:"queue"`
 
@@ -34,6 +34,13 @@ type RouterConfig struct {
 	// on the hot path. Zero disables debouncing (every touch hits
 	// disk -- v0.1 behavior).
 	TouchDebounceInterval time.Duration `yaml:"touch_debounce_interval"`
+
+	// RoutingPolicy selects per-request replica selection (v0.2 ch8):
+	// "round_robin" (default, the Ch 7 load balancer) or
+	// "prefix_affinity" (Ch 8 sticky routing -- pin a session's turns
+	// to the replica that holds its prefix). Unknown values are
+	// rejected at startup.
+	RoutingPolicy string `yaml:"routing_policy"`
 }
 
 // QueueConfig parameterizes the M/M/k waiting room in front of the

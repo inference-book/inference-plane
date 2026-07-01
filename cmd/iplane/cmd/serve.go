@@ -33,6 +33,7 @@ import (
 	"github.com/inference-book/inference-plane/internal/provisioners/lifecycle"
 	"github.com/inference-book/inference-plane/internal/provisioners/stores/file"
 	"github.com/inference-book/inference-plane/internal/router"
+	"github.com/inference-book/inference-plane/internal/router/policy"
 	"github.com/inference-book/inference-plane/internal/scheduler"
 	"github.com/inference-book/inference-plane/internal/services"
 	"github.com/inference-book/inference-plane/internal/telemetry"
@@ -68,6 +69,16 @@ func init() {
 	registerServeDefaults()
 }
 
+// routingPolicyLabel normalizes an empty routing-policy value to
+// "round_robin" for the startup log, so an unset config reads as its
+// effective default rather than a blank field.
+func routingPolicyLabel(p string) string {
+	if p == "" {
+		return "round_robin"
+	}
+	return p
+}
+
 // bindServeFlags declares the most-frequently-tweaked config fields as
 // flags and binds them to dotted viper keys. Flags use kebab-case;
 // viper keys are dotted to match the YAML structure; env vars are
@@ -85,21 +96,23 @@ func bindServeFlags(c *cobra.Command) {
 	c.Flags().String("gpu-type", "", "deployment gpu_type label")
 	c.Flags().String("billing-mode", "", "deployment billing_mode label")
 	c.Flags().String("instance-id", "", "deployment instance_id label")
+	c.Flags().String("routing-policy", "round_robin", "per-request replica selection: round_robin | prefix_affinity")
 
 	// Bind kebab-case flags onto dotted viper keys matching the YAML.
 	for flagName, key := range map[string]string{
-		"server-addr":    "server.addr",
-		"state-dir":      "state.dir",
-		"backend-engine": "backend.engine",
-		"backend-url":    "backend.url",
-		"backend-name":   "backend.name",
-		"otlp-endpoint":  "telemetry.otlp_endpoint",
-		"service-name":   "telemetry.service_name",
-		"environment":    "telemetry.environment",
-		"provider":       "deployment.provider",
-		"gpu-type":       "deployment.gpu_type",
-		"billing-mode":   "deployment.billing_mode",
-		"instance-id":    "deployment.instance_id",
+		"server-addr":     "server.addr",
+		"state-dir":       "state.dir",
+		"backend-engine":  "backend.engine",
+		"backend-url":     "backend.url",
+		"backend-name":    "backend.name",
+		"otlp-endpoint":   "telemetry.otlp_endpoint",
+		"service-name":    "telemetry.service_name",
+		"environment":     "telemetry.environment",
+		"provider":        "deployment.provider",
+		"gpu-type":        "deployment.gpu_type",
+		"billing-mode":    "deployment.billing_mode",
+		"instance-id":     "deployment.instance_id",
+		"routing-policy":  "router.routing_policy",
 	} {
 		_ = viper.BindPFlag(key, c.Flags().Lookup(flagName))
 	}
@@ -139,6 +152,7 @@ func registerServeDefaults() {
 	viper.SetDefault("router.queue.interactive.capacity", 256)
 	viper.SetDefault("router.queue.batch.servicers", 0)
 	viper.SetDefault("router.queue.batch.capacity", 256)
+	viper.SetDefault("router.routing_policy", "round_robin")
 
 	// health: per-replica health-poll loop (#87). Defaults match
 	// healthcheck.DefaultConfig() so operators who omit the block
@@ -359,6 +373,18 @@ func runServe(parent context.Context) error {
 		router.WithInFlightCap(cfg.Router.Queue.InFlightCap),
 		router.WithTenantWeights(scheduler.Weights(cfg.Router.Queue.TenantWeights)),
 	}
+	// v0.2 ch8: per-request replica-selection policy. Default (or empty)
+	// is round-robin, which router.New already installs. prefix_affinity
+	// installs the sticky-routing policy. Unknown values fail fast so a
+	// typo doesn't silently fall back to round-robin.
+	switch cfg.Router.RoutingPolicy {
+	case "", "round_robin":
+		// router.New's default (RoundRobin); no option needed.
+	case "prefix_affinity":
+		routerOpts = append(routerOpts, router.WithRoutingPolicy(policy.NewPrefixAffinity()))
+	default:
+		return fmt.Errorf("router.routing_policy: unknown value %q (want round_robin | prefix_affinity)", cfg.Router.RoutingPolicy)
+	}
 	deploymentRouter := router.New(
 		provisionerv1connect.NewDeploymentServiceClient(http.DefaultClient, daemonBaseURL),
 		recorder,
@@ -377,7 +403,8 @@ func runServe(parent context.Context) error {
 		"interactive_capacity", cfg.Router.Queue.Interactive.Capacity,
 		"batch_servicers", cfg.Router.Queue.Batch.Servicers,
 		"batch_capacity", cfg.Router.Queue.Batch.Capacity,
-		"touch_debounce_interval", cfg.Router.TouchDebounceInterval)
+		"touch_debounce_interval", cfg.Router.TouchDebounceInterval,
+		"routing_policy", routingPolicyLabel(cfg.Router.RoutingPolicy))
 
 	api, err := server.New(parent, grpcAddr, logger,
 		server.WithProvisionerHandler(provisioners.NewConnectProvisionerAdapter(provisionerSvc)),
