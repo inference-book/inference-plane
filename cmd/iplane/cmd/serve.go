@@ -301,6 +301,7 @@ func runServe(parent context.Context) error {
 
 	provisionerSvc, err := buildLocalService(stateStore, "default",
 		provisioners.WithTouchDebounceInterval(cfg.Router.TouchDebounceInterval),
+		provisioners.WithRecorder(recorder),
 	)
 	if err != nil {
 		return fmt.Errorf("build provisioner service: %w", err)

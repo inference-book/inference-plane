@@ -656,10 +656,13 @@ func (s *Service) recordAppendedSlots(deployID string, placements []*provisioner
 // finalizeInstanceAfterDeploy path, identical to single-instance.
 func (s *Service) launchReplica(ctx context.Context, deployID string, slot int, inst *provisionerv1.Instance, key *sshkeys.KeyPair, dep *provisionerv1.Deployment, results chan<- fanOutResult) {
 	replicaID := inst.GetId()
+	obs := s.newDeployObserver(ctx, deployKindProvision, deployID, inst)
 	emit := func(u DeployStateUpdate) {
+		obs.observe(u)
 		_ = s.patchDeploymentSlot(deployID, replicaID, u)
 	}
-	err := s.deployerFor(inst).Deploy(ctx, dep, inst, key, emit)
+	err := s.deployerFor(inst).Deploy(obs.ctx(), dep, inst, key, emit)
+	obs.finish(err)
 	endpoint := s.readSlotEndpoint(deployID, slot)
 	if err == nil {
 		s.finalizeInstanceAfterDeploy(ctx, inst, deployID)

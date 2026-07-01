@@ -1,0 +1,163 @@
+{
+  "title": "Inference Plane Deployment & Lifecycle",
+  "uid": "inference-plane-deployment",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "tags": ["inference-plane", "deployment", "lifecycle"],
+  "timezone": "browser",
+  "time": { "from": "now-3h", "to": "now" },
+  "refresh": "10s",
+  "panels": [
+    {
+      "id": 1,
+      "title": "What this dashboard shows",
+      "type": "text",
+      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 5 },
+      "options": {
+        "mode": "markdown",
+        "content": "The **spin-up / spin-down** half of the control plane, the counterpart to the serving dashboard. Provisioning a GPU pod is a multi-minute cold start, and \"my deploy is slow\" is unanswerable without splitting that wait. The deploy observer derives these from the executor's phase stream:\n\n- **scheduling** — RunPod finding capacity for the SKU set.\n- **image-pull** — host assigned, pulling the multi-GB engine image.\n- **engine-init** — container up, downloading the model from HF and loading weights + CUDA init.\n\nThe *time by phase* panel is the one to read first: it attributes the cold start to the stage actually costing you. Per-deploy traces (root span `deployment.provision` with a child span per phase) sit in Tempo for the same story request-by-request. Teardown + reaper cover spin-down."
+      }
+    },
+    {
+      "id": 2,
+      "title": "Provision time by phase (mean seconds, stacked)",
+      "description": "Mean wall-clock seconds a deploy spends in each lifecycle phase, stacked so the bars sum to the mean end-to-end provision time. This is the 'where does the time go' panel: a tall image-pull band means cold image cache; a tall engine-init band means model download + weight load dominate. Means are additive (unlike percentiles), so stacking is honest here.",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "mimir" },
+      "gridPos": { "x": 0, "y": 5, "w": 12, "h": 9 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (phase) (rate(iplane_deployment_phase_duration_sum[5m])) / clamp_min(sum by (phase) (rate(iplane_deployment_phase_duration_count[5m])), 1)",
+          "legendFormat": "{{phase}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 60,
+            "stacking": { "mode": "normal" }
+          }
+        }
+      }
+    },
+    {
+      "id": 3,
+      "title": "End-to-end provision duration (p50 / p95)",
+      "description": "Wall-clock from create-pod to engine serving, across all providers/classes. The top-line 'how long does a deploy take' number. p95 is the tail an operator waits through on a cold host with an uncached image + model.",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "mimir" },
+      "gridPos": { "x": 12, "y": 5, "w": 12, "h": 9 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(iplane_deployment_provision_duration_bucket[10m])))",
+          "legendFormat": "p50"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(iplane_deployment_provision_duration_bucket[10m])))",
+          "legendFormat": "p95"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "lineInterpolation": "linear", "fillOpacity": 10 }
+        }
+      }
+    },
+    {
+      "id": 4,
+      "title": "Phase duration p95 (per phase)",
+      "description": "The tail of each phase separately. Complements the stacked mean panel: a phase whose mean is small but p95 is large is bimodal (e.g. image-pull that's instant on a warm host, minutes on a cold one). One line per phase.",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "mimir" },
+      "gridPos": { "x": 0, "y": 14, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le, phase) (rate(iplane_deployment_phase_duration_bucket[10m])))",
+          "legendFormat": "{{phase}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "lineInterpolation": "linear", "fillOpacity": 10 }
+        }
+      }
+    },
+    {
+      "id": 5,
+      "title": "Provision outcomes (per result)",
+      "description": "Rate of provision attempts by terminal result -- running (success), timeout (hit the engine-ready deadline; the dominant cold-start failure), failed (provider/validation error). Rising timeout means capacity or image/model pulls are outrunning the deadline.",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "mimir" },
+      "gridPos": { "x": 12, "y": 14, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (result) (rate(iplane_deployment_provisions_total[10m]))",
+          "legendFormat": "{{result}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": { "lineInterpolation": "linear", "fillOpacity": 10 }
+        }
+      }
+    },
+    {
+      "id": 6,
+      "title": "Teardown duration (p50 / p95)",
+      "description": "Wall-clock for a deployment teardown (destroy through terminated), per provider. The spin-down half. Slow teardowns leak billed GPU time, so this pairs with the reaper panel to show idle cleanup is actually completing.",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "mimir" },
+      "gridPos": { "x": 0, "y": 22, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(iplane_deployment_teardown_duration_bucket[10m])))",
+          "legendFormat": "p50"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(iplane_deployment_teardown_duration_bucket[10m])))",
+          "legendFormat": "p95"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "lineInterpolation": "linear", "fillOpacity": 10 }
+        }
+      }
+    },
+    {
+      "id": 7,
+      "title": "Idle reaper destroys (spin-down)",
+      "description": "Deployments the idle-TTL reaper tore down, by reason. Operator-facing signal that leak protection is working: pods that went idle past their TTL are being reclaimed instead of billing indefinitely. Pairs with teardown duration above.",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "mimir" },
+      "gridPos": { "x": 12, "y": 22, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (reason) (increase(iplane_reaper_destroys_total[10m]))",
+          "legendFormat": "{{reason}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "{deployment}",
+          "custom": { "lineInterpolation": "linear", "fillOpacity": 10 }
+        }
+      }
+    }
+  ]
+}

@@ -68,6 +68,22 @@ metrics:
     value: iplane.router.decisions.total
     description: Counter of routing decisions, labeled by deploy_id / replica_id / outcome. Outcomes -- "picked" when a replica was selected, "no_replicas" when all were empty/quarantined (the 503 replica_unavailable path). Complementary to inference.requests.total which counts completed requests with downstream status (v0.2 ch7-beat3.6, #88).
 
+  - key: deployment_provision_duration
+    value: iplane.deployment.provision.duration
+    description: Histogram of end-to-end deployment provision wall-clock seconds (create-pod through engine serving), labeled by provider / result / class. The "why is my deploy slow" top-line for the deployment dashboard.
+
+  - key: deployment_phase_duration
+    value: iplane.deployment.phase.duration
+    description: Histogram of seconds spent in each deployment lifecycle phase (scheduling, image-pull, engine-init, ...), labeled by phase / provider / result. Splits the opaque cold-start into attributable stages so model-download and image-pull time are separable.
+
+  - key: deployment_provisions_total
+    value: iplane.deployment.provisions.total
+    description: Counter of deployment provision attempts, labeled by provider / result (running, failed, timeout). Denominator for the provision success-rate panel.
+
+  - key: deployment_teardown_duration
+    value: iplane.deployment.teardown.duration
+    description: Histogram of deployment teardown wall-clock seconds (destroy through terminated), labeled by provider / result. The spin-down half of the lifecycle dashboard; pairs with iplane.reaper.destroys.total.
+
 inference_attributes:
   - key: model
     value: inference.model
@@ -115,3 +131,9 @@ labels:
     value: billing_mode
   - key: outcome
     value: outcome
+  - key: phase
+    value: phase
+  - key: result
+    value: result
+  - key: class
+    value: class

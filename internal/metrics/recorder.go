@@ -29,15 +29,26 @@ import (
 // services that need to emit metrics. nil-safe at the call site so
 // tests that don't init telemetry still work (no-op recorder).
 type Recorder struct {
-	requests         metric.Int64Counter
-	duration         metric.Float64Histogram
-	tokens           metric.Int64Counter
-	backendHealthy   metric.Int64Gauge
-	reaperDestroys   metric.Int64Counter
-	queueDepth       metric.Int64Gauge
-	queueWait        metric.Float64Histogram
-	replicaInFlight  metric.Int64Gauge
-	routerDecisions  metric.Int64Counter
+	requests        metric.Int64Counter
+	duration        metric.Float64Histogram
+	tokens          metric.Int64Counter
+	backendHealthy  metric.Int64Gauge
+	reaperDestroys  metric.Int64Counter
+	queueDepth      metric.Int64Gauge
+	queueWait       metric.Float64Histogram
+	replicaInFlight metric.Int64Gauge
+	routerDecisions metric.Int64Counter
+
+	// Deployment-lifecycle instruments. Unlike the request-path
+	// families above (emitted from the data-plane hot path), these
+	// emit from the control-plane provision/teardown orchestration:
+	// once per phase transition and once per deploy/destroy. They
+	// answer "why is a cold start slow" by attributing the opaque
+	// wait to scheduling vs image-pull vs engine-init.
+	deployProvisionDuration metric.Float64Histogram
+	deployPhaseDuration     metric.Float64Histogram
+	deployProvisions        metric.Int64Counter
+	deployTeardownDuration  metric.Float64Histogram
 }
 
 // NewRecorder builds the four instruments via the global MeterProvider.
@@ -149,6 +160,53 @@ func NewRecorder() (*Recorder, error) {
 		return nil, fmt.Errorf("metrics: router decisions counter: %w", err)
 	}
 
+	// Deployment-lifecycle bucket edges cover the cold-start spectrum:
+	// a warm image+model cache resolves in tens of seconds, a cold
+	// multi-GB image pull plus a fresh HF model download runs into
+	// minutes, and a stuck deploy walks out to the 8-10 min timeout.
+	// The per-phase and end-to-end histograms share the edge set so a
+	// dashboard can stack phase p95s under the total p95.
+	deployBuckets := metric.WithExplicitBucketBoundaries(5, 15, 30, 60, 120, 180, 300, 480, 600)
+
+	deployProvisionDuration, err := meter.Float64Histogram(
+		telemetry.MetricDeploymentProvisionDuration,
+		metric.WithDescription("End-to-end deployment provision wall-clock seconds, labeled by provider / result / class."),
+		metric.WithUnit("s"),
+		deployBuckets,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("metrics: deploy provision histogram: %w", err)
+	}
+
+	deployPhaseDuration, err := meter.Float64Histogram(
+		telemetry.MetricDeploymentPhaseDuration,
+		metric.WithDescription("Seconds spent in each deployment lifecycle phase, labeled by phase / provider / result."),
+		metric.WithUnit("s"),
+		deployBuckets,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("metrics: deploy phase histogram: %w", err)
+	}
+
+	deployProvisions, err := meter.Int64Counter(
+		telemetry.MetricDeploymentProvisionsTotal,
+		metric.WithDescription("Deployment provision attempts, labeled by provider / result."),
+		metric.WithUnit("{deployment}"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("metrics: deploy provisions counter: %w", err)
+	}
+
+	deployTeardownDuration, err := meter.Float64Histogram(
+		telemetry.MetricDeploymentTeardownDuration,
+		metric.WithDescription("Deployment teardown wall-clock seconds, labeled by provider / result."),
+		metric.WithUnit("s"),
+		deployBuckets,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("metrics: deploy teardown histogram: %w", err)
+	}
+
 	return &Recorder{
 		requests:        requests,
 		duration:        duration,
@@ -159,6 +217,11 @@ func NewRecorder() (*Recorder, error) {
 		queueWait:       queueWait,
 		replicaInFlight: replicaInFlight,
 		routerDecisions: routerDecisions,
+
+		deployProvisionDuration: deployProvisionDuration,
+		deployPhaseDuration:     deployPhaseDuration,
+		deployProvisions:        deployProvisions,
+		deployTeardownDuration:  deployTeardownDuration,
 	}, nil
 }
 
@@ -367,5 +430,67 @@ func (r *Recorder) RecordRouterDecision(ctx context.Context, deployID, replicaID
 		attribute.String(telemetry.LabelDeployID, deployID),
 		attribute.String(telemetry.LabelReplicaID, replicaID),
 		attribute.String(telemetry.LabelOutcome, outcome),
+	))
+}
+
+// RecordDeployPhase records the wall-clock seconds a deployment spent
+// in a single lifecycle phase (e.g. "runpod:image-pull",
+// "engine:init"). Called once per phase transition by the provision
+// observer, which derives the boundaries from the executor's emit
+// stream. result carries the eventual provision outcome so a
+// dashboard can separate "time in image-pull on deploys that
+// succeeded" from "on deploys that timed out."
+//
+// nil-safe so control planes constructed without telemetry init get a
+// no-op rather than a panic.
+func (r *Recorder) RecordDeployPhase(ctx context.Context, phase, provider, result string, sec float64) {
+	if r == nil || sec < 0 {
+		return
+	}
+	r.deployPhaseDuration.Record(ctx, sec, metric.WithAttributes(
+		attribute.String(telemetry.LabelPhase, phase),
+		attribute.String(telemetry.LabelProvider, provider),
+		attribute.String(telemetry.LabelResult, result),
+	))
+}
+
+// RecordDeployProvision records the end-to-end provision duration and
+// bumps the provisions counter for one completed deploy attempt.
+// result is "running" on success, "timeout" when the wait hit its
+// deadline, "failed" for any other terminal error. class is the GPU
+// class the deployment resolved to ("small", "large", ...), or empty
+// when unknown.
+//
+// nil-safe.
+func (r *Recorder) RecordDeployProvision(ctx context.Context, provider, result, class string, sec float64) {
+	if r == nil {
+		return
+	}
+	r.deployProvisions.Add(ctx, 1, metric.WithAttributes(
+		attribute.String(telemetry.LabelProvider, provider),
+		attribute.String(telemetry.LabelResult, result),
+	))
+	if sec >= 0 {
+		r.deployProvisionDuration.Record(ctx, sec, metric.WithAttributes(
+			attribute.String(telemetry.LabelProvider, provider),
+			attribute.String(telemetry.LabelResult, result),
+			attribute.String(telemetry.LabelClass, class),
+		))
+	}
+}
+
+// RecordDeployTeardown records the wall-clock seconds a deployment
+// teardown took, labeled by provider and result ("terminated" on
+// success, "failed" otherwise). Pairs with the reaper-destroys
+// counter to give the spin-down half of the lifecycle dashboard.
+//
+// nil-safe.
+func (r *Recorder) RecordDeployTeardown(ctx context.Context, provider, result string, sec float64) {
+	if r == nil || sec < 0 {
+		return
+	}
+	r.deployTeardownDuration.Record(ctx, sec, metric.WithAttributes(
+		attribute.String(telemetry.LabelProvider, provider),
+		attribute.String(telemetry.LabelResult, result),
 	))
 }

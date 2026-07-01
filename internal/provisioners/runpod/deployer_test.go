@@ -478,6 +478,119 @@ func TestDestroy_TransientError_StaysTerminating(t *testing.T) {
 	}
 }
 
+func TestClassifyEnginePhase(t *testing.T) {
+	cases := []struct {
+		name           string
+		machinePresent bool
+		started        bool
+		want           string
+	}{
+		{"nothing yet", false, false, phaseScheduling},
+		{"scheduled, pulling image", true, false, phaseImagePull},
+		{"container started, engine initializing", true, true, phaseEngineInit},
+		// started with no machine reading can't happen from RunPod, but
+		// the started signal wins if it ever does -- we're past image pull.
+		{"started wins", false, true, phaseEngineInit},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := classifyEnginePhase(tc.machinePresent, tc.started); got != tc.want {
+				t.Errorf("classifyEnginePhase(%v, %v) = %q, want %q", tc.machinePresent, tc.started, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDeploy_EmitsFinerColdStartPhases pins the phase-split that lets the
+// deployment dashboard attribute cold-start wall-clock. RunPod's pod
+// status advances scheduling -> image-pull -> engine-init across the
+// wait while /health stays 502 until the engine answers; the deployer
+// must emit each phase so the control-plane observer records per-phase
+// durations. Without the GET /pods status read this whole window was one
+// opaque "engine:waiting".
+func TestDeploy_EmitsFinerColdStartPhases(t *testing.T) {
+	// Proxy /health stays 503 for the first three probes, then 200 -- long
+	// enough for the pod status to walk through all three phases first.
+	var healthProbes atomic.Int32
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/health") {
+			if healthProbes.Add(1) > 3 {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	t.Cleanup(proxy.Close)
+
+	// GET /pods/{id} advances the pod's status one step per read:
+	// empty machine (scheduling) -> populated machine (image-pull) ->
+	// lastStartedAt set (engine-init).
+	var statusReads atomic.Int32
+	f := &fakeRunPod{t: t, respond: func(method, path string, body []byte) (int, string) {
+		if method == "POST" && path == "/pods" {
+			return 201, `{"id":"rp-cold-1"}`
+		}
+		if method == "GET" && path == "/pods/rp-cold-1" {
+			switch statusReads.Add(1) {
+			case 1:
+				return 200, `{"id":"rp-cold-1"}` // no machine yet -> scheduling
+			case 2:
+				return 200, `{"id":"rp-cold-1","machine":{"gpuTypeId":"NVIDIA RTX A5000"}}` // image-pull
+			default:
+				return 200, `{"id":"rp-cold-1","machine":{"gpuTypeId":"NVIDIA RTX A5000"},"lastStartedAt":"2026-07-01T00:00:00Z"}` // engine-init
+			}
+		}
+		t.Errorf("unexpected %s %s", method, path)
+		return 500, "{}"
+	}}
+	srv := httptest.NewServer(f.handler())
+	t.Cleanup(srv.Close)
+	client := NewClient("test-api-key", WithBaseURL(srv.URL), WithHTTPClient(srv.Client()))
+	p := New(client,
+		WithSSHReadyWait(2*time.Second, 5*time.Millisecond),
+		WithProxyBaseURL(proxy.URL),
+	)
+
+	c := &collector{}
+	if err := p.Deploy(context.Background(), okDep(), okInst(), nil, c.emit); err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	if c.lastState() != provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING {
+		t.Fatalf("final state = %v, want RUNNING", c.lastState())
+	}
+
+	// The distinct phases, in first-seen order, must contain the ladder.
+	var order []string
+	seen := map[string]bool{}
+	for _, u := range c.updates {
+		if u.Phase != "" && !seen[u.Phase] {
+			seen[u.Phase] = true
+			order = append(order, u.Phase)
+		}
+	}
+	for _, want := range []string{phaseImagePull, phaseEngineInit, "engine:serving"} {
+		if !seen[want] {
+			t.Errorf("phase %q never emitted; saw ordered phases %v", want, order)
+		}
+	}
+	// Monotonic: image-pull must precede engine-init.
+	if idx(order, phaseImagePull) > idx(order, phaseEngineInit) {
+		t.Errorf("phases out of order: %v (image-pull should precede engine-init)", order)
+	}
+}
+
+func idx(xs []string, want string) int {
+	for i, x := range xs {
+		if x == want {
+			return i
+		}
+	}
+	return -1
+}
+
 // collector mirrors the sshdocker test helper -- captures every emit
 // so tests can assert on the sequence.
 type collector struct {

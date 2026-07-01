@@ -9,6 +9,7 @@ import (
 	"time"
 
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
+	"github.com/inference-book/inference-plane/internal/metrics"
 	"github.com/inference-book/inference-plane/internal/modelstores"
 	"github.com/inference-book/inference-plane/internal/sshkeys"
 	"google.golang.org/grpc/codes"
@@ -91,6 +92,13 @@ type Service struct {
 	// disk IO out of the hot path.
 	touchSeenMu sync.Mutex
 	touchSeen   map[string]time.Time
+
+	// recorder emits the deployment-lifecycle metrics (provision /
+	// phase / teardown durations). nil-safe: when unset (tests,
+	// telemetry-free CLIs) the deploy observer records into a no-op.
+	// Wired via WithRecorder from the daemon that already built the
+	// Recorder for the request-path instruments.
+	recorder *metrics.Recorder
 }
 
 // DefaultTouchDebounceInterval is the minimum wall-clock gap between
@@ -153,6 +161,16 @@ func WithModelStore(ms modelstores.ModelStore) Option {
 // so they can assert touch ordering precisely.
 func WithTouchDebounceInterval(d time.Duration) Option {
 	return func(s *Service) { s.touchDebounceInterval = d }
+}
+
+// WithRecorder wires the OTel metrics recorder used for the
+// deployment-lifecycle instruments (provision / phase / teardown
+// durations). nil-safe: when unset, the deploy observer records into a
+// no-op, so tests and telemetry-free CLIs are unaffected. Mirrors the
+// reaper's WithRecorder option -- the daemon builds one Recorder and
+// hands it to both.
+func WithRecorder(rec *metrics.Recorder) Option {
+	return func(s *Service) { s.recorder = rec }
 }
 
 // New constructs a Service. Providers are keyed by their Name() so the
@@ -572,9 +590,9 @@ func (s *Service) GetInstanceSSHKey(ctx context.Context, req *provisionerv1.GetI
 		user = "root"
 	}
 	return &provisionerv1.GetInstanceSSHKeyResponse{
-		PrivateKeyPem:        privPEM,
-		PublicKeyAuthorized:  pubLine,
-		User:                 user,
+		PrivateKeyPem:       privPEM,
+		PublicKeyAuthorized: pubLine,
+		User:                user,
 	}, nil
 }
 
@@ -1084,10 +1102,14 @@ func (s *Service) launchDeploy(ctx context.Context, dep *provisionerv1.Deploymen
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
+		obs := s.newDeployObserver(ctx, deployKindProvision, dep.GetId(), inst)
 		emit := func(u DeployStateUpdate) {
+			obs.observe(u)
 			_ = s.patchDeployment(dep.GetId(), u)
 		}
-		if err := s.deployerFor(inst).Deploy(ctx, dep, inst, key, emit); err == nil {
+		err := s.deployerFor(inst).Deploy(obs.ctx(), dep, inst, key, emit)
+		obs.finish(err)
+		if err == nil {
 			s.finalizeInstanceAfterDeploy(ctx, inst, dep.GetId())
 		}
 	}()
@@ -1557,11 +1579,15 @@ func (s *Service) DestroyDeployment(ctx context.Context, req *provisionerv1.Dest
 
 	// Synchronous destroy (no Wait flag on the request -- destroy
 	// always blocks until terminal state, simpler semantics).
+	obs := s.newDeployObserver(ctx, deployKindTeardown, id, inst)
 	emit := func(u DeployStateUpdate) {
+		obs.observe(u)
 		_ = s.patchDeployment(id, u)
 	}
-	if err := s.deployerFor(inst).Destroy(ctx, rec, inst, key, emit); err != nil {
-		return nil, status.Errorf(codes.Internal, "destroy %s: %v", id, err)
+	destroyErr := s.deployerFor(inst).Destroy(obs.ctx(), rec, inst, key, emit)
+	obs.finish(destroyErr)
+	if destroyErr != nil {
+		return nil, status.Errorf(codes.Internal, "destroy %s: %v", id, destroyErr)
 	}
 
 	// For an auto-provisioned 1:1 deployment (instance id == deployment

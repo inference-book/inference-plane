@@ -12,6 +12,18 @@ package telemetry
 // MetricBackendHealthy -- Gauge -- 1 if backend is healthy, 0 otherwise. Feeds alerts.
 const MetricBackendHealthy = "inference.backend.healthy"
 
+// MetricDeploymentPhaseDuration -- Histogram of seconds spent in each deployment lifecycle phase (scheduling, image-pull, engine-init, ...), labeled by phase / provider / result. Splits the opaque cold-start into attributable stages so model-download and image-pull time are separable.
+const MetricDeploymentPhaseDuration = "iplane.deployment.phase.duration"
+
+// MetricDeploymentProvisionDuration -- Histogram of end-to-end deployment provision wall-clock seconds (create-pod through engine serving), labeled by provider / result / class. The "why is my deploy slow" top-line for the deployment dashboard.
+const MetricDeploymentProvisionDuration = "iplane.deployment.provision.duration"
+
+// MetricDeploymentProvisionsTotal -- Counter of deployment provision attempts, labeled by provider / result (running, failed, timeout). Denominator for the provision success-rate panel.
+const MetricDeploymentProvisionsTotal = "iplane.deployment.provisions.total"
+
+// MetricDeploymentTeardownDuration -- Histogram of deployment teardown wall-clock seconds (destroy through terminated), labeled by provider / result. The spin-down half of the lifecycle dashboard; pairs with iplane.reaper.destroys.total.
+const MetricDeploymentTeardownDuration = "iplane.deployment.teardown.duration"
+
 // MetricGPUEffectiveRate -- Gauge of per-second cost rate for each provider/gpu_type/billing_mode combination loaded from providers.yaml. One series per provider for the cross-provider cost-projection panel.
 const MetricGPUEffectiveRate = "gpu.effective_rate.usd_per_second"
 
@@ -69,14 +81,17 @@ const (
 // Metric label keys (the dimensions on counter/histogram/gauge instruments).
 const (
 	LabelBillingMode = "billing_mode"
+	LabelClass = "class"
 	LabelDeployID = "deploy_id"
 	LabelGPUType = "gpu_type"
 	LabelModel = "model"
 	LabelOutcome = "outcome"
+	LabelPhase = "phase"
 	LabelPriority = "priority"
 	LabelProvider = "provider"
 	LabelReason = "reason"
 	LabelReplicaID = "replica_id"
+	LabelResult = "result"
 	LabelStatus = "status"
 	LabelTenantID = "tenant_id"
 )
