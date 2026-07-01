@@ -462,7 +462,11 @@ func (r *Router) handleWithObservability(w http.ResponseWriter, req *http.Reques
 	// Beat 1+2 deployments, the helpers fall back to the singular
 	// instance_id / engine_endpoint and the loop picks them every
 	// time -- no behavior change from Beat 1+2.
-	replicaID, replicaEndpoint, replicaOK := r.pickReplica(dep)
+	// v0.2 ch8: carry the X-IPlane-Session affinity key on the context
+	// so the prefix-affinity policy can pin a conversation to a replica.
+	// RoundRobin ignores it; only PrefixAffinity reads it.
+	replicaID, replicaEndpoint, replicaOK := r.pickReplica(
+		policy.WithSession(req.Context(), sessionFromHeader(req)), dep)
 	ctx, span := r.tracer.Start(req.Context(), spanNameDispatch,
 		trace.WithSpanKind(trace.SpanKindServer),
 		trace.WithAttributes(

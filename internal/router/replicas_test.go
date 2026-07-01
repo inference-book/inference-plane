@@ -26,7 +26,7 @@ func TestPickReplica_RoundRobin(t *testing.T) {
 	}
 	got := make([]string, 6)
 	for i := range got {
-		id, _, ok := r.pickReplica(dep)
+		id, _, ok := r.pickReplica(context.Background(), dep)
 		if !ok {
 			t.Fatalf("pickReplica returned !ok on iter %d", i)
 		}
@@ -53,7 +53,7 @@ func TestPickReplica_SkipsEmptyEndpoints(t *testing.T) {
 	}
 	seen := map[string]int{}
 	for range 30 {
-		id, ep, ok := r.pickReplica(dep)
+		id, ep, ok := r.pickReplica(context.Background(), dep)
 		if !ok {
 			t.Fatalf("pickReplica !ok despite 2 healthy slots")
 		}
@@ -79,7 +79,7 @@ func TestPickReplica_AllEmpty(t *testing.T) {
 		InstanceIds:     []string{"a", "b"},
 		EngineEndpoints: []string{"", ""},
 	}
-	if _, _, ok := r.pickReplica(dep); ok {
+	if _, _, ok := r.pickReplica(context.Background(), dep); ok {
 		t.Fatalf("pickReplica returned ok=true when all endpoints are empty")
 	}
 }
@@ -100,7 +100,7 @@ func TestPickReplica_SkipsQuarantined(t *testing.T) {
 	}
 	seen := map[string]int{}
 	for range 60 {
-		id, ep, ok := r.pickReplica(dep)
+		id, ep, ok := r.pickReplica(context.Background(), dep)
 		if !ok {
 			t.Fatalf("pickReplica !ok despite 2 healthy replicas")
 		}
@@ -128,7 +128,7 @@ func TestPickReplica_AllQuarantined(t *testing.T) {
 		EngineEndpoints:      []string{"http://a", "http://b"},
 		UnhealthyInstanceIds: []string{"a", "b"},
 	}
-	if _, _, ok := r.pickReplica(dep); ok {
+	if _, _, ok := r.pickReplica(context.Background(), dep); ok {
 		t.Fatalf("pickReplica returned ok=true with every replica quarantined")
 	}
 }
@@ -146,7 +146,7 @@ func TestPickReplica_QuarantinedDoesNotSkipEmptyInstanceID(t *testing.T) {
 		EngineEndpoints:      []string{"http://only"},
 		UnhealthyInstanceIds: []string{""}, // shouldn't match the empty padded id
 	}
-	id, ep, ok := r.pickReplica(dep)
+	id, ep, ok := r.pickReplica(context.Background(), dep)
 	if !ok || ep != "http://only" || id != "" {
 		t.Fatalf("expected router to forward to the unkeyed endpoint, got id=%q ep=%q ok=%v", id, ep, ok)
 	}
@@ -164,7 +164,7 @@ func TestPickReplica_SingleInstance_Beat1Compat(t *testing.T) {
 		EngineEndpoint: "http://engine:8000",
 	}
 	for range 3 {
-		id, ep, ok := r.pickReplica(dep)
+		id, ep, ok := r.pickReplica(context.Background(), dep)
 		if !ok || id != "the-pod" || ep != "http://engine:8000" {
 			t.Errorf("Beat 1 compat broken: id=%q ep=%q ok=%v", id, ep, ok)
 		}

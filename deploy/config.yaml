@@ -39,6 +39,15 @@ deployment:
   instance_id: ""                 # set per-instance via env override
 
 router:
+  # v0.2 ch8 per-request replica selection:
+  #   round_robin     (default) -- the Ch 7 load balancer; spreads turns
+  #                   evenly, which defeats prefix caching on multi-turn
+  #                   sessions.
+  #   prefix_affinity -- Ch 8 sticky routing; pins a session's turns
+  #                   (keyed on the X-IPlane-Session header) to the
+  #                   replica that already holds its prefix.
+  routing_policy: round_robin
+
   # v0.2 Beat 2.4 scheduler in front of the engine. Strict-priority
   # dispatch: interactive lane preferred; batch only runs when
   # interactive is empty. Per-deployment in-flight cap mirrors the
