@@ -1,6 +1,7 @@
 package router
 
 import (
+	"context"
 	"sync/atomic"
 
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
@@ -40,12 +41,12 @@ import (
 // monotonic and avoids the awkward "advance only on success"
 // case where one always-empty slot would never let the rotation
 // progress.
-func (r *Router) pickReplica(dep *provisionerv1.Deployment) (instanceID, endpoint string, ok bool) {
+func (r *Router) pickReplica(ctx context.Context, dep *provisionerv1.Deployment) (instanceID, endpoint string, ok bool) {
 	replicas := r.eligibleReplicas(dep)
 	if len(replicas) == 0 {
 		return "", "", false
 	}
-	selected, picked := r.policy.Pick(nil, dep.GetId(), replicas, r)
+	selected, picked := r.policy.Pick(ctx, dep.GetId(), replicas, r)
 	if !picked {
 		return "", "", false
 	}
