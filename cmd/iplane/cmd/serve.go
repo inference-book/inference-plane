@@ -88,18 +88,18 @@ func bindServeFlags(c *cobra.Command) {
 
 	// Bind kebab-case flags onto dotted viper keys matching the YAML.
 	for flagName, key := range map[string]string{
-		"server-addr":     "server.addr",
-		"state-dir":       "state.dir",
-		"backend-engine":  "backend.engine",
-		"backend-url":     "backend.url",
-		"backend-name":    "backend.name",
-		"otlp-endpoint":   "telemetry.otlp_endpoint",
-		"service-name":    "telemetry.service_name",
-		"environment":     "telemetry.environment",
-		"provider":        "deployment.provider",
-		"gpu-type":        "deployment.gpu_type",
-		"billing-mode":    "deployment.billing_mode",
-		"instance-id":     "deployment.instance_id",
+		"server-addr":    "server.addr",
+		"state-dir":      "state.dir",
+		"backend-engine": "backend.engine",
+		"backend-url":    "backend.url",
+		"backend-name":   "backend.name",
+		"otlp-endpoint":  "telemetry.otlp_endpoint",
+		"service-name":   "telemetry.service_name",
+		"environment":    "telemetry.environment",
+		"provider":       "deployment.provider",
+		"gpu-type":       "deployment.gpu_type",
+		"billing-mode":   "deployment.billing_mode",
+		"instance-id":    "deployment.instance_id",
 	} {
 		_ = viper.BindPFlag(key, c.Flags().Lookup(flagName))
 	}
@@ -287,6 +287,7 @@ func runServe(parent context.Context) error {
 
 	provisionerSvc, err := buildLocalService(stateStore, "default",
 		provisioners.WithTouchDebounceInterval(cfg.Router.TouchDebounceInterval),
+		provisioners.WithRecorder(recorder),
 	)
 	if err != nil {
 		return fmt.Errorf("build provisioner service: %w", err)
