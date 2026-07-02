@@ -38,6 +38,7 @@ type Recorder struct {
 	queueWait       metric.Float64Histogram
 	replicaInFlight metric.Int64Gauge
 	routerDecisions metric.Int64Counter
+	routerAffinity  metric.Int64Counter
 
 	// Deployment-lifecycle instruments. Unlike the request-path
 	// families above (emitted from the data-plane hot path), these
@@ -160,6 +161,15 @@ func NewRecorder() (*Recorder, error) {
 		return nil, fmt.Errorf("metrics: router decisions counter: %w", err)
 	}
 
+	routerAffinity, err := meter.Int64Counter(
+		telemetry.MetricRouterAffinityTotal,
+		metric.WithDescription("Session-affinity outcomes at the router, labeled by deploy_id / outcome (hit | miss)."),
+		metric.WithUnit("{decision}"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("metrics: router affinity counter: %w", err)
+	}
+
 	// Deployment-lifecycle bucket edges cover the cold-start spectrum:
 	// a warm image+model cache resolves in tens of seconds, a cold
 	// multi-GB image pull plus a fresh HF model download runs into
@@ -217,6 +227,7 @@ func NewRecorder() (*Recorder, error) {
 		queueWait:       queueWait,
 		replicaInFlight: replicaInFlight,
 		routerDecisions: routerDecisions,
+		routerAffinity:  routerAffinity,
 
 		deployProvisionDuration: deployProvisionDuration,
 		deployPhaseDuration:     deployPhaseDuration,
@@ -429,6 +440,27 @@ func (r *Recorder) RecordRouterDecision(ctx context.Context, deployID, replicaID
 	r.routerDecisions.Add(ctx, 1, metric.WithAttributes(
 		attribute.String(telemetry.LabelDeployID, deployID),
 		attribute.String(telemetry.LabelReplicaID, replicaID),
+		attribute.String(telemetry.LabelOutcome, outcome),
+	))
+}
+
+// RecordRouterAffinity bumps the session-affinity counter for one
+// routed request that carried a session key. outcome is "hit" when the
+// chosen replica matches where the session last landed (its prefix is
+// where it was left) and "miss" when the session moved or was first
+// seen. The hit-rate derived from this (hit / hit+miss) is the Ch 8
+// panel that separates round-robin (~1/N) from prefix_affinity (~1.0).
+//
+// This is a routing-locality signal, not the engine's actual KV-cache
+// hit-rate; see the metric-names.yaml entry for the proxy relationship.
+//
+// nil-safe.
+func (r *Recorder) RecordRouterAffinity(ctx context.Context, deployID, outcome string) {
+	if r == nil {
+		return
+	}
+	r.routerAffinity.Add(ctx, 1, metric.WithAttributes(
+		attribute.String(telemetry.LabelDeployID, deployID),
 		attribute.String(telemetry.LabelOutcome, outcome),
 	))
 }

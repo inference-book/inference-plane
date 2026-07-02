@@ -157,6 +157,14 @@ type Router struct {
 	// Like rrCounters, entries leak on DestroyDeployment in v0.2 --
 	// bounded and cheap; cleanup is a follow-up.
 	inFlight sync.Map
+
+	// sessionLastReplica observes, per (deploy, session), the replica a
+	// session last landed on, so the router can record affinity hit/miss
+	// independent of the active policy (v0.2 ch8, #173). Keyed
+	// deployID + "\x00" + session. Distinct from the PrefixAffinity
+	// policy's own pin map: this measures locality for round-robin too.
+	// Leaks on DestroyDeployment like the maps above; bounded and cheap.
+	sessionLastReplica sync.Map
 }
 
 // pendingSchedCfg gathers per-option mutations before New
@@ -465,8 +473,15 @@ func (r *Router) handleWithObservability(w http.ResponseWriter, req *http.Reques
 	// v0.2 ch8: carry the X-IPlane-Session affinity key on the context
 	// so the prefix-affinity policy can pin a conversation to a replica.
 	// RoundRobin ignores it; only PrefixAffinity reads it.
+	session := sessionFromHeader(req)
 	replicaID, replicaEndpoint, replicaOK := r.pickReplica(
-		policy.WithSession(req.Context(), sessionFromHeader(req)), dep)
+		policy.WithSession(req.Context(), session), dep)
+	// v0.2 ch8 (#173): record whether this session landed where it last
+	// did -- routing-locality hit-rate, policy-agnostic. Round-robin
+	// scatters (misses); prefix_affinity pins (hits).
+	if replicaOK && session != "" {
+		r.recordAffinity(req.Context(), dep.GetId(), session, replicaID)
+	}
 	ctx, span := r.tracer.Start(req.Context(), spanNameDispatch,
 		trace.WithSpanKind(trace.SpanKindServer),
 		trace.WithAttributes(

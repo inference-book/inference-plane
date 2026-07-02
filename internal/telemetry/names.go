@@ -51,6 +51,9 @@ const MetricRequestDuration = "inference.request.duration"
 // MetricRequestsTotal -- Counter of inference requests, labeled by model and status.
 const MetricRequestsTotal = "inference.requests.total"
 
+// MetricRouterAffinityTotal -- Counter of session-affinity outcomes, labeled by deploy_id / outcome. For each request carrying X-IPlane-Session, the router compares the chosen replica against where that session last landed -- "hit" when it matches (the session's prefix is where it was left), "miss" when it moved or was first-seen. The hit-rate = hit / (hit + miss) is the Ch 8 money panel -- round-robin scatters sessions so it sits near 1/N, prefix_affinity pins them so it climbs toward 1.0. A routing-locality signal measured at the router; a faithful proxy for the engine's own gpu_prefix_cache_hit_rate (which iplane can't see without scraping the engine, issue
+const MetricRouterAffinityTotal = "iplane.router.affinity.total"
+
 // MetricRouterDecisionsTotal -- Counter of routing decisions, labeled by deploy_id / replica_id / outcome. Outcomes -- "picked" when a replica was selected, "no_replicas" when all were empty/quarantined (the 503 replica_unavailable path). Complementary to inference.requests.total which counts completed requests with downstream status (v0.2 ch7-beat3.6,
 const MetricRouterDecisionsTotal = "iplane.router.decisions.total"
 
