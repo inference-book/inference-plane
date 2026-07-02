@@ -144,7 +144,17 @@ const (
 	// ProviderLambdaLabs follows in #151. Const reserved here so the
 	// future PR's diff stays small.
 	ProviderLambdaLabs = "lambdalabs"
+	// ProviderExternal is the non-owning provider: it registers a
+	// RUNNING replica pointing at an engine URL the operator runs
+	// themselves, rather than provisioning. See internal/provisioners/external.
+	ProviderExternal = "external"
 )
+
+// ExternalEndpointTag carries the operator-supplied engine URL for the
+// external provider from ReplicaSpec.engine_endpoint through the Spec's
+// tag map to the external adapter's Spawn/Deploy. Internal plumbing, not
+// an operator-facing label.
+const ExternalEndpointTag = "iplane-external-engine-endpoint"
 
 // GPU class taxonomy. The chapter teaches one vocabulary across providers;
 // each adapter ships its own class -> []SKU table.

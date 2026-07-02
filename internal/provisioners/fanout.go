@@ -824,16 +824,24 @@ func (s *Service) placeReplicaInstance(_ context.Context, spec *provisionerv1.Re
 	if spec == nil {
 		return nil, status.Error(codes.InvalidArgument, "replica spec is required")
 	}
-	reqs := spec.GetRequirements()
-	if reqs == nil {
-		return nil, status.Errorf(codes.InvalidArgument, "replica slot r%d: resource requirements are required (--class, --min-vram-gb, or --sku)", slot)
-	}
 	providerName := spec.GetProvider()
 	if providerName == "" {
 		return nil, status.Errorf(codes.InvalidArgument, "replica slot r%d: provider is required", slot)
 	}
 	if _, ok := s.providers[providerName]; !ok {
 		return nil, status.Errorf(codes.InvalidArgument, "replica slot r%d: unknown provider %q", slot, providerName)
+	}
+
+	// The external provider points at an operator-managed engine rather
+	// than provisioning, so it has no GPU requirements to size; every
+	// other provider requires them.
+	isExternal := providerName == ProviderExternal
+	reqs := spec.GetRequirements()
+	if reqs == nil {
+		if !isExternal {
+			return nil, status.Errorf(codes.InvalidArgument, "replica slot r%d: resource requirements are required (--class, --min-vram-gb, or --sku)", slot)
+		}
+		reqs = &provisionerv1.ResourceRequirements{}
 	}
 
 	instanceID := replicaInstanceID(deployID, slot, totalSlots)
@@ -849,7 +857,13 @@ func (s *Service) placeReplicaInstance(_ context.Context, spec *provisionerv1.Re
 		BaseImage:    baseImage,
 		Requirements: reqs,
 	}
-	if err := ValidateAndExpandRequirements(pspec); err != nil {
+	if isExternal {
+		endpoint := spec.GetEngineEndpoint()
+		if endpoint == "" {
+			return nil, status.Errorf(codes.InvalidArgument, "replica slot r%d: provider=external requires engine_endpoint (--engine-endpoints)", slot)
+		}
+		pspec.Tags = map[string]string{ExternalEndpointTag: endpoint}
+	} else if err := ValidateAndExpandRequirements(pspec); err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "replica slot r%d: %v", slot, err)
 	}
 	inst := newPendingInstance(pspec, providerName, s.clock())
@@ -906,9 +920,10 @@ func resolveCreateReplicaSpecs(req *provisionerv1.CreateDeploymentRequest) ([]*p
 		// without entries aliasing each other.
 		for range int(count) {
 			out = append(out, &provisionerv1.ReplicaSpec{
-				Provider:     g.GetProvider(),
-				Region:       g.GetRegion(),
-				Requirements: g.GetRequirements(),
+				Provider:       g.GetProvider(),
+				Region:         g.GetRegion(),
+				Requirements:   g.GetRequirements(),
+				EngineEndpoint: g.GetEngineEndpoint(), // external attach target
 				// replicas left zero == 1 on the persisted form.
 			})
 		}
