@@ -48,6 +48,13 @@ router:
   #                   replica that already holds its prefix.
   routing_policy: round_robin
 
+  # v0.2 ch8 load-aware override (prefix_affinity only): when a session's
+  # pinned replica has >= this many in-flight requests, spill that turn to
+  # the coolest eligible replica, keeping the pin so the session returns
+  # once its replica cools. 0 disables the override (pure stickiness);
+  # the Ch 8 demo sets it low to show a whale session spilling.
+  affinity_overload_threshold: 0
+
   # v0.2 Beat 2.4 scheduler in front of the engine. Strict-priority
   # dispatch: interactive lane preferred; batch only runs when
   # interactive is empty. Per-deployment in-flight cap mirrors the

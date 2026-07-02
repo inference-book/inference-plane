@@ -41,6 +41,14 @@ type RouterConfig struct {
 	// to the replica that holds its prefix). Unknown values are
 	// rejected at startup.
 	RoutingPolicy string `yaml:"routing_policy"`
+
+	// AffinityOverloadThreshold enables the prefix_affinity load-aware
+	// override (v0.2 ch8): when a session's pinned replica has this many
+	// or more in-flight requests, the turn spills to the coolest eligible
+	// replica (the pin is kept, so the session snaps back once its
+	// replica cools). 0 (default) disables the override -- pure
+	// stickiness. Only consulted when routing_policy is prefix_affinity.
+	AffinityOverloadThreshold int `yaml:"affinity_overload_threshold"`
 }
 
 // QueueConfig parameterizes the M/M/k waiting room in front of the
