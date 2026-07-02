@@ -50,6 +50,14 @@ func SessionFromContext(ctx context.Context) string {
 type PrefixAffinity struct {
 	fallback *RoundRobin
 
+	// overloadThreshold enables the load-aware override: when a session's
+	// pinned replica has this many or more in-flight requests, the turn
+	// spills to the coolest eligible replica (the pin is kept, so the
+	// session snaps back once its replica cools). 0 disables the override
+	// -- pure stickiness. Absolute in-flight rather than relative so the
+	// operator sets a concrete per-replica ceiling.
+	overloadThreshold int64
+
 	mu sync.Mutex
 	// pins maps deployID + "\x00" + sessionID -> the pinned replica.
 	// Unbounded in session count -- fine for the demo's bounded runs; a
@@ -60,11 +68,13 @@ type PrefixAffinity struct {
 
 // NewPrefixAffinity constructs the Ch 8 sticky-routing policy. Installed
 // via router.WithRoutingPolicy when router.routing_policy is
-// "prefix_affinity".
-func NewPrefixAffinity() *PrefixAffinity {
+// "prefix_affinity". overloadThreshold enables the load-aware override
+// (see the field doc); 0 disables it for pure stickiness.
+func NewPrefixAffinity(overloadThreshold int) *PrefixAffinity {
 	return &PrefixAffinity{
-		fallback: NewRoundRobin(),
-		pins:     make(map[string]Replica),
+		fallback:          NewRoundRobin(),
+		overloadThreshold: int64(overloadThreshold),
+		pins:              make(map[string]Replica),
 	}
 }
 
@@ -85,6 +95,16 @@ func (p *PrefixAffinity) Pick(ctx context.Context, deployID string, replicas []R
 
 	if pinned, ok := p.pins[key]; ok {
 		if live, found := matchReplica(pinned, replicas); found {
+			// Load-aware override: when the pinned replica is hot, spill
+			// this turn to the coolest eligible replica WITHOUT dropping
+			// the pin -- a temporary detour, not a re-pin, so the session
+			// returns to its warm replica once load subsides. If the pin
+			// is itself the coolest, leastInFlight returns it and there's
+			// no actual spill.
+			if p.overloadThreshold > 0 && stats != nil &&
+				stats.InFlight(deployID, live.InstanceID) >= p.overloadThreshold {
+				return leastInFlight(deployID, replicas, stats), true
+			}
 			return live, true
 		}
 		// Pinned replica no longer eligible; fall through and re-pin.
@@ -96,6 +116,21 @@ func (p *PrefixAffinity) Pick(ctx context.Context, deployID string, replicas []R
 	}
 	p.pins[key] = selected
 	return selected, true
+}
+
+// leastInFlight returns the eligible replica with the lowest in-flight
+// count (ties broken by slice order). The load-aware override uses it to
+// spill a hot session to the coolest replica. Callers guard stats != nil
+// and len(replicas) > 0.
+func leastInFlight(deployID string, replicas []Replica, stats Stats) Replica {
+	best := replicas[0]
+	bestN := stats.InFlight(deployID, best.InstanceID)
+	for _, r := range replicas[1:] {
+		if n := stats.InFlight(deployID, r.InstanceID); n < bestN {
+			best, bestN = r, n
+		}
+	}
+	return best
 }
 
 // matchReplica finds pinned in the live eligible set. Matches on

@@ -45,7 +45,7 @@ func TestRouter_PrefixAffinity_HeaderRoutesStickily(t *testing.T) {
 				EngineEndpoint:  endpoints[0], // satisfy the singular-endpoint readiness gate
 			},
 		}, nil
-	}}, nil, WithRoutingPolicy(policy.NewPrefixAffinity()))
+	}}, nil, WithRoutingPolicy(policy.NewPrefixAffinity(0)))
 
 	srv := httptest.NewServer(serveThroughMux(r))
 	defer srv.Close()

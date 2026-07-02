@@ -153,6 +153,7 @@ func registerServeDefaults() {
 	viper.SetDefault("router.queue.batch.servicers", 0)
 	viper.SetDefault("router.queue.batch.capacity", 256)
 	viper.SetDefault("router.routing_policy", "round_robin")
+	viper.SetDefault("router.affinity_overload_threshold", 0)
 
 	// health: per-replica health-poll loop (#87). Defaults match
 	// healthcheck.DefaultConfig() so operators who omit the block
@@ -381,7 +382,7 @@ func runServe(parent context.Context) error {
 	case "", "round_robin":
 		// router.New's default (RoundRobin); no option needed.
 	case "prefix_affinity":
-		routerOpts = append(routerOpts, router.WithRoutingPolicy(policy.NewPrefixAffinity()))
+		routerOpts = append(routerOpts, router.WithRoutingPolicy(policy.NewPrefixAffinity(cfg.Router.AffinityOverloadThreshold)))
 	default:
 		return fmt.Errorf("router.routing_policy: unknown value %q (want round_robin | prefix_affinity)", cfg.Router.RoutingPolicy)
 	}
