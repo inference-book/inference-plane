@@ -142,6 +142,24 @@ func effectiveInstanceIDs(dep *provisionerv1.Deployment) []string {
 	return nil
 }
 
+// hasStampedEndpoint reports whether the deployment has at least one
+// non-empty engine endpoint to route to, across the plural
+// engine_endpoints (multi-replica) or the singular engine_endpoint
+// (single-instance) form. The router's readiness gate uses this instead
+// of the singular field alone, so a multi-replica deployment created
+// directly (which never stamps the singular) is still forwardable.
+func hasStampedEndpoint(dep *provisionerv1.Deployment) bool {
+	if dep.GetEngineEndpoint() != "" {
+		return true
+	}
+	for _, ep := range dep.GetEngineEndpoints() {
+		if ep != "" {
+			return true
+		}
+	}
+	return false
+}
+
 // effectiveEndpoints is the parallel helper for engine endpoint URLs.
 // engine_endpoints[i] corresponds to instance_ids[i]; empty string
 // means "instance still provisioning or quarantined." Beat 1+2
