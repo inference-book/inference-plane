@@ -1,155 +1,114 @@
-# Demo 07 — Prefix-cache affinity (Ch 8: Stateful Routing and Prefix-Cache Reuse)
+# Demo 07 — Stateful Routing and Prefix-Cache Reuse (Ch 8)
 
-> **Status: planned, not yet runnable.** This README is the spec the
-> Ch 8 demo is built against. It pins the topology, the reader-facing
-> flow, and the metrics the chapter screenshots *before* the code
-> lands, so the narrative and the implementation agree. The work items
-> that make it real are tracked in the repo (see **Work needed**
-> below) and in [`ROADMAP.md`](../../ROADMAP.md) § *Ch 8 four-act
-> sketch*. Until those land, the commands here are illustrative.
+A multi-turn **chat session** keeps coming back, turn after turn, with a
+prefix that grows every turn. Under the Ch 7 round-robin router each turn
+lands on a different replica and re-prefills the whole conversation from
+cold. Switch the router to **prefix-cache affinity** and a conversation's
+turns stick to the replica that already holds its prefix.
 
-The chapter act-3 moment for v0.2 / Ch 8: a multi-turn **chat session**
-keeps coming back, turn after turn, with a prefix that grows every
-turn. Under the Ch 7 round-robin router each turn lands on a different
-replica and re-prefills the whole conversation from cold. Switch the
-router to **prefix-cache affinity** and a conversation's turns stick to
-the replica that already holds its prefix. Same hardware, same model,
-same traffic. The prefix-cache hit-rate and time-to-first-token panels
-recover.
+`run.sh` shows this GPU-free in three acts, on the mock engine:
 
-This demo is **real-cluster only.** The lesson is an engine-side
-phenomenon: there is no honest way to feel the latency win on the
-`mock` engine, which has no real KV cache. The book promises cost
-optimization eventually, but affinity itself runs on paid GPUs. (We
-exercise the demo's *plumbing* against `mock` in CI; that path is for
-us, not the chapter.)
+| Act | Router | What you see |
+| --- | ------ | ------------ |
+| 07a | `round_robin` | sessions scatter across all engines (cache-defeating) |
+| 07b | `prefix_affinity` | each session pins to one engine (scatter 0) |
+| 07c | `prefix_affinity` + overload cap | replicas that hit the cap shed load — affinity yields to load under saturation |
 
-## Topology
+It measures **routing** — which engine each session lands on. The
+engine-side prefix-cache hit-rate and the latency win are a real
+multi-replica run (see "Capturing the book figures" below).
 
-```mermaid
-flowchart LR
-    Driver["iplane load session-mode<br/>--sessions 20 --turns 12<br/>X-IPlane-Session: s-NN"]
-    Driver --> Router["iplane router :8080"]
-    Router -->|"round-robin<br/>(turn scatters across replicas)"| R1["replica 1"]
-    Router -->|"vs prefix_affinity<br/>(session sticks to one)"| R2["replica 2"]
-    Router --> R3["replica 3"]
-    R1 -. "gpu_prefix_cache_hit_rate" .-> Graf["Grafana v0.2 dashboard"]
-    R2 -.-> Graf
-    R3 -.-> Graf
+## Run it (GPU-free)
+
+```bash
+make build                              # once, from the repo root
+bash examples/07-prefix-affinity/run.sh # or: cd examples/07-prefix-affinity && make demo
 ```
 
-The deployment ID and replica set are unchanged from Ch 7. The only
-thing that changes between the two runs is `--routing-policy`. Replica
-selection lives behind the seam in
-[`internal/router/policy/`](../../internal/router/policy/policy.go);
-`RoundRobin` is the Ch 7 default, `PrefixAffinity` is the Ch 8 addition.
+No GPU, no provider keys, no cloud. `run.sh` starts three `iplane
+mock-engine` processes, and for each act starts `iplane serve` with a
+different routing policy, registers the engines as one deployment via the
+**external** provider (no provisioning), fires the session driver, and
+prints the per-engine session distribution plus a **scatter score** (how
+many sessions touched more than one engine).
 
-## The demos (what the chapter walks through, and asks you to try)
+Env knobs: `DEMO_SESSIONS` (default 9), `DEMO_TURNS` (default 4).
 
-These are written as the reader's path. Build order and the iplane
-work each one needs are in **Work needed** at the bottom.
-
-### Demo 07a — Round-robin shreds the cache (the problem)
-
-Run the session driver against the existing round-robin deployment.
+### What a run looks like
 
 ```
-# illustrative — session mode is work item (1)
-iplane load --target <deploy-id> --service-url http://localhost:8080 \
-    --sessions 20 --turns 12 --think-time 2s \
-    --system-prompt-tokens 800 --routing-policy round_robin
+== 07a  round_robin ...
+  scatter: 9 of 9 sessions touched more than one engine
+== 07b  prefix_affinity ...
+    engine 9001: s-0006 s-0007 s-0008
+    engine 9002: s-0000 s-0002 s-0005
+    engine 9003: s-0001 s-0003 s-0004
+  scatter: 0 of 9 sessions touched more than one engine
+== 07c  prefix_affinity + overload cap 2 ...
+  scatter: 8 of 9 sessions touched more than one engine
 ```
 
-**What you'll see.** Prefix-cache hit-rate sits near `1/N` (with three
-replicas, about 0.33). TTFT climbs as conversations get longer, because
-each turn re-prefills a longer cold history. Per-replica GPU prefill
-work is high and mostly redundant.
+Round-robin scatters every session; affinity pins each to exactly one
+engine (scatter 0); the overload cap makes saturated replicas shed load,
+so scatter climbs back — the "affinity is not free" trade-off.
 
-**Try it yourself (chapter prompt).** Scale the deployment from 3 to 5
-replicas and watch the hit-rate get *worse* (toward 0.2), not better.
-More replicas means round-robin scatters each session more widely. This
-is the counter-intuitive result the chapter dwells on: under round-robin,
-adding capacity hurts cache locality.
+## The moving parts (real commands)
 
-### Demo 07b — Affinity puts the conversation back together (the fix)
+```bash
+# a mock engine (dev/CI; --latency keeps the demo fast)
+iplane mock-engine --port 9001 --latency 3ms
 
-Same deployment, same driver, one flag changed.
+# register those engines as one deployment, no provisioning
+iplane deployment deploy demo --provider external \
+    --engine-endpoints http://127.0.0.1:9001,http://127.0.0.1:9002,http://127.0.0.1:9003 \
+    --model mock/mock
 
+# the router policy is set on `iplane serve` (config or env):
+#   router.routing_policy: round_robin | prefix_affinity
+#   router.affinity_overload_threshold: 0 (off) | N (spill when a pin has >= N in-flight)
+
+# the load: closed-loop multi-turn sessions, each stamping X-IPlane-Session
+iplane load session --target demo --model mock/mock --sessions 9 --turns 4
 ```
-# illustrative — PrefixAffinity is work item (2)
-iplane load --target <deploy-id> --service-url http://localhost:8080 \
-    --sessions 20 --turns 12 --think-time 2s \
-    --system-prompt-tokens 800 --routing-policy prefix_affinity
-```
 
-**What you'll see.** Hit-rate climbs toward 1.0 as each session's turns
-return to the replica that holds its prefix. TTFT flattens: later turns
-are no slower than early ones because the prefix is already resident.
-The router's per-replica in-flight gauges show each session pinned to
-one replica instead of spread across all of them.
+Header-less clients (a plain OpenAI SDK on the flat `/v1/chat/completions`)
+also get affinity: the router derives the session key from the request's
+opening. `X-IPlane-Session` still wins when present.
 
-**Try it yourself (chapter prompt).** Re-run the 5-replica case from
-07a under affinity. Hit-rate should hold near 1.0 regardless of replica
-count, because affinity decouples cache locality from fan-out width.
+## Try it yourself
 
-### Demo 07c — Affinity is not free (the trade-offs)
+- **Scale the mock fleet to 5 (`PORTS` in `run.sh`) and re-run 07a** — round-robin's scatter stays high; more replicas means *worse* cache locality, not better.
+- **Bump `router.affinity_overload_threshold` up** until 07c stops spilling — that value is roughly your per-replica concurrency ceiling before affinity yields to load.
+- **Point a plain OpenAI SDK at the flat URL twice (no `X-IPlane-Session`)** under `prefix_affinity` and watch both turns land on the same engine — the derived key at work.
 
-Three short variations the chapter uses to show the costs.
+## Capturing the book figures (real cluster)
 
-1. **The whale session.** Point most of the traffic at a handful of
-   session IDs. Those replicas saturate while others sit idle, in
-   tension with Ch 7's per-tenant fair-share. Watch the load-aware
-   tie-break kick in and break affinity once a replica is hot.
-2. **Cache eviction under pressure.** Crank `--sessions` until the
-   concurrent KV footprint exceeds GPU memory. Hit-rate drops even
-   *under affinity* because the engine evicts blocks. This is the
-   "cache memory is the central trade-off" beat, shown with the cheap
-   model by raising session count, not by buying a bigger GPU.
-3. **Pruning invalidates the cache.** Set conversation length past the
-   model's context window so the driver prunes from the front. A
-   front-prune changes the prefix and the cache goes cold. The chapter
-   contrasts naive front-pruning with keep-system-prompt-plus-recent.
+The mock walkthrough shows routing. The book's figures — prefix-cache
+hit-rate and time-to-first-token diverging between round-robin and
+affinity — need real engines with a real KV cache. This is the one paid
+step; run it when you're ready:
 
-**Try it yourself (chapter prompt).** Find the `--sessions` value where
-affinity's hit-rate advantage over round-robin disappears. That is your
-deployment's KV-cache working-set ceiling, and the number that tells you
-when to add a replica versus when to add GPU memory.
+1. Provision **3 replicas of a small model on cheap GPUs** (an 8B on
+   ~16–24 GB cards, e.g. `iplane deployment deploy ... --replicas 3`).
+   The effect is driven by *conversation length*, not model size, so keep
+   the model small — long multi-turn sessions do the work.
+2. Bring up the obs stack (`make infra-up`) so the v0.2 Grafana dashboard
+   (`uid=inference-plane-v02`) populates.
+3. Fire `iplane load session` under each policy (restart `serve` with
+   `routing_policy: round_robin`, then `prefix_affinity`).
+4. **Screenshot these panels** for the chapter:
+   - **Session affinity hit-rate** — ~1/N under round-robin, ~1.0 under affinity.
+   - **Request latency (p50/p95)** — TTFT flat under affinity, climbing with conversation length under round-robin.
+   - **Per-replica in-flight** — even under round-robin, session-pinned clusters under affinity; bounded under the overload cap.
+5. Tear down. Rough cost: a few dollars for a few minutes of 3 cheap GPUs.
 
-## What you'll measure (Grafana)
+The affinity hit-rate the mock run shows is a routing-locality proxy; the
+real engine's `gpu_prefix_cache_hit_rate` (scraping is a follow-up, issue
+51) is the ground truth, and their divergence under KV eviction is the
+memory-pressure story.
 
-- **`prefix_cache_hit_rate`** (new in Ch 8): the headline. Round-robin
-  near `1/N`, affinity near `1.0`, both collapsing under 07c's pressure.
-- **TTFT p50/p95**: flat under affinity, rising with conversation
-  length under round-robin.
-- **Per-replica in-flight** (from Ch 7, #88): even spread under
-  round-robin, session-pinned clusters under affinity.
-- **Routing decisions** (from Ch 7, #87): affinity-hit vs
-  affinity-miss vs load-override counts.
+## Deferred / follow-ups
 
-## Prerequisites (when runnable)
-
-1. `iplane serve` running with this demo's `config.yaml` (scheduler on,
-   router in the data path).
-2. A real multi-replica deployment (3 replicas of a small model on
-   cheap GPUs is enough; see the chapter for the provider recipe).
-   `examples/06-multi-replica` is the closest starting point.
-3. Local observability stack (`make infra-up`) for the panels.
-
-## Work needed (repo tickets)
-
-This demo does not run until these land. Tracked as repo issues; see
-[`ROADMAP.md`](../../ROADMAP.md) § *Ch 8*.
-
-1. **Session mode on `iplane load`** — closed-loop, stateful per
-   session, `X-IPlane-Session` header, multi-turn corpus source.
-   Validated against `mock`.
-2. **`PrefixAffinity` policy** — second `internal/router/policy.Policy`
-   impl, `X-IPlane-Session` resolution, router-side prefix→replica map,
-   `--routing-policy` config + flag.
-3. **Prefix-cache hit-rate metric family** — `mock` reports a simulated
-   hit-rate; real engine surfaces `gpu_prefix_cache_hit_rate`. Grafana
-   panel on the v0.2 dashboard.
-4. **Load-aware tie-break + prefix-hash variant** — the 07c trade-offs
-   and the shared-system-prompt case.
-5. **This walkthrough** (`run.sh`, `config.yaml`, `Makefile`) + one
-   real multi-replica run for the book figures.
+- **Engine `gpu_prefix_cache_hit_rate` scraping** (real cache-hit ground truth) → issue 51.
+- **KV eviction under memory pressure** — real-engine only; the mock has no cache to evict.
+- **Front-pruning invalidates the prefix** and **asymmetric whale load** — both need a driver feature (context pruning / per-session load weighting) that doesn't exist yet → tracked as a follow-up.

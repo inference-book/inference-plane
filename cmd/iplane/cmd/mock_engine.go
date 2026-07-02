@@ -10,12 +10,16 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/inference-book/inference-plane/internal/backends"
 	"github.com/spf13/cobra"
 )
 
-var mockEnginePort int
+var (
+	mockEnginePort    int
+	mockEngineLatency time.Duration
+)
 
 // mockEngineCmd runs a standalone OpenAI-compatible mock engine. It is
 // dev/CI scaffolding, not an operator surface (hidden), used with the
@@ -42,6 +46,8 @@ prefix-affinity router pin a session to one engine.`,
 func init() {
 	rootCmd.AddCommand(mockEngineCmd)
 	mockEngineCmd.Flags().IntVar(&mockEnginePort, "port", 9001, "port to listen on (127.0.0.1)")
+	mockEngineCmd.Flags().DurationVar(&mockEngineLatency, "latency", 0,
+		"fixed per-request latency; 0 keeps the realistic bimodal-with-tail default. Routing demos set this low (e.g. 3ms) so runs finish fast.")
 }
 
 // newMockEngineMux builds the OpenAI-compatible handler set backed by the
@@ -88,7 +94,11 @@ func runMockEngine(parent context.Context, port int) error {
 	ctx, cancel := signal.NotifyContext(parent, os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	be := backends.NewMock(fmt.Sprintf("mock-engine:%d", port))
+	var opts []backends.MockOption
+	if mockEngineLatency > 0 {
+		opts = append(opts, backends.WithLatency(mockEngineLatency, mockEngineLatency))
+	}
+	be := backends.NewMock(fmt.Sprintf("mock-engine:%d", port), opts...)
 	mux := newMockEngineMux(be, fmt.Sprintf("%d", port))
 
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
