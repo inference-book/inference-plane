@@ -473,7 +473,7 @@ func (r *Router) handleWithObservability(w http.ResponseWriter, req *http.Reques
 	// v0.2 ch8: carry the X-IPlane-Session affinity key on the context
 	// so the prefix-affinity policy can pin a conversation to a replica.
 	// RoundRobin ignores it; only PrefixAffinity reads it.
-	session := sessionFromHeader(req)
+	session := sessionKey(req)
 	replicaID, replicaEndpoint, replicaOK := r.pickReplica(
 		policy.WithSession(req.Context(), session), dep)
 	// v0.2 ch8 (#173): record whether this session landed where it last
