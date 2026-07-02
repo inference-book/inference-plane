@@ -47,11 +47,13 @@ func (r *Router) serveFlat(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// Decode only the model field. Other fields stay opaque -- the
+	// Decode the model field (the routing key) plus messages (for the
+	// header-less session-affinity key). Other fields stay opaque -- the
 	// router does not interpret or rewrite them. The engine sees the
 	// body byte-for-byte as the client sent it.
 	var probe struct {
-		Model string `json:"model"`
+		Model    string        `json:"model"`
+		Messages []flatMessage `json:"messages"`
 	}
 	if err := json.Unmarshal(body, &probe); err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, fmt.Sprintf("request body is not valid JSON: %v", err), "invalid_request_error")
@@ -80,6 +82,14 @@ func (r *Router) serveFlat(w http.ResponseWriter, req *http.Request) {
 	// must match or the proxy may set chunked encoding incorrectly.
 	req.Body = io.NopCloser(bytes.NewReader(body))
 	req.ContentLength = int64(len(body))
+
+	// v0.2 ch8 (#181): header-less clients (a plain OpenAI SDK pointed at
+	// the flat URL) get a session-affinity key derived from the body's
+	// opening. The explicit X-IPlane-Session header still wins in
+	// sessionKey; this only fills the gap when it's absent.
+	if key := deriveSessionKey(probe.Messages); key != "" {
+		req = req.WithContext(withDerivedSession(req.Context(), key))
+	}
 
 	// stripDeployPrefix=false: the flat URL has no iplane-side prefix
 	// to strip; /v1/chat/completions forwards as-is to the engine.
