@@ -161,6 +161,22 @@
         }
       ],
       "fieldConfig": { "defaults": { "unit": "s" } }
+    },
+    {
+      "id": 8,
+      "title": "Session affinity hit-rate (per deploy_id)",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 40, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "mimir" },
+      "description": "Fraction of session-tagged requests that landed on the replica the session last used. Ch 8's money panel: round_robin scatters sessions so it sits near 1/N; prefix_affinity pins them so it climbs toward 1.0. A routing-locality proxy for the engine's own prefix-cache hit-rate (v0.2 ch8, #173).",
+      "targets": [
+        {
+          "expr": "sum by (deploy_id) (rate(iplane_router_affinity_total{outcome=\"hit\"}[1m])) / sum by (deploy_id) (rate(iplane_router_affinity_total[1m]))",
+          "legendFormat": "hit-rate {{deploy_id}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 } }
     }
   ]
 }
