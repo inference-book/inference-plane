@@ -100,6 +100,8 @@ Per the cadence note above: if the manual path and the iplane move don't each fi
 
 **iplane work this implies (build order):** (1) **session mode on `iplane load`** — closed-loop, stateful, `X-IPlane-Session` per conversation, content from a public multi-turn corpus (ShareGPT / LMSYS-Chat-1M); validated against `mock`. (2) **`PrefixAffinity` policy** + `X-IPlane-Session` resolution + router-side prefix→replica map. (3) **Prefix-cache hit-rate metric family** + Grafana panel (mock reports a simulated hit-rate, real engine reports `gpu_prefix_cache_hit_rate`). (4) **`examples/07-prefix-affinity/`** walkthrough. (5) One real multi-replica run for the book figures. Mock is *our* build/CI scaffolding; the chapter narrative is real-cluster only (the reader is an operator who deploys for real — affinity itself is not a free lesson).
 
+**Shipped so far** (epic #176 is the live tracker): (1) session mode — PR #177. (2) `PrefixAffinity` + `router.routing_policy` toggle — PR #178. Local GPU-free harness (external non-owning provider + `iplane mock-engine`), split out as its own step — PR #183. (3) affinity hit-rate metric + Grafana panel, measured router-side as a proxy for the engine's `gpu_prefix_cache_hit_rate` (the engine metric itself is deferred to issue 51, not faked on mock) — PR #184. Remaining: load-aware override (#174), header-less body-derived session key (#181), the walkthrough + book figures (#175).
+
 ---
 
 ## v0.3 — Distributed Inference (medium detail)
