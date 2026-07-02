@@ -1,0 +1,15 @@
+# Demo 07 config: prefix-affinity routing on the mock engine.
+#
+# routing_policy: prefix_affinity is the whole point -- a session's turns
+# (keyed on X-IPlane-Session) pin to the replica holding its prefix. Flip
+# to round_robin to watch the sessions scatter instead.
+backend:
+  engine: "mock"
+  name: "mock"
+
+router:
+  routing_policy: prefix_affinity
+  # Scheduler off (Beat 1 direct-forward path); affinity is about
+  # replica selection, not queueing.
+  queue:
+    servicers: 0

@@ -662,9 +662,15 @@ func (r *Router) handleDescribeError(w http.ResponseWriter, deployID string, err
 func (r *Router) forwardable(w http.ResponseWriter, dep *provisionerv1.Deployment) bool {
 	switch dep.GetState() {
 	case provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING:
-		if dep.GetEngineEndpoint() == "" {
-			writeOpenAIError(w, http.StatusServiceUnavailable, "deployment is running but engine endpoint not yet stamped; retry shortly", "deployment_not_ready")
+		// Plural-aware: a multi-replica deployment created directly (not
+		// scaled up from 1) never stamps the singular engine_endpoint, so
+		// gate on the effective endpoint set the router actually routes
+		// over. Single-instance falls back to [singular] and is unchanged.
+		if !hasStampedEndpoint(dep) {
+			// Set Retry-After before writing the body: headers set after
+			// WriteHeader (which writeOpenAIError calls) are silently dropped.
 			w.Header().Set("Retry-After", "2")
+			writeOpenAIError(w, http.StatusServiceUnavailable, "deployment is running but engine endpoint not yet stamped; retry shortly", "deployment_not_ready")
 			return false
 		}
 		return true

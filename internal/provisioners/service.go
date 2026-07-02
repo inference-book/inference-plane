@@ -907,6 +907,25 @@ func WithDeploymentExecutor(e DeploymentExecutor) Option {
 //     deployment record in the state file. With Wait=true, block
 //     until terminal state; otherwise return after PENDING is
 //     written.
+//
+// isExternalDeploy reports whether every replica group targets the
+// external provider. Such deploys carry no image (they attach to an
+// operator-managed engine rather than running one). A mixed fleet
+// (external + owning provider) is not external -- it still needs an
+// image for the owning slots.
+func isExternalDeploy(req *provisionerv1.CreateDeploymentRequest) bool {
+	specs := req.GetReplicasSpec()
+	if len(specs) == 0 {
+		return false
+	}
+	for _, sp := range specs {
+		if sp.GetProvider() != ProviderExternal {
+			return false
+		}
+	}
+	return true
+}
+
 func (s *Service) CreateDeployment(ctx context.Context, req *provisionerv1.CreateDeploymentRequest) (*provisionerv1.CreateDeploymentResponse, error) {
 	dep := req.GetDeployment()
 	if dep == nil {
@@ -915,7 +934,9 @@ func (s *Service) CreateDeployment(ctx context.Context, req *provisionerv1.Creat
 	if err := ValidateID(dep.GetId()); err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
-	if dep.GetImage() == "" {
+	// The external provider attaches to an already-running engine, so it
+	// carries no image to run. Every other deploy form needs one.
+	if dep.GetImage() == "" && !isExternalDeploy(req) {
 		return nil, status.Error(codes.InvalidArgument, "deployment.image is required")
 	}
 	if dep.GetModel() == "" {
@@ -949,9 +970,17 @@ func (s *Service) CreateDeployment(ctx context.Context, req *provisionerv1.Creat
 	// model-info API + propagates HF_TOKEN. Failing here costs us a
 	// network round-trip but saves a ~$0.10-0.50 misfire when the
 	// operator typo'd the model id.
-	resolved, err := s.modelStore.Resolve(ctx, dep.GetModel())
-	if err != nil {
-		return nil, status.Errorf(codes.InvalidArgument, "model spec: %v", err)
+	//
+	// Skipped for external deploys: iplane isn't fetching weights (the
+	// operator's engine already serves the model), so the model string
+	// is just a routing label -- validating it against HF would be wrong.
+	resolved := modelstores.Resolved{EngineModelArg: dep.GetModel()}
+	if !isExternalDeploy(req) {
+		var err error
+		resolved, err = s.modelStore.Resolve(ctx, dep.GetModel())
+		if err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "model spec: %v", err)
+		}
 	}
 	dep.Model = resolved.EngineModelArg
 	// Merge ModelStore env onto the deployment. Operator-supplied
