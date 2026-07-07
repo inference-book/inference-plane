@@ -18,6 +18,373 @@
 
 snapshots:
 
+  # DRAFT — ch08-final is not yet cut. The capability set is locked (epic #176
+  # closed); set `date`/`alias` to the real values at tag time. What remains on
+  # the iplane side is bug-fixing/tweaking, and on the book side the 8.7
+  # transcription of this entry plus the paid-run figures.
+  - tag: ch08-final
+    alias: v0.2.x   # set at tag time
+    chapter: 8
+    chapter_title: Stateful Routing and Prefix-Cache Reuse
+    branch: release/v0.2
+    date: TBD   # set when the tag is cut
+
+    summary: |
+      Cache-aware routing. Chapter 7 fanned a deployment out to N replicas
+      behind round-robin, which scatters a multi-turn conversation across
+      engines and defeats the engine's prefix cache. This chapter adds a
+      second routing policy, `prefix_affinity`, that keeps a conversation on
+      the replica holding its prefix. The router gains real state (a
+      session→replica pin map) predicted from its own routing history, never
+      by querying the engine. Session identity rides a request-level hint
+      (`X-IPlane-Session`) or, for header-less OpenAI-SDK clients, a key the
+      router derives from the conversation's opening. A default-off load-aware
+      override spills off a saturated pinned replica while keeping the pin.
+      The whole arc runs GPU-free on `iplane mock-engine` behind the external
+      (non-owning) provider; the prefix-cache hit-rate and latency figures come
+      from a real multi-replica run. No proto changes, no engine changes: one
+      new policy behind the Chapter 7 routing seam plus one request hint.
+
+    capabilities:
+
+      - name: Session-mode load driver
+        status: shipped
+        notes: |
+          `iplane load session` — closed-loop, stateful, multi-turn driver.
+          One goroutine per conversation holds history and loops
+          build-turn → POST → append response → think-time, stamping each
+          request with `X-IPlane-Session`. Closed-loop is what produces the
+          long-lived overlapping sessions that make routing locality matter.
+          Flags: `--sessions N`, `--turns M`, `--think-time`,
+          `--system-prompt-tokens`, reusing `--target/--service-url/--model/
+          --stream`. Conversation content is a deterministic synthetic
+          generator; real-corpus (ShareGPT/LMSYS) replay is walkthrough-only.
+        prs: [177]
+        related_issues: [171]
+
+      - name: PrefixAffinity routing policy
+        status: shipped
+        notes: |
+          Second `internal/router/policy.Policy` impl behind the seam Chapter 7
+          cut. `router.routing_policy: round_robin (default) | prefix_affinity`,
+          toggled server-side on `iplane serve` (`--routing-policy`, config, or
+          `IPLANE_ROUTER_ROUTING_POLICY`); unknown values fail fast at startup.
+          Pins a session's turns to the replica that holds its prefix; a new
+          session places round-robin then pins; a pin to a quarantined or
+          scaled-away replica transparently re-pins. The router predicts
+          residency from its own routing history (a pin map) — it never queries
+          the engine, which keeps engine state off the hot path.
+        prs: [178]
+        related_issues: [172]
+
+      - name: Header-less body-derived session key
+        status: shipped
+        notes: |
+          A plain OpenAI SDK that sends no `X-IPlane-Session` still gets
+          affinity. On the flat `/v1/chat/completions` URL (which already
+          buffers the body to read `model`) the router derives a key from the
+          conversation's opening — hash(first system message + first user
+          message) — stable across a conversation's turns and distinct per
+          conversation. Precedence: explicit header > derived key > none. The
+          deploy-id URL streams the body unparsed and stays header-only.
+          Opening-hash is coarse: two conversations sharing a system prompt get
+          distinct keys; longest-shared-prefix co-location is a follow-up.
+        prs: [186]
+        related_issues: [181]
+
+      - name: Load-aware affinity override
+        status: shipped
+        notes: |
+          `router.affinity_overload_threshold` (0 = off, pure stickiness).
+          When a session's pinned replica has >= threshold requests in flight,
+          the turn spills to the coolest eligible replica but the pin is NOT
+          moved — a temporary detour that snaps back when load subsides. If the
+          pin is itself the coolest replica, no spill. Resolves the
+          affinity-vs-fairness tension with Chapter 7's per-tenant fair-share.
+          Reuses existing metrics: a spill registers as an affinity miss, so
+          hit-rate dips under overload while per-replica in-flight stays
+          bounded.
+        prs: [185]
+        related_issues: [174]
+
+      - name: Affinity hit-rate metric
+        status: shipped
+        notes: |
+          `iplane.router.affinity.total` (counter, labeled deploy_id /
+          outcome=hit|miss) + v0.2 Grafana panel. For each request carrying a
+          session key the router compares the chosen replica against where the
+          session last landed. hit-rate = hit / (hit+miss): ~1/N under
+          round-robin, ~1.0 under affinity — the chapter's money panel.
+          Measured AT THE ROUTER from iplane's own routing decisions: a
+          routing-locality PROXY for the engine's real
+          `gpu_prefix_cache_hit_rate`, not the engine number itself. The two
+          track each other except under KV eviction (the memory-pressure beat).
+        prs: [184]
+        related_issues: [173]
+
+      - name: External provider + `iplane mock-engine`
+        status: shipped
+        notes: |
+          A new provider category: the external (non-owning) provider.
+          `iplane deployment deploy <id> --provider external --engine-endpoints
+          http://a,http://b` registers a RUNNING deployment pointing at engines
+          the operator runs themselves (one replica per URL) — no provisioning,
+          no image, no model validation. Spawn fabricates from the endpoint
+          (zero cost); Terminate detaches, never touching the operator's engine.
+          `iplane mock-engine --port P --latency` serves the OpenAI surface over
+          a mock backend, making the whole prefix-affinity walkthrough run
+          GPU-free. External is the static precursor to Chapter 10
+          self-registration and the degenerate case of the Chapter 11 HostedAPI
+          provider.
+        prs: [183]
+        related_issues: [179]
+
+      - name: Prefix-affinity walkthrough (examples/07)
+        status: shipped
+        notes: |
+          `examples/07-prefix-affinity/run.sh` (or `make demo`) — a runnable,
+          GPU-free three-act walkthrough on the mock engine. 07a round_robin:
+          sessions scatter (9/9). 07b prefix_affinity: each session pins
+          (scatter 0/9). 07c + `affinity_overload_threshold`: saturated replicas
+          shed load, scatter climbs back (8/9). Measures ROUTING (a per-engine
+          session distribution + scatter score), no obs stack needed. A
+          "Capturing the book figures (real cluster)" checklist covers the paid
+          run that produces the hit-rate / TTFT screenshots.
+        prs: [188]
+        related_issues: [175]
+
+      - name: "Engine `gpu_prefix_cache_hit_rate` scrape (ground truth)"
+        status: deferred
+        moved_to: v0.3+
+        notes: |
+          The affinity hit-rate is a router-side proxy. The engine's own
+          prefix-cache hit-rate is the ground truth and requires scraping the
+          engine's `/metrics`, still deferred. Its divergence from the proxy
+          under KV eviction is exactly the memory-pressure story.
+        related_issues: [51]
+
+      - name: Engine-signal-informed routing
+        status: deferred
+        moved_to: v0.3+
+        notes: |
+          Predicting residency from routing history is a floor, not a ceiling.
+          Stronger prediction (fleet-wide radix tree + overlap score, à la
+          NVIDIA Dynamo) or listening to engine KV-cache events (à la llm-d)
+          would raise hit-rate at the cost of a fleet-wide cache index kept
+          current. Tracked as a spike.
+        related_issues: [189]
+
+      - name: Demo fidelity — context pruning + asymmetric whale load
+        status: deferred
+        moved_to: v0.3+
+        notes: |
+          The closed-loop driver runs uniform sessions, so 07c shows
+          saturation-spill rather than a true single-session whale, and
+          front-pruning invalidating a cached prefix can't be reproduced. Both
+          need driver features (per-session load weighting, context pruning)
+          not yet built.
+        related_issues: [187]
+
+    cli_surface:
+      # New at this tag (additive over ch07-final):
+      - iplane load session --sessions --turns --think-time --system-prompt-tokens
+      - iplane mock-engine --port --latency
+      - iplane serve --routing-policy round_robin|prefix_affinity
+      - iplane deployment deploy --provider external --engine-endpoints <url,url,...>
+
+    environment_variables:
+      recommended:
+        - name: IPLANE_ROUTER_ROUTING_POLICY
+          notes: "`round_robin` (default) | `prefix_affinity`. Equivalent to `--routing-policy` on `iplane serve`."
+        - name: IPLANE_ROUTER_AFFINITY_OVERLOAD_THRESHOLD
+          notes: "0 = off (pure stickiness) | N = spill when a pinned replica has >= N requests in flight."
+
+    known_limitations:
+      - id: affinity-hit-rate-is-a-proxy
+        notes: |
+          The router measures routing locality, not the engine's cache. The
+          engine's real `gpu_prefix_cache_hit_rate` is deferred (issue 51).
+      - id: kv-eviction-real-engine-only
+        notes: |
+          The cache ceiling (pinned sessions evicting each other) and
+          front-pruning invalidation are real-engine phenomena; the mock has no
+          cache to evict.
+      - id: engine-is-one-opaque-kv-domain
+        notes: |
+          The router routes to engines, not GPUs. One engine's KV domain
+          spanning multiple GPUs (tensor parallelism) is Chapter 10; KV memory
+          budgets at model scale are Chapter 9.
+
+    patterns_introduced:
+      - name: routing-decisions-respect-cache-locality
+        notes: |
+          A stateless load balancer optimizes for even spread; once backends
+          hold warm state, even spread is the wrong objective and the router
+          becomes stateful to do better.
+      - name: predict-dont-query
+        notes: |
+          The router predicts prefix residency from its own routing history
+          rather than putting the engine's internal state on the hot path.
+          Correctness depends on the routing being valid, not the prediction
+          being right (a bad prediction costs one cold prefill).
+      - name: design-ahead-of-need-when-visible
+        notes: |
+          Chapter 7's routing-policy seam was speculative until this chapter's
+          second implementation paid it back. Named-future seams pay back;
+          purely speculative ones just add complexity.
+
+    metric_vocabulary:
+      reliably_emitted:
+        - name: iplane.router.affinity.total
+          type: counter
+          source: internal/router (PrefixAffinity)
+          notes: Labeled deploy_id / outcome=hit|miss. Router-side affinity hit-rate, a proxy for the engine's gpu_prefix_cache_hit_rate.
+
+  # ---------------------------------------------------------------------------
+  # Backfill: ch07-final was tagged 2026-06-29 but no capabilities entry was
+  # written at the time. Reconstructed from what shipped at the tag so the book
+  # Ch 7 Capability Snapshot (currently a promissory placeholder) has a
+  # canonical source and `make check-snapshots` can verify it.
+  - tag: ch07-final
+    alias: v0.2.0
+    chapter: 7
+    chapter_title: Routing, Queueing, and the Control Plane in the Data Path
+    branch: release/v0.2
+    date: 2026-06-29
+
+    summary: |
+      The control plane re-enters the inference data path. `iplane serve`
+      becomes the long-lived daemon every request flows through: a router in
+      front of the engine, a bounded queue for multi-tenant fairness, a
+      scheduler that picks what runs next, and multi-replica fan-out. The
+      operator points clients at one OpenAI-compatible iplane URL instead of
+      the engine's proxy URL. Three beats — router (two URL shapes,
+      request-level metrics, W3C trace propagation, idle-TTL reaper),
+      queue+scheduler (per-tenant strict-priority + weighted-lottery fair-share
+      from request headers), and multi-replica fan-out (one deployment ID over
+      N instances, `iplane deployment scale`, per-replica health-checking,
+      heterogeneous multi-cloud fleets). The routing-policy seam is cut here;
+      prefix-cache affinity is Chapter 8.
+
+    capabilities:
+
+      - name: Data-plane router
+        status: shipped
+        notes: |
+          `iplane serve` runs a thin reverse proxy in front of the engine. Two
+          URL shapes: `/v1/<deploy-id>/v1/...` for unambiguous routing and flat
+          `/v1/chat/completions` (body-peek `model`) for OpenAI-SDK compat.
+          Request-level metrics tick here and populate the v0.2 Grafana
+          dashboard. W3C TraceContext + Baggage propagate router → engine.
+          Idle-TTL reaper + `TouchDeployment` RPC + `--no-idle-destroy` pin
+          protect against leaked deployments. The CP/DP boundary is gRPC-only
+          (enforced constraint).
+        prs: [109, 127]
+        docs: ["examples/04-router-in-path/"]
+        related_issues: [107]
+
+      - name: Queue and scheduler
+        status: shipped
+        notes: |
+          A bounded waiting room in front of the router; `internal/scheduler/`
+          hosts the dequeue-and-dispatch primitive. Tenant + priority resolve
+          from request headers (`X-IPlane-Tenant`, `X-IPlane-Priority`):
+          strict-priority across lanes, weighted-lottery fair-share within a
+          lane. Per-deployment in-flight cap mirrors the engine's
+          `max-num-seqs`. Priority is request-level only — engines stay
+          priority-blind. Observability: queue-depth gauge + queue-wait
+          histogram.
+        prs: [128, 136]
+        docs: ["examples/05-fair-queueing/"]
+
+      - name: Multi-replica fan-out
+        status: shipped
+        notes: |
+          One stable deployment ID over N backing instances (parallel
+          instance_ids / engine_endpoints / unhealthy_instance_ids). `iplane
+          deployment scale <id> N` is the capacity verb; `DEGRADED` is the
+          first-class partial-provisioning outcome. The router fans out
+          round-robin across the healthy replicas, composing with the unhealthy
+          set so the data path is never told which replicas to skip.
+        prs: [137, 140]
+        docs: ["examples/06-multi-replica/"]
+
+      - name: Per-replica health checker
+        status: shipped
+        notes: |
+          A background poller probes each replica's `/health` on a cadence and
+          auto-quarantines stuck replicas; recovered replicas rejoin the
+          rotation. Reaction is passive on the data path — a quarantined
+          replica just stops receiving new requests. Per-replica in-flight
+          gauge + routing-decisions counter restore decision visibility.
+        prs: [141, 142]
+
+      - name: Request metric families
+        status: shipped
+        notes: |
+          The four "metrics that matter" removed from the v0.1 dashboard come
+          back now that the router emits them server-side: request rate,
+          request latency histograms, completion-token throughput, and backend
+          health. This closes the ch06 known-limitation
+          `engine-metrics-not-in-dashboard` at the router layer; the engine's
+          own `/metrics` scrape stays deferred (issue 51).
+        related_issues: [51]
+
+      - name: Routing-policy seam
+        status: shipped
+        notes: |
+          Per-request replica selection goes through an interface
+          (`internal/router/policy`); round-robin is the v0.2 default impl.
+          Interface-only at this tag — the seam exists so Chapter 8's
+          `PrefixAffinity` drops in as a second impl without a router refactor.
+        prs: [148]
+
+      - name: Multi-cloud provider catalog
+        status: shipped
+        notes: |
+          Heterogeneous fleets via `ReplicaSpec.replicas` — one deployment can
+          pull replicas from RunPod, Vast.ai, and Lambda Labs together, with the
+          homogeneous case as the degenerate one-spec form. Vast.ai marketplace
+          adapter, Lambda Labs fixed-catalog adapter (HTTP-Basic),
+          `IPLANE_PROVIDER` env-driven default. Hardware spec + metadata on
+          `Instance` exposes GPU SKU / VRAM / region without proto churn.
+        prs: [152, 154, 156]
+        related_issues: [18]
+
+      - name: Prefix-cache affinity
+        status: deferred
+        moved_to: ch08-final
+        notes: |
+          The routing-policy seam is cut here; the cache-aware `prefix_affinity`
+          policy that keeps a conversation on the replica holding its prefix
+          ships in Chapter 8.
+
+    cli_surface:
+      # New at this tag (additive over ch06-final):
+      - iplane serve --routing-policy round_robin
+      - iplane deployment scale <id> N
+      - iplane deployment touch
+      - iplane load --target --priority --tenant --stream --output json
+      # Request headers the router/queue read:
+      - "X-IPlane-Tenant / X-IPlane-Priority (request-level)"
+
+    environment_variables:
+      recommended:
+        - name: IPLANE_PROVIDER
+          notes: Default provider when a ReplicaSpec omits one.
+
+    known_limitations:
+      - id: round-robin-defeats-prefix-cache
+        notes: |
+          Round-robin scatters a multi-turn conversation across replicas, so
+          the engine's prefix cache collapses toward 1/N hit-rate. Chapter 8's
+          prefix-affinity policy closes this.
+      - id: engine-metrics-scrape-still-deferred
+        notes: |
+          Router-emitted request metrics are back, but the engine's own
+          `/metrics` (e.g. gpu_prefix_cache_hit_rate) still isn't scraped
+          (issue 51).
+
   - tag: ch06-final
     alias: v0.1.0
     chapter: 6
