@@ -18,16 +18,12 @@
 
 snapshots:
 
-  # DRAFT — ch08-final is not yet cut. The capability set is locked (epic #176
-  # closed); set `date`/`alias` to the real values at tag time. What remains on
-  # the iplane side is bug-fixing/tweaking, and on the book side the 8.7
-  # transcription of this entry plus the paid-run figures.
   - tag: ch08-final
-    alias: v0.2.x   # set at tag time
+    alias: v0.2.1
     chapter: 8
     chapter_title: Stateful Routing and Prefix-Cache Reuse
     branch: release/v0.2
-    date: TBD   # set when the tag is cut
+    date: 2026-07-06
 
     summary: |
       Cache-aware routing. Chapter 7 fanned a deployment out to N replicas
