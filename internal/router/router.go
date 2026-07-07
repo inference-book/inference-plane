@@ -157,6 +157,14 @@ type Router struct {
 	// Like rrCounters, entries leak on DestroyDeployment in v0.2 --
 	// bounded and cheap; cleanup is a follow-up.
 	inFlight sync.Map
+
+	// sessionLastReplica observes, per (deploy, session), the replica a
+	// session last landed on, so the router can record affinity hit/miss
+	// independent of the active policy (v0.2 ch8, #173). Keyed
+	// deployID + "\x00" + session. Distinct from the PrefixAffinity
+	// policy's own pin map: this measures locality for round-robin too.
+	// Leaks on DestroyDeployment like the maps above; bounded and cheap.
+	sessionLastReplica sync.Map
 }
 
 // pendingSchedCfg gathers per-option mutations before New
@@ -462,7 +470,18 @@ func (r *Router) handleWithObservability(w http.ResponseWriter, req *http.Reques
 	// Beat 1+2 deployments, the helpers fall back to the singular
 	// instance_id / engine_endpoint and the loop picks them every
 	// time -- no behavior change from Beat 1+2.
-	replicaID, replicaEndpoint, replicaOK := r.pickReplica(dep)
+	// v0.2 ch8: carry the X-IPlane-Session affinity key on the context
+	// so the prefix-affinity policy can pin a conversation to a replica.
+	// RoundRobin ignores it; only PrefixAffinity reads it.
+	session := sessionKey(req)
+	replicaID, replicaEndpoint, replicaOK := r.pickReplica(
+		policy.WithSession(req.Context(), session), dep)
+	// v0.2 ch8 (#173): record whether this session landed where it last
+	// did -- routing-locality hit-rate, policy-agnostic. Round-robin
+	// scatters (misses); prefix_affinity pins (hits).
+	if replicaOK && session != "" {
+		r.recordAffinity(req.Context(), dep.GetId(), session, replicaID)
+	}
 	ctx, span := r.tracer.Start(req.Context(), spanNameDispatch,
 		trace.WithSpanKind(trace.SpanKindServer),
 		trace.WithAttributes(
@@ -658,9 +677,15 @@ func (r *Router) handleDescribeError(w http.ResponseWriter, deployID string, err
 func (r *Router) forwardable(w http.ResponseWriter, dep *provisionerv1.Deployment) bool {
 	switch dep.GetState() {
 	case provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING:
-		if dep.GetEngineEndpoint() == "" {
-			writeOpenAIError(w, http.StatusServiceUnavailable, "deployment is running but engine endpoint not yet stamped; retry shortly", "deployment_not_ready")
+		// Plural-aware: a multi-replica deployment created directly (not
+		// scaled up from 1) never stamps the singular engine_endpoint, so
+		// gate on the effective endpoint set the router actually routes
+		// over. Single-instance falls back to [singular] and is unchanged.
+		if !hasStampedEndpoint(dep) {
+			// Set Retry-After before writing the body: headers set after
+			// WriteHeader (which writeOpenAIError calls) are silently dropped.
 			w.Header().Set("Retry-After", "2")
+			writeOpenAIError(w, http.StatusServiceUnavailable, "deployment is running but engine endpoint not yet stamped; retry shortly", "deployment_not_ready")
 			return false
 		}
 		return true

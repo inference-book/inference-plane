@@ -1,7 +1,8 @@
 # Dashboard provisioning config. Grafana scans the path below at
 # startup (and every updateIntervalSeconds thereafter) and loads any
-# *.json files as dashboards. The Inference Plane v0.1 dashboard
-# lives in this folder alongside this config.
+# *.json files as dashboards. This folder holds the serving dashboards
+# (inference-plane-v01 / -v02) and the deployment & lifecycle dashboard
+# (inference-plane-deployment) covering the provision/teardown path.
 
 apiVersion: 1
 

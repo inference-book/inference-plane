@@ -539,8 +539,6 @@ func (p *Provider) Describe(ctx context.Context, providerID string) (*provisione
 	return p.podToInstance(&pod, specFromPod(&pod, tags), classifySKU(pod.gpuSKU()), pod.gpuSKU(), pod.gpuCountInt()), nil
 }
 
-
-
 // List calls GET /pods. When the filter includes iplane-id, we add
 // ?name=iplane-<id> for server-side filtering. Other filter keys
 // (e.g., iplane-operator) are applied client-side, but in v0.1 only
@@ -692,8 +690,8 @@ func specFromPod(pod *podBody, tags map[string]string) *provisionerv1.Spec {
 		BaseImage: pod.Image,
 		Tags:      tags,
 		Requirements: &provisionerv1.ResourceRequirements{
-			Sku:      pod.gpuSKU(),
-			GpuCount: int32(pod.gpuCountInt()),
+			Sku:       pod.gpuSKU(),
+			GpuCount:  int32(pod.gpuCountInt()),
 			MinVramGb: int32(pod.gpuVRAMGB()),
 		},
 	}
@@ -769,9 +767,9 @@ type createPodRequest struct {
 	DockerStartCmd   []string `json:"dockerStartCmd,omitempty"`
 	DockerEntrypoint []string `json:"dockerEntrypoint,omitempty"`
 	Interruptible    bool     `json:"interruptible,omitempty"`
-	TemplateID        string   `json:"templateId,omitempty"`
-	SupportPublicIP   bool     `json:"supportPublicIp,omitempty"`
-	DataCenterIDs     []string `json:"dataCenterIds,omitempty"` // best-effort; if rejected, RunPod schedules anywhere
+	TemplateID       string   `json:"templateId,omitempty"`
+	SupportPublicIP  bool     `json:"supportPublicIp,omitempty"`
+	DataCenterIDs    []string `json:"dataCenterIds,omitempty"` // best-effort; if rejected, RunPod schedules anywhere
 }
 
 // createPodResponse is the minimal response shape from POST /pods.
@@ -786,15 +784,21 @@ type createPodResponse struct {
 // deliberately do not bind every field RunPod returns -- only the
 // ones that flow through to the iplane Instance.
 type podBody struct {
-	ID            string         `json:"id"`
-	Name          string         `json:"name"`
-	Image         string         `json:"image"`
-	MachineID     string         `json:"machineId"`
-	CostPerHr     float64        `json:"costPerHr"`
-	CreatedAt     string         `json:"createdAt"`
-	DesiredStatus string         `json:"desiredStatus"`
-	PublicIP      string         `json:"publicIp"`
-	Ports         []string       `json:"ports"`
+	ID            string  `json:"id"`
+	Name          string  `json:"name"`
+	Image         string  `json:"image"`
+	MachineID     string  `json:"machineId"`
+	CostPerHr     float64 `json:"costPerHr"`
+	CreatedAt     string  `json:"createdAt"`
+	DesiredStatus string  `json:"desiredStatus"`
+	// LastStartedAt is RunPod's UTC timestamp for when the pod's
+	// container process last started. Empty until the image pull
+	// finishes and the container comes up, so a non-empty value is the
+	// "image-pull done, engine now initializing" signal the deploy
+	// phase-split reads (see deployer.go classifyEnginePhase).
+	LastStartedAt string   `json:"lastStartedAt"`
+	PublicIP      string   `json:"publicIp"`
+	Ports         []string `json:"ports"`
 	// PortMappings encodes RunPod's NAT for ports declared in the
 	// create-pod request. Keys are container-internal ports (as
 	// strings, JSON-style), values are the public-IP-side ports.
@@ -802,14 +806,14 @@ type podBody struct {
 	// reaches the container's port 22. SSH wires this through into
 	// Ssh.Port; without the translation, every dial hits the host's
 	// sshd or nothing at all.
-	PortMappings  map[string]int `json:"portMappings"`
-	Machine       *podMachine    `json:"machine"`
+	PortMappings map[string]int `json:"portMappings"`
+	Machine      *podMachine    `json:"machine"`
 }
 
 type podMachine struct {
-	GPUTypeID    string  `json:"gpuTypeId"`
-	GPUCount     int     `json:"gpuCount"`
-	DataCenterID string  `json:"dataCenterId"`
+	GPUTypeID    string   `json:"gpuTypeId"`
+	GPUCount     int      `json:"gpuCount"`
+	DataCenterID string   `json:"dataCenterId"`
 	GPUType      *gpuType `json:"gpuType"`
 }
 
@@ -853,6 +857,21 @@ func (p *podBody) dataCenter() string {
 		return p.Machine.DataCenterID
 	}
 	return ""
+}
+
+// machinePresent reports whether RunPod has scheduled the pod onto a
+// concrete host yet. Freshly-rented pods return an empty machine object
+// ("machine": {}) from the immediate follow-up GET and the populated
+// record lands a few seconds later (see the RunPod-machine gotcha in
+// CLAUDE.md), so a non-nil but empty Machine still counts as "not
+// scheduled." Any real field populated means capacity was found.
+func (p *podBody) machinePresent() bool {
+	m := p.Machine
+	if m == nil {
+		return false
+	}
+	return m.GPUTypeID != "" || m.DataCenterID != "" || m.GPUCount > 0 ||
+		(m.GPUType != nil && m.GPUType.ID != "")
 }
 
 // Compile-time check.

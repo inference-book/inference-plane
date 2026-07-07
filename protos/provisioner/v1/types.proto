@@ -536,6 +536,15 @@ message ReplicaSpec {
   // view this is always 1 (the request's compressed N expands to
   // N one-each entries).
   int32 replicas = 4;
+
+  // engine_endpoint is the pre-existing engine URL for the "external"
+  // provider -- an engine the operator runs themselves (on-prem vLLM,
+  // a k8s Service, or a local `iplane mock-engine`). When set with
+  // provider="external", iplane registers a RUNNING replica pointing
+  // at this URL instead of provisioning anything. Ignored by owning
+  // providers (runpod/vast/lambdalabs/local). One endpoint per replica,
+  // so the multi-endpoint form expands to N one-each ReplicaSpec entries.
+  string engine_endpoint = 5;
 }
 
 // Priority is the lane an inbound request joins on its way to the

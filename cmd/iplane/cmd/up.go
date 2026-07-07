@@ -51,22 +51,22 @@ import (
 // `iplane deployment deploy` -- env fallbacks + flags + an explicit
 // `--no-telemetry` escape hatch.
 var (
-	upProvider     string
-	upModel        string
-	upClass        string
-	upImage        string
-	upRegion       string
-	upOtelEndpoint string
-	upOtelHeaders  map[string]string
-	upNoTelemetry  bool
-	upID           string
-	upTimeout      time.Duration
-	upNoChat       bool
+	upProvider      string
+	upModel         string
+	upClass         string
+	upImage         string
+	upRegion        string
+	upOtelEndpoint  string
+	upOtelHeaders   map[string]string
+	upNoTelemetry   bool
+	upID            string
+	upTimeout       time.Duration
+	upNoChat        bool
 	upDebugShell    bool
 	upIdleTTL       time.Duration
 	upNoIdleDestroy bool
 	upMaxTokens     int32
-	upTemperature  float64
+	upTemperature   float64
 )
 
 const upDefaultImage = "vllm/vllm-openai:v0.7.0"
@@ -142,16 +142,6 @@ func runUp(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("RUNPOD_API_KEY is required (iplane up provisions a real RunPod pod)")
 	}
 
-	// In-process service. iplane up doesn't support --service-url for
-	// v0.1: it's the one-shot operator verb, no separate `iplane serve`
-	// needed. Operators who want forward-to-remote can use the explicit
-	// `iplane deployment deploy` against an `iplane serve`.
-	cli, provisionerSvc, cleanup, err := newInProcessUpClient(apiKey)
-	if err != nil {
-		return err
-	}
-	defer cleanup()
-
 	// v0.2 ch7-beat1.10 acceptance #2: when the operator has an OTLP
 	// sink configured, init the iplane-up process's own telemetry so
 	// the router's metrics + spans land in Tempo/Mimir with
@@ -159,7 +149,23 @@ func runUp(cmd *cobra.Command, _ []string) error {
 	// traffic in the same dashboard. Skip the init if no endpoint is
 	// set or --no-telemetry is on; recorder stays nil and the router
 	// is nil-safe.
+	//
+	// Inited BEFORE the in-process service so the same recorder feeds
+	// the deployment-lifecycle instruments (provision/phase/teardown
+	// durations) -- `up` is the cold-start path operators actually
+	// watch, so its provision phases belong on the deployment dashboard.
 	recorder, telShutdown := initUpTelemetry(cmd, upOtelEndpoint, upNoTelemetry)
+
+	// In-process service. iplane up doesn't support --service-url for
+	// v0.1: it's the one-shot operator verb, no separate `iplane serve`
+	// needed. Operators who want forward-to-remote can use the explicit
+	// `iplane deployment deploy` against an `iplane serve`.
+	cli, provisionerSvc, cleanup, err := newInProcessUpClient(apiKey, recorder)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
 	defer func() {
 		if telShutdown == nil {
 			return
@@ -393,7 +399,7 @@ func startUpRouterServer(svc *provisioners.Service, recorder *metrics.Recorder) 
 	return upServer
 }
 
-func newInProcessUpClient(apiKey string) (upClient, *provisioners.Service, func(), error) {
+func newInProcessUpClient(apiKey string, recorder *metrics.Recorder) (upClient, *provisioners.Service, func(), error) {
 	dir, err := resolveDeploymentStateDir()
 	if err != nil {
 		return nil, nil, func() {}, err
@@ -414,6 +420,7 @@ func newInProcessUpClient(apiKey string) (upClient, *provisioners.Service, func(
 		provisioners.WithKeyStore(keyStore),
 		provisioners.WithDeploymentExecutor(sshdocker.NewExecutor()),
 		provisioners.WithModelStore(modelStoreForCLI()),
+		provisioners.WithRecorder(recorder),
 	)
 	return &inProcessDeploymentClient{svc: svc}, svc, func() {}, nil
 }

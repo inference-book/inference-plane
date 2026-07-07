@@ -1371,9 +1371,17 @@ type ReplicaSpec struct {
 	// zero-value normalization). On the persisted Deployment.replica_specs
 	// view this is always 1 (the request's compressed N expands to
 	// N one-each entries).
-	Replicas      int32 `protobuf:"varint,4,opt,name=replicas,proto3" json:"replicas,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Replicas int32 `protobuf:"varint,4,opt,name=replicas,proto3" json:"replicas,omitempty"`
+	// engine_endpoint is the pre-existing engine URL for the "external"
+	// provider -- an engine the operator runs themselves (on-prem vLLM,
+	// a k8s Service, or a local `iplane mock-engine`). When set with
+	// provider="external", iplane registers a RUNNING replica pointing
+	// at this URL instead of provisioning anything. Ignored by owning
+	// providers (runpod/vast/lambdalabs/local). One endpoint per replica,
+	// so the multi-endpoint form expands to N one-each ReplicaSpec entries.
+	EngineEndpoint string `protobuf:"bytes,5,opt,name=engine_endpoint,json=engineEndpoint,proto3" json:"engine_endpoint,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *ReplicaSpec) Reset() {
@@ -1432,6 +1440,13 @@ func (x *ReplicaSpec) GetReplicas() int32 {
 		return x.Replicas
 	}
 	return 0
+}
+
+func (x *ReplicaSpec) GetEngineEndpoint() string {
+	if x != nil {
+		return x.EngineEndpoint
+	}
+	return ""
 }
 
 var File_provisioner_v1_types_proto protoreflect.FileDescriptor
@@ -1541,12 +1556,13 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"\rreplica_specs\x18\x1b \x03(\v2\x1b.provisioner.v1.ReplicaSpecR\freplicaSpecs\x1a6\n" +
 	"\bEnvEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xa7\x01\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xd0\x01\n" +
 	"\vReplicaSpec\x12\x1a\n" +
 	"\bprovider\x18\x01 \x01(\tR\bprovider\x12\x16\n" +
 	"\x06region\x18\x02 \x01(\tR\x06region\x12H\n" +
 	"\frequirements\x18\x03 \x01(\v2$.provisioner.v1.ResourceRequirementsR\frequirements\x12\x1a\n" +
-	"\breplicas\x18\x04 \x01(\x05R\breplicas*\xc0\x01\n" +
+	"\breplicas\x18\x04 \x01(\x05R\breplicas\x12'\n" +
+	"\x0fengine_endpoint\x18\x05 \x01(\tR\x0eengineEndpoint*\xc0\x01\n" +
 	"\rInstanceState\x12\x1e\n" +
 	"\x1aINSTANCE_STATE_UNSPECIFIED\x10\x00\x12\x1a\n" +
 	"\x16INSTANCE_STATE_PENDING\x10\x01\x12\x19\n" +

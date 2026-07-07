@@ -121,6 +121,15 @@ type Store struct {
 	path       string // <dir>/state.json
 	operatorID string
 
+	// mu serializes Update/Read within this process. The flock guards
+	// across processes, but under LockForLifetime (iplane serve) the
+	// flock is held once for the daemon's lifetime and individual Update
+	// calls skip re-acquiring it -- so without mu, two goroutines doing
+	// concurrent read-modify-write races and the last writer clobbers
+	// the other's mutation (a lost update). This bit multi-replica
+	// deploys whose per-slot endpoint patches land near-simultaneously.
+	mu sync.Mutex
+
 	// heldLock is non-nil while LockForLifetime is active. Update
 	// checks this field to skip re-acquiring the flock from the same
 	// process (the syscall would deadlock against the already-held FD).
@@ -163,6 +172,8 @@ func (s *Store) Dir() string { return s.dir }
 //
 // Satisfies provisioners.Store.Read.
 func (s *Store) Read() (*provisioners.State, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	env, err := s.readFromDisk()
 	if err != nil {
 		return nil, err
@@ -185,6 +196,11 @@ func (s *Store) Read() (*provisioners.State, error) {
 //
 // Satisfies provisioners.Store.Update.
 func (s *Store) Update(fn func(*provisioners.State) error) error {
+	// Serialize in-process read-modify-write (the flock only guards
+	// across processes; see the mu doc comment on Store).
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	if s.heldLock == nil {
 		lockFile, err := s.lock()
 		if err != nil {

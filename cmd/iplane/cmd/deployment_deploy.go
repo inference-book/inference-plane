@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
+	"github.com/inference-book/inference-plane/internal/provisioners"
 )
 
 // Flags scoped to `iplane deployment deploy`.
@@ -28,30 +29,31 @@ import (
 // the engine is RUNNING (or FAILED), the same way `instance create`
 // blocks until ACTIVE. --no-wait returns after PENDING is recorded.
 var (
-	deployInstanceID string
-	deployProvider   string
-	deployRegion     string
-	deployImage      string
-	deployModel      string
-	deployEnginePort int32
-	deployEngineArgs []string
-	deployEnv        map[string]string
-	deployClass      string
-	deploySKU        string
-	deployMinVRAM    int32
-	deployMinRAM     int32
-	deployMinDisk    int32
-	deployGPUCount   int32
-	deployDebugShell    bool
-	deployIdleTTL       time.Duration
-	deployNoIdleDestroy bool
-	deployReplicas      int32
-	deployReplicaSpecs  []string
-	deployOtelEndpoint string
-	deployOtelHeaders  map[string]string
-	deployWait       bool
-	deployTimeout    time.Duration
-	deployDryRun     bool
+	deployInstanceID      string
+	deployProvider        string
+	deployRegion          string
+	deployImage           string
+	deployModel           string
+	deployEnginePort      int32
+	deployEngineArgs      []string
+	deployEnv             map[string]string
+	deployClass           string
+	deploySKU             string
+	deployMinVRAM         int32
+	deployMinRAM          int32
+	deployMinDisk         int32
+	deployGPUCount        int32
+	deployDebugShell      bool
+	deployIdleTTL         time.Duration
+	deployNoIdleDestroy   bool
+	deployReplicas        int32
+	deployReplicaSpecs    []string
+	deployEngineEndpoints []string
+	deployOtelEndpoint    string
+	deployOtelHeaders     map[string]string
+	deployWait            bool
+	deployTimeout         time.Duration
+	deployDryRun          bool
 )
 
 var deploymentDeployCmd = &cobra.Command{
@@ -100,7 +102,9 @@ existing record without re-provisioning.
 
 func runDeploymentDeploy(cmd *cobra.Command, args []string) error {
 	id := args[0]
-	if deployImage == "" {
+	// The external provider attaches to an already-running engine, so
+	// it has no image to run.
+	if deployImage == "" && deployProvider != provisioners.ProviderExternal {
 		return fmt.Errorf("--image is required")
 	}
 	if deployModel == "" {
@@ -112,10 +116,28 @@ func runDeploymentDeploy(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	// Auto-provision needs a provider + a way to resolve the GPU.
-	// Heterogeneous (--replica) carries the per-slot info inline, so
-	// the singular --provider / --class checks below don't apply.
-	if deployInstanceID == "" && len(replicasSpec) == 0 {
+	// External provider: attach to operator-managed engines instead of
+	// provisioning. --engine-endpoints supplies one URL per replica and
+	// replaces the GPU-resolution flags entirely.
+	isExternal := deployProvider == provisioners.ProviderExternal
+	switch {
+	case isExternal || len(deployEngineEndpoints) > 0:
+		if !isExternal {
+			return fmt.Errorf("--engine-endpoints requires --provider external")
+		}
+		if len(deployEngineEndpoints) == 0 {
+			return fmt.Errorf("--provider external requires --engine-endpoints <url> [url ...]")
+		}
+		if deployInstanceID != "" || len(replicasSpec) > 0 {
+			return fmt.Errorf("--engine-endpoints is mutually exclusive with --instance and --replica")
+		}
+		if deployClass != "" || deploySKU != "" || deployMinVRAM != 0 {
+			return fmt.Errorf("--provider external takes no GPU flags (--class/--sku/--min-vram-gb); it attaches to an existing engine")
+		}
+	case deployInstanceID == "" && len(replicasSpec) == 0:
+		// GPU auto-provision needs a provider + a way to resolve the GPU.
+		// Heterogeneous (--replica) carries the per-slot info inline, so
+		// the singular --provider / --class checks don't apply there.
 		if deployProvider == "" {
 			return fmt.Errorf("--provider is required when --instance and --replica are not given (auto-provision)")
 		}
@@ -174,7 +196,20 @@ func runDeploymentDeploy(cmd *cobra.Command, args []string) error {
 	// flags into a single-entry replicas_spec on the way down.
 	// Pinned-instance form (--instance) leaves replicas_spec empty
 	// -- placeDeployment in the service handles that case.
-	if len(replicasSpec) > 0 {
+	if isExternal {
+		// One ReplicaSpec per operator-supplied endpoint; each attaches
+		// to one already-running engine (no provisioning).
+		specs := make([]*provisionerv1.ReplicaSpec, len(deployEngineEndpoints))
+		for i, ep := range deployEngineEndpoints {
+			specs[i] = &provisionerv1.ReplicaSpec{
+				Provider:       provisioners.ProviderExternal,
+				Region:         deployRegion,
+				Replicas:       1,
+				EngineEndpoint: ep,
+			}
+		}
+		req.ReplicasSpec = specs
+	} else if len(replicasSpec) > 0 {
 		req.ReplicasSpec = replicasSpec
 	} else if deployInstanceID == "" {
 		// Auto-provision: build a single instance group from the
@@ -242,6 +277,8 @@ func init() {
 	f.StringVar(&deployImage, "image", "", `engine container image, e.g. vllm/vllm-openai:v0.7.0 (required)`)
 	f.StringVar(&deployModel, "model", "",
 		`HF model id, e.g. Qwen/Qwen2.5-1.5B-Instruct (required; see 'iplane deployment models' for a starter list)`)
+	f.StringSliceVar(&deployEngineEndpoints, "engine-endpoints", nil,
+		`for --provider external: one or more URLs of already-running engines to attach to (one replica per URL), e.g. http://127.0.0.1:9001. No provisioning happens.`)
 	f.StringVar(&deployClass, "class", "", `gpu class for auto-provisioning: small | medium | large | xlarge`)
 	f.StringVar(&deploySKU, "sku", "", `exact provider sku for auto-provisioning (bypasses the resolver)`)
 	f.Int32Var(&deployMinVRAM, "min-vram-gb", 0, `minimum VRAM per GPU for auto-provisioning, in GB`)

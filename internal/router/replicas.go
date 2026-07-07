@@ -1,6 +1,7 @@
 package router
 
 import (
+	"context"
 	"sync/atomic"
 
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
@@ -40,12 +41,12 @@ import (
 // monotonic and avoids the awkward "advance only on success"
 // case where one always-empty slot would never let the rotation
 // progress.
-func (r *Router) pickReplica(dep *provisionerv1.Deployment) (instanceID, endpoint string, ok bool) {
+func (r *Router) pickReplica(ctx context.Context, dep *provisionerv1.Deployment) (instanceID, endpoint string, ok bool) {
 	replicas := r.eligibleReplicas(dep)
 	if len(replicas) == 0 {
 		return "", "", false
 	}
-	selected, picked := r.policy.Pick(nil, dep.GetId(), replicas, r)
+	selected, picked := r.policy.Pick(ctx, dep.GetId(), replicas, r)
 	if !picked {
 		return "", "", false
 	}
@@ -139,6 +140,24 @@ func effectiveInstanceIDs(dep *provisionerv1.Deployment) []string {
 		return []string{id}
 	}
 	return nil
+}
+
+// hasStampedEndpoint reports whether the deployment has at least one
+// non-empty engine endpoint to route to, across the plural
+// engine_endpoints (multi-replica) or the singular engine_endpoint
+// (single-instance) form. The router's readiness gate uses this instead
+// of the singular field alone, so a multi-replica deployment created
+// directly (which never stamps the singular) is still forwardable.
+func hasStampedEndpoint(dep *provisionerv1.Deployment) bool {
+	if dep.GetEngineEndpoint() != "" {
+		return true
+	}
+	for _, ep := range dep.GetEngineEndpoints() {
+		if ep != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // effectiveEndpoints is the parallel helper for engine endpoint URLs.

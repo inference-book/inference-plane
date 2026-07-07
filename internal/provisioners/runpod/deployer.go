@@ -253,7 +253,7 @@ func buildEnginePodRequest(dep *provisionerv1.Deployment, inst *provisionerv1.In
 		// /tcp but only added when the operator opts in via debug_shell
 		// -- otherwise we'd allocate a publicIp the workload doesn't
 		// need and lose the cheapest community capacity in the catalog.
-		Ports:          enginePodPorts(enginePort, dep.GetDebugShell()),
+		Ports:           enginePodPorts(enginePort, dep.GetDebugShell()),
 		SupportPublicIP: dep.GetDebugShell(),
 		Env:             env,
 		DockerStartCmd:  cmd,
@@ -319,8 +319,23 @@ func (p *Provider) waitForEngineReady(ctx context.Context, podID string, engineP
 	// dial error) -- the only signal the operator gets during the cold
 	// image pull + model load window. WatchDeployment fires on
 	// progress_message changes so the CLI streams these to stdout.
+	//
+	// Phase attribution: the proxy /health probe is a single black-box
+	// signal (502 while booting -> 200 when serving) that collapses
+	// RunPod-side scheduling, the multi-GB image pull, and the engine's
+	// model download + startup into one opaque wait. To split them, each
+	// tick also reads RunPod's pod status (GET /pods/{id}) until the
+	// container has started: `machine` populated means RunPod found a
+	// host (scheduling done, now pulling the image); `lastStartedAt`
+	// populated means the container process is up (image pull done, now
+	// downloading the model + loading weights). Those map to the
+	// runpod:image-pull and engine:init phases the deployment dashboard
+	// breaks the cold start down by. The status read degrades to "keep
+	// the last known phase" on any error -- it refines observability, it
+	// never gates readiness (that's still /health alone).
 	healthURL := endpoint + "/health"
 	started := time.Now()
+	phase := phaseScheduling
 	first := true
 	for {
 		if !first {
@@ -339,6 +354,19 @@ func (p *Provider) waitForEngineReady(ctx context.Context, podID string, engineP
 		if ok {
 			return endpoint, nil
 		}
+
+		// Refine the phase from RunPod pod status, but only until the
+		// container has started -- past that point /health is the only
+		// remaining signal and further status reads add nothing. Phases
+		// only advance (monotonic), so a flaky status read never regresses
+		// the operator's view.
+		if enginePhaseOrdinal(phase) < enginePhaseOrdinal(phaseEngineInit) {
+			if refined, gotStatus := p.probeEnginePhase(ctx, podID); gotStatus &&
+				enginePhaseOrdinal(refined) > enginePhaseOrdinal(phase) {
+				phase = refined
+			}
+		}
+
 		var detail string
 		switch {
 		case err != nil:
@@ -348,13 +376,90 @@ func (p *Provider) waitForEngineReady(ctx context.Context, podID string, engineP
 		default:
 			detail = "no response"
 		}
-		msg := fmt.Sprintf("waiting for engine /health (%s elapsed) -- %s", elapsed, detail)
+		msg := fmt.Sprintf("%s (%s elapsed) -- %s", enginePhaseDescription(phase), elapsed, detail)
 		emit(provisioners.DeployStateUpdate{
 			State:           provisionerv1.DeploymentState_DEPLOYMENT_STATE_CONFIGURING,
-			Phase:           "engine:waiting",
+			Phase:           phase,
 			ProgressMessage: msg,
 			ContainerID:     podID,
 		})
+	}
+}
+
+// Engine-readiness phase strings. The deployer emits these on the
+// DeployStateUpdate so the control-plane deploy observer can attribute
+// the cold-start wall-clock to distinct stages (the deployment
+// dashboard's phase-duration breakdown). They form a monotonic ladder
+// -- scheduling -> image-pull -> engine-init -> serving -- and a phase
+// never regresses even if a status read flakes.
+const (
+	phaseScheduling = "runpod:scheduling"
+	phaseImagePull  = "runpod:image-pull"
+	phaseEngineInit = "engine:init"
+)
+
+// enginePhaseOrdinal ranks the cold-start phases so the loop only ever
+// advances the operator's view. Unknown/zero ranks below scheduling so
+// a bad status read is never treated as progress.
+func enginePhaseOrdinal(phase string) int {
+	switch phase {
+	case phaseScheduling:
+		return 1
+	case phaseImagePull:
+		return 2
+	case phaseEngineInit:
+		return 3
+	default:
+		return 0
+	}
+}
+
+// enginePhaseDescription is the human-readable progress prefix for each
+// phase, streamed to the operator via WatchDeployment's progress_message.
+func enginePhaseDescription(phase string) string {
+	switch phase {
+	case phaseImagePull:
+		return "pulling engine image"
+	case phaseEngineInit:
+		return "engine starting (model download + load)"
+	default:
+		return "waiting for RunPod to schedule the pod"
+	}
+}
+
+// probeEnginePhase reads RunPod's pod status (GET /pods/{id}) and maps
+// it to a cold-start phase. Returns ok=false on any error so the caller
+// keeps the last known phase -- this refines observability and must
+// never gate readiness or fail the deploy. Best-effort: a per-read
+// timeout keeps a hung status GET from stalling the health-poll tick.
+func (p *Provider) probeEnginePhase(ctx context.Context, podID string) (string, bool) {
+	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	getReq, err := p.client.newReq("GET", "/pods/"+podID, nil, nil)
+	if err != nil {
+		return "", false
+	}
+	pod, err := skhttp.Call[podBody](probeCtx, getReq, p.client.callOpts()...)
+	if err != nil {
+		return "", false
+	}
+	return classifyEnginePhase(pod.machinePresent(), pod.LastStartedAt != ""), true
+}
+
+// classifyEnginePhase maps two observable RunPod pod-status signals to a
+// cold-start phase. `machine` populated => RunPod scheduled onto a host
+// (scheduling done). `lastStartedAt` populated => the container process
+// started (image pull done). RunPod's REST v1 exposes no explicit
+// container-runtime state, so this pair is the finest split available
+// without reaching inside the pod.
+func classifyEnginePhase(machinePresent, started bool) string {
+	switch {
+	case started:
+		return phaseEngineInit
+	case machinePresent:
+		return phaseImagePull
+	default:
+		return phaseScheduling
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 
 	"github.com/inference-book/inference-plane/internal/deployments/sshdocker"
 	"github.com/inference-book/inference-plane/internal/provisioners"
+	"github.com/inference-book/inference-plane/internal/provisioners/external"
 	"github.com/inference-book/inference-plane/internal/provisioners/lambdalabs"
 	"github.com/inference-book/inference-plane/internal/provisioners/local"
 	"github.com/inference-book/inference-plane/internal/provisioners/runpod"
@@ -43,7 +44,7 @@ func buildLocalService(store *file.Store, operatorID string, extra ...provisione
 		return nil, fmt.Errorf("open ssh key store: %w", err)
 	}
 
-	providers := []provisioners.Provider{local.New()}
+	providers := []provisioners.Provider{local.New(), external.New()}
 	if key := os.Getenv("RUNPOD_API_KEY"); key != "" {
 		providers = append(providers, runpod.New(runpod.NewClient(key)))
 	}
