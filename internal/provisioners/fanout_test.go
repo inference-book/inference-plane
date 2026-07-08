@@ -7,6 +7,7 @@ import (
 	"time"
 
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
+	"github.com/inference-book/inference-plane/internal/modelstores"
 	"github.com/inference-book/inference-plane/internal/provisioners"
 	"github.com/inference-book/inference-plane/internal/provisioners/stores/file"
 	"github.com/inference-book/inference-plane/internal/sshkeys"
@@ -136,6 +137,35 @@ func TestFanOut_AllSucceed(t *testing.T) {
 		if _, ok := state.Instances[id]; !ok {
 			t.Errorf("instance %q not persisted", id)
 		}
+	}
+}
+
+// TestFanOut_StampsMountsOntoRecord: a warm-cache store's mounts must
+// reach the multi-replica deployment record -- N replicas sharing one
+// pre-staged volume is the payoff case for warm mounts.
+func TestFanOut_StampsMountsOntoRecord(t *testing.T) {
+	prov := &fanOutMockProvider{name: "mockfan"}
+	store, err := file.Open(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("file.Open: %v", err)
+	}
+	ms := &stubModelStore{respond: func(spec string) (modelstores.Resolved, error) {
+		return modelstores.Resolved{
+			EngineModelArg: spec,
+			Mounts:         []modelstores.Mount{{VolumeID: "vol-1", MountPath: "/models"}},
+		}, nil
+	}}
+	svc := provisioners.New([]provisioners.Provider{prov}, store, "default",
+		provisioners.WithKeyStore(newKeyStore(t)),
+		provisioners.WithModelStore(ms),
+	)
+	resp, err := svc.CreateDeployment(context.Background(), multiReplicaCreateReq("warm", 2))
+	if err != nil {
+		t.Fatalf("CreateDeployment: %v", err)
+	}
+	mounts := resp.GetDeployment().GetMounts()
+	if len(mounts) != 1 || mounts[0].GetVolumeId() != "vol-1" || mounts[0].GetMountPath() != "/models" {
+		t.Errorf("multi-replica deployment should carry ModelStore mounts; got %+v", mounts)
 	}
 }
 

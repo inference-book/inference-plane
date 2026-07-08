@@ -18,6 +18,38 @@ type Config struct {
 	Telemetry  TelemetryConfig  `yaml:"telemetry"`
 	Deployment DeploymentConfig `yaml:"deployment"`
 	Router     RouterConfig     `yaml:"router"`
+	ModelCache ModelCacheConfig `yaml:"model_cache"`
+}
+
+// ModelCacheConfig activates a warm model-cache store so deployments
+// mount pre-staged weights off a persistent volume instead of
+// re-downloading from HuggingFace every deploy. Absent (the default,
+// and every pre-Ch-9 example's config) means the plain HF-passthrough
+// store: cold download inside the pod. A forward example opts in by
+// adding this block, so earlier demos keep the cold path unchanged.
+//
+// The block is provider-agnostic. VolumeID names a provider-managed
+// volume handle for the image-native deploy path (a RunPod network
+// volume id today); HostPath names a host directory for the sshdocker
+// bind path (a VM provider's mounted filesystem). Set whichever your
+// deploy path uses; either non-empty enables the cache. MountPath is
+// the in-container path the engine reads from (defaults to /models).
+//
+// Populating the volume is out of scope here -- this block mounts a
+// volume assumed to already hold the weights. On a cache miss the
+// engine still reaches HF, so a misconfigured volume degrades to a cold
+// deploy rather than failing.
+type ModelCacheConfig struct {
+	VolumeID  string `yaml:"volume_id"`  // provider-managed volume handle (image-native path)
+	HostPath  string `yaml:"host_path"`  // host directory to bind (sshdocker path)
+	MountPath string `yaml:"mount_path"` // in-container attach path; defaults to /models
+}
+
+// Enabled reports whether the warm model-cache is configured. Either a
+// volume handle or a host path turns it on; both empty is the default
+// cold-download path.
+func (m ModelCacheConfig) Enabled() bool {
+	return m.VolumeID != "" || m.HostPath != ""
 }
 
 // RouterConfig configures the v0.2 data-plane router. Beat 2 adds the
