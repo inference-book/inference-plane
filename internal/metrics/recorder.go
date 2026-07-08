@@ -475,7 +475,7 @@ func (r *Recorder) RecordRouterAffinity(ctx context.Context, deployID, outcome s
 //
 // nil-safe so control planes constructed without telemetry init get a
 // no-op rather than a panic.
-func (r *Recorder) RecordDeployPhase(ctx context.Context, phase, provider, result string, sec float64) {
+func (r *Recorder) RecordDeployPhase(ctx context.Context, phase, provider, result, storageTier string, sec float64) {
 	if r == nil || sec < 0 {
 		return
 	}
@@ -483,6 +483,7 @@ func (r *Recorder) RecordDeployPhase(ctx context.Context, phase, provider, resul
 		attribute.String(telemetry.LabelPhase, phase),
 		attribute.String(telemetry.LabelProvider, provider),
 		attribute.String(telemetry.LabelResult, result),
+		attribute.String(telemetry.LabelStorageTier, storageTier),
 	))
 }
 
@@ -494,7 +495,7 @@ func (r *Recorder) RecordDeployPhase(ctx context.Context, phase, provider, resul
 // when unknown.
 //
 // nil-safe.
-func (r *Recorder) RecordDeployProvision(ctx context.Context, provider, result, class string, sec float64) {
+func (r *Recorder) RecordDeployProvision(ctx context.Context, provider, result, class, storageTier string, sec float64) {
 	if r == nil {
 		return
 	}
@@ -507,6 +508,7 @@ func (r *Recorder) RecordDeployProvision(ctx context.Context, provider, result, 
 			attribute.String(telemetry.LabelProvider, provider),
 			attribute.String(telemetry.LabelResult, result),
 			attribute.String(telemetry.LabelClass, class),
+			attribute.String(telemetry.LabelStorageTier, storageTier),
 		))
 	}
 }

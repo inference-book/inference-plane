@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
@@ -39,6 +40,30 @@ func obsTestInstance() *provisionerv1.Instance {
 
 func configuring(phase string) DeployStateUpdate {
 	return DeployStateUpdate{State: provisionerv1.DeploymentState_DEPLOYMENT_STATE_CONFIGURING, Phase: phase}
+}
+
+// histObservationsForTier counts histogram observations for the named
+// instrument whose data point carries storage_tier=tier. Asserts the
+// cold-start SLI slices phase/provision durations by tier.
+func histObservationsForTier(rm metricdata.ResourceMetrics, name, tier string) uint64 {
+	var observations uint64
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != name {
+				continue
+			}
+			h, ok := m.Data.(metricdata.Histogram[float64])
+			if !ok {
+				continue
+			}
+			for _, dp := range h.DataPoints {
+				if v, present := dp.Attributes.Value(attribute.Key(telemetry.LabelStorageTier)); present && v.AsString() == tier {
+					observations += dp.Count
+				}
+			}
+		}
+	}
+	return observations
 }
 
 // collectMetrics runs a manual reader and returns the ResourceMetrics.
@@ -113,7 +138,7 @@ func TestDeployObserver_RecordsPhaseAndProvisionMetrics(t *testing.T) {
 	rec, reader := newTestRecorder(t)
 	s := &Service{recorder: rec, clock: advancingClock(time.Second)}
 
-	obs := s.newDeployObserver(context.Background(), deployKindProvision, "dep-1", obsTestInstance())
+	obs := s.newDeployObserver(context.Background(), deployKindProvision, "dep-1", obsTestInstance(), storageTierCold)
 	obs.observe(configuring("runpod:scheduling"))
 	obs.observe(configuring("runpod:scheduling")) // repeat -> no new phase
 	obs.observe(configuring("runpod:image-pull"))
@@ -134,6 +159,49 @@ func TestDeployObserver_RecordsPhaseAndProvisionMetrics(t *testing.T) {
 	}
 	if got := sumInt(rm, telemetry.MetricDeploymentProvisionsTotal); got != 1 {
 		t.Errorf("provisions counter = %d, want 1", got)
+	}
+}
+
+// TestDeployObserver_StorageTierLabelsPhases: a warm observer tags its
+// phase + provision durations storage_tier=warm; a cold one tags them
+// cold. This is the cut the Ch 9 cold-start panel slices engine-init by.
+func TestDeployObserver_StorageTierLabelsPhases(t *testing.T) {
+	run := func(tier string) metricdata.ResourceMetrics {
+		rec, reader := newTestRecorder(t)
+		s := &Service{recorder: rec, clock: advancingClock(time.Second)}
+		obs := s.newDeployObserver(context.Background(), deployKindProvision, "dep-1", obsTestInstance(), tier)
+		obs.observe(configuring("engine:init"))
+		obs.observe(DeployStateUpdate{State: provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING, Phase: "engine:serving"})
+		obs.finish(nil)
+		return collectMetrics(t, reader)
+	}
+
+	warm := run(storageTierWarm)
+	if got := histObservationsForTier(warm, telemetry.MetricDeploymentPhaseDuration, storageTierWarm); got != 1 {
+		t.Errorf("warm phase observations under storage_tier=warm = %d, want 1", got)
+	}
+	if got := histObservationsForTier(warm, telemetry.MetricDeploymentProvisionDuration, storageTierWarm); got != 1 {
+		t.Errorf("warm provision observations under storage_tier=warm = %d, want 1", got)
+	}
+	if got := histObservationsForTier(warm, telemetry.MetricDeploymentPhaseDuration, storageTierCold); got != 0 {
+		t.Errorf("warm deploy leaked into storage_tier=cold = %d, want 0", got)
+	}
+
+	cold := run(storageTierCold)
+	if got := histObservationsForTier(cold, telemetry.MetricDeploymentPhaseDuration, storageTierCold); got != 1 {
+		t.Errorf("cold phase observations under storage_tier=cold = %d, want 1", got)
+	}
+}
+
+// TestStorageTierForDeployment: mounts present -> warm, absent -> cold.
+func TestStorageTierForDeployment(t *testing.T) {
+	cold := &provisionerv1.Deployment{Id: "d"}
+	if got := storageTierForDeployment(cold); got != storageTierCold {
+		t.Errorf("no mounts -> %q, want cold", got)
+	}
+	warm := &provisionerv1.Deployment{Id: "d", Mounts: []*provisionerv1.VolumeMount{{VolumeId: "v", MountPath: "/models"}}}
+	if got := storageTierForDeployment(warm); got != storageTierWarm {
+		t.Errorf("mounts present -> %q, want warm", got)
 	}
 }
 
@@ -161,7 +229,7 @@ func TestDeployObserver_TeardownRecordsTeardownDuration(t *testing.T) {
 	rec, reader := newTestRecorder(t)
 	s := &Service{recorder: rec, clock: advancingClock(time.Second)}
 
-	obs := s.newDeployObserver(context.Background(), deployKindTeardown, "dep-1", obsTestInstance())
+	obs := s.newDeployObserver(context.Background(), deployKindTeardown, "dep-1", obsTestInstance(), "")
 	obs.observe(DeployStateUpdate{State: provisionerv1.DeploymentState_DEPLOYMENT_STATE_TERMINATING, Phase: "runpod:terminate"})
 	obs.observe(DeployStateUpdate{State: provisionerv1.DeploymentState_DEPLOYMENT_STATE_TERMINATED, Phase: "runpod:terminate"})
 	obs.finish(nil)
