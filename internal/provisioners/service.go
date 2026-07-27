@@ -1039,6 +1039,20 @@ func (s *Service) CreateDeployment(ctx context.Context, req *provisionerv1.Creat
 		}
 	}
 
+	// Auto-resolve a warm mount from the pin registry (#191b). Only when
+	// no explicit mount was configured (an operator model_cache block
+	// wins) and the fleet lands on one (provider, region): look up a
+	// pinned volume that has this model staged and mount it, so a deploy
+	// after `iplane model pin` is warm without any config. No match ->
+	// cold, unchanged.
+	if len(dep.GetMounts()) == 0 {
+		if provider, region, ok := homogeneousPlacement(specs); ok {
+			if m := s.resolveWarmMount(dep.GetModel(), provider, region); m != nil {
+				dep.Mounts = []*provisionerv1.VolumeMount{m}
+			}
+		}
+	}
+
 	// v0.2 ch7-beat3.10 (#143 + refactor): auto-provision flows
 	// through replicas_spec. createMultiReplicaDeployment branches
 	// off here so the single-instance pinned path below stays

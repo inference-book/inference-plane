@@ -151,8 +151,23 @@ cold.
 
 Pinning runs **in-process, before `iplane serve`** (the daemon holds the
 state lock for its lifetime); remote pinning over `--service-url` is a
-follow-up. Auto-resolving a pinned volume at deploy time (so you skip the
-`model_cache` config entirely) is a separate follow-up.
+follow-up.
+
+**Auto-resolve (no config needed).** A deploy whose `(model, provider,
+region)` matches a pinned volume mounts it automatically, so after
+`iplane model pin` you can just deploy and it's warm without a
+`model_cache` block:
+
+```bash
+iplane model pin Qwen/Qwen2.5-32B-Instruct-AWQ --provider runpod --region EU-RO-1
+iplane deployment deploy qwen32 --model Qwen/Qwen2.5-32B-Instruct-AWQ \
+    --provider runpod --region EU-RO-1 --min-vram-gb 24
+# warm automatically -- the registry join (model, provider, region) -> volume
+```
+
+An explicit `model_cache` mount still wins (config is the override); a
+heterogeneous fleet spanning regions stays cold (one mount can't serve
+replicas on different providers).
 
 **On a cache miss** the engine still reaches HF (`HF_HOME` is redirected,
 not forced offline), so an unpopulated or misconfigured volume degrades
