@@ -1247,6 +1247,54 @@ func TestCreateDeployment_ResolveModelCalled_AndEnvMerged(t *testing.T) {
 	}
 }
 
+// TestCreateDeployment_RejectsCrossProviderMount: a warm-cache mount
+// tagged with one provider cannot be attached to a deployment placed on
+// another -- the deploy is refused, not silently run cold.
+func TestCreateDeployment_RejectsCrossProviderMount(t *testing.T) {
+	mock := &mockProvider{name: "runpod"}
+	store, err := file.Open(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("file.Open: %v", err)
+	}
+	ms := &stubModelStore{
+		respond: func(spec string) (modelstores.Resolved, error) {
+			return modelstores.Resolved{
+				EngineModelArg: spec,
+				// A lambda volume, but the deployment lands on runpod.
+				Mounts: []modelstores.Mount{{VolumeID: "vol-1", MountPath: "/models", Provider: "lambda"}},
+			}, nil
+		},
+	}
+	exec := &fakeExecutor{}
+	svc := provisioners.New([]provisioners.Provider{mock}, store, "default",
+		provisioners.WithKeyStore(newKeyStore(t)),
+		provisioners.WithDeploymentExecutor(exec),
+		provisioners.WithModelStore(ms),
+	)
+	_ = store.Update(func(f *provisioners.State) error {
+		f.Instances["my-pod"] = &provisionerv1.Instance{
+			Id: "my-pod", Provider: "runpod",
+			State: provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE,
+			Ssh:   &provisionerv1.SshTarget{Host: "1.2.3.4", Port: 22, User: "root"},
+		}
+		return nil
+	})
+
+	_, err = svc.CreateDeployment(context.Background(), &provisionerv1.CreateDeploymentRequest{
+		Deployment: okDep(),
+		Wait:       true,
+	})
+	if err == nil {
+		t.Fatal("expected a cross-provider mount to be rejected")
+	}
+	if !strings.Contains(err.Error(), "lambda") || !strings.Contains(err.Error(), "runpod") {
+		t.Errorf("error should name both providers; got %v", err)
+	}
+	if exec.deployCalls != 0 {
+		t.Errorf("provider deploy must not run on a rejected mount; got %d calls", exec.deployCalls)
+	}
+}
+
 func TestCreateDeployment_ResolveError_FailsWithInvalidArgument(t *testing.T) {
 	mock := &mockProvider{name: "runpod"}
 	store, err := file.Open(t.TempDir(), "default")

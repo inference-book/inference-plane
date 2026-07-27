@@ -128,6 +128,67 @@ type SSHReadyWaiter interface {
 	WaitForSSHReady(ctx context.Context, providerID string) (*provisionerv1.SshTarget, error)
 }
 
+// VolumeManager is an optional Provider capability for providers that
+// offer persistent volumes a model can be pre-staged onto (RunPod
+// network volumes today), so warm-cache deploys mount weights instead of
+// re-downloading them. Providers without persistent volumes simply do
+// not implement it, and the warm-cache pin surface reports the provider
+// as unsupported. Asserted via provider.(VolumeManager), the same
+// runtime opt-in pattern as Deployer / KeyRegistrar / SSHReadyWaiter.
+//
+// A volume is a shared cache: one volume holds many models under a
+// single HuggingFace cache layout, and it is datacenter-locked (a pod
+// must be scheduled in the volume's region to mount it).
+type VolumeManager interface {
+	// EnsureVolume finds or creates a cache volume for (region, name)
+	// and returns its handle. Idempotent: an existing volume of the same
+	// name in the region is reused, never duplicated.
+	EnsureVolume(ctx context.Context, spec VolumeSpec) (VolumeRef, error)
+
+	// StageModel downloads a model onto an existing volume so later
+	// deploys mount it. Idempotent at the HuggingFace-cache level:
+	// already-present files are skipped. Blocks until the download
+	// completes (it spins a throwaway pod that mounts the volume, fetches
+	// the weights, and exits).
+	StageModel(ctx context.Context, spec StageSpec) error
+
+	// ListVolumes returns the provider's cache volumes.
+	ListVolumes(ctx context.Context) ([]VolumeRef, error)
+
+	// DeleteVolume destroys a volume and everything staged on it.
+	DeleteVolume(ctx context.Context, volumeID string) error
+}
+
+// VolumeSpec requests a cache volume. Name is the deterministic
+// per-region cache name (or an operator-supplied one); Region is the
+// provider datacenter the volume is pinned to; SizeGB is the capacity to
+// create when the volume does not yet exist.
+type VolumeSpec struct {
+	Name   string
+	Region string
+	SizeGB int
+}
+
+// VolumeRef identifies a provider cache volume.
+type VolumeRef struct {
+	ID     string
+	Name   string
+	Region string
+	SizeGB int
+}
+
+// StageSpec requests a model download onto a volume. MountPath is where
+// the volume attaches in the staging pod (HF_HOME points at
+// MountPath/hf); HFToken authenticates gated-model fetches; Region is
+// the volume's datacenter (the staging pod must be scheduled there).
+type StageSpec struct {
+	VolumeID  string
+	Region    string
+	Model     string
+	MountPath string
+	HFToken   string
+}
+
 // Tag keys stamped on every provider instance Spawn creates. The Service
 // uses them as List filters for the idempotency lookup and the
 // post-v0.1 reconcile loop.

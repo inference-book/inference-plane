@@ -330,6 +330,16 @@ func (s *Service) applyScaleAggregate(deployID string, delta, successes int, fai
 // constraint.
 func (s *Service) createMultiReplicaDeployment(ctx context.Context, req *provisionerv1.CreateDeploymentRequest, specs []*provisionerv1.ReplicaSpec) (*provisionerv1.CreateDeploymentResponse, error) {
 	dep := req.GetDeployment()
+	// A single mount list applies to every replica, so a warm-cache
+	// mount must match every provider in the fleet. Reject a
+	// heterogeneous fleet that mixes a mount's provider with another.
+	placements := make([]string, 0, len(specs))
+	for _, sp := range specs {
+		placements = append(placements, sp.GetProvider())
+	}
+	if err := checkMountProviders(dep.GetMounts(), placements...); err != nil {
+		return nil, err
+	}
 	var record *provisionerv1.Deployment
 	var alreadyExisted bool
 	err := s.store.Update(func(f *State) error {

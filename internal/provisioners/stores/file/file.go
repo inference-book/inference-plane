@@ -83,7 +83,10 @@ import (
 // ch7-beat2.3 for Deployment.default_priority; that field was removed
 // before merge and the version reverted to "1.2". This "1.3" bump
 // is the first one operators see in shipped artifacts.
-const SchemaVersion = "1.5"
+// v0.2 ch9 bumps to "1.6" -- the envelope gains the volumes map (the
+// warm-cache pin registry). Purely additive; old 1.5 files load with
+// volumes={} (no pins), which is exactly the cold-path initial state.
+const SchemaVersion = "1.6"
 
 // BackendLocalFile is the value written into the file's `backend` field.
 // v1.0's remote backend will write its own value here and may fall back
@@ -102,6 +105,7 @@ type envelope struct {
 	OperatorID    string
 	Instances     map[string]*provisionerv1.Instance
 	Deployments   map[string]*provisionerv1.Deployment
+	Volumes       map[string]*provisionerv1.Volume
 }
 
 // Store owns the file path and the flock. One Store per CLI invocation
@@ -224,6 +228,7 @@ func (s *Store) Update(fn func(*provisioners.State) error) error {
 	// (state.Instances = newMap).
 	env.Instances = state.Instances
 	env.Deployments = state.Deployments
+	env.Volumes = state.Volumes
 	return s.writeToDisk(env)
 }
 
@@ -235,6 +240,7 @@ func envelopeToState(env *envelope) *provisioners.State {
 	return &provisioners.State{
 		Instances:   env.Instances,
 		Deployments: env.Deployments,
+		Volumes:     env.Volumes,
 	}
 }
 
@@ -410,6 +416,7 @@ func (s *Store) readFromDisk() (*envelope, error) {
 		OperatorID    string                     `json:"operator_id"`
 		Instances     map[string]json.RawMessage `json:"instances"`
 		Deployments   map[string]json.RawMessage `json:"deployments"`
+		Volumes       map[string]json.RawMessage `json:"volumes"`
 	}
 	if err := json.Unmarshal(raw, &env); err != nil {
 		return nil, fmt.Errorf("parse state file %q: %w", s.path, err)
@@ -420,6 +427,7 @@ func (s *Store) readFromDisk() (*envelope, error) {
 		OperatorID:    env.OperatorID,
 		Instances:     make(map[string]*provisionerv1.Instance, len(env.Instances)),
 		Deployments:   make(map[string]*provisionerv1.Deployment, len(env.Deployments)),
+		Volumes:       make(map[string]*provisionerv1.Volume, len(env.Volumes)),
 	}
 	if file.OperatorID == "" {
 		file.OperatorID = s.operatorID
@@ -438,6 +446,13 @@ func (s *Store) readFromDisk() (*envelope, error) {
 			return nil, fmt.Errorf("parse deployment %q in state file: %w", id, err)
 		}
 		file.Deployments[id] = dep
+	}
+	for id, volRaw := range env.Volumes {
+		vol := &provisionerv1.Volume{}
+		if err := unmarshal.Unmarshal(volRaw, vol); err != nil {
+			return nil, fmt.Errorf("parse volume %q in state file: %w", id, err)
+		}
+		file.Volumes[id] = vol
 	}
 	return file, nil
 }
@@ -472,18 +487,28 @@ func (s *Store) writeToDisk(file *envelope) error {
 		}
 		deploymentsJSON[id] = b
 	}
+	volumesJSON := make(map[string]json.RawMessage, len(file.Volumes))
+	for id, vol := range file.Volumes {
+		b, err := marshal.Marshal(vol)
+		if err != nil {
+			return fmt.Errorf("marshal volume %q: %w", id, err)
+		}
+		volumesJSON[id] = b
+	}
 	envelope := struct {
 		SchemaVersion string                     `json:"schema_version"`
 		Backend       string                     `json:"backend"`
 		OperatorID    string                     `json:"operator_id"`
 		Instances     map[string]json.RawMessage `json:"instances"`
 		Deployments   map[string]json.RawMessage `json:"deployments"`
+		Volumes       map[string]json.RawMessage `json:"volumes"`
 	}{
 		SchemaVersion: file.SchemaVersion,
 		Backend:       file.Backend,
 		OperatorID:    file.OperatorID,
 		Instances:     instancesJSON,
 		Deployments:   deploymentsJSON,
+		Volumes:       volumesJSON,
 	}
 	out, err := json.MarshalIndent(envelope, "", "  ")
 	if err != nil {
@@ -525,5 +550,6 @@ func (s *Store) emptyFile() *envelope {
 		OperatorID:    s.operatorID,
 		Instances:     map[string]*provisionerv1.Instance{},
 		Deployments:   map[string]*provisionerv1.Deployment{},
+		Volumes:       map[string]*provisionerv1.Volume{},
 	}
 }

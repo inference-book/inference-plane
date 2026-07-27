@@ -926,6 +926,32 @@ func isExternalDeploy(req *provisionerv1.CreateDeploymentRequest) bool {
 	return true
 }
 
+// checkMountProviders rejects a deployment whose warm-cache mounts name
+// a provider other than where its replicas are placed. A volume handle
+// is provider-scoped -- a RunPod networkVolumeId means nothing to Lambda
+// -- so a cross-provider mount cannot attach, and failing loudly beats
+// silently falling back to a cold download. An empty mount.provider
+// (a host-path bind) is unscoped and always allowed. placements is the
+// set of providers this deployment will land on (one for single-
+// instance, one per replica spec for a fleet); a mount must match every
+// one, since a single mount list applies to all replicas.
+func checkMountProviders(mounts []*provisionerv1.VolumeMount, placements ...string) error {
+	for _, m := range mounts {
+		mp := m.GetProvider()
+		if mp == "" {
+			continue
+		}
+		for _, p := range placements {
+			if p != "" && p != mp {
+				return status.Errorf(codes.FailedPrecondition,
+					"volume mount %q is a %s volume but the deployment is placed on %s; a %s volume cannot be mounted on %s",
+					m.GetVolumeId(), mp, p, mp, p)
+			}
+		}
+	}
+	return nil
+}
+
 func (s *Service) CreateDeployment(ctx context.Context, req *provisionerv1.CreateDeploymentRequest) (*provisionerv1.CreateDeploymentResponse, error) {
 	dep := req.GetDeployment()
 	if dep == nil {
@@ -1008,6 +1034,7 @@ func (s *Service) CreateDeployment(ctx context.Context, req *provisionerv1.Creat
 				VolumeId:  m.VolumeID,
 				HostPath:  m.HostPath,
 				MountPath: m.MountPath,
+				Provider:  m.Provider,
 			})
 		}
 	}
@@ -1027,6 +1054,12 @@ func (s *Service) CreateDeployment(ctx context.Context, req *provisionerv1.Creat
 	// the v1.0 bin-packing scheduler will eventually live.
 	inst, err := s.placeDeployment(ctx, req)
 	if err != nil {
+		return nil, err
+	}
+	// Warm-cache mounts are provider-scoped: refuse a mount whose
+	// provider doesn't match where this deployment landed, rather than
+	// silently attaching nothing and running cold.
+	if err := checkMountProviders(dep.GetMounts(), inst.GetProvider()); err != nil {
 		return nil, err
 	}
 	// Persist the (possibly freshly-synthesized) instance_id back onto
