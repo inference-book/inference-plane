@@ -12,10 +12,10 @@ package telemetry
 // MetricBackendHealthy -- Gauge -- 1 if backend is healthy, 0 otherwise. Feeds alerts.
 const MetricBackendHealthy = "inference.backend.healthy"
 
-// MetricDeploymentPhaseDuration -- Histogram of seconds spent in each deployment lifecycle phase (scheduling, image-pull, engine-init, ...), labeled by phase / provider / result. Splits the opaque cold-start into attributable stages so model-download and image-pull time are separable.
+// MetricDeploymentPhaseDuration -- Histogram of seconds spent in each deployment lifecycle phase (scheduling, image-pull, engine-init, ...), labeled by phase / provider / result / storage_tier. Splits the opaque cold-start into attributable stages so model-download and image-pull time are separable; storage_tier (cold=HF download in-pod, warm=pre-staged volume mount) makes the engine-init collapse of a warm deploy visible against a cold one (Ch 9).
 const MetricDeploymentPhaseDuration = "iplane.deployment.phase.duration"
 
-// MetricDeploymentProvisionDuration -- Histogram of end-to-end deployment provision wall-clock seconds (create-pod through engine serving), labeled by provider / result / class. The "why is my deploy slow" top-line for the deployment dashboard.
+// MetricDeploymentProvisionDuration -- Histogram of end-to-end deployment provision wall-clock seconds (create-pod through engine serving), labeled by provider / result / class / storage_tier. The "why is my deploy slow" top-line for the deployment dashboard; storage_tier (cold=HF download in-pod, warm=pre-staged volume mount) is the Ch 9 cold-start-distance cut.
 const MetricDeploymentProvisionDuration = "iplane.deployment.provision.duration"
 
 // MetricDeploymentProvisionsTotal -- Counter of deployment provision attempts, labeled by provider / result (running, failed, timeout). Denominator for the provision success-rate panel.
@@ -96,5 +96,6 @@ const (
 	LabelReplicaID = "replica_id"
 	LabelResult = "result"
 	LabelStatus = "status"
+	LabelStorageTier = "storage_tier"
 	LabelTenantID = "tenant_id"
 )

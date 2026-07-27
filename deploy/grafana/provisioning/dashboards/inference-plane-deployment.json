@@ -158,6 +158,27 @@
           "custom": { "lineInterpolation": "linear", "fillOpacity": 10 }
         }
       }
+    },
+    {
+      "id": 8,
+      "title": "Engine-init: warm vs cold (mean seconds)",
+      "description": "Mean engine-init seconds split by storage_tier. cold = the engine downloads the model from HuggingFace inside the pod; warm = a pre-staged volume is mounted so the download portion of engine-init collapses. This is the Ch 9 distance-reduction panel: the gap between the two lines is the download time a warm mount buys back. A warm line that isn't well below cold means the cache isn't being hit (unpopulated volume, wrong mount path).",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "mimir" },
+      "gridPos": { "x": 0, "y": 30, "w": 24, "h": 9 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (storage_tier) (rate(iplane_deployment_phase_duration_sum{phase=\"engine:init\"}[10m])) / clamp_min(sum by (storage_tier) (rate(iplane_deployment_phase_duration_count{phase=\"engine:init\"}[10m])), 1)",
+          "legendFormat": "{{storage_tier}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "lineInterpolation": "linear", "fillOpacity": 10 }
+        }
+      }
     }
   ]
 }

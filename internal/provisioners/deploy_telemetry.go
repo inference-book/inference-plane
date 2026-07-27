@@ -29,12 +29,35 @@ const (
 	spanDeployProvision = "deployment.provision"
 	spanDeployTeardown  = "deployment.teardown"
 
-	attrDeployID = "iplane.deploy_id"
-	attrProvider = "iplane.provider"
-	attrClass    = "iplane.class"
-	attrPhase    = "iplane.phase"
-	attrResult   = "iplane.result"
+	attrDeployID    = "iplane.deploy_id"
+	attrProvider    = "iplane.provider"
+	attrClass       = "iplane.class"
+	attrPhase       = "iplane.phase"
+	attrResult      = "iplane.result"
+	attrStorageTier = "iplane.storage_tier"
 )
+
+// Storage-tier label values for the deploy lifecycle metrics/span. cold
+// = the engine downloads the model from HuggingFace inside the pod (no
+// mount); warm = a pre-staged volume is mounted so the model-download
+// portion of engine-init collapses. "hot" (a pre-warmed running pool)
+// does not exist yet. Teardown carries no tier.
+const (
+	storageTierCold = "cold"
+	storageTierWarm = "warm"
+)
+
+// storageTierForDeployment classifies a deployment by whether it mounts
+// a warm cache. A deployment with mounts loads weights off the volume
+// (warm); without, it downloads from HF in-pod (cold). This is the one
+// bit of deployment state the cold-start SLI slices by, derived here so
+// the provider adapters stay telemetry-free (CP/DP-1).
+func storageTierForDeployment(dep *provisionerv1.Deployment) string {
+	if len(dep.GetMounts()) > 0 {
+		return storageTierWarm
+	}
+	return storageTierCold
+}
 
 // deployKind selects which overall instrument finish() records into.
 type deployKind int
@@ -67,6 +90,8 @@ type deployObserver struct {
 	class    string
 	clock    func() time.Time
 
+	storageTier string
+
 	rootCtx  context.Context
 	rootSpan trace.Span
 	started  time.Time
@@ -84,7 +109,7 @@ type deployObserver struct {
 // newDeployObserver starts the root span and returns an observer whose
 // rootCtx should be handed to the executor so anything it traces nests
 // under the lifecycle span. kind picks the end-to-end instrument.
-func (s *Service) newDeployObserver(ctx context.Context, kind deployKind, deployID string, inst *provisionerv1.Instance) *deployObserver {
+func (s *Service) newDeployObserver(ctx context.Context, kind deployKind, deployID string, inst *provisionerv1.Instance, storageTier string) *deployObserver {
 	provider := inst.GetProvider()
 	class := inst.GetSpec().GetRequirements().GetClass()
 
@@ -92,23 +117,30 @@ func (s *Service) newDeployObserver(ctx context.Context, kind deployKind, deploy
 	if kind == deployKindTeardown {
 		spanName = spanDeployTeardown
 	}
+	attrs := []attribute.KeyValue{
+		attribute.String(attrDeployID, deployID),
+		attribute.String(attrProvider, provider),
+		attribute.String(attrClass, class),
+	}
+	// Tier is a provision-only cut (teardown has no download); omit the
+	// attribute on teardown so it doesn't read as a meaningful "cold".
+	if storageTier != "" {
+		attrs = append(attrs, attribute.String(attrStorageTier, storageTier))
+	}
 	rootCtx, span := deployTracer.Start(ctx, spanName,
 		trace.WithSpanKind(trace.SpanKindInternal),
-		trace.WithAttributes(
-			attribute.String(attrDeployID, deployID),
-			attribute.String(attrProvider, provider),
-			attribute.String(attrClass, class),
-		),
+		trace.WithAttributes(attrs...),
 	)
 	return &deployObserver{
-		rec:      s.recorder,
-		kind:     kind,
-		provider: provider,
-		class:    class,
-		clock:    s.clock,
-		rootCtx:  rootCtx,
-		rootSpan: span,
-		started:  s.clock(),
+		rec:         s.recorder,
+		kind:        kind,
+		provider:    provider,
+		class:       class,
+		storageTier: storageTier,
+		clock:       s.clock,
+		rootCtx:     rootCtx,
+		rootSpan:    span,
+		started:     s.clock(),
 	}
 }
 
@@ -160,7 +192,7 @@ func (o *deployObserver) finish(err error) {
 	case deployKindTeardown:
 		o.rec.RecordDeployTeardown(o.rootCtx, o.provider, result, total)
 	default:
-		o.rec.RecordDeployProvision(o.rootCtx, o.provider, result, o.class, total)
+		o.rec.RecordDeployProvision(o.rootCtx, o.provider, result, o.class, o.storageTier, total)
 	}
 
 	o.rootSpan.SetAttributes(attribute.String(attrResult, result))
@@ -196,7 +228,7 @@ func (o *deployObserver) closePhase(at time.Time) {
 	// result is not final until finish(); label the phase with the
 	// running outcome so far. The overwhelmingly common query is
 	// "phase p95 regardless of result", which sums over the label.
-	o.rec.RecordDeployPhase(o.rootCtx, o.curPhase, o.provider, resultInProgress, sec)
+	o.rec.RecordDeployPhase(o.rootCtx, o.curPhase, o.provider, resultInProgress, o.storageTier, sec)
 	if o.phaseSpan != nil {
 		o.phaseSpan.End()
 	}

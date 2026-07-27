@@ -1147,7 +1147,7 @@ func (s *Service) launchDeploy(ctx context.Context, dep *provisionerv1.Deploymen
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		obs := s.newDeployObserver(ctx, deployKindProvision, dep.GetId(), inst)
+		obs := s.newDeployObserver(ctx, deployKindProvision, dep.GetId(), inst, storageTierForDeployment(dep))
 		emit := func(u DeployStateUpdate) {
 			obs.observe(u)
 			_ = s.patchDeployment(dep.GetId(), u)
@@ -1624,7 +1624,9 @@ func (s *Service) DestroyDeployment(ctx context.Context, req *provisionerv1.Dest
 
 	// Synchronous destroy (no Wait flag on the request -- destroy
 	// always blocks until terminal state, simpler semantics).
-	obs := s.newDeployObserver(ctx, deployKindTeardown, id, inst)
+	// Teardown carries no storage tier (there is no model download to
+	// classify); pass "" so the tier attribute is omitted.
+	obs := s.newDeployObserver(ctx, deployKindTeardown, id, inst, "")
 	emit := func(u DeployStateUpdate) {
 		obs.observe(u)
 		_ = s.patchDeployment(id, u)
