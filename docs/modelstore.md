@@ -124,11 +124,39 @@ The Service code doesn't change; the wrapper just produces a richer
 
 **Activation is per-config**, via the daemon's `model_cache` block (see
 `deploy/config.yaml`), so earlier examples keep the cold path and a
-forward example opts in by adding the block. **Populating the volume**
-(the one-time download into it) is out of scope here; `volumecache`
-assumes the volume already holds the weights, and on a cache miss the
-engine still reaches HF (`HF_HOME` is redirected, not forced offline),
-so a misconfigured volume degrades to a cold deploy rather than failing.
+forward example opts in by adding the block.
+
+## Pinning (v0.2 Ch 9)
+
+`iplane model pin` populates the volume the `model_cache` block mounts:
+
+```bash
+iplane model pin Qwen/Qwen2.5-32B-Instruct-AWQ --provider runpod --region EU-RO-1
+# → creates/finds the region's shared cache volume, downloads the model
+#   onto it (via a throwaway CPU pod), prints the volume id to paste into
+#   model_cache.volume_id.
+iplane model ls                       # volumes + the models staged on each
+iplane model unpin <vol> --model <m>  # drop one model from the registry
+iplane model unpin <vol>              # destroy the whole volume
+```
+
+A volume is a **shared cache**: many models accumulate on one per-region
+volume (they sit side by side under one HF layout), so `volume_id` in the
+config serves every model pinned to that volume. A volume is
+datacenter-locked, so serving a model in two regions means pinning it in
+each. The `provider` field on the mount is enforced at deploy time: a
+deployment refuses a mount whose provider differs from where it lands
+(a RunPod volume can't attach on Lambda), rather than silently running
+cold.
+
+Pinning runs **in-process, before `iplane serve`** (the daemon holds the
+state lock for its lifetime); remote pinning over `--service-url` is a
+follow-up. Auto-resolving a pinned volume at deploy time (so you skip the
+`model_cache` config entirely) is a separate follow-up.
+
+**On a cache miss** the engine still reaches HF (`HF_HOME` is redirected,
+not forced offline), so an unpopulated or misconfigured volume degrades
+to a cold deploy rather than failing.
 
 ## Limitations the operator should know
 
