@@ -140,6 +140,121 @@ func TestFanOut_AllSucceed(t *testing.T) {
 	}
 }
 
+// seedWarmVolume records a pinned volume in the registry so auto-resolve
+// has something to find.
+func seedWarmVolume(t *testing.T, store *file.Store, id, provider, region string, models ...string) {
+	t.Helper()
+	if err := store.Update(func(f *provisioners.State) error {
+		f.Volumes[id] = &provisionerv1.Volume{
+			Id: id, Provider: provider, Region: region, MountPath: "/models", Models: models,
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("seed volume: %v", err)
+	}
+}
+
+func warmDeployReq(id, model, provider, region string, replicas int32) *provisionerv1.CreateDeploymentRequest {
+	return &provisionerv1.CreateDeploymentRequest{
+		Deployment: &provisionerv1.Deployment{
+			Id: id, Image: "vllm/vllm-openai:v0.7.0", Model: model, EnginePort: 8000,
+		},
+		ReplicasSpec: []*provisionerv1.ReplicaSpec{{
+			Provider: provider, Region: region,
+			Requirements: &provisionerv1.ResourceRequirements{Sku: "mock-sku"},
+			Replicas:     replicas,
+		}},
+		Wait: true,
+	}
+}
+
+// TestCreateDeployment_AutoResolvesWarmMountFromRegistry: with a model
+// pinned on a volume in the deploy's (provider, region) and no config
+// mount, the deploy auto-mounts that volume -- warm without any config.
+func TestCreateDeployment_AutoResolvesWarmMountFromRegistry(t *testing.T) {
+	svc, store := fanOutMultiReplicaSvc(t, nil)
+	seedWarmVolume(t, store, "vol-1", "mockfan", "EU-RO-1", "Qwen/Qwen2.5-32B-Instruct-AWQ")
+
+	resp, err := svc.CreateDeployment(context.Background(),
+		warmDeployReq("warm", "Qwen/Qwen2.5-32B-Instruct-AWQ", "mockfan", "EU-RO-1", 1))
+	if err != nil {
+		t.Fatalf("CreateDeployment: %v", err)
+	}
+	mounts := resp.GetDeployment().GetMounts()
+	if len(mounts) != 1 || mounts[0].GetVolumeId() != "vol-1" || mounts[0].GetProvider() != "mockfan" {
+		t.Errorf("auto-resolve should mount vol-1; got %+v", mounts)
+	}
+}
+
+// TestCreateDeployment_NoPinStaysCold: no matching pin -> no mount.
+func TestCreateDeployment_NoPinStaysCold(t *testing.T) {
+	svc, store := fanOutMultiReplicaSvc(t, nil)
+	// Pinned model exists but in a different region than the deploy.
+	seedWarmVolume(t, store, "vol-1", "mockfan", "US-CA-1", "Qwen/Qwen2.5-32B-Instruct-AWQ")
+
+	resp, err := svc.CreateDeployment(context.Background(),
+		warmDeployReq("cold", "Qwen/Qwen2.5-32B-Instruct-AWQ", "mockfan", "EU-RO-1", 1))
+	if err != nil {
+		t.Fatalf("CreateDeployment: %v", err)
+	}
+	if got := resp.GetDeployment().GetMounts(); len(got) != 0 {
+		t.Errorf("no pin in the deploy's region -> cold; got mounts %+v", got)
+	}
+}
+
+// TestCreateDeployment_HeterogeneousFleetStaysCold: a fleet spanning two
+// regions can't share one mount, so auto-resolve is skipped.
+func TestCreateDeployment_HeterogeneousFleetStaysCold(t *testing.T) {
+	svc, store := fanOutMultiReplicaSvc(t, nil)
+	seedWarmVolume(t, store, "vol-1", "mockfan", "EU-RO-1", "m")
+
+	req := &provisionerv1.CreateDeploymentRequest{
+		Deployment: &provisionerv1.Deployment{Id: "hetero", Image: "vllm/vllm-openai:v0.7.0", Model: "m", EnginePort: 8000},
+		ReplicasSpec: []*provisionerv1.ReplicaSpec{
+			{Provider: "mockfan", Region: "EU-RO-1", Requirements: &provisionerv1.ResourceRequirements{Sku: "mock-sku"}, Replicas: 1},
+			{Provider: "mockfan", Region: "US-CA-1", Requirements: &provisionerv1.ResourceRequirements{Sku: "mock-sku"}, Replicas: 1},
+		},
+		Wait: true,
+	}
+	resp, err := svc.CreateDeployment(context.Background(), req)
+	if err != nil {
+		t.Fatalf("CreateDeployment: %v", err)
+	}
+	if got := resp.GetDeployment().GetMounts(); len(got) != 0 {
+		t.Errorf("heterogeneous fleet must stay cold; got mounts %+v", got)
+	}
+}
+
+// TestCreateDeployment_ConfigMountWinsOverAutoResolve: an explicit
+// model_cache mount (from the ModelStore) takes precedence; the registry
+// is only consulted when no mount was configured.
+func TestCreateDeployment_ConfigMountWinsOverAutoResolve(t *testing.T) {
+	prov := &fanOutMockProvider{name: "mockfan"}
+	store, err := file.Open(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("file.Open: %v", err)
+	}
+	ms := &stubModelStore{respond: func(spec string) (modelstores.Resolved, error) {
+		return modelstores.Resolved{
+			EngineModelArg: spec,
+			Mounts:         []modelstores.Mount{{VolumeID: "config-vol", MountPath: "/models", Provider: "mockfan"}},
+		}, nil
+	}}
+	svc := provisioners.New([]provisioners.Provider{prov}, store, "default",
+		provisioners.WithKeyStore(newKeyStore(t)),
+		provisioners.WithModelStore(ms))
+	seedWarmVolume(t, store, "registry-vol", "mockfan", "EU-RO-1", "m")
+
+	resp, err := svc.CreateDeployment(context.Background(), warmDeployReq("both", "m", "mockfan", "EU-RO-1", 1))
+	if err != nil {
+		t.Fatalf("CreateDeployment: %v", err)
+	}
+	mounts := resp.GetDeployment().GetMounts()
+	if len(mounts) != 1 || mounts[0].GetVolumeId() != "config-vol" {
+		t.Errorf("config mount should win over the registry; got %+v", mounts)
+	}
+}
+
 // TestFanOut_StampsMountsOntoRecord: a warm-cache store's mounts must
 // reach the multi-replica deployment record -- N replicas sharing one
 // pre-staged volume is the payoff case for warm mounts.

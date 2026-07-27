@@ -40,6 +40,52 @@ func cacheVolumeName(region string) string {
 	return "iplane-cache-" + region
 }
 
+// resolveWarmMount looks the pin registry up for a volume in
+// (provider, region) that has model staged, returning a VolumeMount to
+// stamp onto a deployment, or nil when nothing matches (the deploy then
+// runs cold). The mount carries the volume's provider so the deploy
+// guard is satisfied by construction. #191b: this is what makes a
+// deploy warm after `iplane model pin` without any model_cache config.
+func (s *Service) resolveWarmMount(model, provider, region string) *provisionerv1.VolumeMount {
+	if model == "" || provider == "" || region == "" {
+		return nil
+	}
+	state, err := s.store.Read()
+	if err != nil {
+		return nil
+	}
+	for _, v := range state.Volumes {
+		if v.GetProvider() == provider && v.GetRegion() == region && slices.Contains(v.GetModels(), model) {
+			return &provisionerv1.VolumeMount{
+				VolumeId:  v.GetId(),
+				MountPath: v.GetMountPath(),
+				Provider:  v.GetProvider(),
+			}
+		}
+	}
+	return nil
+}
+
+// homogeneousPlacement returns the single (provider, region) a fleet
+// lands on, or ok=false when the specs are empty or mix providers/
+// regions. Auto-resolve only applies to a homogeneous fleet: one
+// deployment-level mount cannot serve replicas on different providers
+// (a heterogeneous fleet stays cold, and the deploy guard would reject a
+// mismatched mount anyway).
+func homogeneousPlacement(specs []*provisionerv1.ReplicaSpec) (provider, region string, ok bool) {
+	if len(specs) == 0 {
+		return "", "", false
+	}
+	provider = specs[0].GetProvider()
+	region = specs[0].GetRegion()
+	for _, sp := range specs[1:] {
+		if sp.GetProvider() != provider || sp.GetRegion() != region {
+			return "", "", false
+		}
+	}
+	return provider, region, true
+}
+
 // PinModelRequest asks the Service to pre-stage a model onto a provider's
 // per-region cache volume.
 type PinModelRequest struct {
