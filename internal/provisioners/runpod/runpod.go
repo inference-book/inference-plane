@@ -129,6 +129,12 @@ type Provider struct {
 	engineReadyTimeout time.Duration
 	sshReadyInterval   time.Duration
 
+	// Model-staging poll cadence + budget (VolumeManager.StageModel).
+	// Zero falls back to the stagePollInterval / stageTimeout consts;
+	// tests set a small interval so they don't sleep between polls.
+	stageInterval time.Duration
+	stageBudget   time.Duration
+
 	// sshProbe is the function used to verify tcp/22 is actually
 	// accepting connections (RunPod's publicIp can be assigned a few
 	// seconds before the container's sshd is ready to handshake).

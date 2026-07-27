@@ -69,10 +69,16 @@ type Resolved struct {
 //     by the sshdocker deploy path. Empty when VolumeID drives the mount.
 //   - MountPath is the in-container path the engine sees. Always set; a
 //     store points HF_HOME at it so the engine finds the staged weights.
+//   - Provider namespaces VolumeID: a volume handle only means something
+//     to the provider that issued it, so the deploy path refuses to
+//     attach a mount whose provider does not match the replica's
+//     placement provider. Empty skips the check (host-path binds are
+//     not provider-scoped). Mirrors provisionerv1.VolumeMount.provider.
 type Mount struct {
 	VolumeID  string
 	HostPath  string
 	MountPath string
+	Provider  string
 }
 
 // Passthrough is the no-op ModelStore: returns the input spec

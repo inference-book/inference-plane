@@ -1367,6 +1367,13 @@ func (x *Deployment) GetMounts() []*VolumeMount {
 //   - mount_path is the in-container path the engine sees. Always set;
 //     the model store points HF_HOME at it so the engine finds the
 //     staged weights.
+//   - provider namespaces volume_id. A volume handle only means
+//     something to the provider that issued it (a RunPod networkVolumeId
+//     is meaningless to Lambda), so the deploy path refuses to attach a
+//     mount whose provider does not match the replica's placement
+//     provider -- otherwise a cross-provider mount would silently fall
+//     back to a cold download instead of failing loudly. Empty provider
+//     skips the check (host_path binds, which are not provider-scoped).
 //
 // An adapter uses the fields its provider primitive supports and
 // ignores the rest. Mirrors modelstores.Mount.
@@ -1375,6 +1382,7 @@ type VolumeMount struct {
 	VolumeId      string                 `protobuf:"bytes,1,opt,name=volume_id,json=volumeId,proto3" json:"volume_id,omitempty"`
 	HostPath      string                 `protobuf:"bytes,2,opt,name=host_path,json=hostPath,proto3" json:"host_path,omitempty"`
 	MountPath     string                 `protobuf:"bytes,3,opt,name=mount_path,json=mountPath,proto3" json:"mount_path,omitempty"`
+	Provider      string                 `protobuf:"bytes,4,opt,name=provider,proto3" json:"provider,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1428,6 +1436,134 @@ func (x *VolumeMount) GetMountPath() string {
 		return x.MountPath
 	}
 	return ""
+}
+
+func (x *VolumeMount) GetProvider() string {
+	if x != nil {
+		return x.Provider
+	}
+	return ""
+}
+
+// Volume is the registry record for a persistent provider volume that
+// models are pre-staged onto, so warm-cache deploys mount weights
+// instead of re-downloading them. One volume is a shared cache: it
+// holds many models (the HuggingFace hub layout keeps them side by side
+// under one HF_HOME), and models accumulate as they are pinned.
+//
+// A volume is datacenter-locked, so serving a model in two regions needs
+// it staged on one volume per region -- replication is per-region, not a
+// property of a single record.
+type Volume struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// id is the provider-issued volume handle (a RunPod networkVolumeId).
+	Id string `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	// provider that issued the volume; namespaces id and gates which
+	// deployments may mount it (see VolumeMount.provider).
+	Provider string `protobuf:"bytes,2,opt,name=provider,proto3" json:"provider,omitempty"`
+	// region / datacenter the volume lives in. A pod must be scheduled
+	// here to mount it.
+	Region string `protobuf:"bytes,3,opt,name=region,proto3" json:"region,omitempty"`
+	// name is the operator-visible label (the deterministic per-region
+	// cache name, or an operator-supplied one).
+	Name string `protobuf:"bytes,4,opt,name=name,proto3" json:"name,omitempty"`
+	// size_gb is the provisioned capacity.
+	SizeGb int32 `protobuf:"varint,5,opt,name=size_gb,json=sizeGb,proto3" json:"size_gb,omitempty"`
+	// models is the set of model specs staged onto this volume. Pinning is
+	// additive; unpinning a single model removes its entry.
+	Models []string `protobuf:"bytes,6,rep,name=models,proto3" json:"models,omitempty"`
+	// mount_path is where the volume attaches in a pod and where HF_HOME
+	// points (the staged HuggingFace cache lives under mount_path/hf).
+	MountPath     string                 `protobuf:"bytes,7,opt,name=mount_path,json=mountPath,proto3" json:"mount_path,omitempty"`
+	CreatedAt     *timestamppb.Timestamp `protobuf:"bytes,8,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Volume) Reset() {
+	*x = Volume{}
+	mi := &file_provisioner_v1_types_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Volume) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Volume) ProtoMessage() {}
+
+func (x *Volume) ProtoReflect() protoreflect.Message {
+	mi := &file_provisioner_v1_types_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Volume.ProtoReflect.Descriptor instead.
+func (*Volume) Descriptor() ([]byte, []int) {
+	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *Volume) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *Volume) GetProvider() string {
+	if x != nil {
+		return x.Provider
+	}
+	return ""
+}
+
+func (x *Volume) GetRegion() string {
+	if x != nil {
+		return x.Region
+	}
+	return ""
+}
+
+func (x *Volume) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *Volume) GetSizeGb() int32 {
+	if x != nil {
+		return x.SizeGb
+	}
+	return 0
+}
+
+func (x *Volume) GetModels() []string {
+	if x != nil {
+		return x.Models
+	}
+	return nil
+}
+
+func (x *Volume) GetMountPath() string {
+	if x != nil {
+		return x.MountPath
+	}
+	return ""
+}
+
+func (x *Volume) GetCreatedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.CreatedAt
+	}
+	return nil
 }
 
 // ReplicaSpec describes one *instance group* in the fleet: N units
@@ -1489,7 +1625,7 @@ type ReplicaSpec struct {
 
 func (x *ReplicaSpec) Reset() {
 	*x = ReplicaSpec{}
-	mi := &file_provisioner_v1_types_proto_msgTypes[8]
+	mi := &file_provisioner_v1_types_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1501,7 +1637,7 @@ func (x *ReplicaSpec) String() string {
 func (*ReplicaSpec) ProtoMessage() {}
 
 func (x *ReplicaSpec) ProtoReflect() protoreflect.Message {
-	mi := &file_provisioner_v1_types_proto_msgTypes[8]
+	mi := &file_provisioner_v1_types_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1514,7 +1650,7 @@ func (x *ReplicaSpec) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReplicaSpec.ProtoReflect.Descriptor instead.
 func (*ReplicaSpec) Descriptor() ([]byte, []int) {
-	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{8}
+	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *ReplicaSpec) GetProvider() string {
@@ -1660,12 +1796,24 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"\x06mounts\x18\x1c \x03(\v2\x1b.provisioner.v1.VolumeMountR\x06mounts\x1a6\n" +
 	"\bEnvEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"f\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x82\x01\n" +
 	"\vVolumeMount\x12\x1b\n" +
 	"\tvolume_id\x18\x01 \x01(\tR\bvolumeId\x12\x1b\n" +
 	"\thost_path\x18\x02 \x01(\tR\bhostPath\x12\x1d\n" +
 	"\n" +
-	"mount_path\x18\x03 \x01(\tR\tmountPath\"\xd0\x01\n" +
+	"mount_path\x18\x03 \x01(\tR\tmountPath\x12\x1a\n" +
+	"\bprovider\x18\x04 \x01(\tR\bprovider\"\xeb\x01\n" +
+	"\x06Volume\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1a\n" +
+	"\bprovider\x18\x02 \x01(\tR\bprovider\x12\x16\n" +
+	"\x06region\x18\x03 \x01(\tR\x06region\x12\x12\n" +
+	"\x04name\x18\x04 \x01(\tR\x04name\x12\x17\n" +
+	"\asize_gb\x18\x05 \x01(\x05R\x06sizeGb\x12\x16\n" +
+	"\x06models\x18\x06 \x03(\tR\x06models\x12\x1d\n" +
+	"\n" +
+	"mount_path\x18\a \x01(\tR\tmountPath\x129\n" +
+	"\n" +
+	"created_at\x18\b \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\"\xd0\x01\n" +
 	"\vReplicaSpec\x12\x1a\n" +
 	"\bprovider\x18\x01 \x01(\tR\bprovider\x12\x16\n" +
 	"\x06region\x18\x02 \x01(\tR\x06region\x12H\n" +
@@ -1709,7 +1857,7 @@ func file_provisioner_v1_types_proto_rawDescGZIP() []byte {
 }
 
 var file_provisioner_v1_types_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_provisioner_v1_types_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
+var file_provisioner_v1_types_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
 var file_provisioner_v1_types_proto_goTypes = []any{
 	(InstanceState)(0),            // 0: provisioner.v1.InstanceState
 	(Priority)(0),                 // 1: provisioner.v1.Priority
@@ -1722,43 +1870,45 @@ var file_provisioner_v1_types_proto_goTypes = []any{
 	(*InstanceRef)(nil),           // 8: provisioner.v1.InstanceRef
 	(*Deployment)(nil),            // 9: provisioner.v1.Deployment
 	(*VolumeMount)(nil),           // 10: provisioner.v1.VolumeMount
-	(*ReplicaSpec)(nil),           // 11: provisioner.v1.ReplicaSpec
-	nil,                           // 12: provisioner.v1.Spec.TagsEntry
-	nil,                           // 13: provisioner.v1.Instance.MetadataEntry
-	nil,                           // 14: provisioner.v1.InstanceRef.TagsEntry
-	nil,                           // 15: provisioner.v1.Deployment.EnvEntry
-	(*timestamppb.Timestamp)(nil), // 16: google.protobuf.Timestamp
-	(*structpb.Value)(nil),        // 17: google.protobuf.Value
+	(*Volume)(nil),                // 11: provisioner.v1.Volume
+	(*ReplicaSpec)(nil),           // 12: provisioner.v1.ReplicaSpec
+	nil,                           // 13: provisioner.v1.Spec.TagsEntry
+	nil,                           // 14: provisioner.v1.Instance.MetadataEntry
+	nil,                           // 15: provisioner.v1.InstanceRef.TagsEntry
+	nil,                           // 16: provisioner.v1.Deployment.EnvEntry
+	(*timestamppb.Timestamp)(nil), // 17: google.protobuf.Timestamp
+	(*structpb.Value)(nil),        // 18: google.protobuf.Value
 }
 var file_provisioner_v1_types_proto_depIdxs = []int32{
 	4,  // 0: provisioner.v1.Spec.requirements:type_name -> provisioner.v1.ResourceRequirements
-	12, // 1: provisioner.v1.Spec.tags:type_name -> provisioner.v1.Spec.TagsEntry
+	13, // 1: provisioner.v1.Spec.tags:type_name -> provisioner.v1.Spec.TagsEntry
 	3,  // 2: provisioner.v1.Instance.spec:type_name -> provisioner.v1.Spec
 	5,  // 3: provisioner.v1.Instance.hardware:type_name -> provisioner.v1.Hardware
 	0,  // 4: provisioner.v1.Instance.state:type_name -> provisioner.v1.InstanceState
-	16, // 5: provisioner.v1.Instance.created_at:type_name -> google.protobuf.Timestamp
-	16, // 6: provisioner.v1.Instance.activated_at:type_name -> google.protobuf.Timestamp
-	16, // 7: provisioner.v1.Instance.terminated_at:type_name -> google.protobuf.Timestamp
+	17, // 5: provisioner.v1.Instance.created_at:type_name -> google.protobuf.Timestamp
+	17, // 6: provisioner.v1.Instance.activated_at:type_name -> google.protobuf.Timestamp
+	17, // 7: provisioner.v1.Instance.terminated_at:type_name -> google.protobuf.Timestamp
 	6,  // 8: provisioner.v1.Instance.ssh:type_name -> provisioner.v1.SshTarget
-	13, // 9: provisioner.v1.Instance.metadata:type_name -> provisioner.v1.Instance.MetadataEntry
-	14, // 10: provisioner.v1.InstanceRef.tags:type_name -> provisioner.v1.InstanceRef.TagsEntry
-	16, // 11: provisioner.v1.InstanceRef.created_at:type_name -> google.protobuf.Timestamp
-	15, // 12: provisioner.v1.Deployment.env:type_name -> provisioner.v1.Deployment.EnvEntry
+	14, // 9: provisioner.v1.Instance.metadata:type_name -> provisioner.v1.Instance.MetadataEntry
+	15, // 10: provisioner.v1.InstanceRef.tags:type_name -> provisioner.v1.InstanceRef.TagsEntry
+	17, // 11: provisioner.v1.InstanceRef.created_at:type_name -> google.protobuf.Timestamp
+	16, // 12: provisioner.v1.Deployment.env:type_name -> provisioner.v1.Deployment.EnvEntry
 	2,  // 13: provisioner.v1.Deployment.state:type_name -> provisioner.v1.DeploymentState
-	16, // 14: provisioner.v1.Deployment.created_at:type_name -> google.protobuf.Timestamp
-	16, // 15: provisioner.v1.Deployment.started_at:type_name -> google.protobuf.Timestamp
-	16, // 16: provisioner.v1.Deployment.ready_at:type_name -> google.protobuf.Timestamp
-	16, // 17: provisioner.v1.Deployment.terminated_at:type_name -> google.protobuf.Timestamp
-	16, // 18: provisioner.v1.Deployment.last_activity_at:type_name -> google.protobuf.Timestamp
-	11, // 19: provisioner.v1.Deployment.replica_specs:type_name -> provisioner.v1.ReplicaSpec
+	17, // 14: provisioner.v1.Deployment.created_at:type_name -> google.protobuf.Timestamp
+	17, // 15: provisioner.v1.Deployment.started_at:type_name -> google.protobuf.Timestamp
+	17, // 16: provisioner.v1.Deployment.ready_at:type_name -> google.protobuf.Timestamp
+	17, // 17: provisioner.v1.Deployment.terminated_at:type_name -> google.protobuf.Timestamp
+	17, // 18: provisioner.v1.Deployment.last_activity_at:type_name -> google.protobuf.Timestamp
+	12, // 19: provisioner.v1.Deployment.replica_specs:type_name -> provisioner.v1.ReplicaSpec
 	10, // 20: provisioner.v1.Deployment.mounts:type_name -> provisioner.v1.VolumeMount
-	4,  // 21: provisioner.v1.ReplicaSpec.requirements:type_name -> provisioner.v1.ResourceRequirements
-	17, // 22: provisioner.v1.Instance.MetadataEntry.value:type_name -> google.protobuf.Value
-	23, // [23:23] is the sub-list for method output_type
-	23, // [23:23] is the sub-list for method input_type
-	23, // [23:23] is the sub-list for extension type_name
-	23, // [23:23] is the sub-list for extension extendee
-	0,  // [0:23] is the sub-list for field type_name
+	17, // 21: provisioner.v1.Volume.created_at:type_name -> google.protobuf.Timestamp
+	4,  // 22: provisioner.v1.ReplicaSpec.requirements:type_name -> provisioner.v1.ResourceRequirements
+	18, // 23: provisioner.v1.Instance.MetadataEntry.value:type_name -> google.protobuf.Value
+	24, // [24:24] is the sub-list for method output_type
+	24, // [24:24] is the sub-list for method input_type
+	24, // [24:24] is the sub-list for extension type_name
+	24, // [24:24] is the sub-list for extension extendee
+	0,  // [0:24] is the sub-list for field type_name
 }
 
 func init() { file_provisioner_v1_types_proto_init() }
@@ -1772,7 +1922,7 @@ func file_provisioner_v1_types_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_provisioner_v1_types_proto_rawDesc), len(file_provisioner_v1_types_proto_rawDesc)),
 			NumEnums:      3,
-			NumMessages:   13,
+			NumMessages:   14,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

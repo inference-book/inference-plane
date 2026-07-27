@@ -43,6 +43,7 @@ type ModelCacheConfig struct {
 	VolumeID  string `yaml:"volume_id"`  // provider-managed volume handle (image-native path)
 	HostPath  string `yaml:"host_path"`  // host directory to bind (sshdocker path)
 	MountPath string `yaml:"mount_path"` // in-container attach path; defaults to /models
+	Provider  string `yaml:"provider"`   // namespaces volume_id; deploy refuses a mount whose provider != the replica's
 }
 
 // Enabled reports whether the warm model-cache is configured. Either a

@@ -57,5 +57,6 @@ func modelStoreFromConfig(mc config.ModelCacheConfig) modelstores.ModelStore {
 		VolumeID:  mc.VolumeID,
 		HostPath:  mc.HostPath,
 		MountPath: mountPath,
+		Provider:  mc.Provider,
 	})
 }
