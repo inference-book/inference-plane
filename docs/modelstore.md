@@ -89,29 +89,46 @@ The `--skip-model-validation` flag is a root-level persistent flag, so
 it applies to every verb that constructs an in-process Service
 (`up`, `deployment deploy`, `instance create`, etc.).
 
-## v0.2 trajectory
+## Warm model cache (v0.2, Ch 9)
 
-When v0.2's `CachedStore` lands, it wraps `huggingface.Store`:
+`volumecache.Store` wraps a base store (`huggingface.Store`) so a
+deployment mounts a pre-staged volume instead of re-downloading the
+model on every deploy. It is provider-agnostic: it stamps an opaque
+`Mount` (a provider volume handle and/or a host path, plus the
+in-container attach path) and redirects `HF_HOME` at it. No
+provider-specific branch lives in the store — which is why it carries
+no provider name.
 
 ```go
-// Sketch — not in v0.1
-cs := cachedstore.New(
-    huggingface.New(token),
-    runpodvolume.NewStore(volumeID),
+vc := volumecache.New(
+    huggingface.New(token),               // still validates + propagates HF_TOKEN
+    modelstores.Mount{VolumeID: volumeID, MountPath: "/models"},
 )
-provisioners.WithModelStore(cs)
+provisioners.WithModelStore(vc)
 ```
 
-`CachedStore.Resolve` would:
+`volumecache.Store.Resolve`:
 
-1. Delegate to HF for validation (same as today).
-2. If the model isn't cached on the volume, do a one-time download
-   inside a setup pod that writes to the network volume.
-3. Return `Resolved{EngineModelArg: "/cache/<model>", Mounts: [...]}`
-   so the engine loads from the mounted path instead of re-downloading.
+1. Delegates to the base for validation (same as the plain HF path).
+2. Adds `HF_HOME=<mount>/hf` so the engine finds the staged HF cache,
+   leaving `--model` as the HF id (the cache hits via the env redirect,
+   not by rewriting `--model`).
+3. Appends the `Mount`, which the Service stamps onto
+   `Deployment.mounts`. Each deploy path maps it onto its own
+   primitive: the RunPod adapter onto `networkVolumeId`, the sshdocker
+   executor onto a `docker run -v` bind. Paths with no volume mechanism
+   take the cold download path.
 
 The Service code doesn't change; the wrapper just produces a richer
 `Resolved`. That's the whole point of the seam.
+
+**Activation is per-config**, via the daemon's `model_cache` block (see
+`deploy/config.yaml`), so earlier examples keep the cold path and a
+forward example opts in by adding the block. **Populating the volume**
+(the one-time download into it) is out of scope here; `volumecache`
+assumes the volume already holds the weights, and on a cache miss the
+engine still reaches HF (`HF_HOME` is redirected, not forced offline),
+so a misconfigured volume degrades to a cold deploy rather than failing.
 
 ## Limitations the operator should know
 
@@ -126,8 +143,9 @@ The Service code doesn't change; the wrapper just produces a richer
   CI pipeline running many deploys back-to-back may hit
   `429 Too Many Requests`; use `--skip-model-validation` in CI or
   set `HF_TOKEN` (authenticated requests have higher limits).
-- **`iplane serve` doesn't validate.** The long-running provisioner-
-  serve mode doesn't construct a ModelStore today (it isn't wired
-  through `serve.go`); only the in-process CLI verbs do. If you use
-  `--service-url` against a remote `iplane serve`, validation is
-  effectively off regardless of the flag.
+- **Remote `--service-url` uses the daemon's store, not yours.** Both
+  the in-process CLI verbs and `iplane serve` construct a ModelStore
+  (via `buildLocalService`), so validation and the warm cache are the
+  daemon's, configured on the daemon. When you drive a remote daemon
+  with `--service-url`, your local `--skip-model-validation` and
+  `model_cache` settings do not apply -- the daemon's do.

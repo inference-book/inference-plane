@@ -757,6 +757,8 @@ type createPodRequest struct {
 	ContainerDiskInGB int               `json:"containerDiskInGb,omitempty"`
 	VolumeInGB        int               `json:"volumeInGb,omitempty"`
 	NetworkVolumeID   string            `json:"networkVolumeId,omitempty"`
+	VolumeMountPath   string            `json:"volumeMountPath,omitempty"` // where networkVolumeId attaches inside the pod
+
 	Ports             []string          `json:"ports,omitempty"`
 	Env               map[string]string `json:"env,omitempty"` // RunPod's REST uses a flat key/value map.
 	// DockerStartCmd REPLACES the image's CMD with these argv tokens

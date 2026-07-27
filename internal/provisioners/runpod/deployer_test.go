@@ -114,6 +114,67 @@ func TestDeploy_HappyPath_GoesToRUNNING(t *testing.T) {
 	}
 }
 
+func TestDeploy_Mounts_AttachNetworkVolume(t *testing.T) {
+	proxyURL := proxyServer(t, http.StatusOK)
+	var gotVolumeID, gotMountPath string
+	f := &fakeRunPod{t: t, respond: func(method, path string, body []byte) (int, string) {
+		if method == "POST" && path == "/pods" {
+			var req createPodRequest
+			_ = json.Unmarshal(body, &req)
+			gotVolumeID = req.NetworkVolumeID
+			gotMountPath = req.VolumeMountPath
+			return 201, `{"id":"rp-engine-1","desiredStatus":"RUNNING"}`
+		}
+		t.Errorf("unexpected %s %s", method, path)
+		return 500, "{}"
+	}}
+	srv := httptest.NewServer(f.handler())
+	t.Cleanup(srv.Close)
+	client := NewClient("test-api-key", WithBaseURL(srv.URL), WithHTTPClient(srv.Client()))
+	p := New(client, WithSSHReadyWait(2*time.Second, 5*time.Millisecond), WithProxyBaseURL(proxyURL))
+
+	dep := okDep()
+	// A VolumeMount with a volume id is the image-native (RunPod) shape;
+	// the host_path-only sibling is exercised by the sshdocker path.
+	dep.Mounts = []*provisionerv1.VolumeMount{
+		{VolumeId: "vol-abc123", MountPath: "/models"},
+	}
+	if err := p.Deploy(context.Background(), dep, okInst(), nil, (&collector{}).emit); err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	if gotVolumeID != "vol-abc123" {
+		t.Errorf("networkVolumeId = %q, want vol-abc123", gotVolumeID)
+	}
+	if gotMountPath != "/models" {
+		t.Errorf("volumeMountPath = %q, want /models", gotMountPath)
+	}
+}
+
+func TestDeploy_NoMounts_LeavesNetworkVolumeUnset(t *testing.T) {
+	proxyURL := proxyServer(t, http.StatusOK)
+	var gotVolumeID string
+	f := &fakeRunPod{t: t, respond: func(method, path string, body []byte) (int, string) {
+		if method == "POST" && path == "/pods" {
+			var req createPodRequest
+			_ = json.Unmarshal(body, &req)
+			gotVolumeID = req.NetworkVolumeID
+			return 201, `{"id":"rp-engine-1","desiredStatus":"RUNNING"}`
+		}
+		return 500, "{}"
+	}}
+	srv := httptest.NewServer(f.handler())
+	t.Cleanup(srv.Close)
+	client := NewClient("test-api-key", WithBaseURL(srv.URL), WithHTTPClient(srv.Client()))
+	p := New(client, WithSSHReadyWait(2*time.Second, 5*time.Millisecond), WithProxyBaseURL(proxyURL))
+
+	if err := p.Deploy(context.Background(), okDep(), okInst(), nil, (&collector{}).emit); err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	if gotVolumeID != "" {
+		t.Errorf("networkVolumeId = %q, want empty on the default (no-mount) path", gotVolumeID)
+	}
+}
+
 func TestDeploy_PostFailure_GoesToFAILED(t *testing.T) {
 	f := &fakeRunPod{t: t, respond: func(method, path string, body []byte) (int, string) {
 		if method == "POST" && path == "/pods" {

@@ -115,3 +115,18 @@ health:
   success_threshold: 3
   probe_timeout: 2s
   max_concurrent: 32
+
+# model_cache (v0.2 Ch 9): warm model cache. When set, deployments mount
+# a pre-staged volume and load weights off it instead of re-downloading
+# from HuggingFace every deploy. Absent (the default) means the cold
+# path: the engine downloads inside the pod. Provider-agnostic -- set
+# volume_id for the image-native path (a RunPod network volume id) or
+# host_path for the sshdocker bind path (a VM's mounted filesystem);
+# either non-empty enables it. mount_path is where the engine reads
+# from (defaults to /models). Populating the volume is a separate step;
+# a miss degrades to a cold deploy, not a failure.
+#
+# model_cache:
+#   volume_id: ""      # provider volume handle (image-native / RunPod)
+#   host_path: ""      # host directory to bind (sshdocker / VM providers)
+#   mount_path: /models

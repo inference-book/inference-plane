@@ -1203,6 +1203,7 @@ func TestCreateDeployment_ResolveModelCalled_AndEnvMerged(t *testing.T) {
 			return modelstores.Resolved{
 				EngineModelArg: spec,
 				EnvOverrides:   map[string]string{"HF_TOKEN": "secret"},
+				Mounts:         []modelstores.Mount{{VolumeID: "vol-1", MountPath: "/models"}},
 			}, nil
 		},
 	}
@@ -1237,6 +1238,12 @@ func TestCreateDeployment_ResolveModelCalled_AndEnvMerged(t *testing.T) {
 	// Env from ModelStore must land on the deployment record.
 	if resp.GetDeployment().GetEnv()["HF_TOKEN"] != "secret" {
 		t.Errorf("HF_TOKEN should be merged from Resolved.EnvOverrides; got %+v", resp.GetDeployment().GetEnv())
+	}
+	// Mounts from ModelStore must be stamped onto the deployment so the
+	// deploy path can attach them.
+	mounts := resp.GetDeployment().GetMounts()
+	if len(mounts) != 1 || mounts[0].GetVolumeId() != "vol-1" || mounts[0].GetMountPath() != "/models" {
+		t.Errorf("Resolved.Mounts should be stamped onto Deployment.mounts; got %+v", mounts)
 	}
 }
 

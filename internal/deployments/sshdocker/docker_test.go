@@ -229,6 +229,32 @@ func TestRun_BuildsExpectedCommand(t *testing.T) {
 	}
 }
 
+func TestRun_MountsBecomeBindFlags(t *testing.T) {
+	r := &fakeRunner{}
+	r.on("docker run", fakeResp{stdout: "abc1234\n"})
+	d := NewDocker(r)
+	_, err := d.Run(context.Background(), RunSpec{
+		Name:  "iplane-deployment-foo",
+		Image: "vllm/vllm-openai:0.7.0",
+		Model: "Qwen/Qwen2.5-7B-Instruct",
+		Port:  8000,
+		Mounts: []Mount{
+			{HostPath: "/mnt/models", MountPath: "/models"},
+			{HostPath: "", MountPath: "/skip"}, // incomplete -> dropped
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	cmd := r.calls[0]
+	if !strings.Contains(cmd, "-v '/mnt/models:/models'") {
+		t.Errorf("docker run missing bind mount\nfull cmd: %s", cmd)
+	}
+	if strings.Contains(cmd, ":/skip") {
+		t.Errorf("incomplete mount (no host path) should be dropped\nfull cmd: %s", cmd)
+	}
+}
+
 func TestStop_Idempotent_OnNoSuchContainer(t *testing.T) {
 	r := &fakeRunner{}
 	r.on("docker stop", fakeResp{

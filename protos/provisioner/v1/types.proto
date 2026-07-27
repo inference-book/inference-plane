@@ -490,6 +490,49 @@ message Deployment {
   // deployments always populate this in lockstep with the other
   // parallel arrays.
   repeated ReplicaSpec replica_specs = 27;
+
+  // mounts are filesystem mounts the deployment's engine needs, set
+  // by the Service from the ModelStore's Resolved.Mounts at
+  // CreateDeployment time (empty for the default HF-passthrough store,
+  // which downloads weights inside the pod). A warm-cache store
+  // (RunPodVolumeStore) fills this so the engine loads a model already
+  // staged on a persistent volume instead of re-downloading it every
+  // deploy.
+  //
+  // The field is provider-agnostic on purpose: it names a mount, not a
+  // provider primitive. Each deploy path maps it onto its own
+  // mechanism -- the RunPod Deployer onto networkVolumeId, the
+  // sshdocker executor onto a `docker run -v` bind -- and paths with no
+  // volume mechanism take the cold download path. Keeping the seam free
+  // of networkVolumeId / -v keeps adding a new provider's volume impl a
+  // new file, not a proto change.
+  //
+  // Field 22/23 were the removed default_priority draft; 28 is the next
+  // free number (kept distinct so that history note stays intact).
+  repeated VolumeMount mounts = 28;
+}
+
+// VolumeMount is one filesystem mount a deployment's engine needs. The
+// three fields cover the two deploy paths without either leaking into
+// the other:
+//
+//   - volume_id is a provider-managed volume handle (a RunPod network
+//     volume id today; a Lambda filesystem id later). The image-native
+//     deploy path attaches it by id; the provider schedules the pod in
+//     the volume's datacenter.
+//   - host_path is a directory already present on the host, bind-
+//     mounted by the sshdocker deploy path (`docker run -v
+//     host_path:mount_path`). Empty when volume_id drives the mount.
+//   - mount_path is the in-container path the engine sees. Always set;
+//     the model store points HF_HOME at it so the engine finds the
+//     staged weights.
+//
+// An adapter uses the fields its provider primitive supports and
+// ignores the rest. Mirrors modelstores.Mount.
+message VolumeMount {
+  string volume_id = 1;
+  string host_path = 2;
+  string mount_path = 3;
 }
 
 // ReplicaSpec describes one *instance group* in the fleet: N units

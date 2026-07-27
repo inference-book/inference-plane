@@ -1117,7 +1117,26 @@ type Deployment struct {
 	// (which fell back to the singular instance_id). Beat 3
 	// deployments always populate this in lockstep with the other
 	// parallel arrays.
-	ReplicaSpecs  []*ReplicaSpec `protobuf:"bytes,27,rep,name=replica_specs,json=replicaSpecs,proto3" json:"replica_specs,omitempty"`
+	ReplicaSpecs []*ReplicaSpec `protobuf:"bytes,27,rep,name=replica_specs,json=replicaSpecs,proto3" json:"replica_specs,omitempty"`
+	// mounts are filesystem mounts the deployment's engine needs, set
+	// by the Service from the ModelStore's Resolved.Mounts at
+	// CreateDeployment time (empty for the default HF-passthrough store,
+	// which downloads weights inside the pod). A warm-cache store
+	// (RunPodVolumeStore) fills this so the engine loads a model already
+	// staged on a persistent volume instead of re-downloading it every
+	// deploy.
+	//
+	// The field is provider-agnostic on purpose: it names a mount, not a
+	// provider primitive. Each deploy path maps it onto its own
+	// mechanism -- the RunPod Deployer onto networkVolumeId, the
+	// sshdocker executor onto a `docker run -v` bind -- and paths with no
+	// volume mechanism take the cold download path. Keeping the seam free
+	// of networkVolumeId / -v keeps adding a new provider's volume impl a
+	// new file, not a proto change.
+	//
+	// Field 22/23 were the removed default_priority draft; 28 is the next
+	// free number (kept distinct so that history note stays intact).
+	Mounts        []*VolumeMount `protobuf:"bytes,28,rep,name=mounts,proto3" json:"mounts,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1327,6 +1346,90 @@ func (x *Deployment) GetReplicaSpecs() []*ReplicaSpec {
 	return nil
 }
 
+func (x *Deployment) GetMounts() []*VolumeMount {
+	if x != nil {
+		return x.Mounts
+	}
+	return nil
+}
+
+// VolumeMount is one filesystem mount a deployment's engine needs. The
+// three fields cover the two deploy paths without either leaking into
+// the other:
+//
+//   - volume_id is a provider-managed volume handle (a RunPod network
+//     volume id today; a Lambda filesystem id later). The image-native
+//     deploy path attaches it by id; the provider schedules the pod in
+//     the volume's datacenter.
+//   - host_path is a directory already present on the host, bind-
+//     mounted by the sshdocker deploy path (`docker run -v
+//     host_path:mount_path`). Empty when volume_id drives the mount.
+//   - mount_path is the in-container path the engine sees. Always set;
+//     the model store points HF_HOME at it so the engine finds the
+//     staged weights.
+//
+// An adapter uses the fields its provider primitive supports and
+// ignores the rest. Mirrors modelstores.Mount.
+type VolumeMount struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	VolumeId      string                 `protobuf:"bytes,1,opt,name=volume_id,json=volumeId,proto3" json:"volume_id,omitempty"`
+	HostPath      string                 `protobuf:"bytes,2,opt,name=host_path,json=hostPath,proto3" json:"host_path,omitempty"`
+	MountPath     string                 `protobuf:"bytes,3,opt,name=mount_path,json=mountPath,proto3" json:"mount_path,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *VolumeMount) Reset() {
+	*x = VolumeMount{}
+	mi := &file_provisioner_v1_types_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *VolumeMount) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*VolumeMount) ProtoMessage() {}
+
+func (x *VolumeMount) ProtoReflect() protoreflect.Message {
+	mi := &file_provisioner_v1_types_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use VolumeMount.ProtoReflect.Descriptor instead.
+func (*VolumeMount) Descriptor() ([]byte, []int) {
+	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *VolumeMount) GetVolumeId() string {
+	if x != nil {
+		return x.VolumeId
+	}
+	return ""
+}
+
+func (x *VolumeMount) GetHostPath() string {
+	if x != nil {
+		return x.HostPath
+	}
+	return ""
+}
+
+func (x *VolumeMount) GetMountPath() string {
+	if x != nil {
+		return x.MountPath
+	}
+	return ""
+}
+
 // ReplicaSpec describes one *instance group* in the fleet: N units
 // of one (provider, region, requirements) shape. Used in two ways:
 //
@@ -1386,7 +1489,7 @@ type ReplicaSpec struct {
 
 func (x *ReplicaSpec) Reset() {
 	*x = ReplicaSpec{}
-	mi := &file_provisioner_v1_types_proto_msgTypes[7]
+	mi := &file_provisioner_v1_types_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1398,7 +1501,7 @@ func (x *ReplicaSpec) String() string {
 func (*ReplicaSpec) ProtoMessage() {}
 
 func (x *ReplicaSpec) ProtoReflect() protoreflect.Message {
-	mi := &file_provisioner_v1_types_proto_msgTypes[7]
+	mi := &file_provisioner_v1_types_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1411,7 +1514,7 @@ func (x *ReplicaSpec) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReplicaSpec.ProtoReflect.Descriptor instead.
 func (*ReplicaSpec) Descriptor() ([]byte, []int) {
-	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{7}
+	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *ReplicaSpec) GetProvider() string {
@@ -1519,7 +1622,7 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"created_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x1a7\n" +
 	"\tTagsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x81\t\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xb6\t\n" +
 	"\n" +
 	"Deployment\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1f\n" +
@@ -1553,10 +1656,16 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"\finstance_ids\x18\x18 \x03(\tR\vinstanceIds\x12)\n" +
 	"\x10engine_endpoints\x18\x19 \x03(\tR\x0fengineEndpoints\x124\n" +
 	"\x16unhealthy_instance_ids\x18\x1a \x03(\tR\x14unhealthyInstanceIds\x12@\n" +
-	"\rreplica_specs\x18\x1b \x03(\v2\x1b.provisioner.v1.ReplicaSpecR\freplicaSpecs\x1a6\n" +
+	"\rreplica_specs\x18\x1b \x03(\v2\x1b.provisioner.v1.ReplicaSpecR\freplicaSpecs\x123\n" +
+	"\x06mounts\x18\x1c \x03(\v2\x1b.provisioner.v1.VolumeMountR\x06mounts\x1a6\n" +
 	"\bEnvEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xd0\x01\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"f\n" +
+	"\vVolumeMount\x12\x1b\n" +
+	"\tvolume_id\x18\x01 \x01(\tR\bvolumeId\x12\x1b\n" +
+	"\thost_path\x18\x02 \x01(\tR\bhostPath\x12\x1d\n" +
+	"\n" +
+	"mount_path\x18\x03 \x01(\tR\tmountPath\"\xd0\x01\n" +
 	"\vReplicaSpec\x12\x1a\n" +
 	"\bprovider\x18\x01 \x01(\tR\bprovider\x12\x16\n" +
 	"\x06region\x18\x02 \x01(\tR\x06region\x12H\n" +
@@ -1600,7 +1709,7 @@ func file_provisioner_v1_types_proto_rawDescGZIP() []byte {
 }
 
 var file_provisioner_v1_types_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_provisioner_v1_types_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
+var file_provisioner_v1_types_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
 var file_provisioner_v1_types_proto_goTypes = []any{
 	(InstanceState)(0),            // 0: provisioner.v1.InstanceState
 	(Priority)(0),                 // 1: provisioner.v1.Priority
@@ -1612,42 +1721,44 @@ var file_provisioner_v1_types_proto_goTypes = []any{
 	(*Instance)(nil),              // 7: provisioner.v1.Instance
 	(*InstanceRef)(nil),           // 8: provisioner.v1.InstanceRef
 	(*Deployment)(nil),            // 9: provisioner.v1.Deployment
-	(*ReplicaSpec)(nil),           // 10: provisioner.v1.ReplicaSpec
-	nil,                           // 11: provisioner.v1.Spec.TagsEntry
-	nil,                           // 12: provisioner.v1.Instance.MetadataEntry
-	nil,                           // 13: provisioner.v1.InstanceRef.TagsEntry
-	nil,                           // 14: provisioner.v1.Deployment.EnvEntry
-	(*timestamppb.Timestamp)(nil), // 15: google.protobuf.Timestamp
-	(*structpb.Value)(nil),        // 16: google.protobuf.Value
+	(*VolumeMount)(nil),           // 10: provisioner.v1.VolumeMount
+	(*ReplicaSpec)(nil),           // 11: provisioner.v1.ReplicaSpec
+	nil,                           // 12: provisioner.v1.Spec.TagsEntry
+	nil,                           // 13: provisioner.v1.Instance.MetadataEntry
+	nil,                           // 14: provisioner.v1.InstanceRef.TagsEntry
+	nil,                           // 15: provisioner.v1.Deployment.EnvEntry
+	(*timestamppb.Timestamp)(nil), // 16: google.protobuf.Timestamp
+	(*structpb.Value)(nil),        // 17: google.protobuf.Value
 }
 var file_provisioner_v1_types_proto_depIdxs = []int32{
 	4,  // 0: provisioner.v1.Spec.requirements:type_name -> provisioner.v1.ResourceRequirements
-	11, // 1: provisioner.v1.Spec.tags:type_name -> provisioner.v1.Spec.TagsEntry
+	12, // 1: provisioner.v1.Spec.tags:type_name -> provisioner.v1.Spec.TagsEntry
 	3,  // 2: provisioner.v1.Instance.spec:type_name -> provisioner.v1.Spec
 	5,  // 3: provisioner.v1.Instance.hardware:type_name -> provisioner.v1.Hardware
 	0,  // 4: provisioner.v1.Instance.state:type_name -> provisioner.v1.InstanceState
-	15, // 5: provisioner.v1.Instance.created_at:type_name -> google.protobuf.Timestamp
-	15, // 6: provisioner.v1.Instance.activated_at:type_name -> google.protobuf.Timestamp
-	15, // 7: provisioner.v1.Instance.terminated_at:type_name -> google.protobuf.Timestamp
+	16, // 5: provisioner.v1.Instance.created_at:type_name -> google.protobuf.Timestamp
+	16, // 6: provisioner.v1.Instance.activated_at:type_name -> google.protobuf.Timestamp
+	16, // 7: provisioner.v1.Instance.terminated_at:type_name -> google.protobuf.Timestamp
 	6,  // 8: provisioner.v1.Instance.ssh:type_name -> provisioner.v1.SshTarget
-	12, // 9: provisioner.v1.Instance.metadata:type_name -> provisioner.v1.Instance.MetadataEntry
-	13, // 10: provisioner.v1.InstanceRef.tags:type_name -> provisioner.v1.InstanceRef.TagsEntry
-	15, // 11: provisioner.v1.InstanceRef.created_at:type_name -> google.protobuf.Timestamp
-	14, // 12: provisioner.v1.Deployment.env:type_name -> provisioner.v1.Deployment.EnvEntry
+	13, // 9: provisioner.v1.Instance.metadata:type_name -> provisioner.v1.Instance.MetadataEntry
+	14, // 10: provisioner.v1.InstanceRef.tags:type_name -> provisioner.v1.InstanceRef.TagsEntry
+	16, // 11: provisioner.v1.InstanceRef.created_at:type_name -> google.protobuf.Timestamp
+	15, // 12: provisioner.v1.Deployment.env:type_name -> provisioner.v1.Deployment.EnvEntry
 	2,  // 13: provisioner.v1.Deployment.state:type_name -> provisioner.v1.DeploymentState
-	15, // 14: provisioner.v1.Deployment.created_at:type_name -> google.protobuf.Timestamp
-	15, // 15: provisioner.v1.Deployment.started_at:type_name -> google.protobuf.Timestamp
-	15, // 16: provisioner.v1.Deployment.ready_at:type_name -> google.protobuf.Timestamp
-	15, // 17: provisioner.v1.Deployment.terminated_at:type_name -> google.protobuf.Timestamp
-	15, // 18: provisioner.v1.Deployment.last_activity_at:type_name -> google.protobuf.Timestamp
-	10, // 19: provisioner.v1.Deployment.replica_specs:type_name -> provisioner.v1.ReplicaSpec
-	4,  // 20: provisioner.v1.ReplicaSpec.requirements:type_name -> provisioner.v1.ResourceRequirements
-	16, // 21: provisioner.v1.Instance.MetadataEntry.value:type_name -> google.protobuf.Value
-	22, // [22:22] is the sub-list for method output_type
-	22, // [22:22] is the sub-list for method input_type
-	22, // [22:22] is the sub-list for extension type_name
-	22, // [22:22] is the sub-list for extension extendee
-	0,  // [0:22] is the sub-list for field type_name
+	16, // 14: provisioner.v1.Deployment.created_at:type_name -> google.protobuf.Timestamp
+	16, // 15: provisioner.v1.Deployment.started_at:type_name -> google.protobuf.Timestamp
+	16, // 16: provisioner.v1.Deployment.ready_at:type_name -> google.protobuf.Timestamp
+	16, // 17: provisioner.v1.Deployment.terminated_at:type_name -> google.protobuf.Timestamp
+	16, // 18: provisioner.v1.Deployment.last_activity_at:type_name -> google.protobuf.Timestamp
+	11, // 19: provisioner.v1.Deployment.replica_specs:type_name -> provisioner.v1.ReplicaSpec
+	10, // 20: provisioner.v1.Deployment.mounts:type_name -> provisioner.v1.VolumeMount
+	4,  // 21: provisioner.v1.ReplicaSpec.requirements:type_name -> provisioner.v1.ResourceRequirements
+	17, // 22: provisioner.v1.Instance.MetadataEntry.value:type_name -> google.protobuf.Value
+	23, // [23:23] is the sub-list for method output_type
+	23, // [23:23] is the sub-list for method input_type
+	23, // [23:23] is the sub-list for extension type_name
+	23, // [23:23] is the sub-list for extension extendee
+	0,  // [0:23] is the sub-list for field type_name
 }
 
 func init() { file_provisioner_v1_types_proto_init() }
@@ -1661,7 +1772,7 @@ func file_provisioner_v1_types_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_provisioner_v1_types_proto_rawDesc), len(file_provisioner_v1_types_proto_rawDesc)),
 			NumEnums:      3,
-			NumMessages:   12,
+			NumMessages:   13,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

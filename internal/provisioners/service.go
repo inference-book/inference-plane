@@ -996,6 +996,21 @@ func (s *Service) CreateDeployment(ctx context.Context, req *provisionerv1.Creat
 		}
 		dep.Env = merged
 	}
+	// Stamp the ModelStore's mounts onto the deployment so the deploy
+	// path can attach them. Empty for the default HF-passthrough store;
+	// a warm-cache store (volumecache) fills them so the engine loads
+	// weights already staged on a volume. The field is provider-agnostic
+	// -- each deploy path maps a mount onto its own primitive.
+	if len(resolved.Mounts) > 0 {
+		dep.Mounts = make([]*provisionerv1.VolumeMount, 0, len(resolved.Mounts))
+		for _, m := range resolved.Mounts {
+			dep.Mounts = append(dep.Mounts, &provisionerv1.VolumeMount{
+				VolumeId:  m.VolumeID,
+				HostPath:  m.HostPath,
+				MountPath: m.MountPath,
+			})
+		}
+	}
 
 	// v0.2 ch7-beat3.10 (#143 + refactor): auto-provision flows
 	// through replicas_spec. createMultiReplicaDeployment branches
@@ -1066,6 +1081,7 @@ func (s *Service) CreateDeployment(ctx context.Context, req *provisionerv1.Creat
 			Model:          dep.GetModel(),
 			EngineArgs:     dep.GetEngineArgs(),
 			Env:            dep.GetEnv(),
+			Mounts:         dep.GetMounts(),
 			EnginePort:     dep.GetEnginePort(),
 			State:          provisionerv1.DeploymentState_DEPLOYMENT_STATE_PENDING,
 			CreatedAt:      now,

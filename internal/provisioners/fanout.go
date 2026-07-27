@@ -357,6 +357,7 @@ func (s *Service) createMultiReplicaDeployment(ctx context.Context, req *provisi
 			Model:          dep.GetModel(),
 			EngineArgs:     dep.GetEngineArgs(),
 			Env:            dep.GetEnv(),
+			Mounts:         dep.GetMounts(),
 			EnginePort:     dep.GetEnginePort(),
 			State:          provisionerv1.DeploymentState_DEPLOYMENT_STATE_PENDING,
 			CreatedAt:      now,
