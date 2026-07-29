@@ -75,7 +75,7 @@ func TestEnsureVolume_ReusesExistingByNameAndRegion(t *testing.T) {
 	}
 }
 
-func TestStageModel_PollsToExitThenDeletesPod(t *testing.T) {
+func TestStageModel_PollsLogsForDoneThenDeletesPod(t *testing.T) {
 	var stageCmd string
 	var deleted string
 	polls := 0
@@ -89,12 +89,13 @@ func TestStageModel_PollsToExitThenDeletesPod(t *testing.T) {
 				t.Errorf("stage pod req = %+v, want vol-1 + CPU", req)
 			}
 			return 201, `{"id":"stage-pod","desiredStatus":"RUNNING"}`
-		case method == "GET" && path == "/pods/stage-pod":
+		case method == "GET" && path == "/v2/pods/stage-pod/logs":
 			polls++
 			if polls < 2 {
-				return 200, `{"id":"stage-pod","desiredStatus":"RUNNING"}`
+				// container still downloading -- marker not printed yet.
+				return 200, `data: {"source":"container","line":"downloading shards..."}`
 			}
-			return 200, `{"id":"stage-pod","desiredStatus":"EXITED"}`
+			return 200, `data: {"source":"container","line":"` + stageSentinelDone + `"}`
 		case method == "DELETE" && path == "/pods/stage-pod":
 			deleted = "stage-pod"
 			return 200, "{}"
@@ -110,41 +111,51 @@ func TestStageModel_PollsToExitThenDeletesPod(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StageModel: %v", err)
 	}
-	if !strings.Contains(stageCmd, "huggingface-cli download Qwen/Qwen2.5-32B-Instruct-AWQ") {
+	if !strings.Contains(stageCmd, "hf download Qwen/Qwen2.5-32B-Instruct-AWQ") {
 		t.Errorf("stage cmd missing download: %q", stageCmd)
+	}
+	if !strings.Contains(stageCmd, stageSentinelDone) || !strings.Contains(stageCmd, stageSentinelFail) {
+		t.Errorf("stage cmd missing completion markers: %q", stageCmd)
 	}
 	if deleted != "stage-pod" {
 		t.Error("staging pod was not torn down after completion")
 	}
 }
 
-func TestStageModel_FailedStatusErrors(t *testing.T) {
+func TestStageModel_FailMarkerErrors(t *testing.T) {
 	_, p := newFake(t, func(method, path string, body []byte) (int, string) {
 		switch {
 		case method == "POST" && path == "/pods":
 			return 201, `{"id":"stage-pod","desiredStatus":"RUNNING"}`
-		case method == "GET" && path == "/pods/stage-pod":
-			return 200, `{"id":"stage-pod","desiredStatus":"FAILED"}`
+		case method == "GET" && path == "/v2/pods/stage-pod/logs":
+			return 200, `data: {"source":"container","line":"` + stageSentinelFail + `"}`
 		case method == "DELETE" && path == "/pods/stage-pod":
 			return 200, "{}"
 		}
 		return 500, "{}"
 	})
 	err := stageWithFastPoll(t, p, provisioners.StageSpec{VolumeID: "vol-1", Region: "EU-RO-1", Model: "m"})
-	if err == nil || !strings.Contains(err.Error(), "failed") {
-		t.Errorf("StageModel err = %v, want a staging-failed error", err)
+	if err == nil || !strings.Contains(err.Error(), "failure") {
+		t.Errorf("StageModel err = %v, want a staging-failure error", err)
 	}
 }
 
-func TestIsStageComplete(t *testing.T) {
-	for _, s := range []string{"EXITED", "exited", "STOPPED", "TERMINATED", "COMPLETED"} {
-		if !isStageComplete(s) {
-			t.Errorf("isStageComplete(%q) = false, want true", s)
-		}
+func TestStageSignal(t *testing.T) {
+	done, failed := stageSignal([]byte("pip install ...\n" + stageSentinelDone + "\n"))
+	if !done || failed {
+		t.Errorf("done marker: done=%v failed=%v, want true/false", done, failed)
 	}
-	for _, s := range []string{"RUNNING", "CREATED", ""} {
-		if isStageComplete(s) {
-			t.Errorf("isStageComplete(%q) = true, want false", s)
-		}
+	done, failed = stageSignal([]byte("Traceback ...\n" + stageSentinelFail + "\n"))
+	if done || !failed {
+		t.Errorf("fail marker: done=%v failed=%v, want false/true", done, failed)
+	}
+	// Failure wins if somehow both appear, so a failed run is never
+	// mistaken for success.
+	done, failed = stageSignal([]byte(stageSentinelDone + " " + stageSentinelFail))
+	if done || !failed {
+		t.Errorf("both markers: done=%v failed=%v, want false/true", done, failed)
+	}
+	if done, failed := stageSignal([]byte("still downloading shards")); done || failed {
+		t.Errorf("no marker: done=%v failed=%v, want false/false", done, failed)
 	}
 }

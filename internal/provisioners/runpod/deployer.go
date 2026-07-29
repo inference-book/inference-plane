@@ -248,13 +248,24 @@ func buildEnginePodRequest(dep *provisionerv1.Deployment, inst *provisionerv1.In
 		}
 	}
 
+	// Container disk holds the engine image + (on a cold deploy) the
+	// downloaded weights, which for a large model dwarf the 20 GB default.
+	// Size it from the deployment's min_disk_gb (via --min-disk-gb or the
+	// class default) so a big-model cold deploy doesn't fill the disk
+	// mid-download. A warm deploy loads off the mounted volume and doesn't
+	// need it, but sizing on the request keeps one code path.
+	containerDisk := defaultContainerDiskGB
+	if reqs := inst.GetSpec().GetRequirements(); reqs != nil && int(reqs.GetMinDiskGb()) > containerDisk {
+		containerDisk = int(reqs.GetMinDiskGb())
+	}
+
 	return createPodRequest{
 		Name:              "iplane-engine-" + dep.GetId(),
 		ImageName:         dep.GetImage(),
 		GPUTypeIDs:        gpuSKUs,
 		GPUTypePriority:   "availability",
 		GPUCount:          gpuCount,
-		ContainerDiskInGB: defaultContainerDiskGB,
+		ContainerDiskInGB: containerDisk,
 		VolumeInGB:        defaultVolumeGB,
 		NetworkVolumeID:   networkVolumeID,
 		VolumeMountPath:   volumeMountPath,
