@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/inference-book/inference-plane/internal/deployments/sshdocker"
 	"github.com/inference-book/inference-plane/internal/provisioners"
@@ -46,7 +47,17 @@ func buildLocalService(store *file.Store, operatorID string, extra ...provisione
 
 	providers := []provisioners.Provider{local.New(), external.New()}
 	if key := os.Getenv("RUNPOD_API_KEY"); key != "" {
-		providers = append(providers, runpod.New(runpod.NewClient(key)))
+		var rpOpts []runpod.Option
+		// The engine-ready wait defaults to 10m. A large engine image
+		// cold-pulling on community capacity (plus the model load) can
+		// exceed that, so let an operator extend it. Ch 9's big-model
+		// deploys are the motivating case.
+		if v := os.Getenv("IPLANE_RUNPOD_ENGINE_READY_TIMEOUT"); v != "" {
+			if d, err := time.ParseDuration(v); err == nil && d > 0 {
+				rpOpts = append(rpOpts, runpod.WithEngineReadyTimeout(d))
+			}
+		}
+		providers = append(providers, runpod.New(runpod.NewClient(key), rpOpts...))
 	}
 	if key := os.Getenv("VAST_API_KEY"); key != "" {
 		providers = append(providers, vast.New(vast.NewClient(key)))

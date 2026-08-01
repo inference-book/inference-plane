@@ -1,8 +1,11 @@
 package runpod
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
+	"net/http"
 	"strings"
 	"time"
 
@@ -12,10 +15,12 @@ import (
 
 // Model staging: download a model onto a network volume so warm-cache
 // deploys mount it instead of re-downloading. StageModel spins a
-// throwaway CPU pod that mounts the volume, runs huggingface-cli
-// download into the volume's HF cache, and exits; the pod is deleted
-// once the download finishes. This backs the StageModel half of the
-// VolumeManager capability.
+// throwaway CPU pod that mounts the volume and runs `hf download`
+// into the volume's HF cache. The download command prints a
+// sentinel line on completion, which the poller reads back out of the
+// pod's log stream (RunPod exposes no pod-status signal that a one-shot
+// command finished); the pod is deleted once the marker appears. This
+// backs the StageModel half of the VolumeManager capability.
 
 const (
 	// defaultStageImage is a small Python image the staging pod runs.
@@ -29,6 +34,21 @@ const (
 
 	stagePollInterval = 10 * time.Second
 	stageTimeout      = 30 * time.Minute
+
+	// logsReadTimeout bounds one poll's read of the (streaming) logs
+	// endpoint: the tail backfill arrives at once, then the SSE stream
+	// stays open, so we read for this long and cut it off. Only bites
+	// against a real stream; the test fake closes the body at EOF.
+	logsReadTimeout = 6 * time.Second
+
+	// Staging-completion markers the download command prints to stdout,
+	// read back out of the pod logs. RunPod gives no pod-status signal
+	// that a one-shot command finished (the pod stays RUNNING and the
+	// container restarts), so the command reports its own outcome and we
+	// scan the log stream for it. Deliberately unlikely to collide with
+	// pip / hf output.
+	stageSentinelDone = "__IPLANE_STAGE_DONE__"
+	stageSentinelFail = "__IPLANE_STAGE_FAIL__"
 )
 
 // StageModel satisfies provisioners.VolumeManager. It blocks until the
@@ -47,11 +67,27 @@ func (p *Provider) StageModel(ctx context.Context, spec provisioners.StageSpec) 
 		env["HF_TOKEN"] = spec.HFToken
 	}
 
-	// pip-install the CLI, then download. --exclude of the safetensors
-	// index is avoided; a full snapshot is what the engine loads.
+	// pip-install the CLI, then download a full snapshot (the engine
+	// loads the whole thing). The command reports its own outcome as a
+	// sentinel line -- there is no pod-status signal for "one-shot
+	// command finished" -- then sleeps so RunPod does not restart the
+	// exited container and re-run the download; the poller terminates
+	// the pod once it reads the marker.
+	// `hf download`, not the old `huggingface-cli download`: current
+	// huggingface_hub removed the huggingface-cli entrypoint (it prints a
+	// deprecation notice and exits non-zero), and the CLI is now `hf`.
+	//
+	// --max-workers 2: the CPU staging pod has little RAM (~4 GB), and the
+	// default 8 parallel workers streaming multi-GB shards through the FUSE
+	// volume mount OOM-kill the download (SIGKILL / rc 137) on a large
+	// model. Throttling concurrency keeps it under the RAM ceiling. A small
+	// model is unaffected; a 70B+ needs it.
 	cmd := []string{
 		"bash", "-lc",
-		fmt.Sprintf("set -euo pipefail; pip install -q -U 'huggingface_hub[cli]' && huggingface-cli download %s", spec.Model),
+		fmt.Sprintf(
+			"if pip install -q -U 'huggingface_hub[cli]' && hf download %s --max-workers 2; then echo %s; else echo %s; fi; sleep infinity",
+			spec.Model, stageSentinelDone, stageSentinelFail,
+		),
 	}
 
 	createBody := createPodRequest{
@@ -83,16 +119,13 @@ func (p *Provider) StageModel(ctx context.Context, spec provisioners.StageSpec) 
 	return nil
 }
 
-// waitForStageComplete polls the staging pod until its container exits.
-// A finished dockerStartCmd stops the pod, so a terminal desiredStatus
-// signals the download is done; a "FAILED" status means the download
-// errored. The exact terminal-status strings RunPod reports for a pod
-// whose CMD exited are isolated in isStageComplete / isStageFailed.
-//
-// VALIDATE against a live RunPod run: confirm the desiredStatus values a
-// completed / failed staging pod reports and adjust the predicates. The
-// poll/terminate control flow is exercised by the fake harness
-// independently of the exact strings.
+// waitForStageComplete polls the staging pod's logs until the download
+// command prints its completion marker. RunPod exposes no pod-status
+// signal that a one-shot command finished -- v1 keeps desiredStatus at
+// RUNNING, and even v2's status stays RUNNING because the exited
+// container is restarted (confirmed live 2026-07-28). So the command
+// echoes stageSentinelDone / stageSentinelFail and we read it back out
+// of the v2 pod-logs stream.
 func (p *Provider) waitForStageComplete(ctx context.Context, podID string) error {
 	interval := p.stageInterval
 	if interval <= 0 {
@@ -104,22 +137,19 @@ func (p *Provider) waitForStageComplete(ctx context.Context, podID string) error
 	}
 	deadline := time.Now().Add(budget)
 	for {
-		getReq, err := p.client.newReq("GET", "/pods/"+podID, nil, nil)
-		if err != nil {
-			return wrapErr("stage model: poll", err)
-		}
-		pod, err := skhttp.Call[podBody](ctx, getReq, p.client.callOpts()...)
-		if err != nil {
-			return wrapErr("stage model: poll", err)
-		}
-		switch {
-		case isStageFailed(pod.DesiredStatus):
-			return fmt.Errorf("stage model: staging pod %s failed (status %q)", podID, pod.DesiredStatus)
-		case isStageComplete(pod.DesiredStatus):
-			return nil
+		logs, err := p.fetchStageLogs(ctx, podID)
+		// A transient logs-fetch error (stream hiccup, pod not yet
+		// emitting) is not fatal: keep polling until the deadline.
+		if err == nil {
+			switch done, failed := stageSignal(logs); {
+			case failed:
+				return fmt.Errorf("stage model: staging pod %s reported a download failure (%s in logs)", podID, stageSentinelFail)
+			case done:
+				return nil
+			}
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("stage model: timed out after %s waiting for download (last status %q)", budget, pod.DesiredStatus)
+			return fmt.Errorf("stage model: timed out after %s waiting for the %s marker in staging logs", budget, stageSentinelDone)
 		}
 		select {
 		case <-ctx.Done():
@@ -129,20 +159,55 @@ func (p *Provider) waitForStageComplete(ctx context.Context, podID string) error
 	}
 }
 
-// isStageComplete reports whether a staging pod's container has exited
-// cleanly (the download finished). VALIDATE the exact strings live.
-func isStageComplete(desiredStatus string) bool {
-	switch strings.ToUpper(desiredStatus) {
-	case "EXITED", "STOPPED", "TERMINATED", "COMPLETED":
-		return true
+// fetchStageLogs reads a bounded chunk of the staging pod's v2 log
+// stream. The endpoint is Server-Sent Events: the tail backfill arrives
+// immediately and the stream then stays open, so we read under a short
+// deadline and cut it off, scanning whatever arrived. A deadline while
+// reading the still-open stream is expected, not an error.
+func (p *Provider) fetchStageLogs(ctx context.Context, podID string) ([]byte, error) {
+	readCtx, cancel := context.WithTimeout(ctx, logsReadTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(readCtx, http.MethodGet, p.client.v2LogsURL(podID), nil)
+	if err != nil {
+		return nil, err
 	}
-	return false
+	req.Header.Set("Authorization", "Bearer "+p.client.apiKey)
+	req.Header.Set("Accept", "text/event-stream")
+
+	httpClient := http.DefaultClient
+	if p.client.httpClient != nil {
+		httpClient = p.client.httpClient
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		// Logs not available yet (pod still scheduling); treat as empty.
+		return nil, nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("stage model: logs HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	// io.ReadAll returns whatever was read before the deadline cancels
+	// the stream, plus the deadline error -- keep the bytes, drop the err.
+	body, _ := io.ReadAll(resp.Body)
+	return body, nil
 }
 
-// isStageFailed reports whether a staging pod's container errored out.
-// VALIDATE the exact strings live.
-func isStageFailed(desiredStatus string) bool {
-	return strings.EqualFold(desiredStatus, "FAILED")
+// stageSignal scans staging-pod log bytes for the completion markers the
+// download command prints. Failure is checked first so a failed run is
+// never mistaken for success.
+func stageSignal(logs []byte) (done, failed bool) {
+	if bytes.Contains(logs, []byte(stageSentinelFail)) {
+		return false, true
+	}
+	if bytes.Contains(logs, []byte(stageSentinelDone)) {
+		return true, false
+	}
+	return false, false
 }
 
 // volumeShortID derives a pod-name-safe suffix from a volume id.
