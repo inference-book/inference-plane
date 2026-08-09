@@ -17,14 +17,24 @@ import (
 // (httptest in unit tests, staging in integration tests).
 const DefaultBaseURL = "https://rest.runpod.io/v1"
 
+// DefaultLogsBaseURL is the host for RunPod's v2 API, which -- unlike the
+// v1 REST surface this adapter otherwise uses -- exposes a pod-logs
+// stream (GET /v2/pods/{id}/logs). Model staging reads it to detect
+// download completion, because v1 has no signal that a pod's one-shot
+// command finished (the pod stays desiredStatus=RUNNING and RunPod
+// restarts the exited container). Overrideable via WithLogsBaseURL for
+// tests.
+const DefaultLogsBaseURL = "https://api.runpod.io"
+
 // Client carries the bits every RunPod request needs (base URL, bearer
 // token) plus an optional custom *http.Client for tests. The actual
 // HTTP send / read / decode lives in servicekit's http.Call / CallVoid.
 // We keep this struct thin: build the request, hand it to servicekit.
 type Client struct {
-	baseURL    string
-	apiKey     string
-	httpClient *http.Client // when nil, servicekit's DefaultHttpClient is used
+	baseURL     string
+	logsBaseURL string
+	apiKey      string
+	httpClient  *http.Client // when nil, servicekit's DefaultHttpClient is used
 }
 
 // ClientOption configures the Client at construction time.
@@ -42,6 +52,13 @@ func WithBaseURL(u string) ClientOption {
 	return func(cl *Client) { cl.baseURL = strings.TrimRight(u, "/") }
 }
 
+// WithLogsBaseURL points the v2 pod-logs host at a different endpoint.
+// Tests pass the same httptest.Server URL so the logs poll is served
+// alongside the v1 REST fakes.
+func WithLogsBaseURL(u string) ClientOption {
+	return func(cl *Client) { cl.logsBaseURL = strings.TrimRight(u, "/") }
+}
+
 // NewClient builds a RunPod REST client. apiKey is the operator's
 // RUNPOD_API_KEY, attached as a bearer token on every request.
 //
@@ -52,8 +69,9 @@ func WithBaseURL(u string) ClientOption {
 // original transport.
 func NewClient(apiKey string, opts ...ClientOption) *Client {
 	c := &Client{
-		baseURL: DefaultBaseURL,
-		apiKey:  apiKey,
+		baseURL:     DefaultBaseURL,
+		logsBaseURL: DefaultLogsBaseURL,
+		apiKey:      apiKey,
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -95,6 +113,13 @@ func (c *Client) newReq(method, path string, query url.Values, body any) (*http.
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	req.Header.Set("Accept", "application/json")
 	return req, nil
+}
+
+// v2LogsURL builds the v2 pod-logs stream URL. source=container drops
+// RunPod's system log noise; tail backfills recent history so a marker
+// printed before the poll started is still seen.
+func (c *Client) v2LogsURL(podID string) string {
+	return fmt.Sprintf("%s/v2/pods/%s/logs?source=container&tail=1000", c.logsBaseURL, podID)
 }
 
 // callOpts returns the servicekit options to apply. Tests inject a

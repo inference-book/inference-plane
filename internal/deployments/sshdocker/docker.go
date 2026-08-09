@@ -195,6 +195,23 @@ type RunSpec struct {
 	EngineArgs []string
 	Env       map[string]string
 	Port      int32 // engine listen port; 0 means "use the engine's default"
+
+	// Mounts are host-path bind mounts for the container (docker run
+	// -v host:container), used to attach a warm model-cache volume so
+	// the engine loads staged weights instead of re-downloading. Each
+	// needs a non-empty HostPath and MountPath; volume-id-only mounts
+	// (the RunPod image-native path) are skipped here.
+	Mounts []Mount
+}
+
+// Mount is one host-path bind mount for a container. Mirrors the
+// provisionerv1.VolumeMount fields the sshdocker deploy path can honor:
+// a docker bind needs a concrete host directory, so HostPath and
+// MountPath must both be set (VolumeID-driven attach is the image-native
+// path's job, not this one).
+type Mount struct {
+	HostPath  string
+	MountPath string
 }
 
 // Run launches the container in detached mode with --gpus all,
@@ -226,6 +243,12 @@ func (d *Docker) Run(ctx context.Context, spec RunSpec) (string, error) {
 	}
 	for k, v := range spec.Env {
 		args = append(args, "-e", shellEscape(k+"="+v))
+	}
+	for _, m := range spec.Mounts {
+		if m.HostPath == "" || m.MountPath == "" {
+			continue
+		}
+		args = append(args, "-v", shellEscape(m.HostPath+":"+m.MountPath))
 	}
 	args = append(args, shellEscape(spec.Image))
 	if spec.Model != "" {

@@ -192,6 +192,7 @@ func (e *Executor) Deploy(ctx context.Context, dep *provisionerv1.Deployment, in
 			EngineArgs: dep.GetEngineArgs(),
 			Env:        dep.GetEnv(),
 			Port:       dep.GetEnginePort(),
+			Mounts:     bindMounts(dep.GetMounts()),
 		})
 		if err != nil {
 			return e.failed(emit, "docker:running", "docker run failed", err)
@@ -323,4 +324,19 @@ func (e *Executor) failed(emit func(StateUpdate), phase, msg string, err error) 
 		FailureReason: full,
 	})
 	return fmt.Errorf("%s: %w", phase, err)
+}
+
+// bindMounts maps the deployment's provider-agnostic mounts onto the
+// host-path binds the sshdocker path can honor. Volume-id-only mounts
+// (the RunPod image-native path attaches those by id) are dropped --
+// there is no host directory to bind them to on a VM instance.
+func bindMounts(vms []*provisionerv1.VolumeMount) []Mount {
+	var out []Mount
+	for _, vm := range vms {
+		if vm.GetHostPath() == "" || vm.GetMountPath() == "" {
+			continue
+		}
+		out = append(out, Mount{HostPath: vm.GetHostPath(), MountPath: vm.GetMountPath()})
+	}
+	return out
 }

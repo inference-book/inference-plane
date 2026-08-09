@@ -231,14 +231,44 @@ func buildEnginePodRequest(dep *provisionerv1.Deployment, inst *provisionerv1.In
 		gpuCount = 1
 	}
 
+	// Warm-cache mount: attach a pre-staged network volume by id so the
+	// engine loads weights off it instead of re-downloading from HF.
+	// RunPod's image-native path maps a mount onto networkVolumeId; a
+	// volume is datacenter-locked, so passing the id also pins the pod
+	// to the volume's datacenter (no separate dataCenterIds needed). The
+	// bind-mount (host_path) fields of a VolumeMount belong to the
+	// sshdocker path and are ignored here. Only the first mount is
+	// honored -- RunPod pods attach a single network volume.
+	var networkVolumeID, volumeMountPath string
+	for _, m := range dep.GetMounts() {
+		if m.GetVolumeId() != "" {
+			networkVolumeID = m.GetVolumeId()
+			volumeMountPath = m.GetMountPath()
+			break
+		}
+	}
+
+	// Container disk holds the engine image + (on a cold deploy) the
+	// downloaded weights, which for a large model dwarf the 20 GB default.
+	// Size it from the deployment's min_disk_gb (via --min-disk-gb or the
+	// class default) so a big-model cold deploy doesn't fill the disk
+	// mid-download. A warm deploy loads off the mounted volume and doesn't
+	// need it, but sizing on the request keeps one code path.
+	containerDisk := defaultContainerDiskGB
+	if reqs := inst.GetSpec().GetRequirements(); reqs != nil && int(reqs.GetMinDiskGb()) > containerDisk {
+		containerDisk = int(reqs.GetMinDiskGb())
+	}
+
 	return createPodRequest{
 		Name:              "iplane-engine-" + dep.GetId(),
 		ImageName:         dep.GetImage(),
 		GPUTypeIDs:        gpuSKUs,
 		GPUTypePriority:   "availability",
 		GPUCount:          gpuCount,
-		ContainerDiskInGB: defaultContainerDiskGB,
+		ContainerDiskInGB: containerDisk,
 		VolumeInGB:        defaultVolumeGB,
+		NetworkVolumeID:   networkVolumeID,
+		VolumeMountPath:   volumeMountPath,
 		ComputeType:       defaultComputeType,
 		// RunPod port suffixes:
 		//   /http -> reverse-proxied at

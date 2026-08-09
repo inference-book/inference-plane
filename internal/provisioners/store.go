@@ -18,14 +18,21 @@ import (
 type State struct {
 	Instances   map[string]*provisionerv1.Instance
 	Deployments map[string]*provisionerv1.Deployment
+	// Volumes is the warm-cache pin registry: provider volumes that
+	// models are pre-staged onto (keyed by volume id). Additive and
+	// empty by default -- deployments that never pin a model carry no
+	// volumes, so the cold path is unchanged. A separate namespace from
+	// Instances/Deployments (a volume id is the provider's handle).
+	Volumes map[string]*provisionerv1.Volume
 }
 
-// NewState returns an empty State with both maps initialized. Backends
+// NewState returns an empty State with the maps initialized. Backends
 // use this as their starting point when no prior persistence exists.
 func NewState() *State {
 	return &State{
 		Instances:   map[string]*provisionerv1.Instance{},
 		Deployments: map[string]*provisionerv1.Deployment{},
+		Volumes:     map[string]*provisionerv1.Volume{},
 	}
 }
 

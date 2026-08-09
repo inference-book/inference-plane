@@ -926,6 +926,32 @@ func isExternalDeploy(req *provisionerv1.CreateDeploymentRequest) bool {
 	return true
 }
 
+// checkMountProviders rejects a deployment whose warm-cache mounts name
+// a provider other than where its replicas are placed. A volume handle
+// is provider-scoped -- a RunPod networkVolumeId means nothing to Lambda
+// -- so a cross-provider mount cannot attach, and failing loudly beats
+// silently falling back to a cold download. An empty mount.provider
+// (a host-path bind) is unscoped and always allowed. placements is the
+// set of providers this deployment will land on (one for single-
+// instance, one per replica spec for a fleet); a mount must match every
+// one, since a single mount list applies to all replicas.
+func checkMountProviders(mounts []*provisionerv1.VolumeMount, placements ...string) error {
+	for _, m := range mounts {
+		mp := m.GetProvider()
+		if mp == "" {
+			continue
+		}
+		for _, p := range placements {
+			if p != "" && p != mp {
+				return status.Errorf(codes.FailedPrecondition,
+					"volume mount %q is a %s volume but the deployment is placed on %s; a %s volume cannot be mounted on %s",
+					m.GetVolumeId(), mp, p, mp, p)
+			}
+		}
+	}
+	return nil
+}
+
 func (s *Service) CreateDeployment(ctx context.Context, req *provisionerv1.CreateDeploymentRequest) (*provisionerv1.CreateDeploymentResponse, error) {
 	dep := req.GetDeployment()
 	if dep == nil {
@@ -996,6 +1022,36 @@ func (s *Service) CreateDeployment(ctx context.Context, req *provisionerv1.Creat
 		}
 		dep.Env = merged
 	}
+	// Stamp the ModelStore's mounts onto the deployment so the deploy
+	// path can attach them. Empty for the default HF-passthrough store;
+	// a warm-cache store (volumecache) fills them so the engine loads
+	// weights already staged on a volume. The field is provider-agnostic
+	// -- each deploy path maps a mount onto its own primitive.
+	if len(resolved.Mounts) > 0 {
+		dep.Mounts = make([]*provisionerv1.VolumeMount, 0, len(resolved.Mounts))
+		for _, m := range resolved.Mounts {
+			dep.Mounts = append(dep.Mounts, &provisionerv1.VolumeMount{
+				VolumeId:  m.VolumeID,
+				HostPath:  m.HostPath,
+				MountPath: m.MountPath,
+				Provider:  m.Provider,
+			})
+		}
+	}
+
+	// Auto-resolve a warm mount from the pin registry (#191b). Only when
+	// no explicit mount was configured (an operator model_cache block
+	// wins) and the fleet lands on one (provider, region): look up a
+	// pinned volume that has this model staged and mount it, so a deploy
+	// after `iplane model pin` is warm without any config. No match ->
+	// cold, unchanged.
+	if len(dep.GetMounts()) == 0 {
+		if provider, region, ok := homogeneousPlacement(specs); ok {
+			if m := s.resolveWarmMount(dep.GetModel(), provider, region); m != nil {
+				dep.Mounts = []*provisionerv1.VolumeMount{m}
+			}
+		}
+	}
 
 	// v0.2 ch7-beat3.10 (#143 + refactor): auto-provision flows
 	// through replicas_spec. createMultiReplicaDeployment branches
@@ -1012,6 +1068,12 @@ func (s *Service) CreateDeployment(ctx context.Context, req *provisionerv1.Creat
 	// the v1.0 bin-packing scheduler will eventually live.
 	inst, err := s.placeDeployment(ctx, req)
 	if err != nil {
+		return nil, err
+	}
+	// Warm-cache mounts are provider-scoped: refuse a mount whose
+	// provider doesn't match where this deployment landed, rather than
+	// silently attaching nothing and running cold.
+	if err := checkMountProviders(dep.GetMounts(), inst.GetProvider()); err != nil {
 		return nil, err
 	}
 	// Persist the (possibly freshly-synthesized) instance_id back onto
@@ -1066,6 +1128,7 @@ func (s *Service) CreateDeployment(ctx context.Context, req *provisionerv1.Creat
 			Model:          dep.GetModel(),
 			EngineArgs:     dep.GetEngineArgs(),
 			Env:            dep.GetEnv(),
+			Mounts:         dep.GetMounts(),
 			EnginePort:     dep.GetEnginePort(),
 			State:          provisionerv1.DeploymentState_DEPLOYMENT_STATE_PENDING,
 			CreatedAt:      now,
@@ -1131,7 +1194,7 @@ func (s *Service) launchDeploy(ctx context.Context, dep *provisionerv1.Deploymen
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		obs := s.newDeployObserver(ctx, deployKindProvision, dep.GetId(), inst)
+		obs := s.newDeployObserver(ctx, deployKindProvision, dep.GetId(), inst, storageTierForDeployment(dep))
 		emit := func(u DeployStateUpdate) {
 			obs.observe(u)
 			_ = s.patchDeployment(dep.GetId(), u)
@@ -1608,7 +1671,9 @@ func (s *Service) DestroyDeployment(ctx context.Context, req *provisionerv1.Dest
 
 	// Synchronous destroy (no Wait flag on the request -- destroy
 	// always blocks until terminal state, simpler semantics).
-	obs := s.newDeployObserver(ctx, deployKindTeardown, id, inst)
+	// Teardown carries no storage tier (there is no model download to
+	// classify); pass "" so the tier attribute is omitted.
+	obs := s.newDeployObserver(ctx, deployKindTeardown, id, inst, "")
 	emit := func(u DeployStateUpdate) {
 		obs.observe(u)
 		_ = s.patchDeployment(id, u)

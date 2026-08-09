@@ -345,3 +345,21 @@ func TestDestroy_AlreadyGone_StillTERMINATED(t *testing.T) {
 		t.Errorf("final state = %v, want TERMINATED", c.lastState())
 	}
 }
+
+func TestBindMounts_DropsVolumeIDOnlyMounts(t *testing.T) {
+	// The sshdocker path can only honor host-path binds. A volume-id-only
+	// mount (the RunPod image-native shape) has no host directory to bind
+	// and must be dropped, not turned into a broken `-v`.
+	in := []*provisionerv1.VolumeMount{
+		{VolumeId: "vol-1", MountPath: "/models"},                    // image-native only -> drop
+		{HostPath: "/mnt/models", MountPath: "/models"},              // bindable -> keep
+		{HostPath: "/mnt/x"},                                         // no mount path -> drop
+	}
+	got := bindMounts(in)
+	if len(got) != 1 {
+		t.Fatalf("bindMounts kept %d, want 1: %+v", len(got), got)
+	}
+	if got[0].HostPath != "/mnt/models" || got[0].MountPath != "/models" {
+		t.Errorf("kept wrong mount: %+v", got[0])
+	}
+}

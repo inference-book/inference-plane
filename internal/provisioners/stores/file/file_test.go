@@ -164,6 +164,68 @@ func TestDeployment_NewFields_RoundTrip(t *testing.T) {
 	}
 }
 
+func TestVolume_RoundTripPersistence(t *testing.T) {
+	s := newStore(t)
+	created := time.Date(2026, 7, 26, 9, 0, 0, 0, time.UTC)
+	want := &provisionerv1.Volume{
+		Id:        "vol-abc",
+		Provider:  "runpod",
+		Region:    "EU-RO-1",
+		Name:      "iplane-cache-EU-RO-1",
+		SizeGb:    100,
+		Models:    []string{"Qwen/Qwen2.5-32B-Instruct-AWQ", "meta-llama/Llama-3.3-70B-Instruct"},
+		MountPath: "/models",
+		CreatedAt: timestamppb.New(created),
+	}
+	if err := s.Update(func(f *provisioners.State) error {
+		f.Volumes["vol-abc"] = want
+		return nil
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	got, err := s.Read()
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	vol, ok := got.Volumes["vol-abc"]
+	if !ok {
+		t.Fatal("volume vol-abc missing after round-trip")
+	}
+	if vol.GetProvider() != "runpod" || vol.GetRegion() != "EU-RO-1" || vol.GetSizeGb() != 100 {
+		t.Errorf("volume = %+v, want runpod/EU-RO-1/100", vol)
+	}
+	if len(vol.GetModels()) != 2 {
+		t.Errorf("models = %v, want the two pinned models to survive the round-trip", vol.GetModels())
+	}
+}
+
+func TestVolume_BackwardCompat_OldFileWithoutVolumesLoadsEmpty(t *testing.T) {
+	// A state file written before v0.2 ch9 has no "volumes" key. A reader
+	// must load it with an empty (usable) Volumes map, not nil, and no
+	// error -- the cold-path baseline for every pre-Ch-9 deployment.
+	s := newStore(t)
+	raw := `{
+  "schema_version": "1.5",
+  "backend": "local-file",
+  "operator_id": "default",
+  "instances": {},
+  "deployments": {}
+}`
+	if err := os.WriteFile(s.Path(), []byte(raw), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	f, err := s.Read()
+	if err != nil {
+		t.Fatalf("Read should tolerate a pre-volumes state file: %v", err)
+	}
+	if f.Volumes == nil {
+		t.Error("Volumes should load as an empty map, not nil, from an old file")
+	}
+	if len(f.Volumes) != 0 {
+		t.Errorf("Volumes = %v, want empty", f.Volumes)
+	}
+}
+
 func TestDeployment_ForwardCompat_OldRecordLoadsAsZero(t *testing.T) {
 	// A state file written before v0.2 ch7-beat1.1 has no idle_ttl_seconds /
 	// last_activity_at / no_idle_destroy on the Deployment. A v0.2 reader
@@ -207,7 +269,7 @@ func TestDeployment_ForwardCompat_OldRecordLoadsAsZero(t *testing.T) {
 	}
 }
 
-func TestSchemaVersion_BumpedTo1Dot5(t *testing.T) {
+func TestSchemaVersion_BumpedTo1Dot6(t *testing.T) {
 	s := newStore(t)
 	if err := s.Update(func(f *provisioners.State) error { return nil }); err != nil {
 		t.Fatalf("Update: %v", err)
@@ -216,8 +278,8 @@ func TestSchemaVersion_BumpedTo1Dot5(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
 	}
-	if !strings.Contains(string(raw), `"schema_version": "1.5"`) {
-		t.Errorf("on-disk envelope missing schema_version=1.5; got:\n%s", raw)
+	if !strings.Contains(string(raw), `"schema_version": "1.6"`) {
+		t.Errorf("on-disk envelope missing schema_version=1.6; got:\n%s", raw)
 	}
 }
 

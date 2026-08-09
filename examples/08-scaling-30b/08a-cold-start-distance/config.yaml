@@ -1,0 +1,63 @@
+# Demo 08a iplane serve config -- cold-start distance (warm-cache pinning).
+#
+# Differs from the global deploy/config.yaml only in comments: this demo
+# deliberately ships NO model_cache block. The warm deploy relies on
+# auto-resolve -- after `iplane model pin` records a volume for
+# (model, provider, region), a deploy matching that tuple mounts it
+# automatically, no config mount needed. An explicit model_cache block
+# would force warm for every deploy and hide the cold half of the A/B.
+#
+# The scheduler stays OFF (router.queue.servicers: 0). This demo measures
+# deploy/provision time, not request routing, so the Beat-1 direct-forward
+# path is all it needs.
+#
+# If you change the global deploy/config.yaml, audit this file for drift.
+
+server:
+  addr: ":8080"
+  read_timeout_sec: 60
+  # A deploy with wait=true holds the HTTP response open for the WHOLE
+  # provision (image pull + weight download + engine start), which for a
+  # cold start is routinely 10+ minutes -- and for a big model (65 GB FP16 /
+  # ~73 GB FP8, plus a large Blackwell engine image) can run 30-45m.
+  # write_timeout_sec must exceed the deploy budget (run.sh's --timeout) or
+  # the server severs the response mid-provision and the client sees
+  # "unexpected EOF". 3600s (60m) covers the large-model cold path.
+  write_timeout_sec: 3600
+  shutdown_sec: 30
+
+backend:
+  # Unused for this demo: the engine runs in the rented pod (vLLM image),
+  # not in-process. The router forwards to the deployed engine endpoint.
+  engine: "mock"
+  url: ""
+  name: "mock"
+
+telemetry:
+  service_name: "inference-plane"
+  environment: "dev"
+  sample_ratio: 1.0
+
+deployment:
+  provider: "runpod"
+  gpu_type: "a10g"
+  billing_mode: "metered_per_second"
+  instance_id: ""
+
+router:
+  # Scheduler off -- direct forward. This demo does not exercise queueing.
+  queue:
+    servicers: 0
+    capacity: 0
+    in_flight_cap: 0
+    tenant_weights: {}
+
+health:
+  poll_interval: 10s
+  failure_threshold: 3
+  success_threshold: 3
+  probe_timeout: 2s
+  max_concurrent: 32
+
+# model_cache: intentionally absent. See the header comment -- the warm
+# deploy is served by auto-resolve off the pin registry, not a config mount.

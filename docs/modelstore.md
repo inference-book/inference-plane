@@ -89,29 +89,89 @@ The `--skip-model-validation` flag is a root-level persistent flag, so
 it applies to every verb that constructs an in-process Service
 (`up`, `deployment deploy`, `instance create`, etc.).
 
-## v0.2 trajectory
+## Warm model cache (v0.2, Ch 9)
 
-When v0.2's `CachedStore` lands, it wraps `huggingface.Store`:
+`volumecache.Store` wraps a base store (`huggingface.Store`) so a
+deployment mounts a pre-staged volume instead of re-downloading the
+model on every deploy. It is provider-agnostic: it stamps an opaque
+`Mount` (a provider volume handle and/or a host path, plus the
+in-container attach path) and redirects `HF_HOME` at it. No
+provider-specific branch lives in the store — which is why it carries
+no provider name.
 
 ```go
-// Sketch — not in v0.1
-cs := cachedstore.New(
-    huggingface.New(token),
-    runpodvolume.NewStore(volumeID),
+vc := volumecache.New(
+    huggingface.New(token),               // still validates + propagates HF_TOKEN
+    modelstores.Mount{VolumeID: volumeID, MountPath: "/models"},
 )
-provisioners.WithModelStore(cs)
+provisioners.WithModelStore(vc)
 ```
 
-`CachedStore.Resolve` would:
+`volumecache.Store.Resolve`:
 
-1. Delegate to HF for validation (same as today).
-2. If the model isn't cached on the volume, do a one-time download
-   inside a setup pod that writes to the network volume.
-3. Return `Resolved{EngineModelArg: "/cache/<model>", Mounts: [...]}`
-   so the engine loads from the mounted path instead of re-downloading.
+1. Delegates to the base for validation (same as the plain HF path).
+2. Adds `HF_HOME=<mount>/hf` so the engine finds the staged HF cache,
+   leaving `--model` as the HF id (the cache hits via the env redirect,
+   not by rewriting `--model`).
+3. Appends the `Mount`, which the Service stamps onto
+   `Deployment.mounts`. Each deploy path maps it onto its own
+   primitive: the RunPod adapter onto `networkVolumeId`, the sshdocker
+   executor onto a `docker run -v` bind. Paths with no volume mechanism
+   take the cold download path.
 
 The Service code doesn't change; the wrapper just produces a richer
 `Resolved`. That's the whole point of the seam.
+
+**Activation is per-config**, via the daemon's `model_cache` block (see
+`deploy/config.yaml`), so earlier examples keep the cold path and a
+forward example opts in by adding the block.
+
+## Pinning (v0.2 Ch 9)
+
+`iplane model pin` populates the volume the `model_cache` block mounts:
+
+```bash
+iplane model pin Qwen/Qwen2.5-32B-Instruct-AWQ --provider runpod --region EU-RO-1
+# → creates/finds the region's shared cache volume, downloads the model
+#   onto it (via a throwaway CPU pod), prints the volume id to paste into
+#   model_cache.volume_id.
+iplane model ls                       # volumes + the models staged on each
+iplane model unpin <vol> --model <m>  # drop one model from the registry
+iplane model unpin <vol>              # destroy the whole volume
+```
+
+A volume is a **shared cache**: many models accumulate on one per-region
+volume (they sit side by side under one HF layout), so `volume_id` in the
+config serves every model pinned to that volume. A volume is
+datacenter-locked, so serving a model in two regions means pinning it in
+each. The `provider` field on the mount is enforced at deploy time: a
+deployment refuses a mount whose provider differs from where it lands
+(a RunPod volume can't attach on Lambda), rather than silently running
+cold.
+
+Pinning runs **in-process, before `iplane serve`** (the daemon holds the
+state lock for its lifetime); remote pinning over `--service-url` is a
+follow-up.
+
+**Auto-resolve (no config needed).** A deploy whose `(model, provider,
+region)` matches a pinned volume mounts it automatically, so after
+`iplane model pin` you can just deploy and it's warm without a
+`model_cache` block:
+
+```bash
+iplane model pin Qwen/Qwen2.5-32B-Instruct-AWQ --provider runpod --region EU-RO-1
+iplane deployment deploy qwen32 --model Qwen/Qwen2.5-32B-Instruct-AWQ \
+    --provider runpod --region EU-RO-1 --min-vram-gb 24
+# warm automatically -- the registry join (model, provider, region) -> volume
+```
+
+An explicit `model_cache` mount still wins (config is the override); a
+heterogeneous fleet spanning regions stays cold (one mount can't serve
+replicas on different providers).
+
+**On a cache miss** the engine still reaches HF (`HF_HOME` is redirected,
+not forced offline), so an unpopulated or misconfigured volume degrades
+to a cold deploy rather than failing.
 
 ## Limitations the operator should know
 
@@ -126,8 +186,9 @@ The Service code doesn't change; the wrapper just produces a richer
   CI pipeline running many deploys back-to-back may hit
   `429 Too Many Requests`; use `--skip-model-validation` in CI or
   set `HF_TOKEN` (authenticated requests have higher limits).
-- **`iplane serve` doesn't validate.** The long-running provisioner-
-  serve mode doesn't construct a ModelStore today (it isn't wired
-  through `serve.go`); only the in-process CLI verbs do. If you use
-  `--service-url` against a remote `iplane serve`, validation is
-  effectively off regardless of the flag.
+- **Remote `--service-url` uses the daemon's store, not yours.** Both
+  the in-process CLI verbs and `iplane serve` construct a ModelStore
+  (via `buildLocalService`), so validation and the warm cache are the
+  daemon's, configured on the daemon. When you drive a remote daemon
+  with `--service-url`, your local `--skip-model-validation` and
+  `model_cache` settings do not apply -- the daemon's do.

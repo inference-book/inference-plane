@@ -490,6 +490,89 @@ message Deployment {
   // deployments always populate this in lockstep with the other
   // parallel arrays.
   repeated ReplicaSpec replica_specs = 27;
+
+  // mounts are filesystem mounts the deployment's engine needs, set
+  // by the Service from the ModelStore's Resolved.Mounts at
+  // CreateDeployment time (empty for the default HF-passthrough store,
+  // which downloads weights inside the pod). A warm-cache store
+  // (RunPodVolumeStore) fills this so the engine loads a model already
+  // staged on a persistent volume instead of re-downloading it every
+  // deploy.
+  //
+  // The field is provider-agnostic on purpose: it names a mount, not a
+  // provider primitive. Each deploy path maps it onto its own
+  // mechanism -- the RunPod Deployer onto networkVolumeId, the
+  // sshdocker executor onto a `docker run -v` bind -- and paths with no
+  // volume mechanism take the cold download path. Keeping the seam free
+  // of networkVolumeId / -v keeps adding a new provider's volume impl a
+  // new file, not a proto change.
+  //
+  // Field 22/23 were the removed default_priority draft; 28 is the next
+  // free number (kept distinct so that history note stays intact).
+  repeated VolumeMount mounts = 28;
+}
+
+// VolumeMount is one filesystem mount a deployment's engine needs. The
+// three fields cover the two deploy paths without either leaking into
+// the other:
+//
+//   - volume_id is a provider-managed volume handle (a RunPod network
+//     volume id today; a Lambda filesystem id later). The image-native
+//     deploy path attaches it by id; the provider schedules the pod in
+//     the volume's datacenter.
+//   - host_path is a directory already present on the host, bind-
+//     mounted by the sshdocker deploy path (`docker run -v
+//     host_path:mount_path`). Empty when volume_id drives the mount.
+//   - mount_path is the in-container path the engine sees. Always set;
+//     the model store points HF_HOME at it so the engine finds the
+//     staged weights.
+//   - provider namespaces volume_id. A volume handle only means
+//     something to the provider that issued it (a RunPod networkVolumeId
+//     is meaningless to Lambda), so the deploy path refuses to attach a
+//     mount whose provider does not match the replica's placement
+//     provider -- otherwise a cross-provider mount would silently fall
+//     back to a cold download instead of failing loudly. Empty provider
+//     skips the check (host_path binds, which are not provider-scoped).
+//
+// An adapter uses the fields its provider primitive supports and
+// ignores the rest. Mirrors modelstores.Mount.
+message VolumeMount {
+  string volume_id = 1;
+  string host_path = 2;
+  string mount_path = 3;
+  string provider = 4;
+}
+
+// Volume is the registry record for a persistent provider volume that
+// models are pre-staged onto, so warm-cache deploys mount weights
+// instead of re-downloading them. One volume is a shared cache: it
+// holds many models (the HuggingFace hub layout keeps them side by side
+// under one HF_HOME), and models accumulate as they are pinned.
+//
+// A volume is datacenter-locked, so serving a model in two regions needs
+// it staged on one volume per region -- replication is per-region, not a
+// property of a single record.
+message Volume {
+  // id is the provider-issued volume handle (a RunPod networkVolumeId).
+  string id = 1;
+  // provider that issued the volume; namespaces id and gates which
+  // deployments may mount it (see VolumeMount.provider).
+  string provider = 2;
+  // region / datacenter the volume lives in. A pod must be scheduled
+  // here to mount it.
+  string region = 3;
+  // name is the operator-visible label (the deterministic per-region
+  // cache name, or an operator-supplied one).
+  string name = 4;
+  // size_gb is the provisioned capacity.
+  int32 size_gb = 5;
+  // models is the set of model specs staged onto this volume. Pinning is
+  // additive; unpinning a single model removes its entry.
+  repeated string models = 6;
+  // mount_path is where the volume attaches in a pod and where HF_HOME
+  // points (the staged HuggingFace cache lives under mount_path/hf).
+  string mount_path = 7;
+  google.protobuf.Timestamp created_at = 8;
 }
 
 // ReplicaSpec describes one *instance group* in the fleet: N units

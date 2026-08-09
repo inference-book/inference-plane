@@ -52,7 +52,7 @@ func newFake(t *testing.T, respond func(method, path string, body []byte) (int, 
 	f := &fakeRunPod{t: t, respond: respond}
 	srv := httptest.NewServer(f.handler())
 	t.Cleanup(srv.Close)
-	client := NewClient("test-api-key", WithBaseURL(srv.URL), WithHTTPClient(srv.Client()))
+	client := NewClient("test-api-key", WithBaseURL(srv.URL), WithLogsBaseURL(srv.URL), WithHTTPClient(srv.Client()))
 	return f, New(client)
 }
 

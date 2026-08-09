@@ -330,6 +330,16 @@ func (s *Service) applyScaleAggregate(deployID string, delta, successes int, fai
 // constraint.
 func (s *Service) createMultiReplicaDeployment(ctx context.Context, req *provisionerv1.CreateDeploymentRequest, specs []*provisionerv1.ReplicaSpec) (*provisionerv1.CreateDeploymentResponse, error) {
 	dep := req.GetDeployment()
+	// A single mount list applies to every replica, so a warm-cache
+	// mount must match every provider in the fleet. Reject a
+	// heterogeneous fleet that mixes a mount's provider with another.
+	placements := make([]string, 0, len(specs))
+	for _, sp := range specs {
+		placements = append(placements, sp.GetProvider())
+	}
+	if err := checkMountProviders(dep.GetMounts(), placements...); err != nil {
+		return nil, err
+	}
 	var record *provisionerv1.Deployment
 	var alreadyExisted bool
 	err := s.store.Update(func(f *State) error {
@@ -357,6 +367,7 @@ func (s *Service) createMultiReplicaDeployment(ctx context.Context, req *provisi
 			Model:          dep.GetModel(),
 			EngineArgs:     dep.GetEngineArgs(),
 			Env:            dep.GetEnv(),
+			Mounts:         dep.GetMounts(),
 			EnginePort:     dep.GetEnginePort(),
 			State:          provisionerv1.DeploymentState_DEPLOYMENT_STATE_PENDING,
 			CreatedAt:      now,
@@ -656,7 +667,7 @@ func (s *Service) recordAppendedSlots(deployID string, placements []*provisioner
 // finalizeInstanceAfterDeploy path, identical to single-instance.
 func (s *Service) launchReplica(ctx context.Context, deployID string, slot int, inst *provisionerv1.Instance, key *sshkeys.KeyPair, dep *provisionerv1.Deployment, results chan<- fanOutResult) {
 	replicaID := inst.GetId()
-	obs := s.newDeployObserver(ctx, deployKindProvision, deployID, inst)
+	obs := s.newDeployObserver(ctx, deployKindProvision, deployID, inst, storageTierForDeployment(dep))
 	emit := func(u DeployStateUpdate) {
 		obs.observe(u)
 		_ = s.patchDeploymentSlot(deployID, replicaID, u)

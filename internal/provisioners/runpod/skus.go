@@ -56,7 +56,9 @@ var skus = []SKUSpec{
 	{GpuTypeID: "NVIDIA GeForce RTX 4090", VRAMGb: 24, DefaultSystemRAMGb: 16, DefaultDiskGb: 20, PriceUSDPerHour: 0.39},
 	{GpuTypeID: "NVIDIA RTX A5000", VRAMGb: 24, DefaultSystemRAMGb: 24, DefaultDiskGb: 20, PriceUSDPerHour: 0.36},
 	{GpuTypeID: "NVIDIA L4", VRAMGb: 24, DefaultSystemRAMGb: 24, DefaultDiskGb: 20, PriceUSDPerHour: 0.43},
-	{GpuTypeID: "NVIDIA A30", VRAMGb: 24, DefaultSystemRAMGb: 32, DefaultDiskGb: 20, PriceUSDPerHour: 0.45},
+	// "NVIDIA A30" was retired from RunPod's REST enum (confirmed 2026-07-27:
+	// a create with it in gpuTypeIds 400s with the full enum, A30 absent).
+	// Any min_vram_gb<=24 request included it in the top-5 and failed whole.
 	{GpuTypeID: "NVIDIA GeForce RTX 5090", VRAMGb: 32, DefaultSystemRAMGb: 24, DefaultDiskGb: 20, PriceUSDPerHour: 0.69},
 
 	// Medium (>=40 GB VRAM): workstation / mid-datacenter.
@@ -129,9 +131,12 @@ func MatchSKUs(reqs *provisionerv1.ResourceRequirements) []string {
 		if sku.VRAMGb < int(reqs.GetMinVramGb()) {
 			continue
 		}
-		if int(reqs.GetMinDiskGb()) > 0 && sku.DefaultDiskGb < int(reqs.GetMinDiskGb()) {
-			continue
-		}
+		// NOTE: min_disk_gb does NOT filter SKUs. DefaultDiskGb is a typical
+		// default, not a per-SKU ceiling -- RunPod provisions container disk
+		// as an independent create param (the deployer sizes it from
+		// min_disk_gb). Filtering here would wrongly exclude every SKU when
+		// a big model asks for more disk than any tier's default (e.g. 150
+		// GB for a 72B: max DefaultDiskGb is 100).
 		if int(reqs.GetMinRamGb()) > 0 && sku.DefaultSystemRAMGb < int(reqs.GetMinRamGb()) {
 			continue
 		}

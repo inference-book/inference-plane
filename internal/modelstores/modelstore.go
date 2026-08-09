@@ -49,18 +49,36 @@ type Resolved struct {
 	// is active.
 	EnvOverrides map[string]string
 
-	// Mounts describes filesystem mounts the deployment needs. v0.1
-	// is always empty (vLLM downloads from HF inside the pod). v0.2's
-	// CachedStore fills this with the network-volume path the
-	// pre-populated cache lives at.
+	// Mounts describes filesystem mounts the deployment needs. The
+	// default HF-passthrough store leaves this empty (vLLM downloads
+	// from HF inside the pod). A warm-cache store (RunPodVolumeStore)
+	// fills it with the volume the pre-staged weights live on; the
+	// Service stamps them onto Deployment.mounts and each deploy path
+	// maps them onto its provider primitive.
 	Mounts []Mount
 }
 
-// Mount is a future-shape placeholder. v0.1 never produces these.
-// v0.2's RunPodVolumeStore will fill in (VolumeID, MountPath).
+// Mount is one filesystem mount a deployment's engine needs. It mirrors
+// the provisionerv1.VolumeMount proto and is provider-agnostic: it
+// names a mount, not a provider primitive. The three fields cover the
+// two deploy paths without either leaking into the other.
+//
+//   - VolumeID is a provider-managed volume handle (a RunPod network
+//     volume id today). The image-native deploy path attaches it by id.
+//   - HostPath is a directory already present on the host, bind-mounted
+//     by the sshdocker deploy path. Empty when VolumeID drives the mount.
+//   - MountPath is the in-container path the engine sees. Always set; a
+//     store points HF_HOME at it so the engine finds the staged weights.
+//   - Provider namespaces VolumeID: a volume handle only means something
+//     to the provider that issued it, so the deploy path refuses to
+//     attach a mount whose provider does not match the replica's
+//     placement provider. Empty skips the check (host-path binds are
+//     not provider-scoped). Mirrors provisionerv1.VolumeMount.provider.
 type Mount struct {
 	VolumeID  string
+	HostPath  string
 	MountPath string
+	Provider  string
 }
 
 // Passthrough is the no-op ModelStore: returns the input spec
