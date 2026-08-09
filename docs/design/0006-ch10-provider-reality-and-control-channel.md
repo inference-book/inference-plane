@@ -169,16 +169,67 @@ Three rules fall out, and they are the reviewable content of the ticket:
    PCIE` at 300 GB/s is a real machine that a name-only catalog would have
    wrongly excluded.
 
-This extends [0003](0003-kv-domain.md)'s `Interconnect` enum rather than
-replacing it. 0003 declared *what fabric an instance needs* on
-`ResourceRequirements`; this adds *what fabric an offer is known to have*, plus
-the provenance, on the hardware-spec side of the same seam PR 156 cut. The
-requirement stays an enum; the observation needs the extra two fields.
-
 Also note the RunPod adapter already has the right home for the catalog:
 `internal/provisioners/runpod/skus.go` maps `gpuTypeId` to a `SKUSpec` today.
 The Vast adapter's offer struct currently reads only `gpu_name`, `num_gpus`,
 `gpu_ram`, so picking up `bw_nvlink` is a small, contained change.
+
+## The core proto describes fabrics, not vendors
+
+[0003](0003-kv-domain.md) proposed `enum Interconnect { NONE, RDMA, NVLINK }`.
+That enum is superseded here, because its two interesting values are not
+siblings. **NVLink is one vendor's intra-node link. RDMA is a cross-node access
+semantic.** One field answering two questions, with a vendor name baked into a
+seam meant to outlive it.
+
+What the operator is actually asking is never "NVLink". It is whether N cards
+can move tensors between them fast enough, which decomposes into two
+vendor-neutral properties: the **scope** of the fast path, and its
+**bandwidth**. The technology name is something we discover, not something we
+require.
+
+```proto
+// FabricScope is where an instance's fast interconnect reaches. Vendor-neutral
+// on purpose: NVLink, AMD xGMI and Intel Xe Link are all INTRA_NODE, while
+// InfiniBand, RoCE and AWS EFA are all INTER_NODE. The control plane requires a
+// scope and a bandwidth; which technology delivers it is the adapter's business
+// and never a branch in core logic.
+enum FabricScope {
+  FABRIC_SCOPE_UNSPECIFIED = 0;
+  FABRIC_SCOPE_NONE        = 1; // PCIe / TCP is fine
+  FABRIC_SCOPE_INTRA_NODE  = 2; // cards within one node share a fast link
+  FABRIC_SCOPE_INTER_NODE  = 3; // nodes share a fast link
+}
+```
+
+Requirement side, on `ResourceRequirements`: `fabric_scope` + `min_fabric_gbps`.
+Observation side, on `Hardware`: `fabric_scope`, `fabric_gbps`, `fabric_source`
+(the tier from the table above), and `string fabric_technology` carrying
+`nvlink`, `nvswitch`, `xgmi`, `infiniband`, `roce`, `efa`. That last field is
+descriptive only. Nothing in the control plane branches on it, and that rule is
+what keeps it from quietly becoming a vendor enum again.
+
+**This is not tidiness.** RunPod's live catalog includes `AMD Instinct MI300X
+OAM`, 192 GB, 8 cards, today. An `INTERCONNECT_NVLINK` enum can never match it
+even though xGMI is exactly the fabric a tensor-parallel group wants, so the
+generalization buys a SKU we already have API access to rather than a
+hypothetical one. It also dissolves an argument we would otherwise have about
+AWS EFA, which uses SRD rather than standard RDMA verbs: `INTER_NODE` is true of
+EFA without anyone having to litigate whether it counts as RDMA.
+
+**The two scopes are not ordered, and it is tempting to think they are.**
+Inter-node does not imply intra-node: a PCIe-only box behind InfiniBand has a
+fast cross-node fabric and no fast link between its own cards. So a requirement
+needing both at once needs two fields, not one enum value. We ship the single
+`fabric_scope` now and add the second axis when it has a consumer, since the
+only thing wanting both is a cross-node pool, which is #212, which Part 3
+descopes. The field comment should record why it is one axis and what forces the
+second.
+
+At the CLI the canonical vocabulary is `--fabric intra-node|inter-node|none`
+plus `--min-fabric-gbps`, with `--interconnect nvlink` and `--needs-rdma` kept
+as documented aliases. Operators and the chapter both think in vendor terms, so
+the sugar belongs at the human edge and the properties belong in the contract.
 
 # Part 3. #212 is rescoped, not scheduled
 
@@ -305,11 +356,15 @@ The epic's suggested order survives with one correction and one addition.
   `Phase: v0.3, Ch 10`, while ROADMAP moved Ch 10 to v0.2. Both need a touch-up.
   0003 is currently untracked in git; it should be committed before anything
   links to it.
+- [0003](0003-kv-domain.md)'s `enum Interconnect { NONE, RDMA, NVLINK }` is
+  superseded by `FabricScope` (Part 2). Its two interesting values answer
+  different questions and one of them is a vendor's product name. The
+  `ResourceRequirements.interconnect` field 0003 proposed becomes
+  `fabric_scope` + `min_fabric_gbps`, and `KVDomain.interconnect` follows the
+  same rename when that message is built.
 - `ROADMAP.md` line 66 says the engine's `gpu_prefix_cache_hit_rate` is "(now
   scraped)". It is not, and the same file contradicts it at line 106, which
   records the Ch 8 metric as "measured router-side as a proxy ... the engine
   metric itself is deferred to issue 51, not faked on mock". The `ch08-final`
   capability snapshot stands; line 66 is a stale parenthetical. This is the
   reconciliation epic #211 asks someone with the history to settle.
-</content>
-</invoke>
