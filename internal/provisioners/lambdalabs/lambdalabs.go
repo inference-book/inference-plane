@@ -215,9 +215,11 @@ func (p *Provider) Spawn(ctx context.Context, spec *provisionerv1.Spec) (*provis
 			State:      provisionerv1.InstanceState_INSTANCE_STATE_PENDING,
 			Region:     region,
 			CreatedAt:  timestamppb.New(p.clock()),
-			Hardware: &provisionerv1.Hardware{
-				GpuSku: instanceTypeName,
-			},
+			Hardware: func() *provisionerv1.Hardware {
+				hw := &provisionerv1.Hardware{GpuSku: instanceTypeName}
+				stampFabric(hw, instanceTypeName)
+				return hw
+			}(),
 		}, nil
 	}
 	return p.instanceFromAPI(api, spec, instanceTypeName), nil
@@ -373,14 +375,18 @@ func (p *Provider) instanceFromAPI(api *apiInstance, originalSpec *provisionerv1
 		CreatedAt:     timestamppb.New(p.clock()),
 		Region:        api.Region.Name,
 		HourlyRateUsd: float64(api.InstanceType.PriceCentsPerHour) / 100.0,
-		Hardware: &provisionerv1.Hardware{
-			GpuSku:    instanceTypeName,
-			GpuCount:  int32(gpuCount),
-			GpuVramMb: int32(vramMB),
-			Vcpus:     int32(api.InstanceType.Specs.VCPUs),
-			CpuRamMb:  int32(api.InstanceType.Specs.MemoryGiB * 1024),
-			DiskMb:    int32(api.InstanceType.Specs.StorageGiB * 1024),
-		},
+		Hardware: func() *provisionerv1.Hardware {
+			hw := &provisionerv1.Hardware{
+				GpuSku:    instanceTypeName,
+				GpuCount:  int32(gpuCount),
+				GpuVramMb: int32(vramMB),
+				Vcpus:     int32(api.InstanceType.Specs.VCPUs),
+				CpuRamMb:  int32(api.InstanceType.Specs.MemoryGiB * 1024),
+				DiskMb:    int32(api.InstanceType.Specs.StorageGiB * 1024),
+			}
+			stampFabric(hw, instanceTypeName)
+			return hw
+		}(),
 		Metadata: lambdaMetadata(api),
 	}
 	if api.IP != "" {

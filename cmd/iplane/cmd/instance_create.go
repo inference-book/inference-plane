@@ -26,6 +26,8 @@ var (
 	createClass     string
 	createSKU       string
 	createGPUCount  int32
+	createFabric    string
+	createFabricBW  int32
 	createMinVRAM   int32
 	createMinRAM    int32
 	createMinDisk   int32
@@ -105,6 +107,13 @@ func runInstanceCreate(cmd *cobra.Command, args []string) error {
 		},
 	}
 
+	fabricScope, err := parseFabricScope(createFabric)
+	if err != nil {
+		return err
+	}
+	spec.Requirements.FabricScope = fabricScope
+	spec.Requirements.MinFabricGbps = createFabricBW
+
 	if createDryRun {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -166,6 +175,8 @@ func init() {
 	f.Int32Var(&createMinVRAM, "min-vram-gb", 0, `minimum VRAM per GPU, in GB`)
 	f.Int32Var(&createMinRAM, "min-ram-gb", 0, `minimum system RAM, in GB (per instance, not per GPU)`)
 	f.Int32Var(&createMinDisk, "min-disk-gb", 0, `minimum container disk, in GB`)
+	f.StringVar(&createFabric, "fabric", "", fabricFlagUsage)
+	f.Int32Var(&createFabricBW, "min-fabric-gbps", 0, minFabricGbpsUsage)
 	f.StringVar(&createBaseImage, "base-image", "", `docker-capable base image (provider default if empty)`)
 	f.BoolVar(&createDryRun, "dry-run", false, `print the planned action and exit without provider calls`)
 }

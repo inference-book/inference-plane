@@ -43,6 +43,8 @@ var (
 	deployMinRAM          int32
 	deployMinDisk         int32
 	deployGPUCount        int32
+	deployFabric          string
+	deployFabricBW        int32
 	deployDebugShell      bool
 	deployIdleTTL         time.Duration
 	deployNoIdleDestroy   bool
@@ -215,17 +217,23 @@ func runDeploymentDeploy(cmd *cobra.Command, args []string) error {
 		// Auto-provision: build a single instance group from the
 		// homogeneous flag set. --replicas N folds into the group's
 		// replicas count.
+		fabricScope, err := parseFabricScope(deployFabric)
+		if err != nil {
+			return err
+		}
 		req.ReplicasSpec = []*provisionerv1.ReplicaSpec{{
 			Provider: deployProvider,
 			Region:   deployRegion,
 			Replicas: deployReplicas,
 			Requirements: &provisionerv1.ResourceRequirements{
-				Class:     deployClass,
-				Sku:       deploySKU,
-				MinVramGb: deployMinVRAM,
-				MinRamGb:  deployMinRAM,
-				MinDiskGb: deployMinDisk,
-				GpuCount:  deployGPUCount,
+				Class:         deployClass,
+				Sku:           deploySKU,
+				MinVramGb:     deployMinVRAM,
+				MinRamGb:      deployMinRAM,
+				MinDiskGb:     deployMinDisk,
+				GpuCount:      deployGPUCount,
+				FabricScope:   fabricScope,
+				MinFabricGbps: deployFabricBW,
 			},
 		}}
 	}
@@ -285,6 +293,8 @@ func init() {
 	f.Int32Var(&deployMinRAM, "min-ram-gb", 0, `minimum system RAM for auto-provisioning, in GB`)
 	f.Int32Var(&deployMinDisk, "min-disk-gb", 0, `minimum container disk for auto-provisioning, in GB`)
 	f.Int32Var(&deployGPUCount, "gpu-count", 0, `number of GPUs for auto-provisioning (default 1)`)
+	f.StringVar(&deployFabric, "fabric", "", fabricFlagUsage)
+	f.Int32Var(&deployFabricBW, "min-fabric-gbps", 0, minFabricGbpsUsage)
 	f.Int32Var(&deployEnginePort, "engine-port", 8000, `port the engine listens on`)
 	f.StringSliceVar(&deployEngineArgs, "engine-args", nil,
 		`additional args passed to the engine entrypoint (comma-separated or repeated)`)
