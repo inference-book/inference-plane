@@ -189,19 +189,35 @@ snapshots:
 
     known_limitations:
       - id: image-pull-phase-measures-zero
+        resolved_by: 210
+        resolved_date: 2026-08-09
         notes: |
-          The deployer defines a four-rung phase ladder
-          (runpod:scheduling -> runpod:create-pod -> runpod:image-pull ->
-          engine:init), but in both validated runs the image-pull bucket came
-          out at or near zero and engine:init absorbed the whole cold start.
-          A ~20 GB image pull cannot take 0s, so the `lastStartedAt` signal
-          the ladder keys on is not doing its job; the leading hypothesis is
-          that RunPod populates it at pod creation rather than container
-          start, so the first probe already reads started and the ladder skips
-          the rung. That is a hypothesis, not a verified finding. Practical
-          consequence: engine:init is still image-pull + weight-download +
-          model-load fused, so the warm-vs-cold totals are honest but the
-          image slice cannot yet be attributed. Tracked in
+          RESOLVED after this tag, in PR 210. Recorded here as it stood at
+          ch09-final, with the resolution appended, because the limitation is
+          what the tagged code actually did.
+
+          As of the tag: the deployer defines a three-rung readiness ladder
+          (runpod:scheduling -> runpod:image-pull -> engine:init; the separate
+          runpod:create-pod phase is emitted earlier in the deploy and is not
+          part of the /health wait), but in both validated runs the image-pull
+          bucket came out at or near zero and engine:init absorbed the whole
+          cold start. A ~20 GB image pull cannot take 0s, so the
+          `lastStartedAt` signal the ladder keys on was not doing its job.
+          Practical consequence at the tag: engine:init was image-pull +
+          weight-download + model-load fused, so the warm-vs-cold totals are
+          honest but the image slice could not be attributed.
+
+          Resolution: the hypothesis was confirmed live, and a second
+          independent cause was found. `lastStartedAt` is stamped at
+          pod-record creation, 5-7 ms BEFORE `createdAt`, so the classifier
+          short-circuited to engine:init on the first probe; separately, the
+          `machine` object stays {} for the whole deploy while the top-level
+          `machineId` populates immediately, so the host-assignment check
+          never fired either. The working boundary is the `runtime` block on
+          the v2 pod endpoint, which is null until the container runs. A 1.5B
+          cold start now splits 109s image pull (72%) and 43s engine init
+          (28%), cross-checked against ground truth derived independently
+          from runtime.uptimeInSeconds. Design notes in
           docs/design/0005-engine-image-coldstart.md.
       - id: pin-is-provider-and-region-scoped
         notes: |
@@ -247,7 +263,7 @@ snapshots:
         - name: iplane.deployment.phase.duration
           type: histogram
           source: internal/provisioners (deploy_telemetry)
-          notes: Per-phase seconds, additionally labeled storage_tier. See the image-pull-phase-measures-zero limitation for what the phase split can and cannot attribute today.
+          notes: Per-phase seconds, additionally labeled storage_tier. At this tag the phase split could not attribute the image pull; see the image-pull-phase-measures-zero limitation, which records both the state at the tag and its resolution in PR 210.
 
   - tag: ch08-final
     alias: v0.2.1
