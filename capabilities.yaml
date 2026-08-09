@@ -18,15 +18,12 @@
 
 snapshots:
 
-  # Drafted ahead of the tag: the Ch 9 capability set is locked (PRs 197-201,
-  # 206) but ch09-final is not cut yet, so `date` is TBD until it is. Fill the
-  # date in at tag time; nothing else here should need to change.
   - tag: ch09-final
     alias: v0.2.2
     chapter: 9
     chapter_title: Scaling to 30B+ Models
     branch: release/v0.2
-    date: TBD
+    date: 2026-08-08
 
     summary: |
       Cold-start distance. Chapter 8 kept every engine one opaque endpoint and
