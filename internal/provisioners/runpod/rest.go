@@ -17,13 +17,20 @@ import (
 // (httptest in unit tests, staging in integration tests).
 const DefaultBaseURL = "https://rest.runpod.io/v1"
 
-// DefaultLogsBaseURL is the host for RunPod's v2 API, which -- unlike the
-// v1 REST surface this adapter otherwise uses -- exposes a pod-logs
-// stream (GET /v2/pods/{id}/logs). Model staging reads it to detect
-// download completion, because v1 has no signal that a pod's one-shot
-// command finished (the pod stays desiredStatus=RUNNING and RunPod
-// restarts the exited container). Overrideable via WithLogsBaseURL for
-// tests.
+// DefaultLogsBaseURL is the host for RunPod's v2 API, which exposes two
+// things the v1 REST surface this adapter otherwise uses does not:
+//
+//   - GET /v2/pods/{id}/logs -- the pod-logs stream. Model staging reads
+//     it to detect download completion, because v1 has no signal that a
+//     pod's one-shot command finished (the pod stays
+//     desiredStatus=RUNNING and RunPod restarts the exited container).
+//   - GET /v2/pods/{id} -- carries a `runtime` block that is null until
+//     the container actually starts. That is the only trustworthy
+//     image-pull -> engine-init boundary; v1's lastStartedAt is stamped
+//     at pod creation and v1 omits `runtime` entirely (issue 208).
+//
+// Overrideable via WithLogsBaseURL for tests. The name predates the
+// second use; it is really "the v2 API host".
 const DefaultLogsBaseURL = "https://api.runpod.io"
 
 // Client carries the bits every RunPod request needs (base URL, bearer
@@ -120,6 +127,12 @@ func (c *Client) newReq(method, path string, query url.Values, body any) (*http.
 // printed before the poll started is still seen.
 func (c *Client) v2LogsURL(podID string) string {
 	return fmt.Sprintf("%s/v2/pods/%s/logs?source=container&tail=1000", c.logsBaseURL, podID)
+}
+
+// v2PodURL builds the v2 pod-status URL. Used for the `runtime` block,
+// which v1 does not return (see DefaultLogsBaseURL).
+func (c *Client) v2PodURL(podID string) string {
+	return fmt.Sprintf("%s/v2/pods/%s", c.logsBaseURL, podID)
 }
 
 // callOpts returns the servicekit options to apply. Tests inject a

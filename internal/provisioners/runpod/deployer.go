@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -367,6 +368,7 @@ func (p *Provider) waitForEngineReady(ctx context.Context, podID string, engineP
 	started := time.Now()
 	phase := phaseScheduling
 	first := true
+	tracePhases := phaseTraceEnabled()
 	for {
 		if !first {
 			select {
@@ -390,10 +392,22 @@ func (p *Provider) waitForEngineReady(ctx context.Context, podID string, engineP
 		// remaining signal and further status reads add nothing. Phases
 		// only advance (monotonic), so a flaky status read never regresses
 		// the operator's view.
-		if enginePhaseOrdinal(phase) < enginePhaseOrdinal(phaseEngineInit) {
-			if refined, gotStatus := p.probeEnginePhase(ctx, podID); gotStatus &&
-				enginePhaseOrdinal(refined) > enginePhaseOrdinal(phase) {
-				phase = refined
+		//
+		// Under EnvPhaseTrace we keep probing past engine-init purely to
+		// record the raw signal timeline (issue 208). That is trace-only:
+		// `phase` still advances by the same monotonic rule either way.
+		if enginePhaseOrdinal(phase) < enginePhaseOrdinal(phaseEngineInit) || tracePhases {
+			if refined, sig, gotStatus := p.probeEnginePhase(ctx, podID); gotStatus {
+				if enginePhaseOrdinal(refined) > enginePhaseOrdinal(phase) {
+					phase = refined
+				}
+				if tracePhases {
+					fmt.Fprintf(os.Stderr,
+						"iplane-phase-trace\tpod=%s\telapsed=%s\tphase=%s\tderived=%s\tmachine=%t\tcontainerStarted=%t\tcreatedAt=%s\tlastStartedAt=%s\tdesiredStatus=%s\thealth=%s\n",
+						podID, elapsed, phase, refined, sig.machinePresent, sig.containerStarted,
+						emptyDash(sig.createdAt), emptyDash(sig.lastStartedAt),
+						emptyDash(sig.desiredStatus), emptyDash(statusText))
+				}
 			}
 		}
 
@@ -457,34 +471,89 @@ func enginePhaseDescription(phase string) string {
 	}
 }
 
+// podPhaseSignals is one observation of the RunPod status fields the
+// phase ladder is derived from. Carried alongside the derived phase so
+// the phase trace (EnvPhaseTrace) can print the raw inputs, not just the
+// conclusion -- the whole point of issue 208 is that the conclusion is
+// suspected wrong.
+type podPhaseSignals struct {
+	machinePresent   bool
+	containerStarted bool
+	createdAt        string
+	lastStartedAt    string
+	desiredStatus    string
+}
+
 // probeEnginePhase reads RunPod's pod status (GET /pods/{id}) and maps
 // it to a cold-start phase. Returns ok=false on any error so the caller
 // keeps the last known phase -- this refines observability and must
 // never gate readiness or fail the deploy. Best-effort: a per-read
 // timeout keeps a hung status GET from stalling the health-poll tick.
-func (p *Provider) probeEnginePhase(ctx context.Context, podID string) (string, bool) {
+// Two reads are needed because neither API version carries both
+// signals: v1 has the host assignment (machineId) but omits `runtime`,
+// while v2 has `runtime` (the container-start boundary). The v2 read is
+// skipped once the container is known started, and the whole prober
+// stops running once the ladder reaches engine-init, so the extra call
+// only happens during the image-pull window.
+func (p *Provider) probeEnginePhase(ctx context.Context, podID string) (string, podPhaseSignals, bool) {
 	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	getReq, err := p.client.newReq("GET", "/pods/"+podID, nil, nil)
 	if err != nil {
-		return "", false
+		return "", podPhaseSignals{}, false
 	}
 	pod, err := skhttp.Call[podBody](probeCtx, getReq, p.client.callOpts()...)
 	if err != nil {
-		return "", false
+		return "", podPhaseSignals{}, false
 	}
-	return classifyEnginePhase(pod.machinePresent(), pod.LastStartedAt != ""), true
+	sig := podPhaseSignals{
+		machinePresent: pod.machinePresent(),
+		createdAt:      pod.CreatedAt,
+		lastStartedAt:  pod.LastStartedAt,
+		desiredStatus:  pod.DesiredStatus,
+	}
+	sig.containerStarted = p.probeContainerStarted(probeCtx, podID)
+	return classifyEnginePhase(sig.machinePresent, sig.containerStarted), sig, true
 }
 
-// classifyEnginePhase maps two observable RunPod pod-status signals to a
-// cold-start phase. `machine` populated => RunPod scheduled onto a host
-// (scheduling done). `lastStartedAt` populated => the container process
-// started (image pull done). RunPod's REST v1 exposes no explicit
-// container-runtime state, so this pair is the finest split available
-// without reaching inside the pod.
-func classifyEnginePhase(machinePresent, started bool) string {
+// probeContainerStarted reports whether RunPod's v2 pod status shows a
+// live container runtime. Best-effort: any error reads as "not started
+// yet", which keeps the caller on the lower phase rung rather than
+// falsely advancing it.
+//
+// This replaces the v1 lastStartedAt test, which was stamped at pod
+// creation and so was true from the first probe (issue 208).
+func (p *Provider) probeContainerStarted(ctx context.Context, podID string) bool {
+	req, err := skhttp.NewBytesRequest("GET", p.client.v2PodURL(podID), nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Authorization", "Bearer "+p.client.apiKey)
+	req.Header.Set("Accept", "application/json")
+	body, err := skhttp.Call[podV2Body](ctx, req, p.client.callOpts()...)
+	if err != nil {
+		return false
+	}
+	return body.Runtime.containerStarted()
+}
+
+// classifyEnginePhase maps two observable RunPod signals to a cold-start
+// phase. A host assignment (v1 machineId / machine) means scheduling is
+// done and the image pull is underway; a live container runtime (v2
+// `runtime`) means the pull is done and the engine is initializing.
+//
+// Both arguments MUST be state signals, never timestamps. The phase
+// ladder was dead for its first two rungs because `containerStarted` was
+// once derived from v1's lastStartedAt, which RunPod stamps at pod
+// creation: it read true on the very first probe, the switch
+// short-circuited, and image-pull could never be observed (issue 208).
+// A timestamp says "this happened at some point", which is not the same
+// question as "is this true now".
+func classifyEnginePhase(machinePresent, containerStarted bool) string {
 	switch {
-	case started:
+	case containerStarted:
+		// A running container implies a host, so this outranks
+		// machinePresent even if the host signal is lagging.
 		return phaseEngineInit
 	case machinePresent:
 		return phaseImagePull
