@@ -109,14 +109,14 @@ Per the cadence note above: if the manual path and the iplane move don't each fi
 
 ## v0.3 — Distributed Inference (medium detail)
 
-**Chapters:** Ch 11 (Multi-Backend Routing), Ch 12 (70B Deployment)
+**Chapters:** Ch 11 (Capacity Across Providers), Ch 12 (70B Deployment)
 **Branch:** `release/v0.3` · **Tags:** `ch11-final`, `ch12-final`
 
 ### Features by chapter
 
 | Chapter | Feature                          | Notes                                                                                              |
 |---------|----------------------------------|----------------------------------------------------------------------------------------------------|
-| Ch 11   | Backend router                   | Workload-aware (small/large), cost-aware (spot/on-demand), health-aware.                            |
+| Ch 11   | Cross-provider capacity          | **Reframed 2026-08** from "backend router" to hardware acquisition, following Ch 10's `provision-connected-pool` pattern. Ch 10 rents one connected pool from one vendor; Ch 11 is what happens when one vendor cannot supply it. Resolve a topology requirement against several provider catalogs at once, rank on price as a placement input rather than a post-hoc report, and survive spot/preemption by draining and re-placing. Health-aware routing extends the Ch 7 per-replica quarantine to the case where the fallback is different hardware at a different price. HostedAPI (issue 182) matters here as a capacity source with a per-token rather than per-hour cost model, not as a model-selection target; per that issue, generalize `external` rather than shipping a sibling provider. **Not this chapter:** workload- or quality-aware routing between models, which asks the control plane to reason about model semantics and is now an advanced-book topic. |
 | Ch 12   | TP/PP-aware deploy               | `iplane deploy --tp 4 --pp 2`. Image catalog gains multi-GPU variants.                              |
 | All     | Vast.ai + AWS adapters           | Provider mix becomes real; cost-aware routing has providers to choose between. Cross-provider warm-cache design + the per-provider volume-create matrix (Lambda filesystem-create is API-blocked; AWS/GCP are the clean home) is in [docs/design/0004-cross-provider-warm-cache.md](docs/design/0004-cross-provider-warm-cache.md). |
 | All     | `S3Store` / `GCSStore`           | Object-storage backends for fleet provisioning at scale. The robust cross-provider warm-cache path (see 0004); also engine-image cold-start / streaming in [docs/design/0005-engine-image-coldstart.md](docs/design/0005-engine-image-coldstart.md). |
@@ -138,12 +138,13 @@ Per the cadence note above: if the manual path and the iplane move don't each fi
 
 ## v1.0 — Production Ceiling (low detail)
 
-**Chapters:** Ch 13 (400B + H100), Ch 14 (Production Operations)
-**Branch:** `release/v1.0` · **Tags:** `ch13-final`, `ch14-final`
+**Chapters:** Ch 13 (Production Operations), Ch 14 (Running on Infrastructure You Own), Ch 15 (Turning It Into a Product, optional), Ch 16 (The Ceiling, and What Comes Next)
+**Branch:** `release/v1.0` · **Tags:** `ch13-final`, `ch14-final`, `ch15-final`, `ch16-final`
 
 Capabilities promised:
 
-- Deploy 400B-class models on multi-host H100 clusters
+- **Kubernetes provisioner.** Ch 14 runs the same control plane against a cluster the operator already owns rather than capacity it rents. A cluster is another capacity source, so this should land as a new `Provisioner` implementation behind the existing interface, not as a parallel code path. This is the largest new surface v1.0 implies.
+- Deploy 400B-class models on multi-host H100 clusters. Note the book stops short of reproducing this: Ch 16 argues the economics of 400B rather than walking a reader through a cluster almost nobody can rent. The capability stays on this roadmap as an iplane goal, but it is no longer a chapter's hands-on requirement.
 - SLO/SLI definitions as iplane primitives, not just Grafana panels
 - Auto-scaling on traffic, cost-aware spot fallback
 - Runbook tooling: `iplane drain`, `iplane snapshot`, `iplane rollback`
@@ -156,9 +157,11 @@ Design questions deferred to when this version becomes active.
 
 ---
 
-## Part V — Productizing (separate track)
+## Part V — Productizing (folded into Ch 15, 2026-08)
 
-**Chapters:** Ch 15–19. Versioning is orthogonal to v0.1–v1.0; lives behind feature flags on `release/v1.0` (or a sibling branch if it grows large enough). None of this is inference-specific; the chapters call this out and the iplane code keeps the SaaS surface optional.
+**Chapters:** Ch 15 only. The book no longer has a Part V; the old five-chapter track (Ch 15-19) collapsed into one optional chapter inside Part IV, because the material applies to any platform service and teaches nothing specific about inference. The capabilities below stay accurate as a list of what that chapter shows the seams for; they are simply not five chapters' worth of book. Original scope note follows.
+
+**Versioning:** Versioning is orthogonal to v0.1–v1.0; lives behind feature flags on `release/v1.0` (or a sibling branch if it grows large enough). None of this is inference-specific; the chapters call this out and the iplane code keeps the SaaS surface optional.
 
 Capabilities promised:
 
