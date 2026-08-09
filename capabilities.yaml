@@ -18,6 +18,240 @@
 
 snapshots:
 
+  # Drafted ahead of the tag: the Ch 9 capability set is locked (PRs 197-201,
+  # 206) but ch09-final is not cut yet, so `date` is TBD until it is. Fill the
+  # date in at tag time; nothing else here should need to change.
+  - tag: ch09-final
+    alias: v0.2.2
+    chapter: 9
+    chapter_title: Scaling to 30B+ Models
+    branch: release/v0.2
+    date: TBD
+
+    summary: |
+      Cold-start distance. Chapter 8 kept every engine one opaque endpoint and
+      deferred the question of what a big model costs to hold; this chapter
+      answers it on one card. The control-plane surface is small on purpose,
+      because most of the chapter is engine and model arithmetic (the VRAM
+      budget, quantization formats, and the engine knobs that split a card)
+      rather than new iplane machinery. What iplane adds is the warm model
+      cache: a pin registry that pre-stages weights onto a provider volume,
+      provider-scoped mounts that a deploy resolves without configuration, and
+      a `storage_tier` cut on the deploy metrics so the saving is measured
+      rather than asserted. Validated end-to-end on a 72B FP8 flagship on a
+      single B200: 2692 s cold to 244 s warm, about 11x, roughly $4.41 to
+      $0.40 per deploy. The engine stays opaque and single-card throughout;
+      spreading one engine's KV domain across several GPUs is Chapter 10.
+
+    capabilities:
+
+      - name: Warm-cache volume mounts across deploy paths
+        status: shipped
+        notes: |
+          `Service` stamps `Resolved.Mounts` onto a provider-agnostic
+          `VolumeMount{volume_id, host_path, mount_path, provider}`, and each
+          adapter maps it onto its own primitive: the RunPod adapter onto
+          `networkVolumeId`, the sshdocker executor onto `docker run -v`. The
+          mount is the seam, so a provider that has no persistent volume simply
+          cannot be pinned and says so rather than failing a deploy.
+        prs: [197]
+        related_issues: [190]
+
+      - name: Pin registry and RunPod volume mechanism
+        status: shipped
+        notes: |
+          `Volume` proto plus `State.Volumes` (state schema 1.6, additive) and
+          the `VolumeManager` optional provider capability: RunPod
+          network-volume CRUD plus `StageModel`, which runs a cheap CPU setup
+          pod to download the weights onto the volume. A cross-provider mount
+          guard rejects attaching one provider's volume handle to another's
+          pod, because a RunPod volume id means nothing to Lambda Labs.
+          Shipped generic under `internal/modelstores/volumecache`; the
+          `CachedStore` / `RunPodVolumeStore` names sketched on the roadmap did
+          not survive contact.
+        prs: [199]
+        related_issues: [191]
+
+      - name: iplane model pin / ls / unpin
+        status: shipped
+        notes: |
+          The operator surface over the pin registry, in-process and
+          pin-before-serve. `iplane model pin <model> --provider --region
+          --size --hf-token --force` stages weights onto a volume,
+          `iplane model ls --provider` lists volumes and what is on them, and
+          `iplane model unpin <volume-id> --model` removes one model or
+          destroys the whole volume. `--region` is required because a volume
+          only helps a deploy landing in its own datacenter.
+        prs: [200]
+        related_issues: [191]
+
+      - name: Deploy auto-resolves the pinned volume
+        status: shipped
+        notes: |
+          A deploy joins `(model, provider, region)` against the pin registry
+          and mounts the matching volume with no configuration and no new
+          flag. The cache fails soft: with nothing pinned, or a volume that
+          does not hold the model, `HF_HOME` still points at a real Hugging
+          Face cache so the engine downloads instead of refusing to start. A
+          missing pin costs a cold deploy, not a failed one.
+        prs: [201]
+        related_issues: [191]
+
+      - name: Cold-start SLI (storage_tier)
+        status: shipped
+        notes: |
+          A `storage_tier` label (`cold` = in-pod HF download, `warm` =
+          pre-staged volume mount) on the deploy phase and provision metrics,
+          plus the warm-vs-cold engine-init Grafana panel. Derived from
+          `dep.Mounts` in the deploy observer, so the provider adapters stay
+          OTel-free and the CP/DP-1 boundary holds. This is what turns the
+          warm cache from a claim into a measured gap. See the phase-
+          attribution limitation below.
+        prs: [198]
+        related_issues: [192]
+
+      - name: Engine-args pass-through
+        status: shipped
+        notes: |
+          `iplane deployment deploy --engine-args` forwards engine flags
+          (`gpu_memory_utilization`, `max-model-len`, `kv-cache-dtype`, the
+          quantization selection) as an opaque list. Deliberately a
+          pass-through and not first-class proto fields: placement is a
+          control-plane concern, how a model splits a card it has been given
+          is the engine's own arithmetic, and promoting engine flags would tie
+          the control plane's release cycle to the engine's.
+        prs: []
+        related_issues: []
+
+      - name: Large-model RunPod hardening
+        status: shipped
+        notes: |
+          What the live 72B run cost to make repeatable: a SKU catalog,
+          container-disk sizing, and three aligned timeouts (CLI `--wait`,
+          daemon engine-ready, and the staging pod). Staging completion
+          changed mechanism, from polling `desiredStatus` (RunPod never
+          reports a one-shot command's exit) to reading a marker off the v2
+          pod-logs stream. The download uses `hf download --max-workers 2`;
+          `huggingface-cli` is gone, and 8 workers OOM the ~4 GB staging pod
+          on 70B+ models.
+        prs: [206]
+        related_issues: []
+
+      - name: Scaling-to-30B walkthrough
+        status: shipped
+        notes: |
+          `examples/08-scaling-30b/` in five acts: 08a cold-start-distance
+          (the warm-cache A/B, the one validated against real hardware), 08b
+          quantization, 08c engine-partition, 08d placement, 08e
+          single-gpu-ceiling. 08a is the paid act and carries the measured
+          numbers the chapter's figures are drawn from.
+        prs: [206]
+        related_issues: []
+
+      - name: Remote --service-url pin
+        status: deferred
+        notes: |
+          `iplane model pin` is in-process only. Driving the pin registry
+          against a remote daemon over `--service-url`, the way the other
+          verbs already work, is not wired.
+        moved_to: v0.3
+
+      - name: S3Store / GCSStore object-store staging
+        status: deferred
+        notes: |
+          Volume staging is provider-scoped, so a pin buys nothing across
+          providers or regions. Object-store backed staging is the robust
+          cross-provider path; the per-provider volume-create matrix (Lambda
+          filesystem-create is API-blocked, AWS/GCP are the clean home) is
+          worked out in docs/design/0004-cross-provider-warm-cache.md.
+        moved_to: v0.3
+
+      - name: Engine-image cold-start reduction
+        status: deferred
+        notes: |
+          Pinning removes the weight download and does nothing for the ~20 GB
+          engine image, which both cold and warm deploys pay. Slimmer images,
+          registry proximity or a pull-through cache, image streaming, and
+          warm pools are the levers; design in
+          docs/design/0005-engine-image-coldstart.md.
+        moved_to: v0.3
+
+    cli_surface:
+      # New at this tag (additive over ch08-final):
+      - iplane model pin <model> --provider --region --size --hf-token --force
+      - iplane model ls --provider
+      - iplane model unpin <volume-id> --model
+      - iplane deployment deploy --engine-args
+
+    environment_variables:
+      recommended:
+        - name: IPLANE_RUNPOD_ENGINE_READY_TIMEOUT
+          notes: "Daemon-side engine-/health wait. The 10m default is too short for a real cold deploy of a large model behind a multi-GB image pull."
+        - name: HF_TOKEN
+          notes: "Propagated onto the staging pod and the engine pod for gated models; iplane model pin --hf-token overrides it."
+
+    known_limitations:
+      - id: image-pull-phase-measures-zero
+        notes: |
+          The deployer defines a four-rung phase ladder
+          (runpod:scheduling -> runpod:create-pod -> runpod:image-pull ->
+          engine:init), but in both validated runs the image-pull bucket came
+          out at or near zero and engine:init absorbed the whole cold start.
+          A ~20 GB image pull cannot take 0s, so the `lastStartedAt` signal
+          the ladder keys on is not doing its job; the leading hypothesis is
+          that RunPod populates it at pod creation rather than container
+          start, so the first probe already reads started and the ladder skips
+          the rung. That is a hypothesis, not a verified finding. Practical
+          consequence: engine:init is still image-pull + weight-download +
+          model-load fused, so the warm-vs-cold totals are honest but the
+          image slice cannot yet be attributed. Tracked in
+          docs/design/0005-engine-image-coldstart.md.
+      - id: pin-is-provider-and-region-scoped
+        notes: |
+          A volume belongs to one provider and one datacenter. A deploy that
+          lands elsewhere gets no benefit and silently falls back to cold.
+      - id: cold-times-vary-with-hf-bandwidth
+        notes: |
+          Cold provision time scales with in-pod Hugging Face bandwidth (about
+          30 MB/s on the flagship run) and varies run to run, so the 11x
+          figure is one measurement rather than a constant.
+      - id: single-card-only
+        notes: |
+          Everything here assumes one engine on one GPU. Weights that do not
+          fit any single card, and a KV budget that does not scale at long
+          context, both point at spreading one engine's KV domain across
+          several cards, which is Chapter 10.
+
+    patterns_introduced:
+      - name: placement-vs-tuning
+        notes: |
+          Finding a card that fits a budget is control-plane work, because it
+          is provider-matching. How a model splits a card it has already been
+          given is engine work, because it is the engine's own arithmetic and
+          changes release to release. The thin pass-through keeps the two
+          release cycles independent.
+      - name: measure-the-saving-dont-assert-it
+        notes: |
+          A cache that claims to help should carry the label that proves it.
+          The storage_tier cut makes the warm-vs-cold difference a gap you can
+          read off a dashboard rather than a number in a README.
+      - name: fail-soft-on-a-missing-cache
+        notes: |
+          An absent or wrong pin degrades to the slow path instead of failing
+          the deploy, so the optimization can never be the reason a deployment
+          does not come up.
+
+    metric_vocabulary:
+      reliably_emitted:
+        - name: iplane.deployment.provision.duration
+          type: histogram
+          source: internal/metrics (deploy observer)
+          notes: End-to-end provision wall-clock, now additionally labeled storage_tier=cold|warm. The dashboard's top line.
+        - name: iplane.deployment.phase.duration
+          type: histogram
+          source: internal/provisioners (deploy_telemetry)
+          notes: Per-phase seconds, additionally labeled storage_tier. See the image-pull-phase-measures-zero limitation for what the phase split can and cannot attribute today.
+
   - tag: ch08-final
     alias: v0.2.1
     chapter: 8
