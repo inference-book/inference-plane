@@ -562,6 +562,56 @@ func TestClassifyEnginePhase(t *testing.T) {
 	}
 }
 
+// TestMachinePresent_AcceptsTopLevelMachineID guards the first half of
+// issue 208: RunPod leaves "machine" as {} for the whole deploy and
+// signals host assignment via the top-level machineId, so keying only on
+// the nested object pinned the ladder at scheduling forever.
+func TestMachinePresent_AcceptsTopLevelMachineID(t *testing.T) {
+	cases := []struct {
+		name string
+		pod  podBody
+		want bool
+	}{
+		{"nothing", podBody{}, false},
+		{"empty machine object only", podBody{Machine: &podMachine{}}, false},
+		// The shape observed live on pod 31f66dn93v32fa.
+		{"empty machine but machineId set", podBody{Machine: &podMachine{}, MachineID: "mach-1"}, true},
+		{"machineId with no machine object", podBody{MachineID: "mach-1"}, true},
+		{"populated machine object", podBody{Machine: &podMachine{GPUTypeID: "NVIDIA RTX A5000"}}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.pod.machinePresent(); got != tc.want {
+				t.Errorf("machinePresent() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRuntimeContainerStarted guards the second half of issue 208: the
+// container-start boundary is the v2 `runtime` block's presence, and an
+// empty-but-non-nil block must not count (RunPod returns those).
+func TestRuntimeContainerStarted(t *testing.T) {
+	cases := []struct {
+		name string
+		rt   *podV2Runtime
+		want bool
+	}{
+		{"nil runtime (still pulling image)", nil, false},
+		{"empty runtime object", &podV2Runtime{}, false},
+		{"ports populated", &podV2Runtime{Ports: []podV2RuntimePort{{PrivatePort: 8000}}}, true},
+		{"cpu sample present", &podV2Runtime{CPU: &podV2Util{Util: 12}}, true},
+		{"gpu sample present", &podV2Runtime{GPUs: []podV2Util{{Util: 0}}}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.rt.containerStarted(); got != tc.want {
+				t.Errorf("containerStarted() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestDeploy_EmitsFinerColdStartPhases pins the phase-split that lets the
 // deployment dashboard attribute cold-start wall-clock. RunPod's pod
 // status advances scheduling -> image-pull -> engine-init across the
@@ -586,10 +636,20 @@ func TestDeploy_EmitsFinerColdStartPhases(t *testing.T) {
 	}))
 	t.Cleanup(proxy.Close)
 
-	// GET /pods/{id} advances the pod's status one step per read:
-	// empty machine (scheduling) -> populated machine (image-pull) ->
-	// lastStartedAt set (engine-init).
+	// The pod advances one step per v1 status read: no host (scheduling)
+	// -> host assigned (image-pull) -> container runtime live
+	// (engine-init). Host assignment arrives as the top-level machineId
+	// with "machine" left as {}, which is what RunPod actually returns
+	// (issue 208). Container start comes from the v2 `runtime` block,
+	// since v1 does not carry one.
+	//
+	// Every v1 response also carries a lastStartedAt stamped at creation,
+	// exactly as RunPod does. That is the regression guard: if anything
+	// starts treating that timestamp as a container-start signal again,
+	// the ladder collapses to engine-init on the first probe and the
+	// image-pull assertion below fails.
 	var statusReads atomic.Int32
+	const createStampedStarted = `"lastStartedAt":"2026-07-01T00:00:00Z","createdAt":"2026-07-01T00:00:00Z"`
 	f := &fakeRunPod{t: t, respond: func(method, path string, body []byte) (int, string) {
 		if method == "POST" && path == "/pods" {
 			return 201, `{"id":"rp-cold-1"}`
@@ -597,11 +657,21 @@ func TestDeploy_EmitsFinerColdStartPhases(t *testing.T) {
 		if method == "GET" && path == "/pods/rp-cold-1" {
 			switch statusReads.Add(1) {
 			case 1:
-				return 200, `{"id":"rp-cold-1"}` // no machine yet -> scheduling
-			case 2:
-				return 200, `{"id":"rp-cold-1","machine":{"gpuTypeId":"NVIDIA RTX A5000"}}` // image-pull
+				return 200, `{"id":"rp-cold-1",` + createStampedStarted + `}` // no host -> scheduling
 			default:
-				return 200, `{"id":"rp-cold-1","machine":{"gpuTypeId":"NVIDIA RTX A5000"},"lastStartedAt":"2026-07-01T00:00:00Z"}` // engine-init
+				return 200, `{"id":"rp-cold-1","machine":{},"machineId":"mach-1",` + createStampedStarted + `}` // host -> image-pull
+			}
+		}
+		if method == "GET" && path == "/v2/pods/rp-cold-1" {
+			// Runtime stays null (and then present-but-empty, which must
+			// also read as not-started) until the image pull is done.
+			switch {
+			case statusReads.Load() < 2:
+				return 200, `{"id":"rp-cold-1","runtime":null}`
+			case statusReads.Load() < 3:
+				return 200, `{"id":"rp-cold-1","runtime":{}}`
+			default:
+				return 200, `{"id":"rp-cold-1","runtime":{"ports":[{"privatePort":8000}],"cpu":{"util":12}}}`
 			}
 		}
 		t.Errorf("unexpected %s %s", method, path)
@@ -609,7 +679,7 @@ func TestDeploy_EmitsFinerColdStartPhases(t *testing.T) {
 	}}
 	srv := httptest.NewServer(f.handler())
 	t.Cleanup(srv.Close)
-	client := NewClient("test-api-key", WithBaseURL(srv.URL), WithHTTPClient(srv.Client()))
+	client := NewClient("test-api-key", WithBaseURL(srv.URL), WithLogsBaseURL(srv.URL), WithHTTPClient(srv.Client()))
 	p := New(client,
 		WithSSHReadyWait(2*time.Second, 5*time.Millisecond),
 		WithProxyBaseURL(proxy.URL),
