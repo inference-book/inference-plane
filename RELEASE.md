@@ -8,8 +8,14 @@ and to a release branch + tag in this repo:
 | ------------ | ----------- | --------------- | ----------- |
 | v0.1         | Ch 6        | `release/v0.1`  | `v0.1.0`    |
 | v0.2         | Ch 7–10     | `release/v0.2`  | `v0.2.0`    |
-| v0.3         | Ch 12–15    | `release/v0.3`  | `v0.3.0`    |
-| v1.0         | Ch 18–19    | `release/v1.0`  | `v1.0.0`    |
+| v0.3         | Ch 11–12    | `release/v0.3`  | `v0.3.0`    |
+| v1.0         | Ch 13–14    | `release/v1.0`  | `v1.0.0`    |
+
+Part V (Ch 15–19) is deliberately absent. Its versioning is orthogonal to
+the v0.1–v1.0 line: it lives behind feature flags on `release/v1.0` (or a
+sibling branch if it grows), and none of it is inference-specific. See
+`ROADMAP.md`, which is canonical for the version-to-chapter mapping and
+which this table must agree with.
 
 ## While drafting a chapter
 
