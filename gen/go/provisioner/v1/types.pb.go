@@ -23,6 +23,149 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+// FabricScope is how far an instance's fast GPU interconnect reaches.
+//
+// Deliberately vendor-neutral. NVLink, AMD xGMI and Intel Xe Link are all
+// INTRA_NODE; InfiniBand, RoCE and AWS EFA are all INTER_NODE. The control
+// plane asks for a scope and a bandwidth; which technology delivers it is the
+// adapter's business, and no control-plane logic branches on the vendor name
+// (see Hardware.fabric_technology, which carries it for humans only).
+//
+// An earlier draft (docs/design/0003-kv-domain.md) modelled this as
+// `enum Interconnect { NONE, RDMA, NVLINK }`. That conflated two axes:
+// NVLink is one vendor's intra-node link, RDMA is a cross-node access
+// semantic. docs/design/0006 supersedes it with this enum.
+//
+// NOTE: the two scopes are NOT ordered. INTER_NODE does not imply
+// INTRA_NODE -- a PCIe-only box behind InfiniBand has a fast cross-node
+// fabric and no fast link between its own cards. A requirement that needs
+// both at once therefore needs two fields, not one enum value. We carry one
+// axis while the only consumer wanting both (a cross-node pool, issue 212)
+// is descoped; add the second axis when that lands.
+type FabricScope int32
+
+const (
+	FabricScope_FABRIC_SCOPE_UNSPECIFIED FabricScope = 0
+	// No fast fabric required. PCIe / TCP between cards is fine. This is the
+	// Ch 6-9 default: independent replicas that never exchange tensors.
+	FabricScope_FABRIC_SCOPE_NONE FabricScope = 1
+	// Cards within one node share a fast link. What a tensor-parallel group
+	// needs, since every card holds a slice of every layer.
+	FabricScope_FABRIC_SCOPE_INTRA_NODE FabricScope = 2
+	// Nodes share a fast link. What cross-node pipeline parallelism needs.
+	FabricScope_FABRIC_SCOPE_INTER_NODE FabricScope = 3
+)
+
+// Enum value maps for FabricScope.
+var (
+	FabricScope_name = map[int32]string{
+		0: "FABRIC_SCOPE_UNSPECIFIED",
+		1: "FABRIC_SCOPE_NONE",
+		2: "FABRIC_SCOPE_INTRA_NODE",
+		3: "FABRIC_SCOPE_INTER_NODE",
+	}
+	FabricScope_value = map[string]int32{
+		"FABRIC_SCOPE_UNSPECIFIED": 0,
+		"FABRIC_SCOPE_NONE":        1,
+		"FABRIC_SCOPE_INTRA_NODE":  2,
+		"FABRIC_SCOPE_INTER_NODE":  3,
+	}
+)
+
+func (x FabricScope) Enum() *FabricScope {
+	p := new(FabricScope)
+	*p = x
+	return p
+}
+
+func (x FabricScope) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (FabricScope) Descriptor() protoreflect.EnumDescriptor {
+	return file_provisioner_v1_types_proto_enumTypes[0].Descriptor()
+}
+
+func (FabricScope) Type() protoreflect.EnumType {
+	return &file_provisioner_v1_types_proto_enumTypes[0]
+}
+
+func (x FabricScope) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use FabricScope.Descriptor instead.
+func (FabricScope) EnumDescriptor() ([]byte, []int) {
+	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{0}
+}
+
+// FabricSource records how much to trust a FabricScope reading, because no
+// provider reports intra-node topology as a queryable spec field and the
+// sourcing differs per adapter (see docs/design/0006 Part 2).
+//
+// The distinction is load-bearing, not bookkeeping: UNKNOWN must never
+// satisfy a fabric requirement. Probing live on 2026-08-09, a quarter of
+// Vast's SXM machines reported zero NVLink bandwidth on boards that are
+// physically always NVLinked, so "no reading" and "measured zero" are
+// indistinguishable in the payload and both have to fail closed.
+type FabricSource int32
+
+const (
+	FabricSource_FABRIC_SOURCE_UNSPECIFIED FabricSource = 0
+	// Curated catalog keyed on SKU name and form factor. Trustworthy about the
+	// card, silent about what the host actually wired up.
+	FabricSource_FABRIC_SOURCE_DECLARED FabricSource = 1
+	// The provider reported a reading (Vast's bw_nvlink). Outranks DECLARED
+	// when they disagree: a bridged card named "PCIe" is a real machine a
+	// name-only catalog would wrongly exclude.
+	FabricSource_FABRIC_SOURCE_MEASURED FabricSource = 2
+	// No catalog entry and no usable reading. Fails every fabric requirement.
+	FabricSource_FABRIC_SOURCE_UNKNOWN FabricSource = 3
+)
+
+// Enum value maps for FabricSource.
+var (
+	FabricSource_name = map[int32]string{
+		0: "FABRIC_SOURCE_UNSPECIFIED",
+		1: "FABRIC_SOURCE_DECLARED",
+		2: "FABRIC_SOURCE_MEASURED",
+		3: "FABRIC_SOURCE_UNKNOWN",
+	}
+	FabricSource_value = map[string]int32{
+		"FABRIC_SOURCE_UNSPECIFIED": 0,
+		"FABRIC_SOURCE_DECLARED":    1,
+		"FABRIC_SOURCE_MEASURED":    2,
+		"FABRIC_SOURCE_UNKNOWN":     3,
+	}
+)
+
+func (x FabricSource) Enum() *FabricSource {
+	p := new(FabricSource)
+	*p = x
+	return p
+}
+
+func (x FabricSource) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (FabricSource) Descriptor() protoreflect.EnumDescriptor {
+	return file_provisioner_v1_types_proto_enumTypes[1].Descriptor()
+}
+
+func (FabricSource) Type() protoreflect.EnumType {
+	return &file_provisioner_v1_types_proto_enumTypes[1]
+}
+
+func (x FabricSource) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use FabricSource.Descriptor instead.
+func (FabricSource) EnumDescriptor() ([]byte, []int) {
+	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{1}
+}
+
 // InstanceState is the lifecycle phase of a provisioned instance, as
 // iplane sees it. Five values, not three -- the two *ing states
 // (PENDING, TERMINATING) exist so partial-failure recovery can
@@ -75,11 +218,11 @@ func (x InstanceState) String() string {
 }
 
 func (InstanceState) Descriptor() protoreflect.EnumDescriptor {
-	return file_provisioner_v1_types_proto_enumTypes[0].Descriptor()
+	return file_provisioner_v1_types_proto_enumTypes[2].Descriptor()
 }
 
 func (InstanceState) Type() protoreflect.EnumType {
-	return &file_provisioner_v1_types_proto_enumTypes[0]
+	return &file_provisioner_v1_types_proto_enumTypes[2]
 }
 
 func (x InstanceState) Number() protoreflect.EnumNumber {
@@ -88,7 +231,7 @@ func (x InstanceState) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use InstanceState.Descriptor instead.
 func (InstanceState) EnumDescriptor() ([]byte, []int) {
-	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{0}
+	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{2}
 }
 
 // Priority is the lane an inbound request joins on its way to the
@@ -142,11 +285,11 @@ func (x Priority) String() string {
 }
 
 func (Priority) Descriptor() protoreflect.EnumDescriptor {
-	return file_provisioner_v1_types_proto_enumTypes[1].Descriptor()
+	return file_provisioner_v1_types_proto_enumTypes[3].Descriptor()
 }
 
 func (Priority) Type() protoreflect.EnumType {
-	return &file_provisioner_v1_types_proto_enumTypes[1]
+	return &file_provisioner_v1_types_proto_enumTypes[3]
 }
 
 func (x Priority) Number() protoreflect.EnumNumber {
@@ -155,7 +298,7 @@ func (x Priority) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use Priority.Descriptor instead.
 func (Priority) EnumDescriptor() ([]byte, []int) {
-	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{1}
+	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{3}
 }
 
 type DeploymentState int32
@@ -217,11 +360,11 @@ func (x DeploymentState) String() string {
 }
 
 func (DeploymentState) Descriptor() protoreflect.EnumDescriptor {
-	return file_provisioner_v1_types_proto_enumTypes[2].Descriptor()
+	return file_provisioner_v1_types_proto_enumTypes[4].Descriptor()
 }
 
 func (DeploymentState) Type() protoreflect.EnumType {
-	return &file_provisioner_v1_types_proto_enumTypes[2]
+	return &file_provisioner_v1_types_proto_enumTypes[4]
 }
 
 func (x DeploymentState) Number() protoreflect.EnumNumber {
@@ -230,7 +373,7 @@ func (x DeploymentState) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use DeploymentState.Descriptor instead.
 func (DeploymentState) EnumDescriptor() ([]byte, []int) {
-	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{2}
+	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{4}
 }
 
 // Spec is what the operator asks for. Provider-agnostic. Everything in
@@ -376,7 +519,26 @@ type ResourceRequirements struct {
 	// Exact-SKU escape hatch. When set, skips constraint resolution and
 	// is passed verbatim to the provider. Mutually exclusive with class
 	// (and constraints are ignored -- the SKU is the answer).
-	Sku           string `protobuf:"bytes,6,opt,name=sku,proto3" json:"sku,omitempty"`
+	Sku string `protobuf:"bytes,6,opt,name=sku,proto3" json:"sku,omitempty"`
+	// Fabric the instance's GPUs must be wired for. Constrains SKU selection
+	// the same way min_vram_gb does: the resolver drops candidates whose
+	// fabric is not known to satisfy this. UNSPECIFIED (the Ch 6-9 default)
+	// means the operator does not care.
+	//
+	// A candidate whose fabric is FABRIC_SOURCE_UNKNOWN never satisfies a set
+	// fabric_scope. That is the point of the field -- guessing costs a rented
+	// pool before it reports an answer. `sku` remains the override for
+	// operators who know better than the catalog.
+	FabricScope FabricScope `protobuf:"varint,7,opt,name=fabric_scope,json=fabricScope,proto3,enum=provisioner.v1.FabricScope" json:"fabric_scope,omitempty"`
+	// Minimum fabric bandwidth, GIGABITS per second, aggregate per GPU.
+	// 0 = any bandwidth satisfying fabric_scope.
+	//
+	// Gigabits, not gigabytes, and the 8x is a real trap: NVLink is universally
+	// quoted in GB/s (an A100's 300 GB/s) while InfiniBand and EFA are quoted in
+	// Gbps (RunPod's 3200 Gbps clusters). Adapters convert at the wire boundary,
+	// matching the same single-unit rule Hardware uses for memory, so that A100
+	// arrives here as 2400.
+	MinFabricGbps int32 `protobuf:"varint,8,opt,name=min_fabric_gbps,json=minFabricGbps,proto3" json:"min_fabric_gbps,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -453,6 +615,20 @@ func (x *ResourceRequirements) GetSku() string {
 	return ""
 }
 
+func (x *ResourceRequirements) GetFabricScope() FabricScope {
+	if x != nil {
+		return x.FabricScope
+	}
+	return FabricScope_FABRIC_SCOPE_UNSPECIFIED
+}
+
+func (x *ResourceRequirements) GetMinFabricGbps() int32 {
+	if x != nil {
+		return x.MinFabricGbps
+	}
+	return 0
+}
+
 // Hardware is the cross-provider physical-characteristics base for
 // an Instance. Every adapter populates what its provider exposes;
 // fields the provider doesn't surface stay 0 (or "" for strings).
@@ -488,9 +664,32 @@ type Hardware struct {
 	// as `instance_type.specs.storage_gib`; Vast as the offer's
 	// `disk_space` (GB); RunPod as the pod's `containerDiskInGb`.
 	// All converted to MB at the adapter boundary.
-	DiskMb        int32 `protobuf:"varint,20,opt,name=disk_mb,json=diskMb,proto3" json:"disk_mb,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	DiskMb int32 `protobuf:"varint,20,opt,name=disk_mb,json=diskMb,proto3" json:"disk_mb,omitempty"`
+	// GPU interconnect -- what this instance's fabric turned out to be, as
+	// opposed to ResourceRequirements.fabric_scope, which is what was asked
+	// for. Populated by each adapter from whatever its provider exposes; see
+	// docs/design/0006 Part 2 for the per-provider sourcing.
+	//
+	// fabric_source is not decoration. Read fabric_scope WITHOUT it and an
+	// unknown fabric reads as a definite NONE, which is the exact mistake the
+	// pair exists to prevent.
+	FabricScope  FabricScope  `protobuf:"varint,30,opt,name=fabric_scope,json=fabricScope,proto3,enum=provisioner.v1.FabricScope" json:"fabric_scope,omitempty"`
+	FabricSource FabricSource `protobuf:"varint,31,opt,name=fabric_source,json=fabricSource,proto3,enum=provisioner.v1.FabricSource" json:"fabric_source,omitempty"`
+	// Aggregate per-GPU fabric bandwidth in GIGABITS per second, 0 when
+	// unknown. Same unit (and same 8x trap) as
+	// ResourceRequirements.min_fabric_gbps.
+	FabricGbps int32 `protobuf:"varint,32,opt,name=fabric_gbps,json=fabricGbps,proto3" json:"fabric_gbps,omitempty"`
+	// Vendor technology behind fabric_scope: "nvlink", "nvswitch", "xgmi",
+	// "infiniband", "roce", "efa". DIAGNOSTIC ONLY -- for `iplane instance
+	// describe` and debugging.
+	//
+	// Nothing in the control plane may branch on this string. That rule is what
+	// keeps the vendor-neutral seam vendor-neutral; the moment a resolver reads
+	// it, this has quietly become the vendor enum 0006 removed. Policy reads
+	// fabric_scope and fabric_gbps.
+	FabricTechnology string `protobuf:"bytes,33,opt,name=fabric_technology,json=fabricTechnology,proto3" json:"fabric_technology,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *Hardware) Reset() {
@@ -570,6 +769,34 @@ func (x *Hardware) GetDiskMb() int32 {
 		return x.DiskMb
 	}
 	return 0
+}
+
+func (x *Hardware) GetFabricScope() FabricScope {
+	if x != nil {
+		return x.FabricScope
+	}
+	return FabricScope_FABRIC_SCOPE_UNSPECIFIED
+}
+
+func (x *Hardware) GetFabricSource() FabricSource {
+	if x != nil {
+		return x.FabricSource
+	}
+	return FabricSource_FABRIC_SOURCE_UNSPECIFIED
+}
+
+func (x *Hardware) GetFabricGbps() int32 {
+	if x != nil {
+		return x.FabricGbps
+	}
+	return 0
+}
+
+func (x *Hardware) GetFabricTechnology() string {
+	if x != nil {
+		return x.FabricTechnology
+	}
+	return ""
 }
 
 // SshTarget is the reachability tuple returned for instances that expose
@@ -1703,7 +1930,7 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"\x04tags\x18\x06 \x03(\v2\x1e.provisioner.v1.Spec.TagsEntryR\x04tags\x1a7\n" +
 	"\tTagsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xb9\x01\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xa1\x02\n" +
 	"\x14ResourceRequirements\x12\x1e\n" +
 	"\vmin_vram_gb\x18\x01 \x01(\x05R\tminVramGb\x12\x1e\n" +
 	"\vmin_disk_gb\x18\x02 \x01(\x05R\tminDiskGb\x12\x1c\n" +
@@ -1711,7 +1938,9 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"min_ram_gb\x18\x03 \x01(\x05R\bminRamGb\x12\x1b\n" +
 	"\tgpu_count\x18\x04 \x01(\x05R\bgpuCount\x12\x14\n" +
 	"\x05class\x18\x05 \x01(\tR\x05class\x12\x10\n" +
-	"\x03sku\x18\x06 \x01(\tR\x03sku\"\xca\x01\n" +
+	"\x03sku\x18\x06 \x01(\tR\x03sku\x12>\n" +
+	"\ffabric_scope\x18\a \x01(\x0e2\x1b.provisioner.v1.FabricScopeR\vfabricScope\x12&\n" +
+	"\x0fmin_fabric_gbps\x18\b \x01(\x05R\rminFabricGbps\"\x9b\x03\n" +
 	"\bHardware\x12\x17\n" +
 	"\agpu_sku\x18\x01 \x01(\tR\x06gpuSku\x12\x1b\n" +
 	"\tgpu_count\x18\x02 \x01(\x05R\bgpuCount\x12\x1e\n" +
@@ -1721,7 +1950,12 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"\tcpu_model\x18\v \x01(\tR\bcpuModel\x12\x1c\n" +
 	"\n" +
 	"cpu_ram_mb\x18\f \x01(\x05R\bcpuRamMb\x12\x17\n" +
-	"\adisk_mb\x18\x14 \x01(\x05R\x06diskMb\"G\n" +
+	"\adisk_mb\x18\x14 \x01(\x05R\x06diskMb\x12>\n" +
+	"\ffabric_scope\x18\x1e \x01(\x0e2\x1b.provisioner.v1.FabricScopeR\vfabricScope\x12A\n" +
+	"\rfabric_source\x18\x1f \x01(\x0e2\x1c.provisioner.v1.FabricSourceR\ffabricSource\x12\x1f\n" +
+	"\vfabric_gbps\x18  \x01(\x05R\n" +
+	"fabricGbps\x12+\n" +
+	"\x11fabric_technology\x18! \x01(\tR\x10fabricTechnology\"G\n" +
 	"\tSshTarget\x12\x12\n" +
 	"\x04host\x18\x01 \x01(\tR\x04host\x12\x12\n" +
 	"\x04port\x18\x02 \x01(\x05R\x04port\x12\x12\n" +
@@ -1819,7 +2053,17 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"\x06region\x18\x02 \x01(\tR\x06region\x12H\n" +
 	"\frequirements\x18\x03 \x01(\v2$.provisioner.v1.ResourceRequirementsR\frequirements\x12\x1a\n" +
 	"\breplicas\x18\x04 \x01(\x05R\breplicas\x12'\n" +
-	"\x0fengine_endpoint\x18\x05 \x01(\tR\x0eengineEndpoint*\xc0\x01\n" +
+	"\x0fengine_endpoint\x18\x05 \x01(\tR\x0eengineEndpoint*|\n" +
+	"\vFabricScope\x12\x1c\n" +
+	"\x18FABRIC_SCOPE_UNSPECIFIED\x10\x00\x12\x15\n" +
+	"\x11FABRIC_SCOPE_NONE\x10\x01\x12\x1b\n" +
+	"\x17FABRIC_SCOPE_INTRA_NODE\x10\x02\x12\x1b\n" +
+	"\x17FABRIC_SCOPE_INTER_NODE\x10\x03*\x80\x01\n" +
+	"\fFabricSource\x12\x1d\n" +
+	"\x19FABRIC_SOURCE_UNSPECIFIED\x10\x00\x12\x1a\n" +
+	"\x16FABRIC_SOURCE_DECLARED\x10\x01\x12\x1a\n" +
+	"\x16FABRIC_SOURCE_MEASURED\x10\x02\x12\x19\n" +
+	"\x15FABRIC_SOURCE_UNKNOWN\x10\x03*\xc0\x01\n" +
 	"\rInstanceState\x12\x1e\n" +
 	"\x1aINSTANCE_STATE_UNSPECIFIED\x10\x00\x12\x1a\n" +
 	"\x16INSTANCE_STATE_PENDING\x10\x01\x12\x19\n" +
@@ -1856,59 +2100,64 @@ func file_provisioner_v1_types_proto_rawDescGZIP() []byte {
 	return file_provisioner_v1_types_proto_rawDescData
 }
 
-var file_provisioner_v1_types_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
+var file_provisioner_v1_types_proto_enumTypes = make([]protoimpl.EnumInfo, 5)
 var file_provisioner_v1_types_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
 var file_provisioner_v1_types_proto_goTypes = []any{
-	(InstanceState)(0),            // 0: provisioner.v1.InstanceState
-	(Priority)(0),                 // 1: provisioner.v1.Priority
-	(DeploymentState)(0),          // 2: provisioner.v1.DeploymentState
-	(*Spec)(nil),                  // 3: provisioner.v1.Spec
-	(*ResourceRequirements)(nil),  // 4: provisioner.v1.ResourceRequirements
-	(*Hardware)(nil),              // 5: provisioner.v1.Hardware
-	(*SshTarget)(nil),             // 6: provisioner.v1.SshTarget
-	(*Instance)(nil),              // 7: provisioner.v1.Instance
-	(*InstanceRef)(nil),           // 8: provisioner.v1.InstanceRef
-	(*Deployment)(nil),            // 9: provisioner.v1.Deployment
-	(*VolumeMount)(nil),           // 10: provisioner.v1.VolumeMount
-	(*Volume)(nil),                // 11: provisioner.v1.Volume
-	(*ReplicaSpec)(nil),           // 12: provisioner.v1.ReplicaSpec
-	nil,                           // 13: provisioner.v1.Spec.TagsEntry
-	nil,                           // 14: provisioner.v1.Instance.MetadataEntry
-	nil,                           // 15: provisioner.v1.InstanceRef.TagsEntry
-	nil,                           // 16: provisioner.v1.Deployment.EnvEntry
-	(*timestamppb.Timestamp)(nil), // 17: google.protobuf.Timestamp
-	(*structpb.Value)(nil),        // 18: google.protobuf.Value
+	(FabricScope)(0),              // 0: provisioner.v1.FabricScope
+	(FabricSource)(0),             // 1: provisioner.v1.FabricSource
+	(InstanceState)(0),            // 2: provisioner.v1.InstanceState
+	(Priority)(0),                 // 3: provisioner.v1.Priority
+	(DeploymentState)(0),          // 4: provisioner.v1.DeploymentState
+	(*Spec)(nil),                  // 5: provisioner.v1.Spec
+	(*ResourceRequirements)(nil),  // 6: provisioner.v1.ResourceRequirements
+	(*Hardware)(nil),              // 7: provisioner.v1.Hardware
+	(*SshTarget)(nil),             // 8: provisioner.v1.SshTarget
+	(*Instance)(nil),              // 9: provisioner.v1.Instance
+	(*InstanceRef)(nil),           // 10: provisioner.v1.InstanceRef
+	(*Deployment)(nil),            // 11: provisioner.v1.Deployment
+	(*VolumeMount)(nil),           // 12: provisioner.v1.VolumeMount
+	(*Volume)(nil),                // 13: provisioner.v1.Volume
+	(*ReplicaSpec)(nil),           // 14: provisioner.v1.ReplicaSpec
+	nil,                           // 15: provisioner.v1.Spec.TagsEntry
+	nil,                           // 16: provisioner.v1.Instance.MetadataEntry
+	nil,                           // 17: provisioner.v1.InstanceRef.TagsEntry
+	nil,                           // 18: provisioner.v1.Deployment.EnvEntry
+	(*timestamppb.Timestamp)(nil), // 19: google.protobuf.Timestamp
+	(*structpb.Value)(nil),        // 20: google.protobuf.Value
 }
 var file_provisioner_v1_types_proto_depIdxs = []int32{
-	4,  // 0: provisioner.v1.Spec.requirements:type_name -> provisioner.v1.ResourceRequirements
-	13, // 1: provisioner.v1.Spec.tags:type_name -> provisioner.v1.Spec.TagsEntry
-	3,  // 2: provisioner.v1.Instance.spec:type_name -> provisioner.v1.Spec
-	5,  // 3: provisioner.v1.Instance.hardware:type_name -> provisioner.v1.Hardware
-	0,  // 4: provisioner.v1.Instance.state:type_name -> provisioner.v1.InstanceState
-	17, // 5: provisioner.v1.Instance.created_at:type_name -> google.protobuf.Timestamp
-	17, // 6: provisioner.v1.Instance.activated_at:type_name -> google.protobuf.Timestamp
-	17, // 7: provisioner.v1.Instance.terminated_at:type_name -> google.protobuf.Timestamp
-	6,  // 8: provisioner.v1.Instance.ssh:type_name -> provisioner.v1.SshTarget
-	14, // 9: provisioner.v1.Instance.metadata:type_name -> provisioner.v1.Instance.MetadataEntry
-	15, // 10: provisioner.v1.InstanceRef.tags:type_name -> provisioner.v1.InstanceRef.TagsEntry
-	17, // 11: provisioner.v1.InstanceRef.created_at:type_name -> google.protobuf.Timestamp
-	16, // 12: provisioner.v1.Deployment.env:type_name -> provisioner.v1.Deployment.EnvEntry
-	2,  // 13: provisioner.v1.Deployment.state:type_name -> provisioner.v1.DeploymentState
-	17, // 14: provisioner.v1.Deployment.created_at:type_name -> google.protobuf.Timestamp
-	17, // 15: provisioner.v1.Deployment.started_at:type_name -> google.protobuf.Timestamp
-	17, // 16: provisioner.v1.Deployment.ready_at:type_name -> google.protobuf.Timestamp
-	17, // 17: provisioner.v1.Deployment.terminated_at:type_name -> google.protobuf.Timestamp
-	17, // 18: provisioner.v1.Deployment.last_activity_at:type_name -> google.protobuf.Timestamp
-	12, // 19: provisioner.v1.Deployment.replica_specs:type_name -> provisioner.v1.ReplicaSpec
-	10, // 20: provisioner.v1.Deployment.mounts:type_name -> provisioner.v1.VolumeMount
-	17, // 21: provisioner.v1.Volume.created_at:type_name -> google.protobuf.Timestamp
-	4,  // 22: provisioner.v1.ReplicaSpec.requirements:type_name -> provisioner.v1.ResourceRequirements
-	18, // 23: provisioner.v1.Instance.MetadataEntry.value:type_name -> google.protobuf.Value
-	24, // [24:24] is the sub-list for method output_type
-	24, // [24:24] is the sub-list for method input_type
-	24, // [24:24] is the sub-list for extension type_name
-	24, // [24:24] is the sub-list for extension extendee
-	0,  // [0:24] is the sub-list for field type_name
+	6,  // 0: provisioner.v1.Spec.requirements:type_name -> provisioner.v1.ResourceRequirements
+	15, // 1: provisioner.v1.Spec.tags:type_name -> provisioner.v1.Spec.TagsEntry
+	0,  // 2: provisioner.v1.ResourceRequirements.fabric_scope:type_name -> provisioner.v1.FabricScope
+	0,  // 3: provisioner.v1.Hardware.fabric_scope:type_name -> provisioner.v1.FabricScope
+	1,  // 4: provisioner.v1.Hardware.fabric_source:type_name -> provisioner.v1.FabricSource
+	5,  // 5: provisioner.v1.Instance.spec:type_name -> provisioner.v1.Spec
+	7,  // 6: provisioner.v1.Instance.hardware:type_name -> provisioner.v1.Hardware
+	2,  // 7: provisioner.v1.Instance.state:type_name -> provisioner.v1.InstanceState
+	19, // 8: provisioner.v1.Instance.created_at:type_name -> google.protobuf.Timestamp
+	19, // 9: provisioner.v1.Instance.activated_at:type_name -> google.protobuf.Timestamp
+	19, // 10: provisioner.v1.Instance.terminated_at:type_name -> google.protobuf.Timestamp
+	8,  // 11: provisioner.v1.Instance.ssh:type_name -> provisioner.v1.SshTarget
+	16, // 12: provisioner.v1.Instance.metadata:type_name -> provisioner.v1.Instance.MetadataEntry
+	17, // 13: provisioner.v1.InstanceRef.tags:type_name -> provisioner.v1.InstanceRef.TagsEntry
+	19, // 14: provisioner.v1.InstanceRef.created_at:type_name -> google.protobuf.Timestamp
+	18, // 15: provisioner.v1.Deployment.env:type_name -> provisioner.v1.Deployment.EnvEntry
+	4,  // 16: provisioner.v1.Deployment.state:type_name -> provisioner.v1.DeploymentState
+	19, // 17: provisioner.v1.Deployment.created_at:type_name -> google.protobuf.Timestamp
+	19, // 18: provisioner.v1.Deployment.started_at:type_name -> google.protobuf.Timestamp
+	19, // 19: provisioner.v1.Deployment.ready_at:type_name -> google.protobuf.Timestamp
+	19, // 20: provisioner.v1.Deployment.terminated_at:type_name -> google.protobuf.Timestamp
+	19, // 21: provisioner.v1.Deployment.last_activity_at:type_name -> google.protobuf.Timestamp
+	14, // 22: provisioner.v1.Deployment.replica_specs:type_name -> provisioner.v1.ReplicaSpec
+	12, // 23: provisioner.v1.Deployment.mounts:type_name -> provisioner.v1.VolumeMount
+	19, // 24: provisioner.v1.Volume.created_at:type_name -> google.protobuf.Timestamp
+	6,  // 25: provisioner.v1.ReplicaSpec.requirements:type_name -> provisioner.v1.ResourceRequirements
+	20, // 26: provisioner.v1.Instance.MetadataEntry.value:type_name -> google.protobuf.Value
+	27, // [27:27] is the sub-list for method output_type
+	27, // [27:27] is the sub-list for method input_type
+	27, // [27:27] is the sub-list for extension type_name
+	27, // [27:27] is the sub-list for extension extendee
+	0,  // [0:27] is the sub-list for field type_name
 }
 
 func init() { file_provisioner_v1_types_proto_init() }
@@ -1921,7 +2170,7 @@ func file_provisioner_v1_types_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_provisioner_v1_types_proto_rawDesc), len(file_provisioner_v1_types_proto_rawDesc)),
-			NumEnums:      3,
+			NumEnums:      5,
 			NumMessages:   14,
 			NumExtensions: 0,
 			NumServices:   0,

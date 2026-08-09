@@ -624,11 +624,15 @@ func (p *Provider) podToInstance(pod *podBody, spec *provisionerv1.Spec, resolve
 		Provider:   p.Name(),
 		Spec:       spec,
 		Region:     region,
-		Hardware: &provisionerv1.Hardware{
-			GpuSku:    resolvedSKU,
-			GpuCount:  int32(gpuCount),
-			GpuVramMb: int32(vramGB * 1024), // pod.gpuVRAMGB returns GB; convert to MB
-		},
+		Hardware: func() *provisionerv1.Hardware {
+			hw := &provisionerv1.Hardware{
+				GpuSku:    resolvedSKU,
+				GpuCount:  int32(gpuCount),
+				GpuVramMb: int32(vramGB * 1024), // pod.gpuVRAMGB returns GB; convert to MB
+			}
+			stampFabric(hw, resolvedSKU)
+			return hw
+		}(),
 		Metadata:      runpodMetadata(pod, resolvedClass),
 		HourlyRateUsd: pod.CostPerHr,
 		State:         provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE,
@@ -671,10 +675,14 @@ func (p *Provider) instanceFromCreate(spec *provisionerv1.Spec, created *createP
 		Provider:   p.Name(),
 		Spec:       spec,
 		Region:     spec.GetRegion(),
-		Hardware: &provisionerv1.Hardware{
-			GpuSku:   resolvedSKU,
-			GpuCount: int32(gpuCount),
-		},
+		Hardware: func() *provisionerv1.Hardware {
+			hw := &provisionerv1.Hardware{
+				GpuSku:   resolvedSKU,
+				GpuCount: int32(gpuCount),
+			}
+			stampFabric(hw, resolvedSKU)
+			return hw
+		}(),
 		Metadata: map[string]*structpb.Value{
 			"runpod.class": structpb.NewStringValue(resolvedClass),
 		},
@@ -752,21 +760,21 @@ func isWrappedNotFound(err error) bool {
 // Go side. Omit-empty everywhere; the API treats missing fields as
 // "use the documented default."
 type createPodRequest struct {
-	Name              string            `json:"name,omitempty"`
-	ImageName         string            `json:"imageName,omitempty"`
-	GPUTypeIDs        []string          `json:"gpuTypeIds,omitempty"`
-	GPUTypePriority   string            `json:"gpuTypePriority,omitempty"`
-	GPUCount          int               `json:"gpuCount,omitempty"`
-	MinRAMPerGPU      int               `json:"minRAMPerGPU,omitempty"` // RunPod expresses RAM per-GPU; we convert from per-instance.
-	CloudType         string            `json:"cloudType,omitempty"`
-	ComputeType       string            `json:"computeType,omitempty"`
-	ContainerDiskInGB int               `json:"containerDiskInGb,omitempty"`
-	VolumeInGB        int               `json:"volumeInGb,omitempty"`
-	NetworkVolumeID   string            `json:"networkVolumeId,omitempty"`
-	VolumeMountPath   string            `json:"volumeMountPath,omitempty"` // where networkVolumeId attaches inside the pod
+	Name              string   `json:"name,omitempty"`
+	ImageName         string   `json:"imageName,omitempty"`
+	GPUTypeIDs        []string `json:"gpuTypeIds,omitempty"`
+	GPUTypePriority   string   `json:"gpuTypePriority,omitempty"`
+	GPUCount          int      `json:"gpuCount,omitempty"`
+	MinRAMPerGPU      int      `json:"minRAMPerGPU,omitempty"` // RunPod expresses RAM per-GPU; we convert from per-instance.
+	CloudType         string   `json:"cloudType,omitempty"`
+	ComputeType       string   `json:"computeType,omitempty"`
+	ContainerDiskInGB int      `json:"containerDiskInGb,omitempty"`
+	VolumeInGB        int      `json:"volumeInGb,omitempty"`
+	NetworkVolumeID   string   `json:"networkVolumeId,omitempty"`
+	VolumeMountPath   string   `json:"volumeMountPath,omitempty"` // where networkVolumeId attaches inside the pod
 
-	Ports             []string          `json:"ports,omitempty"`
-	Env               map[string]string `json:"env,omitempty"` // RunPod's REST uses a flat key/value map.
+	Ports []string          `json:"ports,omitempty"`
+	Env   map[string]string `json:"env,omitempty"` // RunPod's REST uses a flat key/value map.
 	// DockerStartCmd REPLACES the image's CMD with these argv tokens
 	// (ENTRYPOINT — the engine binary — stays). RunPod's REST API
 	// removed the legacy single-string `dockerArgs` in favor of these

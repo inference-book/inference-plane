@@ -781,6 +781,33 @@ func ValidateAndExpandRequirements(spec *provisionerv1.Spec) error {
 	if reqs.GetSku() == "" && reqs.GetClass() == "" && reqs.GetMinVramGb() == 0 {
 		return errors.New("requirements: one of class, sku, or min_vram_gb is required")
 	}
+	// A fabric requirement describes how an instance's GPUs reach EACH OTHER,
+	// so it is meaningless with one card and almost certainly a mistake: the
+	// operator asked for an interconnect and would have got a single-GPU
+	// instance that trivially satisfies nothing. Reject rather than silently
+	// ignore, since silently ignoring a constraint is the failure mode the
+	// whole fabric filter exists to prevent.
+	if reqs.GetFabricScope() != provisionerv1.FabricScope_FABRIC_SCOPE_UNSPECIFIED &&
+		reqs.GetFabricScope() != provisionerv1.FabricScope_FABRIC_SCOPE_NONE &&
+		reqs.GetGpuCount() < 2 {
+		return fmt.Errorf("requirements: fabric_scope needs gpu_count >= 2 (got %d); "+
+			"a fabric describes how cards reach each other", reqs.GetGpuCount())
+	}
+	if reqs.GetMinFabricGbps() > 0 && reqs.GetFabricScope() == provisionerv1.FabricScope_FABRIC_SCOPE_UNSPECIFIED {
+		return errors.New("requirements: min_fabric_gbps needs a fabric_scope to qualify")
+	}
+	// INTER_NODE is a valid thing to want and nothing can supply it yet. No
+	// adapter can rent a coherent multi-node pool from code: RunPod's Instant
+	// Clusters are console-only, Vast's cross-node path is undocumented, and
+	// there is no AWS/GCP adapter (probed 2026-08-09, docs/design/0006 Part 1).
+	//
+	// Say that, rather than letting the resolver return an empty candidate
+	// list and reporting "no matching SKU", which would read as a capacity
+	// problem the operator could wait out. Delete this when SpawnGroup lands.
+	if reqs.GetFabricScope() == provisionerv1.FabricScope_FABRIC_SCOPE_INTER_NODE {
+		return errors.New("requirements: no configured provider reports a cross-node fabric; " +
+			"inter-node pools need the group-provisioning capability (issue 212)")
+	}
 
 	// Expand class shorthand. If the operator passed --gpu-class small
 	// and nothing else, after this block min_vram_gb / min_disk_gb /
