@@ -84,6 +84,31 @@ func WrapperScript(binaryURL string, engineCmd []string) (string, error) {
 	}, "\n"), nil
 }
 
+// AgentScript returns a /bin/sh script that fetches the agent and runs it in
+// the foreground.
+//
+// The sidecar counterpart to WrapperScript. There is no engine to exec here
+// and nothing to swallow: the agent IS this container's job, so a failed
+// fetch should exit non-zero and let docker's restart policy retry rather
+// than leaving a container alive doing nothing. That inverts the wrapper's
+// rule, and the reason is that failing here costs no inference, while
+// failing there would have.
+func AgentScript(binaryURL string) (string, error) {
+	if binaryURL == "" {
+		return "", fmt.Errorf("engineagent: binary url is required to build an agent script")
+	}
+	return strings.Join([]string{
+		"set -e;",
+		"if command -v curl >/dev/null 2>&1; then",
+		"  curl -fsSL " + shQuote(binaryURL) + " -o /tmp/iplane;",
+		"else",
+		"  wget -qO /tmp/iplane " + shQuote(binaryURL) + ";",
+		"fi;",
+		"chmod +x /tmp/iplane;",
+		`exec /tmp/iplane engine-agent`,
+	}, "\n"), nil
+}
+
 // shQuote wraps s in single quotes for safe use in a shell command,
 // escaping any embedded single quote the standard way.
 //
