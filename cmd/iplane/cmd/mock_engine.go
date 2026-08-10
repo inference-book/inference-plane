@@ -17,14 +17,15 @@ import (
 )
 
 var (
-	mockEnginePort     int
-	mockEngineLatency  time.Duration
-	mockEngineRegister string
-	mockEngineID       string
-	mockEngineModel    string
-	mockEngineNodes    int
-	mockEngineCards    int
-	mockEngineAssemble time.Duration
+	mockEnginePort         int
+	mockEngineLatency      time.Duration
+	mockEngineRegister     string
+	mockEngineID           string
+	mockEngineModel        string
+	mockEngineNodes        int
+	mockEngineCards        int
+	mockEngineAssemble     time.Duration
+	mockEngineDegradeAfter time.Duration
 )
 
 // mockEngineCmd runs a standalone OpenAI-compatible mock engine. It is
@@ -66,6 +67,8 @@ func init() {
 		"total GPUs to report across the span")
 	mockEngineCmd.Flags().DurationVar(&mockEngineAssemble, "assemble-delay", 0,
 		"report ASSEMBLING for this long before flipping to SERVING; models the interval where workers exist but the group has not formed")
+	mockEngineCmd.Flags().DurationVar(&mockEngineDegradeAfter, "degrade-after", 0,
+		"after this long, report SERVING_DEGRADED while still answering requests normally; stands in for issue 213's link sensor so the degraded-not-dead state is demonstrable without breaking real hardware. 0 disables")
 }
 
 // newMockEngineMux builds the OpenAI-compatible handler set backed by the
@@ -131,7 +134,7 @@ func runMockEngine(parent context.Context, port int) error {
 		agent, err := newMockRegisterAgent(
 			mockEngineRegister, id, mockEngineModel,
 			fmt.Sprintf("http://%s", addr),
-			mockEngineNodes, mockEngineCards, mockEngineAssemble,
+			mockEngineNodes, mockEngineCards, mockEngineAssemble, mockEngineDegradeAfter,
 			slog.New(slog.NewTextHandler(os.Stderr, nil)),
 		)
 		if err != nil {
