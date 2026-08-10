@@ -773,3 +773,86 @@ enum DeploymentState {
   // Terminal failure (deploy or runtime).
   DEPLOYMENT_STATE_FAILED = 8;
 }
+
+// EngineState is what a registered engine reports about itself. Wider than
+// the router's healthy/quarantined pair, because a probe answers a question
+// the control plane already thought to ask and cannot describe a group.
+//
+// Two of these have no single-card equivalent and are the reason the
+// registry exists alongside the /health poller:
+//
+//   - ASSEMBLING: processes are alive and the group has not formed. Four
+//     workers running is not four workers in one group; they have to find
+//     each other and settle ranks before the endpoint serves a token. No
+//     probe can see this, because there is no endpoint yet to ask.
+//   - SERVING_DEGRADED: the group assembled, serves correct tokens, and lost
+//     a large fraction of its throughput because a link inside it is down.
+//     /health says "serving", which is true, and useless.
+enum EngineState {
+  ENGINE_STATE_UNSPECIFIED = 0;
+  // Some workers joined, the group has not formed. No endpoint yet.
+  ENGINE_STATE_ASSEMBLING = 1;
+  // Group formed, endpoint answering.
+  ENGINE_STATE_SERVING = 2;
+  // Assembled and correct, running well below expected throughput.
+  ENGINE_STATE_SERVING_DEGRADED = 3;
+  // The control plane stopped hearing from it: the lease expired. Set by the
+  // sweeper, never reported by an engine about itself.
+  ENGINE_STATE_LOST = 4;
+}
+
+// EngineNode is one machine an engine spans. The fact no probe can report,
+// and the input failure attribution needs: when a member dies, which node
+// took it down (issue 214).
+message EngineNode {
+  // Provider-assigned host identity. RunPod's top-level machineId, Vast's
+  // machine_id, an EC2 instance id. Opaque to the control plane and only
+  // meaningful to the provider that issued it.
+  string host_id = 1;
+  // Provider that issued host_id, so two providers' identifiers cannot
+  // collide.
+  string provider = 2;
+  // Rank of this node within the engine's group, 0-based. The engine assigns
+  // it; the control plane never interprets it beyond ordering the display.
+  int32 node_index = 3;
+  // GPUs this node contributes to the group.
+  int32 gpu_count = 4;
+}
+
+// Engine is one registered data plane: an endpoint serving one model over a
+// span of nodes and cards.
+//
+// Deliberately NOT a field on Deployment. An engine that announces itself
+// need not have been rented by us, which is what makes a fleet of
+// operator-run engines expressible later; deployment_id links the two when
+// the engine does correspond to something we provisioned.
+message Engine {
+  // Engine-chosen stable identity. Survives re-registration: registering
+  // twice with the same id is a renewal, not a second member.
+  string id = 1;
+  // Set when this engine runs on a deployment the control plane created.
+  // Empty for engines that registered themselves without being provisioned.
+  string deployment_id = 2;
+  string model = 3;
+  // The single OpenAI-compatible endpoint, regardless of span. One engine is
+  // one endpoint whether it holds one card or sixteen.
+  string endpoint = 4;
+
+  EngineState state = 5;
+  // Nodes this engine spans, in node_index order. Length 1 is the ordinary
+  // single-machine case, not a special case.
+  repeated EngineNode span = 6;
+
+  // Operational readings the engine computes anyway. Observational only:
+  // routing decisions must not consume these. The router keeps its own
+  // in-flight counts precisely so a routing decision never depends on an
+  // observation pipeline being up.
+  int32 in_flight = 7;
+  double cache_utilization = 8;
+
+  google.protobuf.Timestamp registered_at = 20;
+  google.protobuf.Timestamp last_seen_at = 21;
+  // When the current lease runs out. Past this with no renewal, the sweeper
+  // moves the engine to LOST.
+  google.protobuf.Timestamp lease_expires_at = 22;
+}

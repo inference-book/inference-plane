@@ -17,8 +17,14 @@ import (
 )
 
 var (
-	mockEnginePort    int
-	mockEngineLatency time.Duration
+	mockEnginePort     int
+	mockEngineLatency  time.Duration
+	mockEngineRegister string
+	mockEngineID       string
+	mockEngineModel    string
+	mockEngineNodes    int
+	mockEngineCards    int
+	mockEngineAssemble time.Duration
 )
 
 // mockEngineCmd runs a standalone OpenAI-compatible mock engine. It is
@@ -48,6 +54,18 @@ func init() {
 	mockEngineCmd.Flags().IntVar(&mockEnginePort, "port", 9001, "port to listen on (127.0.0.1)")
 	mockEngineCmd.Flags().DurationVar(&mockEngineLatency, "latency", 0,
 		"fixed per-request latency; 0 keeps the realistic bimodal-with-tail default. Routing demos set this low (e.g. 3ms) so runs finish fast.")
+	mockEngineCmd.Flags().StringVar(&mockEngineRegister, "register", "",
+		"control-plane URL to register with (e.g. http://127.0.0.1:8080); empty disables registration")
+	mockEngineCmd.Flags().StringVar(&mockEngineID, "engine-id", "",
+		"stable engine id used for registration; defaults to mock-engine-<port>")
+	mockEngineCmd.Flags().StringVar(&mockEngineModel, "model", "mock-model",
+		"model name reported in registrations")
+	mockEngineCmd.Flags().IntVar(&mockEngineNodes, "span-nodes", 1,
+		"nodes to report in the registered span (fabricated; lets a multi-node member render without renting one)")
+	mockEngineCmd.Flags().IntVar(&mockEngineCards, "span-cards", 1,
+		"total GPUs to report across the span")
+	mockEngineCmd.Flags().DurationVar(&mockEngineAssemble, "assemble-delay", 0,
+		"report ASSEMBLING for this long before flipping to SERVING; models the interval where workers exist but the group has not formed")
 }
 
 // newMockEngineMux builds the OpenAI-compatible handler set backed by the
@@ -102,6 +120,23 @@ func runMockEngine(parent context.Context, port int) error {
 	mux := newMockEngineMux(be, fmt.Sprintf("%d", port))
 
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
+
+	// Agent half of the control channel (#204). Opt-in: without --register
+	// this is the same standalone mock engine the routing demos use.
+	if mockEngineRegister != "" {
+		id := mockEngineID
+		if id == "" {
+			id = fmt.Sprintf("mock-engine-%d", port)
+		}
+		loop := newRegisterLoop(
+			mockEngineRegister, id, mockEngineModel,
+			fmt.Sprintf("http://%s", addr),
+			mockEngineNodes, mockEngineCards, mockEngineAssemble,
+			slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		)
+		go loop.run(ctx)
+	}
+
 	srv := &http.Server{Addr: addr, Handler: mux}
 	go func() {
 		<-ctx.Done()
