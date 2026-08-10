@@ -52,7 +52,7 @@ func (p *Provider) EnsurePublicKey(ctx context.Context, publicKey []byte, commen
 		return err
 	}
 	for _, k := range existing {
-		got, _, _, _, perr := ssh.ParseAuthorizedKey([]byte(k.SSHKey))
+		got, _, _, _, perr := ssh.ParseAuthorizedKey([]byte(k.key()))
 		if perr != nil {
 			// A key we cannot parse is someone else's problem, not a
 			// reason to fail the deploy. Skip it and keep looking.
@@ -77,6 +77,14 @@ func (p *Provider) EnsurePublicKey(ctx context.Context, publicKey []byte, commen
 		return err
 	}
 	if _, err := skhttp.Call[sshKeyCreateResponse](ctx, req, p.client.callOpts()...); err != nil {
+		// "already exists" is the outcome we wanted. It happens when the
+		// key was registered outside iplane, when two creates race, or when
+		// the listing above could not be read. Treating it as failure would
+		// turn a satisfied precondition into a refused instance create,
+		// which is the opposite of what this call is for.
+		if isDuplicateKeyErr(err) {
+			return nil
+		}
 		return fmt.Errorf("vast: register ssh key: %w", err)
 	}
 	return nil
@@ -96,9 +104,24 @@ func (p *Provider) listSSHKeys(ctx context.Context) ([]sshKeyRecord, error) {
 }
 
 // sshKeyRecord is one entry in Vast's account SSH key list.
+//
+// The two key fields are not redundant: Vast's API is asymmetric. A POST to
+// /api/v0/ssh/ takes the key as "ssh_key", and a GET of the same collection
+// returns it as "public_key". Reading only the field the write side uses
+// yields a list of empty strings, which looks exactly like an account with
+// no keys.
 type sshKeyRecord struct {
-	ID     int    `json:"id"`
-	SSHKey string `json:"ssh_key"`
+	ID        int    `json:"id"`
+	PublicKey string `json:"public_key"`
+	SSHKey    string `json:"ssh_key"`
+}
+
+// key returns whichever field carried the material.
+func (r sshKeyRecord) key() string {
+	if r.PublicKey != "" {
+		return r.PublicKey
+	}
+	return r.SSHKey
 }
 
 // sshKeyCreateResponse is Vast's reply to a key upload. Only the success
@@ -120,10 +143,21 @@ func (p *Provider) IplaneKeyComments(ctx context.Context) ([]string, error) {
 	}
 	var out []string
 	for _, k := range keys {
-		_, comment, _, _, perr := ssh.ParseAuthorizedKey([]byte(k.SSHKey))
+		_, comment, _, _, perr := ssh.ParseAuthorizedKey([]byte(k.key()))
 		if perr == nil && sshkeys.IsIplaneComment(comment) {
 			out = append(out, comment)
 		}
 	}
 	return out, nil
+}
+
+// isDuplicateKeyErr reports whether an upload failed because the key was
+// already on the account.
+//
+// Matched on the response text because Vast signals it with a 400 carrying
+// {"error":"duplicate"} rather than a distinct status code, so there is
+// nothing more structured to key on.
+func isDuplicateKeyErr(err error) bool {
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "duplicate") || strings.Contains(s, "already exists")
 }

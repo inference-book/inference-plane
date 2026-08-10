@@ -2,6 +2,7 @@ package vast
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -22,6 +23,7 @@ type keyServer struct {
 	listed  []sshKeyRecord
 	uploads []string
 	status  int
+	errCode string
 }
 
 func (k *keyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -41,7 +43,7 @@ func (k *keyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		k.uploads = append(k.uploads, body.SSHKey)
 		if k.status != 0 {
 			w.WriteHeader(k.status)
-			_, _ = w.Write([]byte(`{"success":false,"msg":"nope"}`))
+			_, _ = w.Write([]byte(fmt.Sprintf(`{"success":false,"error":%q,"msg":"nope"}`, k.errCode)))
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -73,7 +75,7 @@ func TestEnsurePublicKeyUploadsWhenAbsent(t *testing.T) {
 // This runs on every instance create, so a non-idempotent version would
 // litter the account with a duplicate key per deploy.
 func TestEnsurePublicKeyIsIdempotent(t *testing.T) {
-	ks := &keyServer{listed: []sshKeyRecord{{ID: 1, SSHKey: keyA}}}
+	ks := &keyServer{listed: []sshKeyRecord{{ID: 1, PublicKey: keyA}}}
 	p, _ := newTestProvider(t, ks)
 
 	if err := p.EnsurePublicKey(t.Context(), []byte(keyA), "iplane-default-vast-2026-08-10T00:00:00Z"); err != nil {
@@ -91,7 +93,7 @@ func TestEnsurePublicKeyIsIdempotent(t *testing.T) {
 func TestEnsurePublicKeyMatchesOnKeyMaterialNotTheWholeLine(t *testing.T) {
 	stored := strings.SplitN(keyA, " ", 3)
 	ks := &keyServer{listed: []sshKeyRecord{
-		{ID: 1, SSHKey: stored[0] + " " + stored[1] + " a-totally-different-comment\n"},
+		{ID: 1, PublicKey: stored[0] + " " + stored[1] + " a-totally-different-comment\n"},
 	}}
 	p, _ := newTestProvider(t, ks)
 
@@ -105,7 +107,7 @@ func TestEnsurePublicKeyMatchesOnKeyMaterialNotTheWholeLine(t *testing.T) {
 }
 
 func TestEnsurePublicKeyUploadsWhenOnlyOtherKeysExist(t *testing.T) {
-	ks := &keyServer{listed: []sshKeyRecord{{ID: 1, SSHKey: keyB}}}
+	ks := &keyServer{listed: []sshKeyRecord{{ID: 1, PublicKey: keyB}}}
 	p, _ := newTestProvider(t, ks)
 
 	if err := p.EnsurePublicKey(t.Context(), []byte(keyA), "iplane-default-vast-2026-08-10T00:00:00Z"); err != nil {
@@ -121,8 +123,8 @@ func TestEnsurePublicKeyUploadsWhenOnlyOtherKeysExist(t *testing.T) {
 // reason to fail the deploy.
 func TestUnparseableAccountKeyIsSkipped(t *testing.T) {
 	ks := &keyServer{listed: []sshKeyRecord{
-		{ID: 1, SSHKey: "this is not a key"},
-		{ID: 2, SSHKey: keyA},
+		{ID: 1, PublicKey: "this is not a key"},
+		{ID: 2, PublicKey: keyA},
 	}}
 	p, _ := newTestProvider(t, ks)
 
@@ -160,3 +162,55 @@ func TestEnsurePublicKeySurfacesUploadFailure(t *testing.T) {
 // every deploy would go back to failing at the SSH dial with nothing
 // pointing at the cause.
 var _ provisioners.KeyRegistrar = (*Provider)(nil)
+
+// Vast's API is asymmetric: a POST takes "ssh_key" and a GET returns
+// "public_key". Reading only the write-side field yields a list of empty
+// strings, which is indistinguishable from an account with no keys, so the
+// membership test never matches and every create re-uploads.
+func TestListReadsThePublicKeyField(t *testing.T) {
+	ks := &keyServer{listed: []sshKeyRecord{{ID: 1, PublicKey: keyA}}}
+	p, _ := newTestProvider(t, ks)
+
+	if err := p.EnsurePublicKey(t.Context(), []byte(keyA), "c"); err != nil {
+		t.Fatalf("EnsurePublicKey: %v", err)
+	}
+	if len(ks.uploads) != 0 {
+		t.Error("did not recognise a key returned in public_key; idempotency is broken")
+	}
+}
+
+// Some deployments may still return the write-side spelling; accept either
+// rather than depending on which one a given Vast version emits.
+func TestListAlsoAcceptsTheSshKeyField(t *testing.T) {
+	ks := &keyServer{listed: []sshKeyRecord{{ID: 1, SSHKey: keyA}}}
+	p, _ := newTestProvider(t, ks)
+
+	if err := p.EnsurePublicKey(t.Context(), []byte(keyA), "c"); err != nil {
+		t.Fatalf("EnsurePublicKey: %v", err)
+	}
+	if len(ks.uploads) != 0 {
+		t.Error("did not recognise a key returned in ssh_key")
+	}
+}
+
+// "Already exists" is the outcome we wanted. Failing the create over it
+// turns a satisfied precondition into a refused instance, which is how the
+// first version of this broke every repeat create.
+func TestDuplicateUploadIsNotAnError(t *testing.T) {
+	ks := &keyServer{status: http.StatusBadRequest, errCode: "duplicate"}
+	p, _ := newTestProvider(t, ks)
+
+	if err := p.EnsurePublicKey(t.Context(), []byte(keyA), "c"); err != nil {
+		t.Errorf("duplicate key upload returned an error: %v", err)
+	}
+}
+
+// A genuine refusal still has to surface.
+func TestNonDuplicateUploadFailureStillErrors(t *testing.T) {
+	ks := &keyServer{status: http.StatusForbidden, errCode: "forbidden"}
+	p, _ := newTestProvider(t, ks)
+
+	if err := p.EnsurePublicKey(t.Context(), []byte(keyA), "c"); err == nil {
+		t.Error("want an error for a non-duplicate refusal")
+	}
+}
