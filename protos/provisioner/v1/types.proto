@@ -799,6 +799,11 @@ enum EngineState {
   // The control plane stopped hearing from it: the lease expired. Set by the
   // sweeper, never reported by an engine about itself.
   ENGINE_STATE_LOST = 4;
+  // Taken out of service on purpose: new work is no longer routed here and
+  // the engine is finishing what it has. Operator-initiated (issue 205's
+  // fleet drain), so like LOST it is the control plane's word rather than
+  // the engine's, and unlike LOST it is not a failure.
+  ENGINE_STATE_DRAINING = 5;
 }
 
 // EngineNode is one machine an engine spans. The fact no probe can report,

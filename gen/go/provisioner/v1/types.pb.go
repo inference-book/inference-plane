@@ -403,6 +403,11 @@ const (
 	// The control plane stopped hearing from it: the lease expired. Set by the
 	// sweeper, never reported by an engine about itself.
 	EngineState_ENGINE_STATE_LOST EngineState = 4
+	// Taken out of service on purpose: new work is no longer routed here and
+	// the engine is finishing what it has. Operator-initiated (issue 205's
+	// fleet drain), so like LOST it is the control plane's word rather than
+	// the engine's, and unlike LOST it is not a failure.
+	EngineState_ENGINE_STATE_DRAINING EngineState = 5
 )
 
 // Enum value maps for EngineState.
@@ -413,6 +418,7 @@ var (
 		2: "ENGINE_STATE_SERVING",
 		3: "ENGINE_STATE_SERVING_DEGRADED",
 		4: "ENGINE_STATE_LOST",
+		5: "ENGINE_STATE_DRAINING",
 	}
 	EngineState_value = map[string]int32{
 		"ENGINE_STATE_UNSPECIFIED":      0,
@@ -420,6 +426,7 @@ var (
 		"ENGINE_STATE_SERVING":          2,
 		"ENGINE_STATE_SERVING_DEGRADED": 3,
 		"ENGINE_STATE_LOST":             4,
+		"ENGINE_STATE_DRAINING":         5,
 	}
 )
 
@@ -2402,13 +2409,14 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"\x19DEPLOYMENT_STATE_DEGRADED\x10\x05\x12 \n" +
 	"\x1cDEPLOYMENT_STATE_TERMINATING\x10\x06\x12\x1f\n" +
 	"\x1bDEPLOYMENT_STATE_TERMINATED\x10\a\x12\x1b\n" +
-	"\x17DEPLOYMENT_STATE_FAILED\x10\b*\x9c\x01\n" +
+	"\x17DEPLOYMENT_STATE_FAILED\x10\b*\xb7\x01\n" +
 	"\vEngineState\x12\x1c\n" +
 	"\x18ENGINE_STATE_UNSPECIFIED\x10\x00\x12\x1b\n" +
 	"\x17ENGINE_STATE_ASSEMBLING\x10\x01\x12\x18\n" +
 	"\x14ENGINE_STATE_SERVING\x10\x02\x12!\n" +
 	"\x1dENGINE_STATE_SERVING_DEGRADED\x10\x03\x12\x15\n" +
-	"\x11ENGINE_STATE_LOST\x10\x04B\xc8\x01\n" +
+	"\x11ENGINE_STATE_LOST\x10\x04\x12\x19\n" +
+	"\x15ENGINE_STATE_DRAINING\x10\x05B\xc8\x01\n" +
 	"\x12com.provisioner.v1B\n" +
 	"TypesProtoP\x01ZMgithub.com/inference-book/inference-plane/gen/go/provisioner/v1;provisionerv1\xa2\x02\x03PXX\xaa\x02\x0eProvisioner.V1\xca\x02\x0eProvisioner\\V1\xe2\x02\x1aProvisioner\\V1\\GPBMetadata\xea\x02\x0fProvisioner::V1b\x06proto3"
 
