@@ -412,6 +412,25 @@ func (p *Provider) List(ctx context.Context, filter map[string]string) ([]*provi
 // SKU catalog stores the underscored form for stable Go-identifier
 // hygiene; we transform back at the wire boundary via
 // gpuNameForVast.
+// offerVRAMFloorMB returns the per-GPU memory an offer must have, in the
+// megabytes Vast reports, or 0 when nothing constrains it.
+//
+// Takes the larger of what the operator asked for and what the named SKU is
+// documented to have, because both are real constraints: asking for a SKU is
+// asking for that card, not for something sharing its marketing name.
+func offerVRAMFloorMB(gpuName string, reqs *provisionerv1.ResourceRequirements) int {
+	want := int(reqs.GetMinVramGb())
+	if spec := LookupSKU(gpuName); spec != nil && int(spec.VRAMGb) > want {
+		want = int(spec.VRAMGb)
+	}
+	if want <= 0 {
+		return 0
+	}
+	// 3% under the nominal figure, so a card advertised as 80 GB still
+	// matches when the host reports 81251 MB rather than a round 81920.
+	return want * 970
+}
+
 func (p *Provider) findOffer(ctx context.Context, gpuName string, gpuCount, diskGB int, reqs *provisionerv1.ResourceRequirements) (*offerSummary, error) {
 	q := map[string]any{
 		"gpu_name": map[string]string{"eq": gpuNameForVast(gpuName)},
@@ -422,6 +441,24 @@ func (p *Provider) findOffer(ctx context.Context, gpuName string, gpuCount, disk
 	}
 	if diskGB > 0 {
 		q["disk_space"] = map[string]int{"gte": diskGB}
+	}
+	// VRAM floor, also pushed server-side.
+	//
+	// Vast lists several physically different cards under one gpu_name: an
+	// "A100 PCIE" offer may be the 40 GB part or the 80 GB part, and the
+	// marketplace happily returns the cheaper 40 GB one first because the
+	// results are ordered by price. Without this the resolver would rent
+	// half the VRAM the catalog claims for that SKU, and a model sized
+	// against the catalog would OOM on arrival with nothing in the
+	// deployment record hinting why.
+	//
+	// The floor comes from the resolved SKU's catalog entry, so naming a
+	// SKU implies its advertised memory, and an explicit min_vram_gb raises
+	// it further. Vast reports gpu_ram in MB. The 1000 rather than 1024
+	// conversion plus a small margin absorbs the vendors who report 81920
+	// and the ones who report 81251.
+	if floor := offerVRAMFloorMB(gpuName, reqs); floor > 0 {
+		q["gpu_ram"] = map[string]int{"gte": floor}
 	}
 	// Fabric filter, pushed server-side. Vast's query language filters on
 	// bw_nvlink directly, so the marketplace does the narrowing and we never
