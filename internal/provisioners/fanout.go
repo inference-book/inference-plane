@@ -33,6 +33,36 @@ func replicaInstanceID(deployID string, slot, totalSlots int) string {
 	return fmt.Sprintf("%s-r%d", deployID, slot)
 }
 
+// ownsInstance reports whether instanceID is an Instance this deployment
+// provisioned for itself, as opposed to one the operator created separately
+// and pointed the deployment at.
+//
+// The distinction decides whether destroying the deployment may also
+// terminate the Instance record. An auto-provisioned replica exists only to
+// back this deployment, so leaving it behind is the leak issue 228 is about.
+// An explicitly-placed instance may be shared or reused, so the operator
+// tears it down with `iplane instance destroy`.
+//
+// Ownership is read off the naming convention because that is the only
+// signal there is: replica Instances carry no back-reference to their
+// deployment. Keeping the rule adjacent to replicaInstanceID is what stops
+// the two drifting apart.
+func ownsInstance(deployID, instanceID string) bool {
+	if instanceID == deployID {
+		return true // totalSlots == 1 carve-out
+	}
+	suffix, ok := strings.CutPrefix(instanceID, deployID+"-r")
+	if !ok || suffix == "" {
+		return false
+	}
+	for _, r := range suffix {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 // fanOutResult carries one replica's outcome back to the aggregator.
 // endpoint is empty when the deploy failed or wait_for_engine never
 // returned a URL; err carries the failure reason for DEGRADED /

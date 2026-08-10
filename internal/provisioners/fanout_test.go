@@ -36,8 +36,9 @@ func fanOutMultiReplicaSvc(t *testing.T, deployFn func(inst *provisionerv1.Insta
 // (so each slot's engine_endpoints[i] is distinguishable). Optional
 // deployFn override per-call lets tests program failures.
 type fanOutMockProvider struct {
-	name     string
-	deployFn func(inst *provisionerv1.Instance, emit func(provisioners.DeployStateUpdate)) error
+	name      string
+	deployFn  func(inst *provisionerv1.Instance, emit func(provisioners.DeployStateUpdate)) error
+	destroyFn func(inst *provisionerv1.Instance) error
 }
 
 func (p *fanOutMockProvider) Name() string { return p.name }
@@ -80,8 +81,27 @@ func (p *fanOutMockProvider) Deploy(_ context.Context, _ *provisionerv1.Deployme
 	return nil
 }
 
-func (p *fanOutMockProvider) Destroy(_ context.Context, _ *provisionerv1.Deployment, _ *provisionerv1.Instance, _ *sshkeys.KeyPair, _ func(provisioners.DeployStateUpdate)) error {
+func (p *fanOutMockProvider) Destroy(_ context.Context, _ *provisionerv1.Deployment, inst *provisionerv1.Instance, _ *sshkeys.KeyPair, _ func(provisioners.DeployStateUpdate)) error {
+	if p.destroyFn != nil {
+		return p.destroyFn(inst)
+	}
 	return nil
+}
+
+// fanOutMultiReplicaSvcWithDestroy is fanOutMultiReplicaSvc with a
+// programmable Destroy, so teardown tests can fail one replica and assert
+// the others still go away (issue 228's partial-failure contract).
+func fanOutMultiReplicaSvcWithDestroy(t *testing.T, destroyFn func(inst *provisionerv1.Instance) error) (*provisioners.Service, *file.Store) {
+	t.Helper()
+	prov := &fanOutMockProvider{name: "mockfan", destroyFn: destroyFn}
+	store, err := file.Open(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("file.Open: %v", err)
+	}
+	svc := provisioners.New([]provisioners.Provider{prov}, store, "default",
+		provisioners.WithKeyStore(newKeyStore(t)),
+	)
+	return svc, store
 }
 
 func multiReplicaCreateReq(depID string, replicas int32) *provisionerv1.CreateDeploymentRequest {
