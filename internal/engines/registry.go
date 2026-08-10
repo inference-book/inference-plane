@@ -151,9 +151,17 @@ func (r *Registry) Register(in *provisionerv1.Engine) (*provisionerv1.Engine, er
 	}
 	sortSpan(e)
 
+	prior := r.lookupLocked(e.GetId())
 	e.RegisteredAt = timestamppb.New(now)
-	if prior := r.lookupLocked(e.GetId()); prior != nil && prior.GetRegisteredAt() != nil {
+	if prior != nil && prior.GetRegisteredAt() != nil {
 		e.RegisteredAt = prior.GetRegisteredAt()
+	}
+	// A draining engine is still alive and still renewing while it finishes
+	// in-flight work. Its own reported state is SERVING and always will be,
+	// because the engine does not know an operator decided to reclaim it, so
+	// honouring that report would un-drain the member on the next renewal.
+	if prior.GetState() == provisionerv1.EngineState_ENGINE_STATE_DRAINING {
+		e.State = provisionerv1.EngineState_ENGINE_STATE_DRAINING
 	}
 	e.LastSeenAt = timestamppb.New(now)
 	e.LeaseExpiresAt = timestamppb.New(now.Add(r.lease))
@@ -162,6 +170,47 @@ func (r *Registry) Register(in *provisionerv1.Engine) (*provisionerv1.Engine, er
 		return nil, err
 	}
 	return e, nil
+}
+
+// SetState moves an engine to a state the control plane concluded rather than
+// the engine reported: DRAINING when an operator takes it out of service,
+// LOST when its lease expires.
+//
+// Renewal does not clobber it back. That matters for DRAINING specifically:
+// the engine is still alive and still renewing while it finishes in-flight
+// work, and a renewal arriving mid-drain must not un-drain it. Register()
+// preserves a control-plane-owned state for exactly this reason.
+//
+// Returns an error if the engine is unknown, since silently succeeding would
+// let a typo'd id read as a successful drain.
+func (r *Registry) SetState(id string, state provisionerv1.EngineState) (*provisionerv1.Engine, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	cur := r.lookupLocked(id)
+	if cur == nil {
+		return nil, fmt.Errorf("engines: no engine with id %q", id)
+	}
+	next := proto.Clone(cur).(*provisionerv1.Engine)
+	next.State = state
+	if err := r.store.PutEngine(next); err != nil {
+		return nil, err
+	}
+	return next, nil
+}
+
+// Get returns one engine by id, or nil when unknown.
+func (r *Registry) Get(id string) (*provisionerv1.Engine, error) {
+	all, err := r.store.ListEngines()
+	if err != nil {
+		return nil, err
+	}
+	for _, e := range all {
+		if e.GetId() == id {
+			return e, nil
+		}
+	}
+	return nil, nil
 }
 
 // List returns known engines, LOST ones included, ordered by id so output is

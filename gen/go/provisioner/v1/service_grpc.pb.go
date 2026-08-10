@@ -893,6 +893,7 @@ var DeploymentService_ServiceDesc = grpc.ServiceDesc{
 const (
 	EngineRegistryService_RegisterEngine_FullMethodName = "/provisioner.v1.EngineRegistryService/RegisterEngine"
 	EngineRegistryService_ListEngines_FullMethodName    = "/provisioner.v1.EngineRegistryService/ListEngines"
+	EngineRegistryService_DrainEngine_FullMethodName    = "/provisioner.v1.EngineRegistryService/DrainEngine"
 )
 
 // EngineRegistryServiceClient is the client API for EngineRegistryService service.
@@ -929,6 +930,15 @@ type EngineRegistryServiceClient interface {
 	// an operator can see what went away; this is the read surface the fleet
 	// verbs (issue 205) render.
 	ListEngines(ctx context.Context, in *ListEnginesRequest, opts ...grpc.CallOption) (*ListEnginesResponse, error)
+	// DrainEngine takes a member out of service properly: stop new work landing
+	// on it, let in-flight finish, then release every node it spans.
+	//
+	// Synchronous, and therefore bounded by the server's write timeout. That is
+	// a deliberate constraint rather than an oversight: iplane has already been
+	// bitten once by a long-running unary call being severed mid-flight
+	// (CreateDeployment, Ch 9), so the handler rejects a timeout the transport
+	// cannot carry instead of discovering it the hard way.
+	DrainEngine(ctx context.Context, in *DrainEngineRequest, opts ...grpc.CallOption) (*DrainEngineResponse, error)
 }
 
 type engineRegistryServiceClient struct {
@@ -953,6 +963,16 @@ func (c *engineRegistryServiceClient) ListEngines(ctx context.Context, in *ListE
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ListEnginesResponse)
 	err := c.cc.Invoke(ctx, EngineRegistryService_ListEngines_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *engineRegistryServiceClient) DrainEngine(ctx context.Context, in *DrainEngineRequest, opts ...grpc.CallOption) (*DrainEngineResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DrainEngineResponse)
+	err := c.cc.Invoke(ctx, EngineRegistryService_DrainEngine_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -993,6 +1013,15 @@ type EngineRegistryServiceServer interface {
 	// an operator can see what went away; this is the read surface the fleet
 	// verbs (issue 205) render.
 	ListEngines(context.Context, *ListEnginesRequest) (*ListEnginesResponse, error)
+	// DrainEngine takes a member out of service properly: stop new work landing
+	// on it, let in-flight finish, then release every node it spans.
+	//
+	// Synchronous, and therefore bounded by the server's write timeout. That is
+	// a deliberate constraint rather than an oversight: iplane has already been
+	// bitten once by a long-running unary call being severed mid-flight
+	// (CreateDeployment, Ch 9), so the handler rejects a timeout the transport
+	// cannot carry instead of discovering it the hard way.
+	DrainEngine(context.Context, *DrainEngineRequest) (*DrainEngineResponse, error)
 }
 
 // UnimplementedEngineRegistryServiceServer should be embedded to have
@@ -1007,6 +1036,9 @@ func (UnimplementedEngineRegistryServiceServer) RegisterEngine(context.Context, 
 }
 func (UnimplementedEngineRegistryServiceServer) ListEngines(context.Context, *ListEnginesRequest) (*ListEnginesResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListEngines not implemented")
+}
+func (UnimplementedEngineRegistryServiceServer) DrainEngine(context.Context, *DrainEngineRequest) (*DrainEngineResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DrainEngine not implemented")
 }
 func (UnimplementedEngineRegistryServiceServer) testEmbeddedByValue() {}
 
@@ -1064,6 +1096,24 @@ func _EngineRegistryService_ListEngines_Handler(srv interface{}, ctx context.Con
 	return interceptor(ctx, in, info, handler)
 }
 
+func _EngineRegistryService_DrainEngine_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DrainEngineRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(EngineRegistryServiceServer).DrainEngine(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: EngineRegistryService_DrainEngine_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(EngineRegistryServiceServer).DrainEngine(ctx, req.(*DrainEngineRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // EngineRegistryService_ServiceDesc is the grpc.ServiceDesc for EngineRegistryService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -1078,6 +1128,10 @@ var EngineRegistryService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListEngines",
 			Handler:    _EngineRegistryService_ListEngines_Handler,
+		},
+		{
+			MethodName: "DrainEngine",
+			Handler:    _EngineRegistryService_DrainEngine_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

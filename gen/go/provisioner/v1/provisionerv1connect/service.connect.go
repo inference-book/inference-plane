@@ -82,6 +82,9 @@ const (
 	// EngineRegistryServiceListEnginesProcedure is the fully-qualified name of the
 	// EngineRegistryService's ListEngines RPC.
 	EngineRegistryServiceListEnginesProcedure = "/provisioner.v1.EngineRegistryService/ListEngines"
+	// EngineRegistryServiceDrainEngineProcedure is the fully-qualified name of the
+	// EngineRegistryService's DrainEngine RPC.
+	EngineRegistryServiceDrainEngineProcedure = "/provisioner.v1.EngineRegistryService/DrainEngine"
 )
 
 // ProvisionerServiceClient is a client for the provisioner.v1.ProvisionerService service.
@@ -711,6 +714,15 @@ type EngineRegistryServiceClient interface {
 	// an operator can see what went away; this is the read surface the fleet
 	// verbs (issue 205) render.
 	ListEngines(context.Context, *connect.Request[v1.ListEnginesRequest]) (*connect.Response[v1.ListEnginesResponse], error)
+	// DrainEngine takes a member out of service properly: stop new work landing
+	// on it, let in-flight finish, then release every node it spans.
+	//
+	// Synchronous, and therefore bounded by the server's write timeout. That is
+	// a deliberate constraint rather than an oversight: iplane has already been
+	// bitten once by a long-running unary call being severed mid-flight
+	// (CreateDeployment, Ch 9), so the handler rejects a timeout the transport
+	// cannot carry instead of discovering it the hard way.
+	DrainEngine(context.Context, *connect.Request[v1.DrainEngineRequest]) (*connect.Response[v1.DrainEngineResponse], error)
 }
 
 // NewEngineRegistryServiceClient constructs a client for the provisioner.v1.EngineRegistryService
@@ -736,6 +748,12 @@ func NewEngineRegistryServiceClient(httpClient connect.HTTPClient, baseURL strin
 			connect.WithSchema(engineRegistryServiceMethods.ByName("ListEngines")),
 			connect.WithClientOptions(opts...),
 		),
+		drainEngine: connect.NewClient[v1.DrainEngineRequest, v1.DrainEngineResponse](
+			httpClient,
+			baseURL+EngineRegistryServiceDrainEngineProcedure,
+			connect.WithSchema(engineRegistryServiceMethods.ByName("DrainEngine")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -743,6 +761,7 @@ func NewEngineRegistryServiceClient(httpClient connect.HTTPClient, baseURL strin
 type engineRegistryServiceClient struct {
 	registerEngine *connect.Client[v1.RegisterEngineRequest, v1.RegisterEngineResponse]
 	listEngines    *connect.Client[v1.ListEnginesRequest, v1.ListEnginesResponse]
+	drainEngine    *connect.Client[v1.DrainEngineRequest, v1.DrainEngineResponse]
 }
 
 // RegisterEngine calls provisioner.v1.EngineRegistryService.RegisterEngine.
@@ -753,6 +772,11 @@ func (c *engineRegistryServiceClient) RegisterEngine(ctx context.Context, req *c
 // ListEngines calls provisioner.v1.EngineRegistryService.ListEngines.
 func (c *engineRegistryServiceClient) ListEngines(ctx context.Context, req *connect.Request[v1.ListEnginesRequest]) (*connect.Response[v1.ListEnginesResponse], error) {
 	return c.listEngines.CallUnary(ctx, req)
+}
+
+// DrainEngine calls provisioner.v1.EngineRegistryService.DrainEngine.
+func (c *engineRegistryServiceClient) DrainEngine(ctx context.Context, req *connect.Request[v1.DrainEngineRequest]) (*connect.Response[v1.DrainEngineResponse], error) {
+	return c.drainEngine.CallUnary(ctx, req)
 }
 
 // EngineRegistryServiceHandler is an implementation of the provisioner.v1.EngineRegistryService
@@ -773,6 +797,15 @@ type EngineRegistryServiceHandler interface {
 	// an operator can see what went away; this is the read surface the fleet
 	// verbs (issue 205) render.
 	ListEngines(context.Context, *connect.Request[v1.ListEnginesRequest]) (*connect.Response[v1.ListEnginesResponse], error)
+	// DrainEngine takes a member out of service properly: stop new work landing
+	// on it, let in-flight finish, then release every node it spans.
+	//
+	// Synchronous, and therefore bounded by the server's write timeout. That is
+	// a deliberate constraint rather than an oversight: iplane has already been
+	// bitten once by a long-running unary call being severed mid-flight
+	// (CreateDeployment, Ch 9), so the handler rejects a timeout the transport
+	// cannot carry instead of discovering it the hard way.
+	DrainEngine(context.Context, *connect.Request[v1.DrainEngineRequest]) (*connect.Response[v1.DrainEngineResponse], error)
 }
 
 // NewEngineRegistryServiceHandler builds an HTTP handler from the service implementation. It
@@ -794,12 +827,20 @@ func NewEngineRegistryServiceHandler(svc EngineRegistryServiceHandler, opts ...c
 		connect.WithSchema(engineRegistryServiceMethods.ByName("ListEngines")),
 		connect.WithHandlerOptions(opts...),
 	)
+	engineRegistryServiceDrainEngineHandler := connect.NewUnaryHandler(
+		EngineRegistryServiceDrainEngineProcedure,
+		svc.DrainEngine,
+		connect.WithSchema(engineRegistryServiceMethods.ByName("DrainEngine")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/provisioner.v1.EngineRegistryService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case EngineRegistryServiceRegisterEngineProcedure:
 			engineRegistryServiceRegisterEngineHandler.ServeHTTP(w, r)
 		case EngineRegistryServiceListEnginesProcedure:
 			engineRegistryServiceListEnginesHandler.ServeHTTP(w, r)
+		case EngineRegistryServiceDrainEngineProcedure:
+			engineRegistryServiceDrainEngineHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -815,4 +856,8 @@ func (UnimplementedEngineRegistryServiceHandler) RegisterEngine(context.Context,
 
 func (UnimplementedEngineRegistryServiceHandler) ListEngines(context.Context, *connect.Request[v1.ListEnginesRequest]) (*connect.Response[v1.ListEnginesResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("provisioner.v1.EngineRegistryService.ListEngines is not implemented"))
+}
+
+func (UnimplementedEngineRegistryServiceHandler) DrainEngine(context.Context, *connect.Request[v1.DrainEngineRequest]) (*connect.Response[v1.DrainEngineResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("provisioner.v1.EngineRegistryService.DrainEngine is not implemented"))
 }
