@@ -26,7 +26,7 @@ import (
 //
 // Everything else, the lease, the cadence, the non-fatal failure handling,
 // is shared code rather than a second implementation that drifts.
-func newMockRegisterAgent(serviceURL, engineID, model, endpoint string, nodes, cards int, assemble time.Duration, log *slog.Logger) (*engineagent.Agent, error) {
+func newMockRegisterAgent(serviceURL, engineID, model, endpoint string, nodes, cards int, assemble, degradeAfter time.Duration, log *slog.Logger) (*engineagent.Agent, error) {
 	span := make([]*provisionerv1.EngineNode, 0, nodes)
 	perNode := max(cards/max(nodes, 1), 1)
 	for i := range nodes {
@@ -44,7 +44,21 @@ func newMockRegisterAgent(serviceURL, engineID, model, endpoint string, nodes, c
 	// endpoint serves a token, and no control-plane probe can see that
 	// interval because there is no endpoint yet to ask.
 	started := time.Now()
-	ready := func(context.Context) bool { return time.Since(started) >= assemble }
+	ready := func(context.Context) engineagent.Readiness {
+		if time.Since(started) >= assemble {
+			return engineagent.Ready
+		}
+		return engineagent.NotReady
+	}
+
+	// Stands in for issue 213's link sensor. The real one reads NVLink
+	// state and error counters off the cards; this one reads a clock. What
+	// matters for the demo is the same either way: the engine keeps serving
+	// correct tokens the whole time, and the only thing that changes is a
+	// reading nothing else in the system is watching.
+	impaired := func(context.Context) bool {
+		return degradeAfter > 0 && time.Since(started) >= degradeAfter
+	}
 
 	return engineagent.New(
 		provisionerv1connect.NewEngineRegistryServiceClient(http.DefaultClient, serviceURL),
@@ -55,7 +69,7 @@ func newMockRegisterAgent(serviceURL, engineID, model, endpoint string, nodes, c
 			Provider: "mock",
 		},
 		engineagent.WithSpan(span),
-		engineagent.WithProbe(ready),
+		engineagent.WithProbe(engineagent.AnyDegraded(ready, impaired)),
 		engineagent.WithLogger(log),
 	)
 }

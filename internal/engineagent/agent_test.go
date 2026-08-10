@@ -71,7 +71,12 @@ func TestReportsAssemblingUntilProbePasses(t *testing.T) {
 	var ready bool
 	f := &fakeRegistrar{}
 	a, err := New(f, testIdentity(),
-		WithProbe(func(context.Context) bool { return ready }),
+		WithProbe(func(context.Context) Readiness {
+			if ready {
+				return Ready
+			}
+			return NotReady
+		}),
 		WithLogger(quietLogger()))
 	if err != nil {
 		t.Fatal(err)
@@ -99,7 +104,12 @@ func TestStateIsNotLatchedOnceServing(t *testing.T) {
 	ready := true
 	f := &fakeRegistrar{}
 	a, _ := New(f, testIdentity(),
-		WithProbe(func(context.Context) bool { return ready }),
+		WithProbe(func(context.Context) Readiness {
+			if ready {
+				return Ready
+			}
+			return NotReady
+		}),
 		WithLogger(quietLogger()))
 
 	a.registerOnce(t.Context())
@@ -288,7 +298,7 @@ func TestRunStopsOnContextCancel(t *testing.T) {
 func TestAgentNeverReportsLost(t *testing.T) {
 	f := &fakeRegistrar{}
 	a, _ := New(f, testIdentity(),
-		WithProbe(func(context.Context) bool { return false }),
+		WithProbe(func(context.Context) Readiness { return NotReady }),
 		WithLogger(quietLogger()))
 
 	a.registerOnce(t.Context())
@@ -309,12 +319,12 @@ func TestHTTPProbe(t *testing.T) {
 
 	for _, tc := range []struct {
 		status int
-		want   bool
+		want   Readiness
 	}{
-		{http.StatusOK, true},
-		{http.StatusNoContent, true},
-		{http.StatusServiceUnavailable, false},
-		{http.StatusInternalServerError, false},
+		{http.StatusOK, Ready},
+		{http.StatusNoContent, Ready},
+		{http.StatusServiceUnavailable, NotReady},
+		{http.StatusInternalServerError, NotReady},
 	} {
 		code = tc.status
 		if got := probe(t.Context()); got != tc.want {
@@ -330,7 +340,7 @@ func TestHTTPProbeUnreachableIsNotServing(t *testing.T) {
 	url := srv.URL
 	srv.Close()
 
-	if HTTPProbe(url, 100*time.Millisecond)(t.Context()) {
-		t.Error("probe against a closed listener returned true")
+	if got := HTTPProbe(url, 100*time.Millisecond)(t.Context()); got != NotReady {
+		t.Errorf("probe against a closed listener = %v, want not-ready", got)
 	}
 }
