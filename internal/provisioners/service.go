@@ -58,6 +58,13 @@ type Service struct {
 	operatorID string
 	clock      func() time.Time
 
+	// agentServiceURL is the externally reachable control-plane address
+	// stamped onto engine containers for the registration agent. Empty
+	// means the daemon has not been told its own public URL, in which case
+	// nothing is stamped and the agent does not register. See
+	// WithAgentServiceURL.
+	agentServiceURL string
+
 	// pendingReplicaSpecs is the per-fan-out stash that
 	// provisionSlots writes and recordCreateSlots / recordAppendedSlots
 	// reads. Threading the specs through every recordSlots variant
@@ -161,6 +168,20 @@ func WithModelStore(ms modelstores.ModelStore) Option {
 // so they can assert touch ordering precisely.
 func WithTouchDebounceInterval(d time.Duration) Option {
 	return func(s *Service) { s.touchDebounceInterval = d }
+}
+
+// WithAgentServiceURL sets the externally reachable control-plane URL
+// stamped onto engine containers so the agent beside the engine knows where
+// to register.
+//
+// Unset by default and deliberately not inferred from the listen address. A
+// daemon bound to :8080 on a laptop behind NAT cannot see its own reachable
+// URL, and guessing one produces agents that fail to register against an
+// address that looks plausible in the config. The operator supplies it, the
+// same way IPLANE_OTEL_ENDPOINT is supplied for engine telemetry, and
+// `iplane telemetry url` discovers a cloudflared tunnel for the local case.
+func WithAgentServiceURL(url string) Option {
+	return func(s *Service) { s.agentServiceURL = url }
 }
 
 // WithRecorder wires the OTel metrics recorder used for the

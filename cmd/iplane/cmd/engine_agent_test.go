@@ -1,6 +1,10 @@
 package cmd
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/inference-book/inference-plane/internal/engineagent"
+)
 
 func TestEnvOr(t *testing.T) {
 	const key = "IPLANE_TEST_ENVOR"
@@ -52,13 +56,15 @@ func TestEnvInt(t *testing.T) {
 // pinned rather than left to drift.
 func TestInjectedEnvVarNames(t *testing.T) {
 	for name, got := range map[string]string{
-		"IPLANE_ENGINE_ID":         EnvEngineID,
-		"IPLANE_DEPLOYMENT_ID":     EnvEngineDeployID,
-		"IPLANE_ENGINE_MODEL":      EnvEngineModel,
-		"IPLANE_ENGINE_ENDPOINT":   EnvEngineEndpoint,
-		"IPLANE_ENGINE_HEALTH_URL": EnvEngineHealthURL,
-		"IPLANE_HOST_ID":           EnvEngineHostID,
-		"IPLANE_NODE_INDEX":        EnvEngineNodeIndex,
+		"IPLANE_ENGINE_ID":         engineagent.EnvEngineID,
+		"IPLANE_DEPLOYMENT_ID":     engineagent.EnvDeploymentID,
+		"IPLANE_ENGINE_MODEL":      engineagent.EnvModel,
+		"IPLANE_ENGINE_ENDPOINT":   engineagent.EnvEndpoint,
+		"IPLANE_ENGINE_HEALTH_URL": engineagent.EnvHealthURL,
+		"IPLANE_HOST_ID":           engineagent.EnvHostID,
+		"IPLANE_NODE_INDEX":        engineagent.EnvNodeIndex,
+		"IPLANE_PROVIDER":          engineagent.EnvProvider,
+		"IPLANE_SERVICE_URL":       engineagent.EnvServiceURL,
 	} {
 		if got != name {
 			t.Errorf("env constant = %q, want %q", got, name)
