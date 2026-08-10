@@ -1444,9 +1444,30 @@ type Deployment struct {
 	//
 	// Field 22/23 were the removed default_priority draft; 28 is the next
 	// free number (kept distinct so that history note stays intact).
-	Mounts        []*VolumeMount `protobuf:"bytes,28,rep,name=mounts,proto3" json:"mounts,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Mounts []*VolumeMount `protobuf:"bytes,28,rep,name=mounts,proto3" json:"mounts,omitempty"`
+	// engine_entrypoint is the command that starts the engine inside the
+	// image, e.g. ["vllm", "serve"] or ["python3", "-m",
+	// "vllm.entrypoints.openai.api_server"].
+	//
+	// Normally empty, and normally it should stay that way. iplane has never
+	// needed to know this: it replaces the image's CMD with the engine's
+	// arguments and lets the image's own ENTRYPOINT supply the binary.
+	//
+	// It exists for one case. Running the registration agent beside the
+	// engine on the image-native path means overriding the container's
+	// entrypoint with a wrapper, and a wrapper has to exec the engine
+	// itself, so it needs a command that iplane otherwise never sees. There
+	// is no safe default to infer: vllm/vllm-openai changed its entrypoint
+	// between the versions Ch 9 uses, so guessing would break deploys to
+	// make a fleet view nicer.
+	//
+	// Set it and the agent runs. Leave it and the deployment still works
+	// exactly as before, with liveness coming from the /health poller. The
+	// sshdocker path never needs this: it runs the agent as a separate
+	// container and leaves the engine's entrypoint alone.
+	EngineEntrypoint []string `protobuf:"bytes,29,rep,name=engine_entrypoint,json=engineEntrypoint,proto3" json:"engine_entrypoint,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *Deployment) Reset() {
@@ -1657,6 +1678,13 @@ func (x *Deployment) GetReplicaSpecs() []*ReplicaSpec {
 func (x *Deployment) GetMounts() []*VolumeMount {
 	if x != nil {
 		return x.Mounts
+	}
+	return nil
+}
+
+func (x *Deployment) GetEngineEntrypoint() []string {
+	if x != nil {
+		return x.EngineEntrypoint
 	}
 	return nil
 }
@@ -2297,7 +2325,7 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"created_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x1a7\n" +
 	"\tTagsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xb6\t\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xe3\t\n" +
 	"\n" +
 	"Deployment\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1f\n" +
@@ -2332,7 +2360,8 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"\x10engine_endpoints\x18\x19 \x03(\tR\x0fengineEndpoints\x124\n" +
 	"\x16unhealthy_instance_ids\x18\x1a \x03(\tR\x14unhealthyInstanceIds\x12@\n" +
 	"\rreplica_specs\x18\x1b \x03(\v2\x1b.provisioner.v1.ReplicaSpecR\freplicaSpecs\x123\n" +
-	"\x06mounts\x18\x1c \x03(\v2\x1b.provisioner.v1.VolumeMountR\x06mounts\x1a6\n" +
+	"\x06mounts\x18\x1c \x03(\v2\x1b.provisioner.v1.VolumeMountR\x06mounts\x12+\n" +
+	"\x11engine_entrypoint\x18\x1d \x03(\tR\x10engineEntrypoint\x1a6\n" +
 	"\bEnvEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x82\x01\n" +

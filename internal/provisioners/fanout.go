@@ -392,18 +392,19 @@ func (s *Service) createMultiReplicaDeployment(ctx context.Context, req *provisi
 		}
 		now := timestamppb.New(s.clock())
 		record = &provisionerv1.Deployment{
-			Id:             dep.GetId(),
-			Image:          dep.GetImage(),
-			Model:          dep.GetModel(),
-			EngineArgs:     dep.GetEngineArgs(),
-			Env:            dep.GetEnv(),
-			Mounts:         dep.GetMounts(),
-			EnginePort:     dep.GetEnginePort(),
-			State:          provisionerv1.DeploymentState_DEPLOYMENT_STATE_PENDING,
-			CreatedAt:      now,
-			DebugShell:     dep.GetDebugShell(),
-			IdleTtlSeconds: dep.GetIdleTtlSeconds(),
-			NoIdleDestroy:  dep.GetNoIdleDestroy(),
+			Id:               dep.GetId(),
+			Image:            dep.GetImage(),
+			Model:            dep.GetModel(),
+			EngineArgs:       dep.GetEngineArgs(),
+			EngineEntrypoint: dep.GetEngineEntrypoint(),
+			Env:              dep.GetEnv(),
+			Mounts:           dep.GetMounts(),
+			EnginePort:       dep.GetEnginePort(),
+			State:            provisionerv1.DeploymentState_DEPLOYMENT_STATE_PENDING,
+			CreatedAt:        now,
+			DebugShell:       dep.GetDebugShell(),
+			IdleTtlSeconds:   dep.GetIdleTtlSeconds(),
+			NoIdleDestroy:    dep.GetNoIdleDestroy(),
 		}
 		f.Deployments[dep.GetId()] = record
 		return nil
