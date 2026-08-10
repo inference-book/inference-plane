@@ -442,6 +442,16 @@ service EngineRegistryService {
   // an operator can see what went away; this is the read surface the fleet
   // verbs (issue 205) render.
   rpc ListEngines(ListEnginesRequest) returns (ListEnginesResponse);
+
+  // DrainEngine takes a member out of service properly: stop new work landing
+  // on it, let in-flight finish, then release every node it spans.
+  //
+  // Synchronous, and therefore bounded by the server's write timeout. That is
+  // a deliberate constraint rather than an oversight: iplane has already been
+  // bitten once by a long-running unary call being severed mid-flight
+  // (CreateDeployment, Ch 9), so the handler rejects a timeout the transport
+  // cannot carry instead of discovering it the hard way.
+  rpc DrainEngine(DrainEngineRequest) returns (DrainEngineResponse);
 }
 
 message RegisterEngineRequest {
@@ -467,4 +477,25 @@ message ListEnginesRequest {
 
 message ListEnginesResponse {
   repeated Engine engines = 1;
+}
+
+// ---- Fleet drain (issue 205) -------------------------------------------
+
+message DrainEngineRequest {
+  // Engine to take out of service.
+  string engine_id = 1;
+  // How long to let in-flight work finish before releasing. 0 = server
+  // default. Ignored when force is set.
+  int32 timeout_seconds = 2;
+  // Skip the wait. In-flight requests on this member see their connections
+  // cut.
+  bool force = 3;
+}
+
+message DrainEngineResponse {
+  Engine engine = 1;
+  // Instances released, in span order. The point of draining a member rather
+  // than its replicas one at a time: a distributed engine's whole group goes
+  // in one action, with nothing left billing.
+  repeated string released_instance_ids = 2;
 }

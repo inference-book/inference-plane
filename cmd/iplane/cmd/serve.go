@@ -431,7 +431,16 @@ func runServe(parent context.Context) error {
 		server.WithProvisionerHandler(provisioners.NewConnectProvisionerAdapter(provisionerSvc)),
 		server.WithDeploymentHandler(provisioners.NewConnectDeploymentAdapter(provisionerSvc)),
 		server.WithDataPlaneRoutes(deploymentRouter.Handle()),
-		server.WithEngineRegistryHandler(engines.NewConnectAdapter(engineRegistry)),
+		server.WithEngineRegistryHandler(engines.NewConnectAdapter(engineRegistry,
+			engines.WithDrainer(provisionerSvc),
+			// A drain is a synchronous unary call, so its wait cannot exceed
+			// the response write deadline. Deriving the cap from the same
+			// config value keeps the two from drifting; Ch 9's `unexpected
+			// EOF` was exactly this pair disagreeing. Leave headroom for the
+			// teardown that follows the wait.
+			engines.WithMaxDrainTimeout(
+				time.Duration(cfg.Server.WriteTimeoutSec)*time.Second/2),
+		)),
 	)
 	if err != nil {
 		return fmt.Errorf("HTTP API: %w", err)
