@@ -128,13 +128,16 @@ func runMockEngine(parent context.Context, port int) error {
 		if id == "" {
 			id = fmt.Sprintf("mock-engine-%d", port)
 		}
-		loop := newRegisterLoop(
+		agent, err := newMockRegisterAgent(
 			mockEngineRegister, id, mockEngineModel,
 			fmt.Sprintf("http://%s", addr),
 			mockEngineNodes, mockEngineCards, mockEngineAssemble,
 			slog.New(slog.NewTextHandler(os.Stderr, nil)),
 		)
-		go loop.run(ctx)
+		if err != nil {
+			return err
+		}
+		go agent.Run(ctx)
 	}
 
 	srv := &http.Server{Addr: addr, Handler: mux}

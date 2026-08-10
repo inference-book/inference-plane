@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 
 	"github.com/spf13/cobra"
 
@@ -72,7 +73,12 @@ func init() {
 	fleetCmd.AddCommand(fleetStatusCmd)
 
 	pf := fleetCmd.PersistentFlags()
-	pf.StringVar(&fleetServiceURL, "service-url", "",
+	// IPLANE_SERVICE_URL default, matching `deployment`, `instance` and
+	// `load`. Without it `fleet` was the one remote-transport verb that
+	// silently read the local state file while every sibling verb honoured
+	// the exported variable, which reads as "no engines have registered"
+	// against a daemon that has several.
+	pf.StringVar(&fleetServiceURL, "service-url", os.Getenv("IPLANE_SERVICE_URL"),
 		"daemon base URL (e.g. http://localhost:8080); reads the local state file when unset")
 	pf.StringVar(&fleetStateDir, "state-dir", "",
 		"directory holding state.json + .lock (default ~/.iplane; ignored when --service-url is set)")
