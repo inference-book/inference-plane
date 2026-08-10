@@ -203,6 +203,26 @@ func (e *Executor) Deploy(ctx context.Context, dep *provisionerv1.Deployment, in
 			ProgressMessage: "container started; waiting for engine /health",
 			ContainerID:     containerID,
 		})
+
+		// Registration agent, as its own container sharing the engine's
+		// network namespace. Best-effort on purpose: a serving engine must
+		// not be failed because its fleet-view agent would not start, and
+		// the /health poller still carries liveness either way. The common
+		// reason for the error is simply that the deploy path stamped no
+		// identity or this is an unreleased build, both of which are
+		// ordinary rather than exceptional.
+		if _, err := d.RunAgent(ctx, AgentSpec{
+			DeploymentID: dep.GetId(),
+			Image:        dep.GetImage(),
+			Env:          dep.GetEnv(),
+		}); err != nil {
+			emit(StateUpdate{
+				State:           provisionerv1.DeploymentState_DEPLOYMENT_STATE_CONFIGURING,
+				Phase:           "engine:waiting",
+				ProgressMessage: fmt.Sprintf("registration agent not started (%v); engine unaffected", err),
+				ContainerID:     containerID,
+			})
+		}
 	}
 
 	// Step 3: poll /health until 2xx or timeout.
@@ -265,6 +285,13 @@ func (e *Executor) Destroy(ctx context.Context, dep *provisionerv1.Deployment, i
 
 	d := NewDocker(runner)
 	name := ContainerName(dep.GetId())
+
+	// Agent first. It shares the engine's network namespace, so removing the
+	// engine out from under it would strand a container renewing a lease for
+	// something that no longer exists. Ignored on failure: Stop and Remove
+	// already treat "no such container" as success, so the only real error
+	// is an unreachable box, which the engine teardown below surfaces.
+	_ = d.StopAgent(ctx, dep.GetId())
 
 	emit(StateUpdate{State: provisionerv1.DeploymentState_DEPLOYMENT_STATE_TERMINATING, Phase: "docker:stopping", ProgressMessage: fmt.Sprintf("stopping %s", name)})
 	if err := d.Stop(ctx, name); err != nil {
