@@ -6,6 +6,7 @@ import (
 
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
 	"github.com/inference-book/inference-plane/internal/provisioners"
+	"github.com/inference-book/inference-plane/internal/provisioners/fabric"
 )
 
 // SKUSpec describes what a Vast.ai gpu_name actually delivers: VRAM
@@ -35,6 +36,15 @@ type SKUSpec struct {
 	DefaultSystemRAMGb int     // system RAM for a typical single-GPU host with this SKU
 	DefaultDiskGb      int     // typical disk allocation default for this tier
 	PriceUSDPerHour    float64 // marketplace floor at cataloging; for ordering, not authoritative
+
+	// Family maps this SKU onto the cross-provider fabric catalog.
+	//
+	// Vast is the one provider that MEASURES the fabric (bw_nvlink on each
+	// offer), so unlike RunPod and Lambda this catalog entry is only a
+	// pre-filter: it decides whether a family is worth searching, and the
+	// per-offer reading decides the verdict. A "PCIE" SKU stays searchable
+	// precisely because some of those hosts turn out to be bridged.
+	Family fabric.Family
 }
 
 // skus is the catalog the resolver iterates. The slice is sorted
@@ -52,29 +62,29 @@ type SKUSpec struct {
 // against that offer id.
 var skus = []SKUSpec{
 	// Small (>=24 GB VRAM): consumer + entry datacenter.
-	{GpuName: "RTX_3090", DisplayName: "RTX 3090", VRAMGb: 24, DefaultSystemRAMGb: 32, DefaultDiskGb: 20, PriceUSDPerHour: 0.20},
-	{GpuName: "RTX_4090", DisplayName: "RTX 4090", VRAMGb: 24, DefaultSystemRAMGb: 32, DefaultDiskGb: 20, PriceUSDPerHour: 0.30},
-	{GpuName: "RTX_A5000", DisplayName: "RTX A5000", VRAMGb: 24, DefaultSystemRAMGb: 32, DefaultDiskGb: 20, PriceUSDPerHour: 0.28},
-	{GpuName: "L4", DisplayName: "L4", VRAMGb: 24, DefaultSystemRAMGb: 32, DefaultDiskGb: 20, PriceUSDPerHour: 0.40},
-	{GpuName: "RTX_5090", DisplayName: "RTX 5090", VRAMGb: 32, DefaultSystemRAMGb: 32, DefaultDiskGb: 20, PriceUSDPerHour: 0.55},
+	{GpuName: "RTX_3090", DisplayName: "RTX 3090", VRAMGb: 24, DefaultSystemRAMGb: 32, DefaultDiskGb: 20, PriceUSDPerHour: 0.20, Family: fabric.FamilyRTX3090},
+	{GpuName: "RTX_4090", DisplayName: "RTX 4090", VRAMGb: 24, DefaultSystemRAMGb: 32, DefaultDiskGb: 20, PriceUSDPerHour: 0.30, Family: fabric.FamilyRTX4090},
+	{GpuName: "RTX_A5000", DisplayName: "RTX A5000", VRAMGb: 24, DefaultSystemRAMGb: 32, DefaultDiskGb: 20, PriceUSDPerHour: 0.28, Family: fabric.FamilyA5000},
+	{GpuName: "L4", DisplayName: "L4", VRAMGb: 24, DefaultSystemRAMGb: 32, DefaultDiskGb: 20, PriceUSDPerHour: 0.40, Family: fabric.FamilyL4},
+	{GpuName: "RTX_5090", DisplayName: "RTX 5090", VRAMGb: 32, DefaultSystemRAMGb: 32, DefaultDiskGb: 20, PriceUSDPerHour: 0.55, Family: fabric.FamilyRTX5090},
 
 	// Medium (>=40 GB VRAM): workstation / mid-datacenter.
-	{GpuName: "A40", DisplayName: "A40", VRAMGb: 48, DefaultSystemRAMGb: 48, DefaultDiskGb: 40, PriceUSDPerHour: 0.40},
-	{GpuName: "L40", DisplayName: "L40", VRAMGb: 48, DefaultSystemRAMGb: 48, DefaultDiskGb: 40, PriceUSDPerHour: 0.65},
-	{GpuName: "L40S", DisplayName: "L40S", VRAMGb: 48, DefaultSystemRAMGb: 48, DefaultDiskGb: 40, PriceUSDPerHour: 0.75},
-	{GpuName: "RTX_A6000", DisplayName: "RTX A6000", VRAMGb: 48, DefaultSystemRAMGb: 48, DefaultDiskGb: 40, PriceUSDPerHour: 0.70},
-	{GpuName: "RTX_6000Ada", DisplayName: "RTX 6000 Ada", VRAMGb: 48, DefaultSystemRAMGb: 64, DefaultDiskGb: 40, PriceUSDPerHour: 0.90},
+	{GpuName: "A40", DisplayName: "A40", VRAMGb: 48, DefaultSystemRAMGb: 48, DefaultDiskGb: 40, PriceUSDPerHour: 0.40, Family: fabric.FamilyA40},
+	{GpuName: "L40", DisplayName: "L40", VRAMGb: 48, DefaultSystemRAMGb: 48, DefaultDiskGb: 40, PriceUSDPerHour: 0.65, Family: fabric.FamilyL40},
+	{GpuName: "L40S", DisplayName: "L40S", VRAMGb: 48, DefaultSystemRAMGb: 48, DefaultDiskGb: 40, PriceUSDPerHour: 0.75, Family: fabric.FamilyL40S},
+	{GpuName: "RTX_A6000", DisplayName: "RTX A6000", VRAMGb: 48, DefaultSystemRAMGb: 48, DefaultDiskGb: 40, PriceUSDPerHour: 0.70, Family: fabric.FamilyA6000},
+	{GpuName: "RTX_6000Ada", DisplayName: "RTX 6000 Ada", VRAMGb: 48, DefaultSystemRAMGb: 64, DefaultDiskGb: 40, PriceUSDPerHour: 0.90, Family: fabric.FamilyRTX6000Ada},
 
 	// Large (>=80 GB VRAM): 70B-class inference territory.
-	{GpuName: "A100_PCIE", DisplayName: "A100 PCIE", VRAMGb: 80, DefaultSystemRAMGb: 128, DefaultDiskGb: 60, PriceUSDPerHour: 1.20},
-	{GpuName: "A100_SXM4", DisplayName: "A100 SXM4", VRAMGb: 80, DefaultSystemRAMGb: 128, DefaultDiskGb: 60, PriceUSDPerHour: 1.30},
-	{GpuName: "H100_PCIE", DisplayName: "H100 PCIE", VRAMGb: 80, DefaultSystemRAMGb: 128, DefaultDiskGb: 60, PriceUSDPerHour: 1.80},
-	{GpuName: "H100_SXM", DisplayName: "H100 SXM", VRAMGb: 80, DefaultSystemRAMGb: 192, DefaultDiskGb: 60, PriceUSDPerHour: 2.00},
+	{GpuName: "A100_PCIE", DisplayName: "A100 PCIE", VRAMGb: 80, DefaultSystemRAMGb: 128, DefaultDiskGb: 60, PriceUSDPerHour: 1.20, Family: fabric.FamilyA100PCIe},
+	{GpuName: "A100_SXM4", DisplayName: "A100 SXM4", VRAMGb: 80, DefaultSystemRAMGb: 128, DefaultDiskGb: 60, PriceUSDPerHour: 1.30, Family: fabric.FamilyA100SXM},
+	{GpuName: "H100_PCIE", DisplayName: "H100 PCIE", VRAMGb: 80, DefaultSystemRAMGb: 128, DefaultDiskGb: 60, PriceUSDPerHour: 1.80, Family: fabric.FamilyH100PCIe},
+	{GpuName: "H100_SXM", DisplayName: "H100 SXM", VRAMGb: 80, DefaultSystemRAMGb: 192, DefaultDiskGb: 60, PriceUSDPerHour: 2.00, Family: fabric.FamilyH100SXM},
 
 	// XL (>=94 GB VRAM): frontier / multi-tenant.
-	{GpuName: "H100_NVL", DisplayName: "H100 NVL", VRAMGb: 94, DefaultSystemRAMGb: 192, DefaultDiskGb: 100, PriceUSDPerHour: 2.30},
-	{GpuName: "H200", DisplayName: "H200", VRAMGb: 141, DefaultSystemRAMGb: 256, DefaultDiskGb: 100, PriceUSDPerHour: 3.20},
-	{GpuName: "B200", DisplayName: "B200", VRAMGb: 192, DefaultSystemRAMGb: 256, DefaultDiskGb: 100, PriceUSDPerHour: 4.80},
+	{GpuName: "H100_NVL", DisplayName: "H100 NVL", VRAMGb: 94, DefaultSystemRAMGb: 192, DefaultDiskGb: 100, PriceUSDPerHour: 2.30, Family: fabric.FamilyH100NVL},
+	{GpuName: "H200", DisplayName: "H200", VRAMGb: 141, DefaultSystemRAMGb: 256, DefaultDiskGb: 100, PriceUSDPerHour: 3.20, Family: fabric.FamilyH200SXM},
+	{GpuName: "B200", DisplayName: "B200", VRAMGb: 192, DefaultSystemRAMGb: 256, DefaultDiskGb: 100, PriceUSDPerHour: 4.80, Family: fabric.FamilyB200},
 }
 
 // MaxSKUsPerRequest caps the SKUs the resolver will try when no
@@ -108,6 +118,14 @@ func MatchSKUs(reqs *provisionerv1.ResourceRequirements) []string {
 			continue
 		}
 		if int(reqs.GetMinRamGb()) > 0 && sku.DefaultSystemRAMGb < int(reqs.GetMinRamGb()) {
+			continue
+		}
+		// Fabric PRE-filter. CouldSatisfy, not Satisfies: Vast measures each
+		// offer, so the catalog only drops families that could never carry
+		// the requested fabric and leaves bridge-capable ones searchable.
+		// findOffer pushes the bandwidth filter server-side and the reading
+		// on the picked offer is what actually decides.
+		if !fabric.CouldSatisfy(sku.Family, reqs.GetFabricScope()) {
 			continue
 		}
 		matches = append(matches, sku)
@@ -185,4 +203,27 @@ func isActiveProviderState(state string) bool {
 		return true
 	}
 	return false
+}
+
+// stampFabric fills the fabric fields on a Hardware record from the Vast SKU
+// plus, when we have one, the host's measured bw_nvlink in gigaBYTES/sec.
+//
+// bwNvlink is a pointer so an absent field stays distinguishable from a
+// measured zero; see offerSummary.BwNvlink for why that matters. Pass nil on
+// paths where no reading is available and the declared tier answers instead.
+func stampFabric(hw *provisionerv1.Hardware, gpuName string, bwNvlink *float64) {
+	var family fabric.Family
+	if spec := LookupSKU(gpuName); spec != nil {
+		family = spec.Family
+	}
+	obs := fabric.Observation{Family: family}
+	if bwNvlink != nil {
+		obs.HasMeasurement = true
+		obs.MeasuredGbps = fabric.GbpsFromGBps(*bwNvlink)
+	}
+	res := fabric.Resolve(obs)
+	hw.FabricScope = res.Scope
+	hw.FabricSource = res.Source
+	hw.FabricGbps = res.Gbps
+	hw.FabricTechnology = res.Technology
 }

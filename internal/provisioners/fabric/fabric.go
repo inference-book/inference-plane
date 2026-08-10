@@ -67,6 +67,7 @@ const (
 	FamilyL4         Family = "l4"
 	FamilyA40        Family = "a40"
 	FamilyRTX6000Ada Family = "rtx-6000-ada"
+	FamilyRTX3090    Family = "rtx-3090"
 	FamilyRTX4090    Family = "rtx-4090"
 	FamilyRTX5090    Family = "rtx-5090"
 	FamilyV100SXM    Family = "v100-sxm"
@@ -130,7 +131,10 @@ var catalog = map[Family]Spec{
 	FamilyA100PCIe: {CapabilityOptional, "nvlink", 4800},
 	FamilyH100PCIe: {CapabilityOptional, "nvlink", 4800},
 	FamilyA6000:    {CapabilityOptional, "nvlink", 896},
-	FamilyA5000:    {CapabilityOptional, "nvlink", 896},
+	// The 3090 is the one consumer card with an NVLink connector; the 4090
+	// and 5090 dropped it. Bridge-capable, so a Vast reading can rescue it.
+	FamilyRTX3090: {CapabilityOptional, "nvlink", 896},
+	FamilyA5000:   {CapabilityOptional, "nvlink", 896},
 
 	// No intra-node fabric at all. A zero reading on these is a fact.
 	FamilyA10:        {CapabilityNone, "", 0},
@@ -263,4 +267,46 @@ func Satisfies(got Result, wantScope provisionerv1.FabricScope, minGbps int32) b
 		return false
 	}
 	return minGbps <= 0 || got.Gbps >= minGbps
+}
+
+// CouldSatisfy reports whether a family is worth searching at all for a given
+// requirement. It is the pre-filter for providers that supply a measurement,
+// and it is deliberately more permissive than Satisfies.
+//
+// The distinction matters and is easy to get backwards. On a provider with no
+// readings (RunPod, Lambda) the catalog is the last word, so a bridge-capable
+// card resolves to UNKNOWN and is dropped. On a marketplace that measures
+// (Vast), dropping it at the catalog stage would discard exactly the machines
+// worth having: 3 of 24 "A100 PCIE" offers in the 2026-08-09 probe reported a
+// real 275-300 GB/s link. So the catalog filters only what is IMPOSSIBLE, and
+// the provider query settles what is merely uncertain.
+//
+// Callers must still run Satisfies on the resolved result. CouldSatisfy
+// narrows a search; it never admits anything.
+func CouldSatisfy(family Family, wantScope provisionerv1.FabricScope) bool {
+	if wantScope == provisionerv1.FabricScope_FABRIC_SCOPE_UNSPECIFIED {
+		return true
+	}
+	spec, known := catalog[family]
+	if !known {
+		return false
+	}
+	switch wantScope {
+	case provisionerv1.FabricScope_FABRIC_SCOPE_NONE:
+		return spec.Capability == CapabilityNone
+	case provisionerv1.FabricScope_FABRIC_SCOPE_INTRA_NODE:
+		// Always AND Optional: the second is the one a reading can rescue.
+		return spec.Capability != CapabilityNone
+	default:
+		// INTER_NODE is not derivable from a single instance's card.
+		return false
+	}
+}
+
+// GbpsFromGBps converts a gigaBYTES-per-second reading, which is how vendors
+// and Vast quote NVLink, into the gigaBITS this package and the proto use.
+// Exists as a named function rather than an inline *8 because the two units
+// differ by exactly the factor most likely to pass code review unnoticed.
+func GbpsFromGBps(gbytes float64) int32 {
+	return int32(gbytes * 8)
 }

@@ -164,3 +164,60 @@ func TestCatalogEntriesAreConsistent(t *testing.T) {
 		}
 	}
 }
+
+// CouldSatisfy must be more permissive than Satisfies for exactly one class
+// of candidate: the bridge-capable card a provider reading could rescue.
+// Getting this backwards silently discards the machines the measured tier
+// exists to find.
+func TestCouldSatisfyIsPermissiveWhereSatisfiesIsNot(t *testing.T) {
+	const bridgeCapable = FamilyA100PCIe
+
+	if !CouldSatisfy(bridgeCapable, scopeIntra) {
+		t.Error("bridge-capable card excluded from an intra-node SEARCH; a reading could still rescue it")
+	}
+	if Satisfies(Resolve(Observation{Family: bridgeCapable}), scopeIntra, 0) {
+		t.Error("bridge-capable card ADMITTED without a reading; unknown must fail closed")
+	}
+}
+
+func TestCouldSatisfy(t *testing.T) {
+	tests := []struct {
+		name   string
+		family Family
+		want   provisionerv1.FabricScope
+		ok     bool
+	}{
+		{"no requirement searches everything", FamilyRTX4090, scopeUnspec, true},
+		{"always-linked card for intra", FamilyA100SXM, scopeIntra, true},
+		{"bridge-capable card for intra", FamilyA6000, scopeIntra, true},
+		{"card with no link is impossible for intra", FamilyL40S, scopeIntra, false},
+		{"card with no link is what NONE wants", FamilyL40S, scopeNone, true},
+		{"linked card does not match NONE", FamilyA100SXM, scopeNone, false},
+		{"inter-node is not derivable from one card", FamilyH100SXM, scopeInter, false},
+		{"unknown family is never worth searching", Family("mystery"), scopeIntra, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := CouldSatisfy(tt.family, tt.want); got != tt.ok {
+				t.Errorf("CouldSatisfy(%q, %v) = %v, want %v", tt.family, tt.want, got, tt.ok)
+			}
+		})
+	}
+}
+
+func TestGbpsFromGBps(t *testing.T) {
+	tests := []struct {
+		gbytes float64
+		want   int32
+	}{
+		{300, 2400}, // Vast's A100 SXM4 reading
+		{900, 7200}, // Vast's H100 SXM reading
+		{56, 448},   // RTX A6000 bridge
+		{0, 0},
+	}
+	for _, tt := range tests {
+		if got := GbpsFromGBps(tt.gbytes); got != tt.want {
+			t.Errorf("GbpsFromGBps(%v) = %d, want %d", tt.gbytes, got, tt.want)
+		}
+	}
+}
