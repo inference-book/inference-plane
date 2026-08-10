@@ -494,3 +494,26 @@ func TestBindMounts_DropsVolumeIDOnlyMounts(t *testing.T) {
 		t.Errorf("kept wrong mount: %+v", got[0])
 	}
 }
+
+// The old default silently capped what this path could deploy: a large
+// model's weights take far longer than two minutes to land, so the deploy
+// failed while the pod was healthy and still downloading.
+func TestDefaultHealthMaxMatchesTheImageNativePath(t *testing.T) {
+	e := NewExecutor()
+	if e.healthMax != DefaultHealthMax {
+		t.Errorf("healthMax = %v, want DefaultHealthMax", e.healthMax)
+	}
+	if DefaultHealthMax != 10*time.Minute {
+		t.Errorf("DefaultHealthMax = %v, want 10m to match the image-native engine-ready default", DefaultHealthMax)
+	}
+}
+
+func TestWithHealthPollOverridesTheDefault(t *testing.T) {
+	e := NewExecutor(WithHealthPoll(time.Second, 45*time.Minute))
+	if e.healthMax != 45*time.Minute {
+		t.Errorf("healthMax = %v, want 45m", e.healthMax)
+	}
+	if e.healthEvery != time.Second {
+		t.Errorf("healthEvery = %v, want 1s", e.healthEvery)
+	}
+}

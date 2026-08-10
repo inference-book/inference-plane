@@ -92,7 +92,8 @@ flatten to underscore (so `deployment.provider` → `IPLANE_DEPLOYMENT_PROVIDER`
 | `IPLANE_SERVICE_URL`               | `iplane instance` / `iplane deployment` remote transport (e.g., `http://localhost:8080`); in-process state file when unset |
 | `IPLANE_RUNPOD_DEBUG`              | `1` logs RunPod HTTP request/response bytes (sans Authorization) to stderr |
 | `IPLANE_RUNPOD_PHASE_TRACE`        | `1` prints one TSV line per engine-readiness tick with the raw cold-start signals (`elapsed`, `phase`, `machine`, `createdAt`, `lastStartedAt`, `health`) and keeps probing pod status past engine-init. Diagnostic for issue 208; observability-only, never changes phase emission or readiness |
-| `IPLANE_RUNPOD_ENGINE_READY_TIMEOUT` | Go duration (e.g. `20m`) overriding the RunPod engine-`/health` wait (default 10m). Extend for large images / slow cold pulls. Read at `iplane serve` startup |
+| `IPLANE_ENGINE_READY_TIMEOUT`       | Go duration overriding how long ANY deploy path waits for the engine to answer `/health`. Applies to the sshdocker (Vast, Lambda) path as well as RunPod. Default 10m on both |
+| `IPLANE_RUNPOD_ENGINE_READY_TIMEOUT` | Same, scoped to RunPod, and wins over the generic one when both are set. Kept for operators who already export it |
 | `IPLANE_SKIP_MODEL_VALIDATION`     | `1` bypasses the HF pre-flight check on `CreateDeployment` (offline / firewalled / non-HF models) |
 | `IPLANE_OTEL_ENDPOINT`             | OTLP URL **propagated to the engine pod** as `OTEL_EXPORTER_OTLP_ENDPOINT`. Either a hosted OTLP URL or `$(iplane telemetry url)` for the cloudflared tunnel. |
 | `IPLANE_OTEL_HEADERS`              | Comma-separated `KEY=VALUE` auth headers paired with `IPLANE_OTEL_ENDPOINT`. Required for hosted providers; unused for the tunnel. |
