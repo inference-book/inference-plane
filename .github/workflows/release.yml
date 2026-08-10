@@ -1,0 +1,100 @@
+# Publishes linux binaries for a tagged release.
+#
+# This exists to serve the engine agent. The agent runs inside an engine
+# container on a rented box and gets there by being fetched from a URL, so
+# something has to publish a linux binary at a stable, version-pinned
+# address. That requirement is what makes release artifacts load-bearing
+# rather than a nicety.
+#
+# Deliberately narrow. It builds and uploads; it does not test, lint, or
+# gate. This repo has no CI workflow today and adding one is a separate
+# decision with its own trade-offs, so this does not quietly become the
+# place where that happens.
+name: release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  # Manual runs re-upload artifacts for an existing tag, which is the
+  # recovery path when a publish half-fails. Re-running against the same
+  # tag overwrites the assets rather than creating a second release.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and upload assets for (vX.Y.Z)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      # Resolve and validate the version BEFORE it is used as a checkout ref
+      # or reaches a shell. workflow_dispatch inputs are attacker-controlled
+      # in the general case, and this one flows into `ref:` and into `make`,
+      # so it is pinned to a strict tag shape first. Interpolation happens
+      # through env rather than inline, so the value is never spliced into
+      # the script text.
+      - name: Resolve version
+        id: v
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${INPUT_TAG:-$REF_NAME}"
+          if ! printf '%s' "$version" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$'; then
+            echo "refusing to build '$version': not a vX.Y.Z tag" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          # Safe to interpolate: validated against the tag pattern above.
+          ref: ${{ steps.v.outputs.version }}
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build release binaries
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+        run: make dist-checksums VERSION="$VERSION"
+
+      - name: Verify the version stamp
+        # A binary that reports the wrong version sends agents to the wrong
+        # artifact, and that failure is invisible until a pod tries to fetch
+        # one. Checking here costs a second.
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          set -euo pipefail
+          got="$(./dist/iplane-linux-amd64 --version 2>/dev/null | tr -d '\n' || true)"
+          echo "stamped: $got"
+          case "$got" in
+            *"$VERSION"*) ;;
+            *) echo "version stamp mismatch: wanted $VERSION, got '$got'" >&2; exit 1 ;;
+          esac
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          set -euo pipefail
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            gh release upload "$VERSION" \
+              dist/iplane-linux-amd64 dist/iplane-linux-arm64 dist/checksums.txt --clobber
+          else
+            gh release create "$VERSION" \
+              --title "$VERSION" \
+              --generate-notes \
+              dist/iplane-linux-amd64 dist/iplane-linux-arm64 dist/checksums.txt
+          fi

@@ -34,6 +34,9 @@ go.work.sum
 
 # Local build artifacts
 /bin/
+# Release artifacts built by `make dist`; published to GitHub Releases,
+# never committed.
+/dist/
 /dist/
 /tmp/
 
