@@ -93,6 +93,10 @@ func newMockEngineMux(be *backends.MockBackend, label string) *http.ServeMux {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		if req.Stream {
+			streamChatCompletion(w, &resp)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(resp)
 	}

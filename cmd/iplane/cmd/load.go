@@ -394,6 +394,13 @@ type loadStats struct {
 	skipped   int64
 	tokens    int64
 	latencies []time.Duration
+
+	// ttfts holds only the turns where time-to-first-token was actually
+	// measured, which is the streaming ones. Kept separate from latencies
+	// rather than parallel to it, because a run may mix measured and
+	// unmeasured turns and padding the gaps with zeros would drag every
+	// percentile toward a number no request experienced.
+	ttfts []time.Duration
 }
 
 func (s *loadStats) recordSuccess(d time.Duration, tokens int64) {
@@ -401,6 +408,15 @@ func (s *loadStats) recordSuccess(d time.Duration, tokens int64) {
 	s.successes++
 	s.latencies = append(s.latencies, d)
 	s.tokens += tokens
+	s.mu.Unlock()
+}
+
+// recordTTFT adds one measured time-to-first-token. Called only when the
+// reading exists, so len(ttfts) is the sample count rather than the request
+// count and the two are allowed to differ.
+func (s *loadStats) recordTTFT(d time.Duration) {
+	s.mu.Lock()
+	s.ttfts = append(s.ttfts, d)
 	s.mu.Unlock()
 }
 
@@ -422,6 +438,14 @@ type loadSummary struct {
 	LatencyP50Ms int64   `json:"latency_p50_ms"`
 	LatencyP95Ms int64   `json:"latency_p95_ms"`
 	LatencyP99Ms int64   `json:"latency_p99_ms"`
+
+	// TTFT is reported only when it was measured, which needs --stream.
+	// TTFTSamples is carried so a reader can tell "fast" from "barely
+	// sampled" without going back to the run's flags.
+	TTFTSamples int64 `json:"ttft_samples"`
+	TTFTP50Ms   int64 `json:"ttft_p50_ms"`
+	TTFTP95Ms   int64 `json:"ttft_p95_ms"`
+	TTFTP99Ms   int64 `json:"ttft_p99_ms"`
 }
 
 func (s *loadStats) summary(elapsed time.Duration, targetRPS float64) loadSummary {
@@ -453,6 +477,20 @@ func (s *loadStats) summary(elapsed time.Duration, targetRPS float64) loadSummar
 		sum.LatencyP95Ms = p(0.95).Milliseconds()
 		sum.LatencyP99Ms = p(0.99).Milliseconds()
 	}
+	if len(s.ttfts) > 0 {
+		sort.Slice(s.ttfts, func(i, j int) bool { return s.ttfts[i] < s.ttfts[j] })
+		p := func(q float64) time.Duration {
+			i := int(float64(len(s.ttfts)) * q)
+			if i >= len(s.ttfts) {
+				i = len(s.ttfts) - 1
+			}
+			return s.ttfts[i]
+		}
+		sum.TTFTSamples = int64(len(s.ttfts))
+		sum.TTFTP50Ms = p(0.50).Milliseconds()
+		sum.TTFTP95Ms = p(0.95).Milliseconds()
+		sum.TTFTP99Ms = p(0.99).Milliseconds()
+	}
 	return sum
 }
 
@@ -480,5 +518,15 @@ func (s *loadStats) print(elapsed time.Duration, targetRPS float64, format strin
 		fmt.Fprintf(os.Stderr, "latency p50           : %dms\n", sum.LatencyP50Ms)
 		fmt.Fprintf(os.Stderr, "latency p95           : %dms\n", sum.LatencyP95Ms)
 		fmt.Fprintf(os.Stderr, "latency p99           : %dms\n", sum.LatencyP99Ms)
+	}
+	// Sample count is printed alongside, because TTFT is only measurable on
+	// the streaming path and a reader comparing two runs needs to see that
+	// one of them sampled nothing rather than being mysteriously fast.
+	if sum.TTFTSamples > 0 {
+		fmt.Fprintf(os.Stderr, "ttft p50 (n=%-8d): %dms\n", sum.TTFTSamples, sum.TTFTP50Ms)
+		fmt.Fprintf(os.Stderr, "ttft p95              : %dms\n", sum.TTFTP95Ms)
+		fmt.Fprintf(os.Stderr, "ttft p99              : %dms\n", sum.TTFTP99Ms)
+	} else if sum.Successes > 0 {
+		fmt.Fprintf(os.Stderr, "ttft                  : not measured (needs --stream)\n")
 	}
 }
