@@ -889,3 +889,197 @@ var DeploymentService_ServiceDesc = grpc.ServiceDesc{
 	},
 	Metadata: "provisioner/v1/service.proto",
 }
+
+const (
+	EngineRegistryService_RegisterEngine_FullMethodName = "/provisioner.v1.EngineRegistryService/RegisterEngine"
+	EngineRegistryService_ListEngines_FullMethodName    = "/provisioner.v1.EngineRegistryService/ListEngines"
+)
+
+// EngineRegistryServiceClient is the client API for EngineRegistryService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// EngineRegistryService is the push side of fleet tracking: engines announce
+// themselves and keep announcing, rather than the control plane polling to
+// find out what exists.
+//
+// Separate from DeploymentService on purpose. The caller is an engine rather
+// than an operator, it may be reporting an engine nobody provisioned, and it
+// sits outside the trust boundary the operator API assumes.
+//
+// **This does not replace the /health poller.** The poller drives quarantine,
+// and quarantine is router eligibility, which is data-path correctness; the
+// design doc's guardrail keeps pull carrying anything the data path rides on.
+// The registry answers a different question: what is this engine, did its
+// group assemble, and is it still there. See
+// docs/design/0006-ch10-provider-reality-and-control-channel.md Part 4.
+type EngineRegistryServiceClient interface {
+	// RegisterEngine is both the first announcement and every renewal after
+	// it. One method, because the distinction is not useful to the caller and
+	// collapsing them makes the agent a retry loop with no state machine: an
+	// engine that crashes and returns simply registers again.
+	//
+	// Idempotent on Engine.id. The response carries the interval the control
+	// plane wants the next renewal by, so detection latency is a property of
+	// the control plane's configuration rather than of what each agent
+	// happened to hardcode.
+	RegisterEngine(ctx context.Context, in *RegisterEngineRequest, opts ...grpc.CallOption) (*RegisterEngineResponse, error)
+	// ListEngines returns every engine the registry knows, including those the
+	// sweeper has marked LOST. Lost members are retained rather than deleted so
+	// an operator can see what went away; this is the read surface the fleet
+	// verbs (issue 205) render.
+	ListEngines(ctx context.Context, in *ListEnginesRequest, opts ...grpc.CallOption) (*ListEnginesResponse, error)
+}
+
+type engineRegistryServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewEngineRegistryServiceClient(cc grpc.ClientConnInterface) EngineRegistryServiceClient {
+	return &engineRegistryServiceClient{cc}
+}
+
+func (c *engineRegistryServiceClient) RegisterEngine(ctx context.Context, in *RegisterEngineRequest, opts ...grpc.CallOption) (*RegisterEngineResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RegisterEngineResponse)
+	err := c.cc.Invoke(ctx, EngineRegistryService_RegisterEngine_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *engineRegistryServiceClient) ListEngines(ctx context.Context, in *ListEnginesRequest, opts ...grpc.CallOption) (*ListEnginesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListEnginesResponse)
+	err := c.cc.Invoke(ctx, EngineRegistryService_ListEngines_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// EngineRegistryServiceServer is the server API for EngineRegistryService service.
+// All implementations should embed UnimplementedEngineRegistryServiceServer
+// for forward compatibility.
+//
+// EngineRegistryService is the push side of fleet tracking: engines announce
+// themselves and keep announcing, rather than the control plane polling to
+// find out what exists.
+//
+// Separate from DeploymentService on purpose. The caller is an engine rather
+// than an operator, it may be reporting an engine nobody provisioned, and it
+// sits outside the trust boundary the operator API assumes.
+//
+// **This does not replace the /health poller.** The poller drives quarantine,
+// and quarantine is router eligibility, which is data-path correctness; the
+// design doc's guardrail keeps pull carrying anything the data path rides on.
+// The registry answers a different question: what is this engine, did its
+// group assemble, and is it still there. See
+// docs/design/0006-ch10-provider-reality-and-control-channel.md Part 4.
+type EngineRegistryServiceServer interface {
+	// RegisterEngine is both the first announcement and every renewal after
+	// it. One method, because the distinction is not useful to the caller and
+	// collapsing them makes the agent a retry loop with no state machine: an
+	// engine that crashes and returns simply registers again.
+	//
+	// Idempotent on Engine.id. The response carries the interval the control
+	// plane wants the next renewal by, so detection latency is a property of
+	// the control plane's configuration rather than of what each agent
+	// happened to hardcode.
+	RegisterEngine(context.Context, *RegisterEngineRequest) (*RegisterEngineResponse, error)
+	// ListEngines returns every engine the registry knows, including those the
+	// sweeper has marked LOST. Lost members are retained rather than deleted so
+	// an operator can see what went away; this is the read surface the fleet
+	// verbs (issue 205) render.
+	ListEngines(context.Context, *ListEnginesRequest) (*ListEnginesResponse, error)
+}
+
+// UnimplementedEngineRegistryServiceServer should be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedEngineRegistryServiceServer struct{}
+
+func (UnimplementedEngineRegistryServiceServer) RegisterEngine(context.Context, *RegisterEngineRequest) (*RegisterEngineResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RegisterEngine not implemented")
+}
+func (UnimplementedEngineRegistryServiceServer) ListEngines(context.Context, *ListEnginesRequest) (*ListEnginesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListEngines not implemented")
+}
+func (UnimplementedEngineRegistryServiceServer) testEmbeddedByValue() {}
+
+// UnsafeEngineRegistryServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to EngineRegistryServiceServer will
+// result in compilation errors.
+type UnsafeEngineRegistryServiceServer interface {
+	mustEmbedUnimplementedEngineRegistryServiceServer()
+}
+
+func RegisterEngineRegistryServiceServer(s grpc.ServiceRegistrar, srv EngineRegistryServiceServer) {
+	// If the following call panics, it indicates UnimplementedEngineRegistryServiceServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&EngineRegistryService_ServiceDesc, srv)
+}
+
+func _EngineRegistryService_RegisterEngine_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RegisterEngineRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(EngineRegistryServiceServer).RegisterEngine(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: EngineRegistryService_RegisterEngine_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(EngineRegistryServiceServer).RegisterEngine(ctx, req.(*RegisterEngineRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _EngineRegistryService_ListEngines_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListEnginesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(EngineRegistryServiceServer).ListEngines(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: EngineRegistryService_ListEngines_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(EngineRegistryServiceServer).ListEngines(ctx, req.(*ListEnginesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// EngineRegistryService_ServiceDesc is the grpc.ServiceDesc for EngineRegistryService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var EngineRegistryService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "provisioner.v1.EngineRegistryService",
+	HandlerType: (*EngineRegistryServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "RegisterEngine",
+			Handler:    _EngineRegistryService_RegisterEngine_Handler,
+		},
+		{
+			MethodName: "ListEngines",
+			Handler:    _EngineRegistryService_ListEngines_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "provisioner/v1/service.proto",
+}

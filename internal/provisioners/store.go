@@ -24,6 +24,16 @@ type State struct {
 	// volumes, so the cold path is unchanged. A separate namespace from
 	// Instances/Deployments (a volume id is the provider's handle).
 	Volumes map[string]*provisionerv1.Volume
+	// Engines is the push-side fleet registry: data planes that announced
+	// themselves, keyed by engine id (issue 204). A separate namespace from
+	// Deployments on purpose -- an engine that registers need not have been
+	// provisioned by us, and hanging the record off Deployment would close
+	// the door on tracking operator-run engines. Deployment linkage, when it
+	// exists, is Engine.deployment_id pointing the other way.
+	//
+	// Additive and empty by default: a fleet where nothing registers carries
+	// no engines and behaves exactly as it did before.
+	Engines map[string]*provisionerv1.Engine
 }
 
 // NewState returns an empty State with the maps initialized. Backends
@@ -33,6 +43,7 @@ func NewState() *State {
 		Instances:   map[string]*provisionerv1.Instance{},
 		Deployments: map[string]*provisionerv1.Deployment{},
 		Volumes:     map[string]*provisionerv1.Volume{},
+		Engines:     map[string]*provisionerv1.Engine{},
 	}
 }
 

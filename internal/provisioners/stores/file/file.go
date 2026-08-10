@@ -106,6 +106,7 @@ type envelope struct {
 	Instances     map[string]*provisionerv1.Instance
 	Deployments   map[string]*provisionerv1.Deployment
 	Volumes       map[string]*provisionerv1.Volume
+	Engines       map[string]*provisionerv1.Engine
 }
 
 // Store owns the file path and the flock. One Store per CLI invocation
@@ -229,6 +230,7 @@ func (s *Store) Update(fn func(*provisioners.State) error) error {
 	env.Instances = state.Instances
 	env.Deployments = state.Deployments
 	env.Volumes = state.Volumes
+	env.Engines = state.Engines
 	return s.writeToDisk(env)
 }
 
@@ -241,6 +243,7 @@ func envelopeToState(env *envelope) *provisioners.State {
 		Instances:   env.Instances,
 		Deployments: env.Deployments,
 		Volumes:     env.Volumes,
+		Engines:     env.Engines,
 	}
 }
 
@@ -417,6 +420,7 @@ func (s *Store) readFromDisk() (*envelope, error) {
 		Instances     map[string]json.RawMessage `json:"instances"`
 		Deployments   map[string]json.RawMessage `json:"deployments"`
 		Volumes       map[string]json.RawMessage `json:"volumes"`
+		Engines       map[string]json.RawMessage `json:"engines"`
 	}
 	if err := json.Unmarshal(raw, &env); err != nil {
 		return nil, fmt.Errorf("parse state file %q: %w", s.path, err)
@@ -428,6 +432,7 @@ func (s *Store) readFromDisk() (*envelope, error) {
 		Instances:     make(map[string]*provisionerv1.Instance, len(env.Instances)),
 		Deployments:   make(map[string]*provisionerv1.Deployment, len(env.Deployments)),
 		Volumes:       make(map[string]*provisionerv1.Volume, len(env.Volumes)),
+		Engines:       make(map[string]*provisionerv1.Engine, len(env.Engines)),
 	}
 	if file.OperatorID == "" {
 		file.OperatorID = s.operatorID
@@ -453,6 +458,13 @@ func (s *Store) readFromDisk() (*envelope, error) {
 			return nil, fmt.Errorf("parse volume %q in state file: %w", id, err)
 		}
 		file.Volumes[id] = vol
+	}
+	for id, engRaw := range env.Engines {
+		eng := &provisionerv1.Engine{}
+		if err := unmarshal.Unmarshal(engRaw, eng); err != nil {
+			return nil, fmt.Errorf("parse engine %q in state file: %w", id, err)
+		}
+		file.Engines[id] = eng
 	}
 	return file, nil
 }
@@ -495,6 +507,14 @@ func (s *Store) writeToDisk(file *envelope) error {
 		}
 		volumesJSON[id] = b
 	}
+	enginesJSON := make(map[string]json.RawMessage, len(file.Engines))
+	for id, eng := range file.Engines {
+		b, err := marshal.Marshal(eng)
+		if err != nil {
+			return fmt.Errorf("marshal engine %q: %w", id, err)
+		}
+		enginesJSON[id] = b
+	}
 	envelope := struct {
 		SchemaVersion string                     `json:"schema_version"`
 		Backend       string                     `json:"backend"`
@@ -502,6 +522,7 @@ func (s *Store) writeToDisk(file *envelope) error {
 		Instances     map[string]json.RawMessage `json:"instances"`
 		Deployments   map[string]json.RawMessage `json:"deployments"`
 		Volumes       map[string]json.RawMessage `json:"volumes"`
+		Engines       map[string]json.RawMessage `json:"engines"`
 	}{
 		SchemaVersion: file.SchemaVersion,
 		Backend:       file.Backend,
@@ -509,6 +530,7 @@ func (s *Store) writeToDisk(file *envelope) error {
 		Instances:     instancesJSON,
 		Deployments:   deploymentsJSON,
 		Volumes:       volumesJSON,
+		Engines:       enginesJSON,
 	}
 	out, err := json.MarshalIndent(envelope, "", "  ")
 	if err != nil {
