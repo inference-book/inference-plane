@@ -8,28 +8,38 @@ import (
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
 )
 
-// fabricAliases maps every accepted --fabric token onto a FabricScope.
+// fabricScopes is the complete set of accepted --fabric values. One
+// vocabulary, deliberately: the property, never the vendor's product name.
 //
-// The canonical vocabulary is the property one (none / intra-node /
-// inter-node) because that is what the proto carries and what survives a
-// non-NVIDIA fleet. The vendor tokens are kept as aliases rather than dropped
-// because operators, vendor docs, and the book all say "NVLink" and "RDMA",
-// and a CLI that refuses the words its users know is just friction. Sugar at
-// the human edge, properties in the contract.
-var fabricAliases = map[string]provisionerv1.FabricScope{
+// An earlier version also accepted "nvlink", "rdma" and friends as aliases,
+// on the theory that operators say those words and a CLI should meet them
+// there. Dropped, for a reason worth recording. The alias promises a
+// specificity we are structurally unable to honour: --fabric nvlink on a
+// mixed fleet would return an AMD xGMI host, because the token can only
+// widen to "any intra-node fabric". Narrowing it properly would mean
+// branching on Hardware.fabric_technology, which the proto forbids as the
+// thing that turns that string back into a vendor enum. Accepting a word
+// whose obvious meaning we cannot implement is worse than refusing it.
+//
+// vendorHints below keeps the words useful without accepting them as input.
+var fabricScopes = map[string]provisionerv1.FabricScope{
 	"none":       provisionerv1.FabricScope_FABRIC_SCOPE_NONE,
 	"intra-node": provisionerv1.FabricScope_FABRIC_SCOPE_INTRA_NODE,
 	"inter-node": provisionerv1.FabricScope_FABRIC_SCOPE_INTER_NODE,
+}
 
-	// Vendor aliases. Deliberately many-to-one: nvlink, nvswitch and xgmi are
-	// different technologies that answer the same question.
-	"nvlink":     provisionerv1.FabricScope_FABRIC_SCOPE_INTRA_NODE,
-	"nvswitch":   provisionerv1.FabricScope_FABRIC_SCOPE_INTRA_NODE,
-	"xgmi":       provisionerv1.FabricScope_FABRIC_SCOPE_INTRA_NODE,
-	"rdma":       provisionerv1.FabricScope_FABRIC_SCOPE_INTER_NODE,
-	"infiniband": provisionerv1.FabricScope_FABRIC_SCOPE_INTER_NODE,
-	"roce":       provisionerv1.FabricScope_FABRIC_SCOPE_INTER_NODE,
-	"efa":        provisionerv1.FabricScope_FABRIC_SCOPE_INTER_NODE,
+// vendorHints maps the vendor technology names an operator is likely to
+// reach for onto the scope they belong to. Used ONLY to turn a rejection
+// into a redirect, never to resolve a value: typing a brand name gets you a
+// one-line correction naming the right token, not a silent reinterpretation.
+var vendorHints = map[string]string{
+	"nvlink":     "intra-node",
+	"nvswitch":   "intra-node",
+	"xgmi":       "intra-node",
+	"rdma":       "inter-node",
+	"infiniband": "inter-node",
+	"roce":       "inter-node",
+	"efa":        "inter-node",
 }
 
 // parseFabricScope resolves a --fabric value. An empty string means the
@@ -40,22 +50,28 @@ func parseFabricScope(v string) (provisionerv1.FabricScope, error) {
 	if token == "" {
 		return provisionerv1.FabricScope_FABRIC_SCOPE_UNSPECIFIED, nil
 	}
-	if scope, ok := fabricAliases[token]; ok {
+	if scope, ok := fabricScopes[token]; ok {
 		return scope, nil
 	}
-	known := make([]string, 0, len(fabricAliases))
-	for k := range fabricAliases {
+	unspec := provisionerv1.FabricScope_FABRIC_SCOPE_UNSPECIFIED
+	if scope, ok := vendorHints[token]; ok {
+		return unspec, fmt.Errorf(
+			"--fabric %q: %s is a vendor technology, not a fabric scope; use --fabric %s "+
+				"(iplane selects on where a fabric reaches, so one scope covers every vendor's)",
+			v, token, scope)
+	}
+	known := make([]string, 0, len(fabricScopes))
+	for k := range fabricScopes {
 		known = append(known, k)
 	}
 	sort.Strings(known)
-	return provisionerv1.FabricScope_FABRIC_SCOPE_UNSPECIFIED,
-		fmt.Errorf("unknown --fabric %q (known: %s)", v, strings.Join(known, ", "))
+	return unspec, fmt.Errorf("unknown --fabric %q (known: %s)", v, strings.Join(known, ", "))
 }
 
 // fabricFlagUsage is the shared help text. Kept in one place so the two
 // commands that take the flag cannot drift apart.
-const fabricFlagUsage = `required GPU interconnect: none | intra-node | inter-node ` +
-	`(aliases: nvlink, nvswitch, xgmi -> intra-node; rdma, infiniband, roce, efa -> inter-node). ` +
+const fabricFlagUsage = `required GPU interconnect: none | intra-node | inter-node. ` +
+	`Intra-node is what NVLink, NVSwitch and AMD xGMI provide; inter-node is InfiniBand, RoCE or EFA. ` +
 	`Needs --gpu-count >= 2. Candidates whose fabric the provider does not report are rejected, ` +
 	`not assumed; use --sku to override`
 

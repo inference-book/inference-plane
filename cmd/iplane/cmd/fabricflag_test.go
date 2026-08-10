@@ -17,16 +17,7 @@ func TestParseFabricScope(t *testing.T) {
 		{"intra-node", provisionerv1.FabricScope_FABRIC_SCOPE_INTRA_NODE},
 		{"inter-node", provisionerv1.FabricScope_FABRIC_SCOPE_INTER_NODE},
 
-		// Vendor aliases collapse onto the property, which is the point.
-		{"nvlink", provisionerv1.FabricScope_FABRIC_SCOPE_INTRA_NODE},
-		{"nvswitch", provisionerv1.FabricScope_FABRIC_SCOPE_INTRA_NODE},
-		{"xgmi", provisionerv1.FabricScope_FABRIC_SCOPE_INTRA_NODE},
-		{"rdma", provisionerv1.FabricScope_FABRIC_SCOPE_INTER_NODE},
-		{"infiniband", provisionerv1.FabricScope_FABRIC_SCOPE_INTER_NODE},
-		{"efa", provisionerv1.FabricScope_FABRIC_SCOPE_INTER_NODE},
-
-		{"  NVLink  ", provisionerv1.FabricScope_FABRIC_SCOPE_INTRA_NODE},
-		{"INTRA-NODE", provisionerv1.FabricScope_FABRIC_SCOPE_INTRA_NODE},
+		{"  INTRA-NODE  ", provisionerv1.FabricScope_FABRIC_SCOPE_INTRA_NODE},
 	}
 	for _, tt := range tests {
 		t.Run(tt.in, func(t *testing.T) {
@@ -50,6 +41,52 @@ func TestParseFabricScopeRejectsUnknown(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "known:") {
 			t.Errorf("parseFabricScope(%q) error %q should list the accepted values", in, err)
+		}
+	}
+}
+
+// A vendor name must be REFUSED, not quietly widened. --fabric nvlink
+// resolving to intra-node would hand a mixed fleet an AMD xGMI host under a
+// token that reads as a promise of NVLink specifically.
+func TestParseFabricScopeRefusesVendorNames(t *testing.T) {
+	for _, in := range []string{"nvlink", "nvswitch", "xgmi", "rdma", "infiniband", "roce", "efa"} {
+		got, err := parseFabricScope(in)
+		if err == nil {
+			t.Errorf("parseFabricScope(%q) = %v, want a refusal; vendor names are not scopes", in, got)
+			continue
+		}
+		if got != provisionerv1.FabricScope_FABRIC_SCOPE_UNSPECIFIED {
+			t.Errorf("parseFabricScope(%q) returned scope %v alongside its error", in, got)
+		}
+	}
+}
+
+// The refusal has to teach the right word, or it is just friction. Operators
+// and the chapter both reach for "NVLink" first.
+func TestVendorNameErrorNamesTheRightToken(t *testing.T) {
+	tests := map[string]string{
+		"nvlink":     "intra-node",
+		"xgmi":       "intra-node",
+		"rdma":       "inter-node",
+		"infiniband": "inter-node",
+	}
+	for in, want := range tests {
+		_, err := parseFabricScope(in)
+		if err == nil {
+			t.Fatalf("parseFabricScope(%q) did not error", in)
+		}
+		if !strings.Contains(err.Error(), "--fabric "+want) {
+			t.Errorf("parseFabricScope(%q) error %q should point at --fabric %s", in, err, want)
+		}
+	}
+}
+
+// Every vendor hint must name a real scope, or the redirect sends operators
+// at a token the parser then rejects.
+func TestVendorHintsPointAtRealScopes(t *testing.T) {
+	for name, scope := range vendorHints {
+		if _, ok := fabricScopes[scope]; !ok {
+			t.Errorf("hint %q redirects to %q, which is not an accepted --fabric value", name, scope)
 		}
 	}
 }
