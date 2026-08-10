@@ -1,4 +1,4 @@
-.PHONY: build up down infra-up infra-down rebuild pull smoke load logs dashboards clean check-pins help install examples
+.PHONY: build up down infra-up infra-down rebuild pull smoke load logs dashboards clean check-pins help install examples dist dist-checksums dist-clean
 
 PKG    := ./cmd/iplane
 
@@ -14,6 +14,38 @@ install:
 build: ## Compile the iplane binary into bin/
 	@mkdir -p bin
 	go build -o bin/iplane ./cmd/iplane
+
+# ── Release artifacts ───────────────────────────────────────────────────
+# VERSION is stamped into the binary at link time. It defaults to the
+# git describe of the working tree so a local `make dist` produces
+# something identifiable, and the release workflow overrides it with the
+# tag being built.
+VERSION    ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+LDFLAGS    := -s -w -X github.com/inference-book/inference-plane/internal/version.Version=$(VERSION)
+DIST_PLATFORMS := linux/amd64 linux/arm64
+
+# Linux binaries exist for one reason: the engine agent runs inside an
+# engine container on a rented box, and it gets there by being fetched
+# from a published URL. A macOS build cannot be copied onto a linux pod,
+# so cross-compilation is the delivery path's prerequisite rather than a
+# convenience. CGO is off so the result is static and runs on whatever
+# libc the engine image happens to ship.
+dist: ## Cross-compile release binaries into dist/
+	@mkdir -p dist
+	@for p in $(DIST_PLATFORMS); do \
+		os=$${p%/*}; arch=$${p#*/}; \
+		echo "  building dist/iplane-$$os-$$arch ($(VERSION))"; \
+		CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch \
+			go build -trimpath -ldflags "$(LDFLAGS)" \
+			-o dist/iplane-$$os-$$arch $(PKG) || exit 1; \
+	done
+
+dist-checksums: dist ## Cross-compile and write dist/checksums.txt
+	@cd dist && shasum -a 256 iplane-* > checksums.txt
+	@echo "  wrote dist/checksums.txt"
+
+dist-clean: ## Remove dist/
+	rm -rf dist
 
 # ── Stack lifecycle ─────────────────────────────────────────────────────
 # Two paths share one compose file via profiles:

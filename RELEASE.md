@@ -43,12 +43,27 @@ Cut the release.
 1. Verify `pinned-versions.env` on the release branch carries the
    correct `CP_VERSION` / `CP_BRANCH`.
 2. Tag the release branch tip: `git tag vX.Y.0 release/vX.Y`.
-3. Push the tag: `git push origin vX.Y.0`.
+3. Push the tag: `git push origin vX.Y.0`. This fires
+   `.github/workflows/release.yml`, which cross-compiles
+   `iplane-linux-{amd64,arm64}`, verifies the version stamp, and attaches
+   the binaries plus `checksums.txt` to a GitHub Release.
 4. Stop forward-merging `main` into the now-cut release branch. The
    branch is a maintained errata channel, not a moving snapshot, from
    this point on.
 5. The next chapter's release branch (`release/v(X.Y+1)`) is cut from
    `main` at this point and starts moving with the next chapter's work.
+
+**Why the release carries binaries.** The engine agent runs inside an
+engine container on a rented box and gets there by being fetched from a
+URL, so a published linux binary at a version-pinned address is a
+prerequisite for that path rather than a convenience. `make dist`
+produces the same artifacts locally; a build with no tag stamps `dev`,
+and the delivery path reads `dev` as "no published artifact to fetch"
+instead of guessing at a version that was never cut.
+
+A publish that half-fails is recovered by re-running the workflow from
+the Actions tab against the same tag: it overwrites the assets rather
+than creating a second release. Never re-tag.
 
 ## Revisiting a finished chapter
 

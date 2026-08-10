@@ -17,6 +17,7 @@ Reference implementation of the control plane for *Inference Is All You Need* (A
 | `make load`        | Synthetic traffic generator (works against mock or vllm) |
 | `make test`        | Unit tests (no live stack needed)                      |
 | `make build`       | Compile `bin/iplane`                                   |
+| `make dist`        | Cross-compile `dist/iplane-linux-{amd64,arm64}` with the version stamped in (what the engine agent is fetched from) |
 | `make check-pins`  | Verify `pinned-versions.env` matches book's `.tex`     |
 | `make check-names` | Verify generated names match `metric-names.yaml`       |
 | `make check-constraints` | Verify architectural constraints (CP/DP-1, ...)  |
