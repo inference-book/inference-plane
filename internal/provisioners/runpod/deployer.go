@@ -13,6 +13,7 @@ import (
 	skhttp "github.com/panyam/servicekit/http"
 
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
+	"github.com/inference-book/inference-plane/internal/engineagent"
 	"github.com/inference-book/inference-plane/internal/provisioners"
 	"github.com/inference-book/inference-plane/internal/sshkeys"
 )
@@ -222,6 +223,13 @@ func buildEnginePodRequest(dep *provisionerv1.Deployment, inst *provisionerv1.In
 	}
 	cmd = append(cmd, dep.GetEngineArgs()...)
 
+	// Registration agent, when the operator has told us how to start the
+	// engine. Without engine_entrypoint there is nothing to exec after the
+	// wrapper runs, and guessing would break the deploy to make a fleet
+	// view nicer, so the deployment goes out unwrapped and liveness stays
+	// with the /health poller. See Deployment.engine_entrypoint.
+	entrypoint := agentEntrypoint(dep, env)
+
 	// GPU count: from the resolved instance if present, else the
 	// requirements, else 1.
 	gpuCount := int(inst.GetHardware().GetGpuCount())
@@ -284,11 +292,46 @@ func buildEnginePodRequest(dep *provisionerv1.Deployment, inst *provisionerv1.In
 		// /tcp but only added when the operator opts in via debug_shell
 		// -- otherwise we'd allocate a publicIp the workload doesn't
 		// need and lose the cheapest community capacity in the catalog.
-		Ports:           enginePodPorts(enginePort, dep.GetDebugShell()),
-		SupportPublicIP: dep.GetDebugShell(),
-		Env:             env,
-		DockerStartCmd:  cmd,
+		Ports:            enginePodPorts(enginePort, dep.GetDebugShell()),
+		SupportPublicIP:  dep.GetDebugShell(),
+		Env:              env,
+		DockerStartCmd:   cmd,
+		DockerEntrypoint: entrypoint,
 	}, nil
+}
+
+// agentEntrypoint returns the DockerEntrypoint override that runs the
+// registration agent alongside the engine, or nil to leave the image's own
+// entrypoint in place.
+//
+// nil is the common answer and the safe one. Three things all have to be
+// true before a deployment's entrypoint is touched: the deploy path stamped
+// an agent identity (so there is something to register as), the operator
+// supplied engine_entrypoint (so the wrapper has an engine to exec), and a
+// binary URL resolves (so there is an agent to fetch). Any missing and the
+// deployment goes out exactly as it did before this existed.
+//
+// The trailing argv element is not decoration. Docker runs
+// ENTRYPOINT + CMD as one argv, so `sh -c <script>` followed by the engine
+// args would bind the first arg to $0 and silently drop it from "$@". The
+// extra token takes the $0 slot so the engine sees every argument.
+func agentEntrypoint(dep *provisionerv1.Deployment, env map[string]string) []string {
+	if env[engineagent.EnvEngineID] == "" || env[engineagent.EnvServiceURL] == "" {
+		return nil
+	}
+	engineCmd := dep.GetEngineEntrypoint()
+	if len(engineCmd) == 0 {
+		return nil
+	}
+	url, ok := engineagent.BinaryURL("amd64")
+	if !ok {
+		return nil
+	}
+	script, err := engineagent.WrapperScript(url, engineCmd)
+	if err != nil {
+		return nil
+	}
+	return []string{"/bin/sh", "-c", script, "iplane-engine-agent"}
 }
 
 // enginePodPorts returns the Ports list for POST /pods. Engine port is

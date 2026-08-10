@@ -610,6 +610,28 @@ message Deployment {
   // Field 22/23 were the removed default_priority draft; 28 is the next
   // free number (kept distinct so that history note stays intact).
   repeated VolumeMount mounts = 28;
+
+  // engine_entrypoint is the command that starts the engine inside the
+  // image, e.g. ["vllm", "serve"] or ["python3", "-m",
+  // "vllm.entrypoints.openai.api_server"].
+  //
+  // Normally empty, and normally it should stay that way. iplane has never
+  // needed to know this: it replaces the image's CMD with the engine's
+  // arguments and lets the image's own ENTRYPOINT supply the binary.
+  //
+  // It exists for one case. Running the registration agent beside the
+  // engine on the image-native path means overriding the container's
+  // entrypoint with a wrapper, and a wrapper has to exec the engine
+  // itself, so it needs a command that iplane otherwise never sees. There
+  // is no safe default to infer: vllm/vllm-openai changed its entrypoint
+  // between the versions Ch 9 uses, so guessing would break deploys to
+  // make a fleet view nicer.
+  //
+  // Set it and the agent runs. Leave it and the deployment still works
+  // exactly as before, with liveness coming from the /health poller. The
+  // sshdocker path never needs this: it runs the agent as a separate
+  // container and leaves the engine's entrypoint alone.
+  repeated string engine_entrypoint = 29;
 }
 
 // VolumeMount is one filesystem mount a deployment's engine needs. The
