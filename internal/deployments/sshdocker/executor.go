@@ -40,13 +40,55 @@ func SSHDial(ctx context.Context, instance *provisionerv1.Instance, key *sshkeys
 	if port == 0 {
 		port = 22
 	}
-	return NewSSHRunner(ctx, SSHConfig{
+	cfg := SSHConfig{
 		Host:       ssh.GetHost(),
 		Port:       port,
 		User:       user,
 		PrivateKey: key.Private,
-	})
+	}
+
+	// Retry, because a freshly rented machine publishes its SSH endpoint
+	// before sshd will complete a handshake on it. The gap is seconds to
+	// tens of seconds and shows up as "handshake failed: EOF" or a refused
+	// key; Vast's own login banner tells you to try again in a few seconds,
+	// which is a fair summary of the situation.
+	//
+	// A single-shot dial turns that window into a failed deploy on a machine
+	// that is already billing, and the error names the handshake rather than
+	// the timing, so it reads like a bad key.
+	//
+	// Bounded rather than open-ended: a genuinely wrong key fails the same
+	// way forever, and retrying it for the life of the deploy would hide a
+	// real misconfiguration behind a long wait.
+	deadline := time.Now().Add(dialRetryWindow)
+	var lastErr error
+	for {
+		runner, err := NewSSHRunner(ctx, cfg)
+		if err == nil {
+			return runner, nil
+		}
+		lastErr = err
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("sshdocker: ssh to %s:%d never completed a handshake within %s: %w",
+				cfg.Host, port, dialRetryWindow, lastErr)
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(dialRetryInterval):
+		}
+	}
 }
+
+// dialRetryWindow / dialRetryInterval bound the handshake retry above.
+//
+// Two minutes covers the observed publish-before-accept gap on Vast with
+// room to spare, and stays well inside any deploy timeout, so a genuinely
+// unreachable host still fails long before the engine-ready wait would.
+const (
+	dialRetryWindow   = 2 * time.Minute
+	dialRetryInterval = 5 * time.Second
+)
 
 // Executor runs the deployment state machine for one Deployment at
 // a time. Constructed once per Service; safe to share across

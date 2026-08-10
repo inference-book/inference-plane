@@ -503,14 +503,25 @@ func (s *Service) WaitForInstanceReady(ctx context.Context, req *provisionerv1.W
 		return nil, status.Errorf(codes.NotFound, "no instance with id %q", id)
 	}
 
-	// Fast path: SSH already populated. Return without touching the
-	// provider so repeat callers (idempotent retries, polling scripts)
-	// don't hammer the upstream API.
+	// A populated SSH endpoint is not the same as a reachable one, and
+	// treating it as such is what made this verb lie. Providers publish the
+	// address before sshd accepts on it, so "already ready" was routinely
+	// returned for a machine that refused the next connection, and the
+	// caller's deploy then failed at the dial with an error about the
+	// handshake rather than about timing.
+	//
+	// So the fast path now only applies where nothing can verify
+	// reachability. Where the provider offers a readiness check, it runs
+	// even though the address is already known: the check is cheap once the
+	// host is up, and being wrong here costs a rented machine.
 	if ssh := inst.GetSsh(); ssh != nil && ssh.GetHost() != "" {
-		return &provisionerv1.WaitForInstanceReadyResponse{
-			Instance:     inst,
-			AlreadyReady: true,
-		}, nil
+		provider, known := s.providers[inst.GetProvider()]
+		if _, verifiable := provider.(SSHReadyWaiter); !known || !verifiable {
+			return &provisionerv1.WaitForInstanceReadyResponse{
+				Instance:     inst,
+				AlreadyReady: true,
+			}, nil
+		}
 	}
 
 	// Correctness check: was SSH ever requested on this instance? An

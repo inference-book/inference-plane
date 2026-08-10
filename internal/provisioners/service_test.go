@@ -247,8 +247,10 @@ func TestCreateInstance_ClassShorthandExpandsToConstraints(t *testing.T) {
 func TestCreateInstance_SpawnFailure_RecordsFailedState(t *testing.T) {
 	wantErr := provisioners.NewProviderError("mock", "spawn", errors.New("quota exceeded"), 429)
 	mock := &mockProvider{
-		name:  "mock",
-		spawn: func(ctx context.Context, spec *provisionerv1.Spec) (*provisionerv1.Instance, error) { return nil, wantErr },
+		name: "mock",
+		spawn: func(ctx context.Context, spec *provisionerv1.Spec) (*provisionerv1.Instance, error) {
+			return nil, wantErr
+		},
 	}
 	svc, store := newSvc(t, mock)
 
@@ -442,10 +444,18 @@ func TestWaitForInstanceReady_NotFound(t *testing.T) {
 	}
 }
 
-func TestWaitForInstanceReady_AlreadyReady(t *testing.T) {
-	// Instance already has SSH populated in state -- the Service must
-	// short-circuit without touching the provider so retries are cheap.
+// A populated SSH endpoint is not a reachable one. Providers publish the
+// address before sshd accepts on it, so short-circuiting on the record
+// returned "ready" for machines that refused the very next connection and
+// the caller's deploy failed at the dial.
+//
+// This case previously asserted the opposite (that the provider must NOT be
+// consulted when state already had an endpoint). That assertion protected
+// the bug, so the contract changed deliberately: where a provider can
+// verify reachability, it is consulted even though the address is known.
+func TestWaitForInstanceReady_PopulatedEndpointIsStillVerified(t *testing.T) {
 	waiter := &mockSSHWaiter{mockProvider: &mockProvider{name: "mock"}}
+	waiter.waitTarget = &provisionerv1.SshTarget{Host: "1.2.3.4", Port: 22, User: "root"}
 	svc, store := newSvc(t, waiter)
 	_ = store.Update(func(f *provisioners.State) error {
 		f.Instances["my-pod"] = &provisionerv1.Instance{
@@ -459,11 +469,33 @@ func TestWaitForInstanceReady_AlreadyReady(t *testing.T) {
 	if err != nil {
 		t.Fatalf("WaitForInstanceReady: %v", err)
 	}
-	if !resp.GetAlreadyReady() {
-		t.Errorf("expected already_ready=true; got false")
+	if waiter.waitCalls != 1 {
+		t.Errorf("provider waiter calls = %d, want 1; a published endpoint must still be verified", waiter.waitCalls)
 	}
-	if waiter.waitCalls != 0 {
-		t.Errorf("provider waiter should not have been called; got %d calls", waiter.waitCalls)
+	if resp.GetInstance().GetSsh().GetHost() != "1.2.3.4" {
+		t.Errorf("ssh host = %q, want the verified endpoint", resp.GetInstance().GetSsh().GetHost())
+	}
+}
+
+// The fast path survives exactly where nothing can verify: a provider with
+// no readiness capability has no better answer than what state already says,
+// so consulting it would add a call and learn nothing.
+func TestWaitForInstanceReady_UnverifiableProviderKeepsTheFastPath(t *testing.T) {
+	svc, store := newSvc(t, &mockProvider{name: "mock"})
+	_ = store.Update(func(f *provisioners.State) error {
+		f.Instances["my-pod"] = &provisionerv1.Instance{
+			Id: "my-pod", Provider: "mock", ProviderId: "mock:my-pod",
+			State: provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE,
+			Ssh:   &provisionerv1.SshTarget{Host: "1.2.3.4", Port: 22, User: "root"},
+		}
+		return nil
+	})
+	resp, err := svc.WaitForInstanceReady(context.Background(), &provisionerv1.WaitForInstanceReadyRequest{Id: "my-pod"})
+	if err != nil {
+		t.Fatalf("WaitForInstanceReady: %v", err)
+	}
+	if !resp.GetAlreadyReady() {
+		t.Error("expected already_ready=true for a provider that cannot verify")
 	}
 }
 
@@ -674,9 +706,9 @@ func TestDeployerDispatch_ProviderCapability_TakesPrecedence(t *testing.T) {
 	_ = store.Update(func(f *provisioners.State) error {
 		f.Instances["my-pod"] = &provisionerv1.Instance{
 			Id: "my-pod", Provider: "mock", ProviderId: "mock:my-pod",
-			State: provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE,
+			State:    provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE,
 			Hardware: &provisionerv1.Hardware{GpuSku: "mock-sku"},
-			Ssh:   &provisionerv1.SshTarget{Host: "1.2.3.4", Port: 22, User: "root"},
+			Ssh:      &provisionerv1.SshTarget{Host: "1.2.3.4", Port: 22, User: "root"},
 		}
 		return nil
 	})
@@ -723,9 +755,9 @@ func TestDeployerDispatch_NoCapability_FallsBackToConfiguredExecutor(t *testing.
 	_ = store.Update(func(f *provisioners.State) error {
 		f.Instances["my-pod"] = &provisionerv1.Instance{
 			Id: "my-pod", Provider: "mock", ProviderId: "mock:my-pod",
-			State: provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE,
+			State:    provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE,
 			Hardware: &provisionerv1.Hardware{GpuSku: "mock-sku"},
-			Ssh:   &provisionerv1.SshTarget{Host: "1.2.3.4", Port: 22, User: "root"},
+			Ssh:      &provisionerv1.SshTarget{Host: "1.2.3.4", Port: 22, User: "root"},
 		}
 		return nil
 	})
