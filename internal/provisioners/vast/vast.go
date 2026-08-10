@@ -736,3 +736,85 @@ type instanceListResponse struct {
 // real-API run lands, prune anything that's still unused.
 var _ = json.Marshal
 var _ = url.QueryEscape
+
+// WaitForSSHReady satisfies provisioners.SSHReadyWaiter.
+//
+// Vast returns from the rent call before the machine is reachable: the
+// contract exists, but ssh_host and ssh_port are empty until the host has
+// pulled the image and started sshd, which takes tens of seconds to a couple
+// of minutes. Anything that dials in that window finds no endpoint at all.
+//
+// The scaffolding for this poll (the timeout, the interval, the TCP probe,
+// their options and defaults) was present from the start; only the method
+// was missing, so every caller silently got no wait. `iplane instance wait`
+// reported "already ready" against a machine with no SSH endpoint, and the
+// deploy path dialled into nothing.
+//
+// Two conditions, not one. The record must carry a host and port, and the
+// port must actually accept a connection. Vast publishes the endpoint a few
+// seconds before sshd answers on it, so returning on the record alone hands
+// the caller an address that refuses the next connection.
+func (p *Provider) WaitForSSHReady(ctx context.Context, providerID string) (*provisionerv1.SshTarget, error) {
+	if providerID == "" {
+		return nil, provisioners.NewProviderError(p.Name(), "wait_ssh_ready",
+			fmt.Errorf("providerID is empty"), 0)
+	}
+	id, err := strconv.Atoi(providerID)
+	if err != nil {
+		return nil, provisioners.NewProviderError(p.Name(), "wait_ssh_ready",
+			fmt.Errorf("provider id %q is not a vast contract id: %w", providerID, err), 0)
+	}
+
+	timeout := p.sshReadyTimeout
+	if timeout <= 0 {
+		// Always allow one lookup, so a test that disables polling still
+		// gets a best-effort answer rather than an immediate error.
+		timeout = time.Second
+	}
+	interval := p.sshReadyInterval
+	if interval <= 0 {
+		interval = 5 * time.Second
+	}
+
+	// Deadline on the context rather than arithmetic over p.clock(). The
+	// clock is injectable and tests hold it fixed, which would make a
+	// clock-based deadline unreachable and this loop run forever. Wall time
+	// is also the honest measure here: the wait is against a remote machine
+	// booting, not against anything the caller simulates.
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	var last error
+	for {
+		api, derr := p.describeContract(waitCtx, id)
+		switch {
+		case derr != nil:
+			// A transient read failure is not a verdict; keep polling until
+			// the deadline and report the last error if it never clears.
+			last = derr
+		case api.SSHHost != "":
+			target := &provisionerv1.SshTarget{
+				Host: api.SSHHost,
+				Port: int32(api.SSHPort),
+				User: "root",
+			}
+			if p.sshProbe == nil {
+				return target, nil
+			}
+			if perr := p.sshProbe(waitCtx, target.Host, target.Port); perr == nil {
+				return target, nil
+			} else {
+				last = perr
+			}
+		default:
+			last = fmt.Errorf("ssh_host not yet published")
+		}
+
+		select {
+		case <-waitCtx.Done():
+			return nil, provisioners.NewProviderError(p.Name(), "wait_ssh_ready",
+				fmt.Errorf("instance %s had no reachable ssh endpoint within %s: %w", providerID, timeout, last), 0)
+		case <-time.After(interval):
+		}
+	}
+}
