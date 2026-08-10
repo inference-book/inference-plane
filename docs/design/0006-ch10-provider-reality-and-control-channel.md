@@ -336,18 +336,30 @@ The epic's suggested order survives with one correction and one addition.
 4. **#214 and #215** last.
 5. **#212 leaves the sequence**, blocked on the AWS/GCP adapter (Part 3).
 
-## Experiments still to run
+## Experiments: settled 2026-08-10
 
-- **Can NVML read link state inside a provider container?** #213 assumes
-  `nvmlDeviceGetNvLinkState` and the error counters are reachable from inside a
-  RunPod pod. Unverified. Cheapest check is a few minutes on a 2-card SXM pod
-  running `nvidia-smi nvlink -s` and `-e`. Note a single-card pod has no link to
-  report, so the check needs at least two cards.
-- **Is Vast's `bw_nvlink` a per-machine or per-offer reading?** Offers from the
-  same `machine_id` should agree. Worth confirming before the catalog trusts it.
-- **Vast renter-side co-located rental.** Whether `cluster_id` can be used to
-  rent two instances on one cluster from the API. If yes, #212 has a marketplace
+Two of the three ran live on one rented box (2x RTX A6000 on Vast, $0.639/hr,
+about $0.10 total; nothing left running, verified against both provider APIs).
+Full detail in [0007-gpu-validation-findings.md](0007-gpu-validation-findings.md).
+
+- **Can NVML read link state inside a provider container? YES.** `nvidia-smi
+  nvlink -s` returns per-link state and `-e` returns the replay / recovery / CRC
+  counters, from inside the container with no special privileges. #213's
+  load-bearing assumption holds and the sensor is buildable.
+- **Is Vast's `bw_nvlink` per-machine or per-offer? Per-machine.** Across 800
+  rentable multi-GPU offers spanning 624 machines, exactly one machine reported
+  differing values across its own offers. Safe to reason about per-machine.
+- **Vast renter-side co-located rental.** Still open. Whether `cluster_id` can
+  rent two instances on one cluster from the API; if yes, #212 has a marketplace
   path and Part 3 gets revisited.
+
+The same run gave the first real-hardware check of anything shipped for #203.
+iplane stamped `INTRA_NODE / MEASURED / 449 Gbps / nvlink` on the A6000;
+`nvidia-smi topo -m` reported `NV4` (four links) at 14.062 GB/s each, which is
+56.25 GB/s, matching Vast's reading of 56.248 and our gigabit conversion to
+within rounding. A third finding matters for later tickets: a box **cannot see
+its own provider machine id from inside**, so #214's failure attribution needs
+that identity injected at deploy time rather than discovered by the agent.
 
 ## Corrections this doc lands
 
