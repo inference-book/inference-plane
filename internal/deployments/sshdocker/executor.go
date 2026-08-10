@@ -73,11 +73,7 @@ func WithDial(d DialFunc) Option {
 // WithHealthPoll configures the health-check loop. every is the
 // polling interval; max is the total time the executor will wait
 // before declaring the deployment FAILED with a "health never
-// reached 2xx" reason. Defaults: every=2s, max=2min.
-//
-// 2 minutes covers vLLM cold starts (HF download + weights into VRAM,
-// typically 30-90s on a fresh A5000-class pod). Operators with
-// slower-loading engines override via this option.
+// reached 2xx" reason. Defaults: every=2s, max=DefaultHealthMax.
 func WithHealthPoll(every, max time.Duration) Option {
 	return func(e *Executor) {
 		e.healthEvery = every
@@ -85,12 +81,30 @@ func WithHealthPoll(every, max time.Duration) Option {
 	}
 }
 
+// DefaultHealthMax is how long the executor waits for the engine to answer
+// /health before calling the deploy failed.
+//
+// It was 2 minutes, chosen when the only thing this path deployed was a
+// small model whose weights landed in well under that. That number silently
+// capped what the path could deploy at all: a 72B is roughly 145 GB of
+// weights, and the download alone runs far past two minutes, so the deploy
+// failed while the pod was healthy and still working. The operator paid for
+// the pod either way, and nothing in the failure said "you ran out of
+// patience" rather than "the engine is broken".
+//
+// 10 minutes matches the image-native path's engine-ready default, so the
+// two deploy paths now fail on the same schedule instead of one being eight
+// times stricter for reasons that were never about the engine. A large
+// model still needs more than this; that is what the option and the env
+// override are for.
+const DefaultHealthMax = 10 * time.Minute
+
 // NewExecutor constructs an Executor with sensible defaults.
 func NewExecutor(opts ...Option) *Executor {
 	e := &Executor{
 		dial:        SSHDial,
 		healthEvery: 2 * time.Second,
-		healthMax:   2 * time.Minute,
+		healthMax:   DefaultHealthMax,
 	}
 	for _, opt := range opts {
 		opt(e)
