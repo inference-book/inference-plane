@@ -27,6 +27,7 @@ import (
 	"github.com/inference-book/inference-plane/gen/go/provisioner/v1/provisionerv1connect"
 	"github.com/inference-book/inference-plane/internal/backends"
 	"github.com/inference-book/inference-plane/internal/config"
+	"github.com/inference-book/inference-plane/internal/engines"
 	"github.com/inference-book/inference-plane/internal/healthcheck"
 	"github.com/inference-book/inference-plane/internal/metrics"
 	"github.com/inference-book/inference-plane/internal/provisioners"
@@ -100,19 +101,19 @@ func bindServeFlags(c *cobra.Command) {
 
 	// Bind kebab-case flags onto dotted viper keys matching the YAML.
 	for flagName, key := range map[string]string{
-		"server-addr":     "server.addr",
-		"state-dir":       "state.dir",
-		"backend-engine":  "backend.engine",
-		"backend-url":     "backend.url",
-		"backend-name":    "backend.name",
-		"otlp-endpoint":   "telemetry.otlp_endpoint",
-		"service-name":    "telemetry.service_name",
-		"environment":     "telemetry.environment",
-		"provider":        "deployment.provider",
-		"gpu-type":        "deployment.gpu_type",
-		"billing-mode":    "deployment.billing_mode",
-		"instance-id":     "deployment.instance_id",
-		"routing-policy":  "router.routing_policy",
+		"server-addr":    "server.addr",
+		"state-dir":      "state.dir",
+		"backend-engine": "backend.engine",
+		"backend-url":    "backend.url",
+		"backend-name":   "backend.name",
+		"otlp-endpoint":  "telemetry.otlp_endpoint",
+		"service-name":   "telemetry.service_name",
+		"environment":    "telemetry.environment",
+		"provider":       "deployment.provider",
+		"gpu-type":       "deployment.gpu_type",
+		"billing-mode":   "deployment.billing_mode",
+		"instance-id":    "deployment.instance_id",
+		"routing-policy": "router.routing_policy",
 	} {
 		_ = viper.BindPFlag(key, c.Flags().Lookup(flagName))
 	}
@@ -353,6 +354,22 @@ func runServe(parent context.Context) error {
 		"failure_threshold", healthCfg.FailureThreshold,
 		"success_threshold", healthCfg.SuccessThreshold)
 
+	// v0.2 ch10 (#204): the push side of fleet tracking. Engines register
+	// themselves and renew a lease; the sweeper declares an engine LOST when
+	// it stops renewing.
+	//
+	// This runs ALONGSIDE the health poller above, not instead of it. The
+	// poller drives quarantine, and quarantine is router eligibility, which
+	// the data path's correctness rides on; the registry carries membership,
+	// group composition and liveness, which no probe can report. Removing
+	// either leaves a hole the other does not cover.
+	engineRegistry := engines.New(engines.NewStateStore(stateStore))
+	engineSweeper := engines.NewSweeper(engineRegistry, engines.WithLogger(logger))
+	go engineSweeper.Run(healthCtx)
+	logger.Info("engine registry started",
+		"lease", engines.DefaultLease,
+		"renew_interval", engineRegistry.RenewInterval())
+
 	grpcSrv, grpcLis, err := startGRPCServer(be, recorder, costRecorder, logger)
 	if err != nil {
 		return fmt.Errorf("gRPC server: %w", err)
@@ -414,6 +431,30 @@ func runServe(parent context.Context) error {
 		server.WithProvisionerHandler(provisioners.NewConnectProvisionerAdapter(provisionerSvc)),
 		server.WithDeploymentHandler(provisioners.NewConnectDeploymentAdapter(provisionerSvc)),
 		server.WithDataPlaneRoutes(deploymentRouter.Handle()),
+		server.WithEngineRegistryHandler(engines.NewConnectAdapter(engineRegistry,
+			engines.WithDrainer(provisionerSvc),
+			// The two identity fields a container cannot know about itself:
+			// its provider machine id and its externally reachable endpoint.
+			// The agent is told a correlation key at deploy time and the
+			// control plane completes the record from what it already
+			// recorded when it rented the box.
+			engines.WithLocator(engines.LocatorFunc(
+				func(_ context.Context, engineID string) (engines.NodeIdentity, bool, error) {
+					host, provider, endpoint, found, err := provisionerSvc.LocateEngineNode(engineID)
+					return engines.NodeIdentity{
+						HostID:   host,
+						Provider: provider,
+						Endpoint: endpoint,
+					}, found, err
+				})),
+			// A drain is a synchronous unary call, so its wait cannot exceed
+			// the response write deadline. Deriving the cap from the same
+			// config value keeps the two from drifting; Ch 9's `unexpected
+			// EOF` was exactly this pair disagreeing. Leave headroom for the
+			// teardown that follows the wait.
+			engines.WithMaxDrainTimeout(
+				time.Duration(cfg.Server.WriteTimeoutSec)*time.Second/2),
+		)),
 	)
 	if err != nil {
 		return fmt.Errorf("HTTP API: %w", err)

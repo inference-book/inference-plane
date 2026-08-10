@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/inference-book/inference-plane/internal/version"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -21,8 +22,13 @@ var (
 // matching child based on the first positional argument; with no
 // argument it prints --help.
 var rootCmd = &cobra.Command{
-	Use:           "iplane",
-	Short:         "Inference Plane control plane and tooling",
+	Use:   "iplane",
+	Short: "Inference Plane control plane and tooling",
+	// Gives `iplane --version` and `iplane version`. Not decoration: the
+	// engine agent is fetched onto a rented box by a URL naming a specific
+	// build, so an operator debugging a fleet needs to be able to ask which
+	// version the control plane is and therefore which agent it expects.
+	Version:       version.Version,
 	SilenceUsage:  true,
 	SilenceErrors: false,
 	Long: `iplane runs and operates the v0.1 inference control plane.

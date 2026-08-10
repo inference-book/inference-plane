@@ -23,6 +23,149 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+// FabricScope is how far an instance's fast GPU interconnect reaches.
+//
+// Deliberately vendor-neutral. NVLink, AMD xGMI and Intel Xe Link are all
+// INTRA_NODE; InfiniBand, RoCE and AWS EFA are all INTER_NODE. The control
+// plane asks for a scope and a bandwidth; which technology delivers it is the
+// adapter's business, and no control-plane logic branches on the vendor name
+// (see Hardware.fabric_technology, which carries it for humans only).
+//
+// An earlier draft (docs/design/0003-kv-domain.md) modelled this as
+// `enum Interconnect { NONE, RDMA, NVLINK }`. That conflated two axes:
+// NVLink is one vendor's intra-node link, RDMA is a cross-node access
+// semantic. docs/design/0006 supersedes it with this enum.
+//
+// NOTE: the two scopes are NOT ordered. INTER_NODE does not imply
+// INTRA_NODE -- a PCIe-only box behind InfiniBand has a fast cross-node
+// fabric and no fast link between its own cards. A requirement that needs
+// both at once therefore needs two fields, not one enum value. We carry one
+// axis while the only consumer wanting both (a cross-node pool, issue 212)
+// is descoped; add the second axis when that lands.
+type FabricScope int32
+
+const (
+	FabricScope_FABRIC_SCOPE_UNSPECIFIED FabricScope = 0
+	// No fast fabric required. PCIe / TCP between cards is fine. This is the
+	// Ch 6-9 default: independent replicas that never exchange tensors.
+	FabricScope_FABRIC_SCOPE_NONE FabricScope = 1
+	// Cards within one node share a fast link. What a tensor-parallel group
+	// needs, since every card holds a slice of every layer.
+	FabricScope_FABRIC_SCOPE_INTRA_NODE FabricScope = 2
+	// Nodes share a fast link. What cross-node pipeline parallelism needs.
+	FabricScope_FABRIC_SCOPE_INTER_NODE FabricScope = 3
+)
+
+// Enum value maps for FabricScope.
+var (
+	FabricScope_name = map[int32]string{
+		0: "FABRIC_SCOPE_UNSPECIFIED",
+		1: "FABRIC_SCOPE_NONE",
+		2: "FABRIC_SCOPE_INTRA_NODE",
+		3: "FABRIC_SCOPE_INTER_NODE",
+	}
+	FabricScope_value = map[string]int32{
+		"FABRIC_SCOPE_UNSPECIFIED": 0,
+		"FABRIC_SCOPE_NONE":        1,
+		"FABRIC_SCOPE_INTRA_NODE":  2,
+		"FABRIC_SCOPE_INTER_NODE":  3,
+	}
+)
+
+func (x FabricScope) Enum() *FabricScope {
+	p := new(FabricScope)
+	*p = x
+	return p
+}
+
+func (x FabricScope) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (FabricScope) Descriptor() protoreflect.EnumDescriptor {
+	return file_provisioner_v1_types_proto_enumTypes[0].Descriptor()
+}
+
+func (FabricScope) Type() protoreflect.EnumType {
+	return &file_provisioner_v1_types_proto_enumTypes[0]
+}
+
+func (x FabricScope) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use FabricScope.Descriptor instead.
+func (FabricScope) EnumDescriptor() ([]byte, []int) {
+	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{0}
+}
+
+// FabricSource records how much to trust a FabricScope reading, because no
+// provider reports intra-node topology as a queryable spec field and the
+// sourcing differs per adapter (see docs/design/0006 Part 2).
+//
+// The distinction is load-bearing, not bookkeeping: UNKNOWN must never
+// satisfy a fabric requirement. Probing live on 2026-08-09, a quarter of
+// Vast's SXM machines reported zero NVLink bandwidth on boards that are
+// physically always NVLinked, so "no reading" and "measured zero" are
+// indistinguishable in the payload and both have to fail closed.
+type FabricSource int32
+
+const (
+	FabricSource_FABRIC_SOURCE_UNSPECIFIED FabricSource = 0
+	// Curated catalog keyed on SKU name and form factor. Trustworthy about the
+	// card, silent about what the host actually wired up.
+	FabricSource_FABRIC_SOURCE_DECLARED FabricSource = 1
+	// The provider reported a reading (Vast's bw_nvlink). Outranks DECLARED
+	// when they disagree: a bridged card named "PCIe" is a real machine a
+	// name-only catalog would wrongly exclude.
+	FabricSource_FABRIC_SOURCE_MEASURED FabricSource = 2
+	// No catalog entry and no usable reading. Fails every fabric requirement.
+	FabricSource_FABRIC_SOURCE_UNKNOWN FabricSource = 3
+)
+
+// Enum value maps for FabricSource.
+var (
+	FabricSource_name = map[int32]string{
+		0: "FABRIC_SOURCE_UNSPECIFIED",
+		1: "FABRIC_SOURCE_DECLARED",
+		2: "FABRIC_SOURCE_MEASURED",
+		3: "FABRIC_SOURCE_UNKNOWN",
+	}
+	FabricSource_value = map[string]int32{
+		"FABRIC_SOURCE_UNSPECIFIED": 0,
+		"FABRIC_SOURCE_DECLARED":    1,
+		"FABRIC_SOURCE_MEASURED":    2,
+		"FABRIC_SOURCE_UNKNOWN":     3,
+	}
+)
+
+func (x FabricSource) Enum() *FabricSource {
+	p := new(FabricSource)
+	*p = x
+	return p
+}
+
+func (x FabricSource) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (FabricSource) Descriptor() protoreflect.EnumDescriptor {
+	return file_provisioner_v1_types_proto_enumTypes[1].Descriptor()
+}
+
+func (FabricSource) Type() protoreflect.EnumType {
+	return &file_provisioner_v1_types_proto_enumTypes[1]
+}
+
+func (x FabricSource) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use FabricSource.Descriptor instead.
+func (FabricSource) EnumDescriptor() ([]byte, []int) {
+	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{1}
+}
+
 // InstanceState is the lifecycle phase of a provisioned instance, as
 // iplane sees it. Five values, not three -- the two *ing states
 // (PENDING, TERMINATING) exist so partial-failure recovery can
@@ -75,11 +218,11 @@ func (x InstanceState) String() string {
 }
 
 func (InstanceState) Descriptor() protoreflect.EnumDescriptor {
-	return file_provisioner_v1_types_proto_enumTypes[0].Descriptor()
+	return file_provisioner_v1_types_proto_enumTypes[2].Descriptor()
 }
 
 func (InstanceState) Type() protoreflect.EnumType {
-	return &file_provisioner_v1_types_proto_enumTypes[0]
+	return &file_provisioner_v1_types_proto_enumTypes[2]
 }
 
 func (x InstanceState) Number() protoreflect.EnumNumber {
@@ -88,7 +231,7 @@ func (x InstanceState) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use InstanceState.Descriptor instead.
 func (InstanceState) EnumDescriptor() ([]byte, []int) {
-	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{0}
+	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{2}
 }
 
 // Priority is the lane an inbound request joins on its way to the
@@ -142,11 +285,11 @@ func (x Priority) String() string {
 }
 
 func (Priority) Descriptor() protoreflect.EnumDescriptor {
-	return file_provisioner_v1_types_proto_enumTypes[1].Descriptor()
+	return file_provisioner_v1_types_proto_enumTypes[3].Descriptor()
 }
 
 func (Priority) Type() protoreflect.EnumType {
-	return &file_provisioner_v1_types_proto_enumTypes[1]
+	return &file_provisioner_v1_types_proto_enumTypes[3]
 }
 
 func (x Priority) Number() protoreflect.EnumNumber {
@@ -155,7 +298,7 @@ func (x Priority) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use Priority.Descriptor instead.
 func (Priority) EnumDescriptor() ([]byte, []int) {
-	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{1}
+	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{3}
 }
 
 type DeploymentState int32
@@ -217,11 +360,11 @@ func (x DeploymentState) String() string {
 }
 
 func (DeploymentState) Descriptor() protoreflect.EnumDescriptor {
-	return file_provisioner_v1_types_proto_enumTypes[2].Descriptor()
+	return file_provisioner_v1_types_proto_enumTypes[4].Descriptor()
 }
 
 func (DeploymentState) Type() protoreflect.EnumType {
-	return &file_provisioner_v1_types_proto_enumTypes[2]
+	return &file_provisioner_v1_types_proto_enumTypes[4]
 }
 
 func (x DeploymentState) Number() protoreflect.EnumNumber {
@@ -230,7 +373,88 @@ func (x DeploymentState) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use DeploymentState.Descriptor instead.
 func (DeploymentState) EnumDescriptor() ([]byte, []int) {
-	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{2}
+	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{4}
+}
+
+// EngineState is what a registered engine reports about itself. Wider than
+// the router's healthy/quarantined pair, because a probe answers a question
+// the control plane already thought to ask and cannot describe a group.
+//
+// Two of these have no single-card equivalent and are the reason the
+// registry exists alongside the /health poller:
+//
+//   - ASSEMBLING: processes are alive and the group has not formed. Four
+//     workers running is not four workers in one group; they have to find
+//     each other and settle ranks before the endpoint serves a token. No
+//     probe can see this, because there is no endpoint yet to ask.
+//   - SERVING_DEGRADED: the group assembled, serves correct tokens, and lost
+//     a large fraction of its throughput because a link inside it is down.
+//     /health says "serving", which is true, and useless.
+type EngineState int32
+
+const (
+	EngineState_ENGINE_STATE_UNSPECIFIED EngineState = 0
+	// Some workers joined, the group has not formed. No endpoint yet.
+	EngineState_ENGINE_STATE_ASSEMBLING EngineState = 1
+	// Group formed, endpoint answering.
+	EngineState_ENGINE_STATE_SERVING EngineState = 2
+	// Assembled and correct, running well below expected throughput.
+	EngineState_ENGINE_STATE_SERVING_DEGRADED EngineState = 3
+	// The control plane stopped hearing from it: the lease expired. Set by the
+	// sweeper, never reported by an engine about itself.
+	EngineState_ENGINE_STATE_LOST EngineState = 4
+	// Taken out of service on purpose: new work is no longer routed here and
+	// the engine is finishing what it has. Operator-initiated (issue 205's
+	// fleet drain), so like LOST it is the control plane's word rather than
+	// the engine's, and unlike LOST it is not a failure.
+	EngineState_ENGINE_STATE_DRAINING EngineState = 5
+)
+
+// Enum value maps for EngineState.
+var (
+	EngineState_name = map[int32]string{
+		0: "ENGINE_STATE_UNSPECIFIED",
+		1: "ENGINE_STATE_ASSEMBLING",
+		2: "ENGINE_STATE_SERVING",
+		3: "ENGINE_STATE_SERVING_DEGRADED",
+		4: "ENGINE_STATE_LOST",
+		5: "ENGINE_STATE_DRAINING",
+	}
+	EngineState_value = map[string]int32{
+		"ENGINE_STATE_UNSPECIFIED":      0,
+		"ENGINE_STATE_ASSEMBLING":       1,
+		"ENGINE_STATE_SERVING":          2,
+		"ENGINE_STATE_SERVING_DEGRADED": 3,
+		"ENGINE_STATE_LOST":             4,
+		"ENGINE_STATE_DRAINING":         5,
+	}
+)
+
+func (x EngineState) Enum() *EngineState {
+	p := new(EngineState)
+	*p = x
+	return p
+}
+
+func (x EngineState) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (EngineState) Descriptor() protoreflect.EnumDescriptor {
+	return file_provisioner_v1_types_proto_enumTypes[5].Descriptor()
+}
+
+func (EngineState) Type() protoreflect.EnumType {
+	return &file_provisioner_v1_types_proto_enumTypes[5]
+}
+
+func (x EngineState) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use EngineState.Descriptor instead.
+func (EngineState) EnumDescriptor() ([]byte, []int) {
+	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{5}
 }
 
 // Spec is what the operator asks for. Provider-agnostic. Everything in
@@ -376,7 +600,26 @@ type ResourceRequirements struct {
 	// Exact-SKU escape hatch. When set, skips constraint resolution and
 	// is passed verbatim to the provider. Mutually exclusive with class
 	// (and constraints are ignored -- the SKU is the answer).
-	Sku           string `protobuf:"bytes,6,opt,name=sku,proto3" json:"sku,omitempty"`
+	Sku string `protobuf:"bytes,6,opt,name=sku,proto3" json:"sku,omitempty"`
+	// Fabric the instance's GPUs must be wired for. Constrains SKU selection
+	// the same way min_vram_gb does: the resolver drops candidates whose
+	// fabric is not known to satisfy this. UNSPECIFIED (the Ch 6-9 default)
+	// means the operator does not care.
+	//
+	// A candidate whose fabric is FABRIC_SOURCE_UNKNOWN never satisfies a set
+	// fabric_scope. That is the point of the field -- guessing costs a rented
+	// pool before it reports an answer. `sku` remains the override for
+	// operators who know better than the catalog.
+	FabricScope FabricScope `protobuf:"varint,7,opt,name=fabric_scope,json=fabricScope,proto3,enum=provisioner.v1.FabricScope" json:"fabric_scope,omitempty"`
+	// Minimum fabric bandwidth, GIGABITS per second, aggregate per GPU.
+	// 0 = any bandwidth satisfying fabric_scope.
+	//
+	// Gigabits, not gigabytes, and the 8x is a real trap: NVLink is universally
+	// quoted in GB/s (an A100's 300 GB/s) while InfiniBand and EFA are quoted in
+	// Gbps (RunPod's 3200 Gbps clusters). Adapters convert at the wire boundary,
+	// matching the same single-unit rule Hardware uses for memory, so that A100
+	// arrives here as 2400.
+	MinFabricGbps int32 `protobuf:"varint,8,opt,name=min_fabric_gbps,json=minFabricGbps,proto3" json:"min_fabric_gbps,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -453,6 +696,20 @@ func (x *ResourceRequirements) GetSku() string {
 	return ""
 }
 
+func (x *ResourceRequirements) GetFabricScope() FabricScope {
+	if x != nil {
+		return x.FabricScope
+	}
+	return FabricScope_FABRIC_SCOPE_UNSPECIFIED
+}
+
+func (x *ResourceRequirements) GetMinFabricGbps() int32 {
+	if x != nil {
+		return x.MinFabricGbps
+	}
+	return 0
+}
+
 // Hardware is the cross-provider physical-characteristics base for
 // an Instance. Every adapter populates what its provider exposes;
 // fields the provider doesn't surface stay 0 (or "" for strings).
@@ -488,9 +745,32 @@ type Hardware struct {
 	// as `instance_type.specs.storage_gib`; Vast as the offer's
 	// `disk_space` (GB); RunPod as the pod's `containerDiskInGb`.
 	// All converted to MB at the adapter boundary.
-	DiskMb        int32 `protobuf:"varint,20,opt,name=disk_mb,json=diskMb,proto3" json:"disk_mb,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	DiskMb int32 `protobuf:"varint,20,opt,name=disk_mb,json=diskMb,proto3" json:"disk_mb,omitempty"`
+	// GPU interconnect -- what this instance's fabric turned out to be, as
+	// opposed to ResourceRequirements.fabric_scope, which is what was asked
+	// for. Populated by each adapter from whatever its provider exposes; see
+	// docs/design/0006 Part 2 for the per-provider sourcing.
+	//
+	// fabric_source is not decoration. Read fabric_scope WITHOUT it and an
+	// unknown fabric reads as a definite NONE, which is the exact mistake the
+	// pair exists to prevent.
+	FabricScope  FabricScope  `protobuf:"varint,30,opt,name=fabric_scope,json=fabricScope,proto3,enum=provisioner.v1.FabricScope" json:"fabric_scope,omitempty"`
+	FabricSource FabricSource `protobuf:"varint,31,opt,name=fabric_source,json=fabricSource,proto3,enum=provisioner.v1.FabricSource" json:"fabric_source,omitempty"`
+	// Aggregate per-GPU fabric bandwidth in GIGABITS per second, 0 when
+	// unknown. Same unit (and same 8x trap) as
+	// ResourceRequirements.min_fabric_gbps.
+	FabricGbps int32 `protobuf:"varint,32,opt,name=fabric_gbps,json=fabricGbps,proto3" json:"fabric_gbps,omitempty"`
+	// Vendor technology behind fabric_scope: "nvlink", "nvswitch", "xgmi",
+	// "infiniband", "roce", "efa". DIAGNOSTIC ONLY -- for `iplane instance
+	// describe` and debugging.
+	//
+	// Nothing in the control plane may branch on this string. That rule is what
+	// keeps the vendor-neutral seam vendor-neutral; the moment a resolver reads
+	// it, this has quietly become the vendor enum 0006 removed. Policy reads
+	// fabric_scope and fabric_gbps.
+	FabricTechnology string `protobuf:"bytes,33,opt,name=fabric_technology,json=fabricTechnology,proto3" json:"fabric_technology,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *Hardware) Reset() {
@@ -570,6 +850,34 @@ func (x *Hardware) GetDiskMb() int32 {
 		return x.DiskMb
 	}
 	return 0
+}
+
+func (x *Hardware) GetFabricScope() FabricScope {
+	if x != nil {
+		return x.FabricScope
+	}
+	return FabricScope_FABRIC_SCOPE_UNSPECIFIED
+}
+
+func (x *Hardware) GetFabricSource() FabricSource {
+	if x != nil {
+		return x.FabricSource
+	}
+	return FabricSource_FABRIC_SOURCE_UNSPECIFIED
+}
+
+func (x *Hardware) GetFabricGbps() int32 {
+	if x != nil {
+		return x.FabricGbps
+	}
+	return 0
+}
+
+func (x *Hardware) GetFabricTechnology() string {
+	if x != nil {
+		return x.FabricTechnology
+	}
+	return ""
 }
 
 // SshTarget is the reachability tuple returned for instances that expose
@@ -1136,9 +1444,30 @@ type Deployment struct {
 	//
 	// Field 22/23 were the removed default_priority draft; 28 is the next
 	// free number (kept distinct so that history note stays intact).
-	Mounts        []*VolumeMount `protobuf:"bytes,28,rep,name=mounts,proto3" json:"mounts,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Mounts []*VolumeMount `protobuf:"bytes,28,rep,name=mounts,proto3" json:"mounts,omitempty"`
+	// engine_entrypoint is the command that starts the engine inside the
+	// image, e.g. ["vllm", "serve"] or ["python3", "-m",
+	// "vllm.entrypoints.openai.api_server"].
+	//
+	// Normally empty, and normally it should stay that way. iplane has never
+	// needed to know this: it replaces the image's CMD with the engine's
+	// arguments and lets the image's own ENTRYPOINT supply the binary.
+	//
+	// It exists for one case. Running the registration agent beside the
+	// engine on the image-native path means overriding the container's
+	// entrypoint with a wrapper, and a wrapper has to exec the engine
+	// itself, so it needs a command that iplane otherwise never sees. There
+	// is no safe default to infer: vllm/vllm-openai changed its entrypoint
+	// between the versions Ch 9 uses, so guessing would break deploys to
+	// make a fleet view nicer.
+	//
+	// Set it and the agent runs. Leave it and the deployment still works
+	// exactly as before, with liveness coming from the /health poller. The
+	// sshdocker path never needs this: it runs the agent as a separate
+	// container and leaves the engine's entrypoint alone.
+	EngineEntrypoint []string `protobuf:"bytes,29,rep,name=engine_entrypoint,json=engineEntrypoint,proto3" json:"engine_entrypoint,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *Deployment) Reset() {
@@ -1349,6 +1678,13 @@ func (x *Deployment) GetReplicaSpecs() []*ReplicaSpec {
 func (x *Deployment) GetMounts() []*VolumeMount {
 	if x != nil {
 		return x.Mounts
+	}
+	return nil
+}
+
+func (x *Deployment) GetEngineEntrypoint() []string {
+	if x != nil {
+		return x.EngineEntrypoint
 	}
 	return nil
 }
@@ -1688,6 +2024,230 @@ func (x *ReplicaSpec) GetEngineEndpoint() string {
 	return ""
 }
 
+// EngineNode is one machine an engine spans. The fact no probe can report,
+// and the input failure attribution needs: when a member dies, which node
+// took it down (issue 214).
+type EngineNode struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Provider-assigned host identity. RunPod's top-level machineId, Vast's
+	// machine_id, an EC2 instance id. Opaque to the control plane and only
+	// meaningful to the provider that issued it.
+	HostId string `protobuf:"bytes,1,opt,name=host_id,json=hostId,proto3" json:"host_id,omitempty"`
+	// Provider that issued host_id, so two providers' identifiers cannot
+	// collide.
+	Provider string `protobuf:"bytes,2,opt,name=provider,proto3" json:"provider,omitempty"`
+	// Rank of this node within the engine's group, 0-based. The engine assigns
+	// it; the control plane never interprets it beyond ordering the display.
+	NodeIndex int32 `protobuf:"varint,3,opt,name=node_index,json=nodeIndex,proto3" json:"node_index,omitempty"`
+	// GPUs this node contributes to the group.
+	GpuCount      int32 `protobuf:"varint,4,opt,name=gpu_count,json=gpuCount,proto3" json:"gpu_count,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *EngineNode) Reset() {
+	*x = EngineNode{}
+	mi := &file_provisioner_v1_types_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *EngineNode) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*EngineNode) ProtoMessage() {}
+
+func (x *EngineNode) ProtoReflect() protoreflect.Message {
+	mi := &file_provisioner_v1_types_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use EngineNode.ProtoReflect.Descriptor instead.
+func (*EngineNode) Descriptor() ([]byte, []int) {
+	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *EngineNode) GetHostId() string {
+	if x != nil {
+		return x.HostId
+	}
+	return ""
+}
+
+func (x *EngineNode) GetProvider() string {
+	if x != nil {
+		return x.Provider
+	}
+	return ""
+}
+
+func (x *EngineNode) GetNodeIndex() int32 {
+	if x != nil {
+		return x.NodeIndex
+	}
+	return 0
+}
+
+func (x *EngineNode) GetGpuCount() int32 {
+	if x != nil {
+		return x.GpuCount
+	}
+	return 0
+}
+
+// Engine is one registered data plane: an endpoint serving one model over a
+// span of nodes and cards.
+//
+// Deliberately NOT a field on Deployment. An engine that announces itself
+// need not have been rented by us, which is what makes a fleet of
+// operator-run engines expressible later; deployment_id links the two when
+// the engine does correspond to something we provisioned.
+type Engine struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Engine-chosen stable identity. Survives re-registration: registering
+	// twice with the same id is a renewal, not a second member.
+	Id string `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	// Set when this engine runs on a deployment the control plane created.
+	// Empty for engines that registered themselves without being provisioned.
+	DeploymentId string `protobuf:"bytes,2,opt,name=deployment_id,json=deploymentId,proto3" json:"deployment_id,omitempty"`
+	Model        string `protobuf:"bytes,3,opt,name=model,proto3" json:"model,omitempty"`
+	// The single OpenAI-compatible endpoint, regardless of span. One engine is
+	// one endpoint whether it holds one card or sixteen.
+	Endpoint string      `protobuf:"bytes,4,opt,name=endpoint,proto3" json:"endpoint,omitempty"`
+	State    EngineState `protobuf:"varint,5,opt,name=state,proto3,enum=provisioner.v1.EngineState" json:"state,omitempty"`
+	// Nodes this engine spans, in node_index order. Length 1 is the ordinary
+	// single-machine case, not a special case.
+	Span []*EngineNode `protobuf:"bytes,6,rep,name=span,proto3" json:"span,omitempty"`
+	// Operational readings the engine computes anyway. Observational only:
+	// routing decisions must not consume these. The router keeps its own
+	// in-flight counts precisely so a routing decision never depends on an
+	// observation pipeline being up.
+	InFlight         int32                  `protobuf:"varint,7,opt,name=in_flight,json=inFlight,proto3" json:"in_flight,omitempty"`
+	CacheUtilization float64                `protobuf:"fixed64,8,opt,name=cache_utilization,json=cacheUtilization,proto3" json:"cache_utilization,omitempty"`
+	RegisteredAt     *timestamppb.Timestamp `protobuf:"bytes,20,opt,name=registered_at,json=registeredAt,proto3" json:"registered_at,omitempty"`
+	LastSeenAt       *timestamppb.Timestamp `protobuf:"bytes,21,opt,name=last_seen_at,json=lastSeenAt,proto3" json:"last_seen_at,omitempty"`
+	// When the current lease runs out. Past this with no renewal, the sweeper
+	// moves the engine to LOST.
+	LeaseExpiresAt *timestamppb.Timestamp `protobuf:"bytes,22,opt,name=lease_expires_at,json=leaseExpiresAt,proto3" json:"lease_expires_at,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *Engine) Reset() {
+	*x = Engine{}
+	mi := &file_provisioner_v1_types_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Engine) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Engine) ProtoMessage() {}
+
+func (x *Engine) ProtoReflect() protoreflect.Message {
+	mi := &file_provisioner_v1_types_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Engine.ProtoReflect.Descriptor instead.
+func (*Engine) Descriptor() ([]byte, []int) {
+	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *Engine) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *Engine) GetDeploymentId() string {
+	if x != nil {
+		return x.DeploymentId
+	}
+	return ""
+}
+
+func (x *Engine) GetModel() string {
+	if x != nil {
+		return x.Model
+	}
+	return ""
+}
+
+func (x *Engine) GetEndpoint() string {
+	if x != nil {
+		return x.Endpoint
+	}
+	return ""
+}
+
+func (x *Engine) GetState() EngineState {
+	if x != nil {
+		return x.State
+	}
+	return EngineState_ENGINE_STATE_UNSPECIFIED
+}
+
+func (x *Engine) GetSpan() []*EngineNode {
+	if x != nil {
+		return x.Span
+	}
+	return nil
+}
+
+func (x *Engine) GetInFlight() int32 {
+	if x != nil {
+		return x.InFlight
+	}
+	return 0
+}
+
+func (x *Engine) GetCacheUtilization() float64 {
+	if x != nil {
+		return x.CacheUtilization
+	}
+	return 0
+}
+
+func (x *Engine) GetRegisteredAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.RegisteredAt
+	}
+	return nil
+}
+
+func (x *Engine) GetLastSeenAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.LastSeenAt
+	}
+	return nil
+}
+
+func (x *Engine) GetLeaseExpiresAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.LeaseExpiresAt
+	}
+	return nil
+}
+
 var File_provisioner_v1_types_proto protoreflect.FileDescriptor
 
 const file_provisioner_v1_types_proto_rawDesc = "" +
@@ -1703,7 +2263,7 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"\x04tags\x18\x06 \x03(\v2\x1e.provisioner.v1.Spec.TagsEntryR\x04tags\x1a7\n" +
 	"\tTagsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xb9\x01\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xa1\x02\n" +
 	"\x14ResourceRequirements\x12\x1e\n" +
 	"\vmin_vram_gb\x18\x01 \x01(\x05R\tminVramGb\x12\x1e\n" +
 	"\vmin_disk_gb\x18\x02 \x01(\x05R\tminDiskGb\x12\x1c\n" +
@@ -1711,7 +2271,9 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"min_ram_gb\x18\x03 \x01(\x05R\bminRamGb\x12\x1b\n" +
 	"\tgpu_count\x18\x04 \x01(\x05R\bgpuCount\x12\x14\n" +
 	"\x05class\x18\x05 \x01(\tR\x05class\x12\x10\n" +
-	"\x03sku\x18\x06 \x01(\tR\x03sku\"\xca\x01\n" +
+	"\x03sku\x18\x06 \x01(\tR\x03sku\x12>\n" +
+	"\ffabric_scope\x18\a \x01(\x0e2\x1b.provisioner.v1.FabricScopeR\vfabricScope\x12&\n" +
+	"\x0fmin_fabric_gbps\x18\b \x01(\x05R\rminFabricGbps\"\x9b\x03\n" +
 	"\bHardware\x12\x17\n" +
 	"\agpu_sku\x18\x01 \x01(\tR\x06gpuSku\x12\x1b\n" +
 	"\tgpu_count\x18\x02 \x01(\x05R\bgpuCount\x12\x1e\n" +
@@ -1721,7 +2283,12 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"\tcpu_model\x18\v \x01(\tR\bcpuModel\x12\x1c\n" +
 	"\n" +
 	"cpu_ram_mb\x18\f \x01(\x05R\bcpuRamMb\x12\x17\n" +
-	"\adisk_mb\x18\x14 \x01(\x05R\x06diskMb\"G\n" +
+	"\adisk_mb\x18\x14 \x01(\x05R\x06diskMb\x12>\n" +
+	"\ffabric_scope\x18\x1e \x01(\x0e2\x1b.provisioner.v1.FabricScopeR\vfabricScope\x12A\n" +
+	"\rfabric_source\x18\x1f \x01(\x0e2\x1c.provisioner.v1.FabricSourceR\ffabricSource\x12\x1f\n" +
+	"\vfabric_gbps\x18  \x01(\x05R\n" +
+	"fabricGbps\x12+\n" +
+	"\x11fabric_technology\x18! \x01(\tR\x10fabricTechnology\"G\n" +
 	"\tSshTarget\x12\x12\n" +
 	"\x04host\x18\x01 \x01(\tR\x04host\x12\x12\n" +
 	"\x04port\x18\x02 \x01(\x05R\x04port\x12\x12\n" +
@@ -1758,7 +2325,7 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"created_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x1a7\n" +
 	"\tTagsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xb6\t\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xe3\t\n" +
 	"\n" +
 	"Deployment\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1f\n" +
@@ -1793,7 +2360,8 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"\x10engine_endpoints\x18\x19 \x03(\tR\x0fengineEndpoints\x124\n" +
 	"\x16unhealthy_instance_ids\x18\x1a \x03(\tR\x14unhealthyInstanceIds\x12@\n" +
 	"\rreplica_specs\x18\x1b \x03(\v2\x1b.provisioner.v1.ReplicaSpecR\freplicaSpecs\x123\n" +
-	"\x06mounts\x18\x1c \x03(\v2\x1b.provisioner.v1.VolumeMountR\x06mounts\x1a6\n" +
+	"\x06mounts\x18\x1c \x03(\v2\x1b.provisioner.v1.VolumeMountR\x06mounts\x12+\n" +
+	"\x11engine_entrypoint\x18\x1d \x03(\tR\x10engineEntrypoint\x1a6\n" +
 	"\bEnvEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x82\x01\n" +
@@ -1819,7 +2387,37 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"\x06region\x18\x02 \x01(\tR\x06region\x12H\n" +
 	"\frequirements\x18\x03 \x01(\v2$.provisioner.v1.ResourceRequirementsR\frequirements\x12\x1a\n" +
 	"\breplicas\x18\x04 \x01(\x05R\breplicas\x12'\n" +
-	"\x0fengine_endpoint\x18\x05 \x01(\tR\x0eengineEndpoint*\xc0\x01\n" +
+	"\x0fengine_endpoint\x18\x05 \x01(\tR\x0eengineEndpoint\"}\n" +
+	"\n" +
+	"EngineNode\x12\x17\n" +
+	"\ahost_id\x18\x01 \x01(\tR\x06hostId\x12\x1a\n" +
+	"\bprovider\x18\x02 \x01(\tR\bprovider\x12\x1d\n" +
+	"\n" +
+	"node_index\x18\x03 \x01(\x05R\tnodeIndex\x12\x1b\n" +
+	"\tgpu_count\x18\x04 \x01(\x05R\bgpuCount\"\xe1\x03\n" +
+	"\x06Engine\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12#\n" +
+	"\rdeployment_id\x18\x02 \x01(\tR\fdeploymentId\x12\x14\n" +
+	"\x05model\x18\x03 \x01(\tR\x05model\x12\x1a\n" +
+	"\bendpoint\x18\x04 \x01(\tR\bendpoint\x121\n" +
+	"\x05state\x18\x05 \x01(\x0e2\x1b.provisioner.v1.EngineStateR\x05state\x12.\n" +
+	"\x04span\x18\x06 \x03(\v2\x1a.provisioner.v1.EngineNodeR\x04span\x12\x1b\n" +
+	"\tin_flight\x18\a \x01(\x05R\binFlight\x12+\n" +
+	"\x11cache_utilization\x18\b \x01(\x01R\x10cacheUtilization\x12?\n" +
+	"\rregistered_at\x18\x14 \x01(\v2\x1a.google.protobuf.TimestampR\fregisteredAt\x12<\n" +
+	"\flast_seen_at\x18\x15 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
+	"lastSeenAt\x12D\n" +
+	"\x10lease_expires_at\x18\x16 \x01(\v2\x1a.google.protobuf.TimestampR\x0eleaseExpiresAt*|\n" +
+	"\vFabricScope\x12\x1c\n" +
+	"\x18FABRIC_SCOPE_UNSPECIFIED\x10\x00\x12\x15\n" +
+	"\x11FABRIC_SCOPE_NONE\x10\x01\x12\x1b\n" +
+	"\x17FABRIC_SCOPE_INTRA_NODE\x10\x02\x12\x1b\n" +
+	"\x17FABRIC_SCOPE_INTER_NODE\x10\x03*\x80\x01\n" +
+	"\fFabricSource\x12\x1d\n" +
+	"\x19FABRIC_SOURCE_UNSPECIFIED\x10\x00\x12\x1a\n" +
+	"\x16FABRIC_SOURCE_DECLARED\x10\x01\x12\x1a\n" +
+	"\x16FABRIC_SOURCE_MEASURED\x10\x02\x12\x19\n" +
+	"\x15FABRIC_SOURCE_UNKNOWN\x10\x03*\xc0\x01\n" +
 	"\rInstanceState\x12\x1e\n" +
 	"\x1aINSTANCE_STATE_UNSPECIFIED\x10\x00\x12\x1a\n" +
 	"\x16INSTANCE_STATE_PENDING\x10\x01\x12\x19\n" +
@@ -1840,7 +2438,14 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"\x19DEPLOYMENT_STATE_DEGRADED\x10\x05\x12 \n" +
 	"\x1cDEPLOYMENT_STATE_TERMINATING\x10\x06\x12\x1f\n" +
 	"\x1bDEPLOYMENT_STATE_TERMINATED\x10\a\x12\x1b\n" +
-	"\x17DEPLOYMENT_STATE_FAILED\x10\bB\xc8\x01\n" +
+	"\x17DEPLOYMENT_STATE_FAILED\x10\b*\xb7\x01\n" +
+	"\vEngineState\x12\x1c\n" +
+	"\x18ENGINE_STATE_UNSPECIFIED\x10\x00\x12\x1b\n" +
+	"\x17ENGINE_STATE_ASSEMBLING\x10\x01\x12\x18\n" +
+	"\x14ENGINE_STATE_SERVING\x10\x02\x12!\n" +
+	"\x1dENGINE_STATE_SERVING_DEGRADED\x10\x03\x12\x15\n" +
+	"\x11ENGINE_STATE_LOST\x10\x04\x12\x19\n" +
+	"\x15ENGINE_STATE_DRAINING\x10\x05B\xc8\x01\n" +
 	"\x12com.provisioner.v1B\n" +
 	"TypesProtoP\x01ZMgithub.com/inference-book/inference-plane/gen/go/provisioner/v1;provisionerv1\xa2\x02\x03PXX\xaa\x02\x0eProvisioner.V1\xca\x02\x0eProvisioner\\V1\xe2\x02\x1aProvisioner\\V1\\GPBMetadata\xea\x02\x0fProvisioner::V1b\x06proto3"
 
@@ -1856,59 +2461,72 @@ func file_provisioner_v1_types_proto_rawDescGZIP() []byte {
 	return file_provisioner_v1_types_proto_rawDescData
 }
 
-var file_provisioner_v1_types_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_provisioner_v1_types_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
+var file_provisioner_v1_types_proto_enumTypes = make([]protoimpl.EnumInfo, 6)
+var file_provisioner_v1_types_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
 var file_provisioner_v1_types_proto_goTypes = []any{
-	(InstanceState)(0),            // 0: provisioner.v1.InstanceState
-	(Priority)(0),                 // 1: provisioner.v1.Priority
-	(DeploymentState)(0),          // 2: provisioner.v1.DeploymentState
-	(*Spec)(nil),                  // 3: provisioner.v1.Spec
-	(*ResourceRequirements)(nil),  // 4: provisioner.v1.ResourceRequirements
-	(*Hardware)(nil),              // 5: provisioner.v1.Hardware
-	(*SshTarget)(nil),             // 6: provisioner.v1.SshTarget
-	(*Instance)(nil),              // 7: provisioner.v1.Instance
-	(*InstanceRef)(nil),           // 8: provisioner.v1.InstanceRef
-	(*Deployment)(nil),            // 9: provisioner.v1.Deployment
-	(*VolumeMount)(nil),           // 10: provisioner.v1.VolumeMount
-	(*Volume)(nil),                // 11: provisioner.v1.Volume
-	(*ReplicaSpec)(nil),           // 12: provisioner.v1.ReplicaSpec
-	nil,                           // 13: provisioner.v1.Spec.TagsEntry
-	nil,                           // 14: provisioner.v1.Instance.MetadataEntry
-	nil,                           // 15: provisioner.v1.InstanceRef.TagsEntry
-	nil,                           // 16: provisioner.v1.Deployment.EnvEntry
-	(*timestamppb.Timestamp)(nil), // 17: google.protobuf.Timestamp
-	(*structpb.Value)(nil),        // 18: google.protobuf.Value
+	(FabricScope)(0),              // 0: provisioner.v1.FabricScope
+	(FabricSource)(0),             // 1: provisioner.v1.FabricSource
+	(InstanceState)(0),            // 2: provisioner.v1.InstanceState
+	(Priority)(0),                 // 3: provisioner.v1.Priority
+	(DeploymentState)(0),          // 4: provisioner.v1.DeploymentState
+	(EngineState)(0),              // 5: provisioner.v1.EngineState
+	(*Spec)(nil),                  // 6: provisioner.v1.Spec
+	(*ResourceRequirements)(nil),  // 7: provisioner.v1.ResourceRequirements
+	(*Hardware)(nil),              // 8: provisioner.v1.Hardware
+	(*SshTarget)(nil),             // 9: provisioner.v1.SshTarget
+	(*Instance)(nil),              // 10: provisioner.v1.Instance
+	(*InstanceRef)(nil),           // 11: provisioner.v1.InstanceRef
+	(*Deployment)(nil),            // 12: provisioner.v1.Deployment
+	(*VolumeMount)(nil),           // 13: provisioner.v1.VolumeMount
+	(*Volume)(nil),                // 14: provisioner.v1.Volume
+	(*ReplicaSpec)(nil),           // 15: provisioner.v1.ReplicaSpec
+	(*EngineNode)(nil),            // 16: provisioner.v1.EngineNode
+	(*Engine)(nil),                // 17: provisioner.v1.Engine
+	nil,                           // 18: provisioner.v1.Spec.TagsEntry
+	nil,                           // 19: provisioner.v1.Instance.MetadataEntry
+	nil,                           // 20: provisioner.v1.InstanceRef.TagsEntry
+	nil,                           // 21: provisioner.v1.Deployment.EnvEntry
+	(*timestamppb.Timestamp)(nil), // 22: google.protobuf.Timestamp
+	(*structpb.Value)(nil),        // 23: google.protobuf.Value
 }
 var file_provisioner_v1_types_proto_depIdxs = []int32{
-	4,  // 0: provisioner.v1.Spec.requirements:type_name -> provisioner.v1.ResourceRequirements
-	13, // 1: provisioner.v1.Spec.tags:type_name -> provisioner.v1.Spec.TagsEntry
-	3,  // 2: provisioner.v1.Instance.spec:type_name -> provisioner.v1.Spec
-	5,  // 3: provisioner.v1.Instance.hardware:type_name -> provisioner.v1.Hardware
-	0,  // 4: provisioner.v1.Instance.state:type_name -> provisioner.v1.InstanceState
-	17, // 5: provisioner.v1.Instance.created_at:type_name -> google.protobuf.Timestamp
-	17, // 6: provisioner.v1.Instance.activated_at:type_name -> google.protobuf.Timestamp
-	17, // 7: provisioner.v1.Instance.terminated_at:type_name -> google.protobuf.Timestamp
-	6,  // 8: provisioner.v1.Instance.ssh:type_name -> provisioner.v1.SshTarget
-	14, // 9: provisioner.v1.Instance.metadata:type_name -> provisioner.v1.Instance.MetadataEntry
-	15, // 10: provisioner.v1.InstanceRef.tags:type_name -> provisioner.v1.InstanceRef.TagsEntry
-	17, // 11: provisioner.v1.InstanceRef.created_at:type_name -> google.protobuf.Timestamp
-	16, // 12: provisioner.v1.Deployment.env:type_name -> provisioner.v1.Deployment.EnvEntry
-	2,  // 13: provisioner.v1.Deployment.state:type_name -> provisioner.v1.DeploymentState
-	17, // 14: provisioner.v1.Deployment.created_at:type_name -> google.protobuf.Timestamp
-	17, // 15: provisioner.v1.Deployment.started_at:type_name -> google.protobuf.Timestamp
-	17, // 16: provisioner.v1.Deployment.ready_at:type_name -> google.protobuf.Timestamp
-	17, // 17: provisioner.v1.Deployment.terminated_at:type_name -> google.protobuf.Timestamp
-	17, // 18: provisioner.v1.Deployment.last_activity_at:type_name -> google.protobuf.Timestamp
-	12, // 19: provisioner.v1.Deployment.replica_specs:type_name -> provisioner.v1.ReplicaSpec
-	10, // 20: provisioner.v1.Deployment.mounts:type_name -> provisioner.v1.VolumeMount
-	17, // 21: provisioner.v1.Volume.created_at:type_name -> google.protobuf.Timestamp
-	4,  // 22: provisioner.v1.ReplicaSpec.requirements:type_name -> provisioner.v1.ResourceRequirements
-	18, // 23: provisioner.v1.Instance.MetadataEntry.value:type_name -> google.protobuf.Value
-	24, // [24:24] is the sub-list for method output_type
-	24, // [24:24] is the sub-list for method input_type
-	24, // [24:24] is the sub-list for extension type_name
-	24, // [24:24] is the sub-list for extension extendee
-	0,  // [0:24] is the sub-list for field type_name
+	7,  // 0: provisioner.v1.Spec.requirements:type_name -> provisioner.v1.ResourceRequirements
+	18, // 1: provisioner.v1.Spec.tags:type_name -> provisioner.v1.Spec.TagsEntry
+	0,  // 2: provisioner.v1.ResourceRequirements.fabric_scope:type_name -> provisioner.v1.FabricScope
+	0,  // 3: provisioner.v1.Hardware.fabric_scope:type_name -> provisioner.v1.FabricScope
+	1,  // 4: provisioner.v1.Hardware.fabric_source:type_name -> provisioner.v1.FabricSource
+	6,  // 5: provisioner.v1.Instance.spec:type_name -> provisioner.v1.Spec
+	8,  // 6: provisioner.v1.Instance.hardware:type_name -> provisioner.v1.Hardware
+	2,  // 7: provisioner.v1.Instance.state:type_name -> provisioner.v1.InstanceState
+	22, // 8: provisioner.v1.Instance.created_at:type_name -> google.protobuf.Timestamp
+	22, // 9: provisioner.v1.Instance.activated_at:type_name -> google.protobuf.Timestamp
+	22, // 10: provisioner.v1.Instance.terminated_at:type_name -> google.protobuf.Timestamp
+	9,  // 11: provisioner.v1.Instance.ssh:type_name -> provisioner.v1.SshTarget
+	19, // 12: provisioner.v1.Instance.metadata:type_name -> provisioner.v1.Instance.MetadataEntry
+	20, // 13: provisioner.v1.InstanceRef.tags:type_name -> provisioner.v1.InstanceRef.TagsEntry
+	22, // 14: provisioner.v1.InstanceRef.created_at:type_name -> google.protobuf.Timestamp
+	21, // 15: provisioner.v1.Deployment.env:type_name -> provisioner.v1.Deployment.EnvEntry
+	4,  // 16: provisioner.v1.Deployment.state:type_name -> provisioner.v1.DeploymentState
+	22, // 17: provisioner.v1.Deployment.created_at:type_name -> google.protobuf.Timestamp
+	22, // 18: provisioner.v1.Deployment.started_at:type_name -> google.protobuf.Timestamp
+	22, // 19: provisioner.v1.Deployment.ready_at:type_name -> google.protobuf.Timestamp
+	22, // 20: provisioner.v1.Deployment.terminated_at:type_name -> google.protobuf.Timestamp
+	22, // 21: provisioner.v1.Deployment.last_activity_at:type_name -> google.protobuf.Timestamp
+	15, // 22: provisioner.v1.Deployment.replica_specs:type_name -> provisioner.v1.ReplicaSpec
+	13, // 23: provisioner.v1.Deployment.mounts:type_name -> provisioner.v1.VolumeMount
+	22, // 24: provisioner.v1.Volume.created_at:type_name -> google.protobuf.Timestamp
+	7,  // 25: provisioner.v1.ReplicaSpec.requirements:type_name -> provisioner.v1.ResourceRequirements
+	5,  // 26: provisioner.v1.Engine.state:type_name -> provisioner.v1.EngineState
+	16, // 27: provisioner.v1.Engine.span:type_name -> provisioner.v1.EngineNode
+	22, // 28: provisioner.v1.Engine.registered_at:type_name -> google.protobuf.Timestamp
+	22, // 29: provisioner.v1.Engine.last_seen_at:type_name -> google.protobuf.Timestamp
+	22, // 30: provisioner.v1.Engine.lease_expires_at:type_name -> google.protobuf.Timestamp
+	23, // 31: provisioner.v1.Instance.MetadataEntry.value:type_name -> google.protobuf.Value
+	32, // [32:32] is the sub-list for method output_type
+	32, // [32:32] is the sub-list for method input_type
+	32, // [32:32] is the sub-list for extension type_name
+	32, // [32:32] is the sub-list for extension extendee
+	0,  // [0:32] is the sub-list for field type_name
 }
 
 func init() { file_provisioner_v1_types_proto_init() }
@@ -1921,8 +2539,8 @@ func file_provisioner_v1_types_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_provisioner_v1_types_proto_rawDesc), len(file_provisioner_v1_types_proto_rawDesc)),
-			NumEnums:      3,
-			NumMessages:   14,
+			NumEnums:      6,
+			NumMessages:   16,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

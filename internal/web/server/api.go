@@ -55,6 +55,7 @@ type API struct {
 	healthClient       inferencev1.HealthServiceClient
 	provisionerHandler provisionerv1connect.ProvisionerServiceHandler
 	deploymentHandler  provisionerv1connect.DeploymentServiceHandler
+	engineHandler      provisionerv1connect.EngineRegistryServiceHandler
 
 	// dataPlaneRoutes is the deployment-routed surface mounted by the
 	// daemon: pattern -> handler pairs from router.Router.Handle().
@@ -81,6 +82,19 @@ func WithProvisionerHandler(h provisionerv1connect.ProvisionerServiceHandler) Op
 // already uses.
 func WithDeploymentHandler(h provisionerv1connect.DeploymentServiceHandler) Option {
 	return func(a *API) { a.deploymentHandler = h }
+}
+
+// WithEngineRegistryHandler mounts the EngineRegistryService Connect handler
+// on /provisioner.v1.EngineRegistryService/{Method}, the surface engines
+// register themselves against (issue 204).
+//
+// It belongs on this port rather than the loopback gRPC server for a reason
+// the other two handlers do not share: the caller is an engine on a rented
+// pod out on the internet, not an operator CLI, so 127.0.0.1:9090 is
+// unreachable to it. Omitting the option leaves the daemon with no registry
+// surface, which is the pre-204 behavior.
+func WithEngineRegistryHandler(h provisionerv1connect.EngineRegistryServiceHandler) Option {
+	return func(a *API) { a.engineHandler = h }
 }
 
 // WithDataPlaneRoutes mounts a set of (pattern, handler) pairs on the
@@ -192,6 +206,10 @@ func (a *API) registerConnectHandlers() error {
 	}
 	if a.deploymentHandler != nil {
 		path, handler := provisionerv1connect.NewDeploymentServiceHandler(a.deploymentHandler)
+		a.mux.Handle(path, handler)
+	}
+	if a.engineHandler != nil {
+		path, handler := provisionerv1connect.NewEngineRegistryServiceHandler(a.engineHandler)
 		a.mux.Handle(path, handler)
 	}
 	return nil

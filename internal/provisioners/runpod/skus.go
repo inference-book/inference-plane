@@ -6,6 +6,7 @@ import (
 
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
 	"github.com/inference-book/inference-plane/internal/provisioners"
+	"github.com/inference-book/inference-plane/internal/provisioners/fabric"
 )
 
 // SKUSpec describes what a RunPod gpuTypeId actually delivers: VRAM,
@@ -32,6 +33,16 @@ type SKUSpec struct {
 	DefaultSystemRAMGb int     // system RAM for a typical single-GPU pod with this SKU
 	DefaultDiskGb      int     // typical container-disk default for this tier
 	PriceUSDPerHour    float64 // cheapest cloud tier price; for ordering, not authoritative
+
+	// Family maps this SKU onto the cross-provider fabric catalog.
+	//
+	// RunPod exposes no interconnect field anywhere in its API, so the form
+	// factor baked into the gpuTypeId string is the only signal available:
+	// "NVIDIA A100-SXM4-80GB" is on an NVSwitch mesh, "NVIDIA A100 80GB PCIe"
+	// is on a PCIe root that may or may not carry a bridge. Every datacenter
+	// part names its form factor, which is what makes this tractable.
+	// Verified against the live gpuTypes catalog 2026-08-09.
+	Family fabric.Family
 }
 
 // skus is the catalog the resolver iterates. Order in the slice is the
@@ -53,31 +64,31 @@ type SKUSpec struct {
 // list in the problems field, which is enough to update the catalog.
 var skus = []SKUSpec{
 	// Small (>=24 GB VRAM): consumer + entry datacenter.
-	{GpuTypeID: "NVIDIA GeForce RTX 4090", VRAMGb: 24, DefaultSystemRAMGb: 16, DefaultDiskGb: 20, PriceUSDPerHour: 0.39},
-	{GpuTypeID: "NVIDIA RTX A5000", VRAMGb: 24, DefaultSystemRAMGb: 24, DefaultDiskGb: 20, PriceUSDPerHour: 0.36},
-	{GpuTypeID: "NVIDIA L4", VRAMGb: 24, DefaultSystemRAMGb: 24, DefaultDiskGb: 20, PriceUSDPerHour: 0.43},
+	{GpuTypeID: "NVIDIA GeForce RTX 4090", VRAMGb: 24, DefaultSystemRAMGb: 16, DefaultDiskGb: 20, PriceUSDPerHour: 0.39, Family: fabric.FamilyRTX4090},
+	{GpuTypeID: "NVIDIA RTX A5000", VRAMGb: 24, DefaultSystemRAMGb: 24, DefaultDiskGb: 20, PriceUSDPerHour: 0.36, Family: fabric.FamilyA5000},
+	{GpuTypeID: "NVIDIA L4", VRAMGb: 24, DefaultSystemRAMGb: 24, DefaultDiskGb: 20, PriceUSDPerHour: 0.43, Family: fabric.FamilyL4},
 	// "NVIDIA A30" was retired from RunPod's REST enum (confirmed 2026-07-27:
 	// a create with it in gpuTypeIds 400s with the full enum, A30 absent).
 	// Any min_vram_gb<=24 request included it in the top-5 and failed whole.
-	{GpuTypeID: "NVIDIA GeForce RTX 5090", VRAMGb: 32, DefaultSystemRAMGb: 24, DefaultDiskGb: 20, PriceUSDPerHour: 0.69},
+	{GpuTypeID: "NVIDIA GeForce RTX 5090", VRAMGb: 32, DefaultSystemRAMGb: 24, DefaultDiskGb: 20, PriceUSDPerHour: 0.69, Family: fabric.FamilyRTX5090},
 
 	// Medium (>=40 GB VRAM): workstation / mid-datacenter.
-	{GpuTypeID: "NVIDIA A40", VRAMGb: 48, DefaultSystemRAMGb: 32, DefaultDiskGb: 40, PriceUSDPerHour: 0.39},
-	{GpuTypeID: "NVIDIA L40", VRAMGb: 48, DefaultSystemRAMGb: 32, DefaultDiskGb: 40, PriceUSDPerHour: 0.69},
-	{GpuTypeID: "NVIDIA L40S", VRAMGb: 48, DefaultSystemRAMGb: 32, DefaultDiskGb: 40, PriceUSDPerHour: 0.79},
-	{GpuTypeID: "NVIDIA RTX A6000", VRAMGb: 48, DefaultSystemRAMGb: 32, DefaultDiskGb: 40, PriceUSDPerHour: 0.79},
-	{GpuTypeID: "NVIDIA RTX 6000 Ada Generation", VRAMGb: 48, DefaultSystemRAMGb: 48, DefaultDiskGb: 40, PriceUSDPerHour: 0.99},
+	{GpuTypeID: "NVIDIA A40", VRAMGb: 48, DefaultSystemRAMGb: 32, DefaultDiskGb: 40, PriceUSDPerHour: 0.39, Family: fabric.FamilyA40},
+	{GpuTypeID: "NVIDIA L40", VRAMGb: 48, DefaultSystemRAMGb: 32, DefaultDiskGb: 40, PriceUSDPerHour: 0.69, Family: fabric.FamilyL40},
+	{GpuTypeID: "NVIDIA L40S", VRAMGb: 48, DefaultSystemRAMGb: 32, DefaultDiskGb: 40, PriceUSDPerHour: 0.79, Family: fabric.FamilyL40S},
+	{GpuTypeID: "NVIDIA RTX A6000", VRAMGb: 48, DefaultSystemRAMGb: 32, DefaultDiskGb: 40, PriceUSDPerHour: 0.79, Family: fabric.FamilyA6000},
+	{GpuTypeID: "NVIDIA RTX 6000 Ada Generation", VRAMGb: 48, DefaultSystemRAMGb: 48, DefaultDiskGb: 40, PriceUSDPerHour: 0.99, Family: fabric.FamilyRTX6000Ada},
 
 	// Large (>=80 GB VRAM): 70B-class inference territory.
-	{GpuTypeID: "NVIDIA A100 80GB PCIe", VRAMGb: 80, DefaultSystemRAMGb: 96, DefaultDiskGb: 60, PriceUSDPerHour: 1.69},
-	{GpuTypeID: "NVIDIA A100-SXM4-80GB", VRAMGb: 80, DefaultSystemRAMGb: 96, DefaultDiskGb: 60, PriceUSDPerHour: 1.79},
-	{GpuTypeID: "NVIDIA H100 PCIe", VRAMGb: 80, DefaultSystemRAMGb: 128, DefaultDiskGb: 60, PriceUSDPerHour: 2.39},
-	{GpuTypeID: "NVIDIA H100 80GB HBM3", VRAMGb: 80, DefaultSystemRAMGb: 128, DefaultDiskGb: 60, PriceUSDPerHour: 2.49},
+	{GpuTypeID: "NVIDIA A100 80GB PCIe", VRAMGb: 80, DefaultSystemRAMGb: 96, DefaultDiskGb: 60, PriceUSDPerHour: 1.69, Family: fabric.FamilyA100PCIe},
+	{GpuTypeID: "NVIDIA A100-SXM4-80GB", VRAMGb: 80, DefaultSystemRAMGb: 96, DefaultDiskGb: 60, PriceUSDPerHour: 1.79, Family: fabric.FamilyA100SXM},
+	{GpuTypeID: "NVIDIA H100 PCIe", VRAMGb: 80, DefaultSystemRAMGb: 128, DefaultDiskGb: 60, PriceUSDPerHour: 2.39, Family: fabric.FamilyH100PCIe},
+	{GpuTypeID: "NVIDIA H100 80GB HBM3", VRAMGb: 80, DefaultSystemRAMGb: 128, DefaultDiskGb: 60, PriceUSDPerHour: 2.49, Family: fabric.FamilyH100SXM},
 
 	// XL (>=94 GB VRAM): frontier / 400B-class multi-host.
-	{GpuTypeID: "NVIDIA H100 NVL", VRAMGb: 94, DefaultSystemRAMGb: 128, DefaultDiskGb: 100, PriceUSDPerHour: 2.99},
-	{GpuTypeID: "NVIDIA H200", VRAMGb: 141, DefaultSystemRAMGb: 192, DefaultDiskGb: 100, PriceUSDPerHour: 3.99},
-	{GpuTypeID: "NVIDIA B200", VRAMGb: 192, DefaultSystemRAMGb: 256, DefaultDiskGb: 100, PriceUSDPerHour: 5.99},
+	{GpuTypeID: "NVIDIA H100 NVL", VRAMGb: 94, DefaultSystemRAMGb: 128, DefaultDiskGb: 100, PriceUSDPerHour: 2.99, Family: fabric.FamilyH100NVL},
+	{GpuTypeID: "NVIDIA H200", VRAMGb: 141, DefaultSystemRAMGb: 192, DefaultDiskGb: 100, PriceUSDPerHour: 3.99, Family: fabric.FamilyH200SXM},
+	{GpuTypeID: "NVIDIA B200", VRAMGb: 192, DefaultSystemRAMGb: 256, DefaultDiskGb: 100, PriceUSDPerHour: 5.99, Family: fabric.FamilyB200},
 }
 
 // Class-to-constraint-defaults lives in the service layer
@@ -138,6 +149,18 @@ func MatchSKUs(reqs *provisionerv1.ResourceRequirements) []string {
 		// a big model asks for more disk than any tier's default (e.g. 150
 		// GB for a 72B: max DefaultDiskGb is 100).
 		if int(reqs.GetMinRamGb()) > 0 && sku.DefaultSystemRAMGb < int(reqs.GetMinRamGb()) {
+			continue
+		}
+		// Fabric filter. RunPod supplies no measurement, so every verdict here
+		// is the declared tier: SXM/NVL parts pass, cards with no NVLink at
+		// all are rejected, and bridge-capable PCIe parts resolve to UNKNOWN
+		// and fail closed. Dropping the unknowns is the point -- a silent pass
+		// rents a pool and bills for it before reporting that the fabric was
+		// never there.
+		if !fabric.Satisfies(
+			fabric.Resolve(fabric.Observation{Family: sku.Family}),
+			reqs.GetFabricScope(), reqs.GetMinFabricGbps(),
+		) {
 			continue
 		}
 		matches = append(matches, sku)
@@ -210,4 +233,20 @@ func isActiveProviderState(state string) bool {
 		return true
 	}
 	return false
+}
+
+// stampFabric fills the fabric fields on a Hardware record for a resolved
+// RunPod SKU. RunPod reports no measurement, so this is always the declared
+// tier, and an operator-supplied --gpu-sku outside our catalog resolves to
+// UNKNOWN rather than to a guess.
+func stampFabric(hw *provisionerv1.Hardware, gpuTypeID string) {
+	var family fabric.Family
+	if spec := LookupSKU(gpuTypeID); spec != nil {
+		family = spec.Family
+	}
+	res := fabric.Resolve(fabric.Observation{Family: family})
+	hw.FabricScope = res.Scope
+	hw.FabricSource = res.Source
+	hw.FabricGbps = res.Gbps
+	hw.FabricTechnology = res.Technology
 }

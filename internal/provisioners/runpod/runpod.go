@@ -624,11 +624,15 @@ func (p *Provider) podToInstance(pod *podBody, spec *provisionerv1.Spec, resolve
 		Provider:   p.Name(),
 		Spec:       spec,
 		Region:     region,
-		Hardware: &provisionerv1.Hardware{
-			GpuSku:    resolvedSKU,
-			GpuCount:  int32(gpuCount),
-			GpuVramMb: int32(vramGB * 1024), // pod.gpuVRAMGB returns GB; convert to MB
-		},
+		Hardware: func() *provisionerv1.Hardware {
+			hw := &provisionerv1.Hardware{
+				GpuSku:    resolvedSKU,
+				GpuCount:  int32(gpuCount),
+				GpuVramMb: int32(vramGB * 1024), // pod.gpuVRAMGB returns GB; convert to MB
+			}
+			stampFabric(hw, resolvedSKU)
+			return hw
+		}(),
 		Metadata:      runpodMetadata(pod, resolvedClass),
 		HourlyRateUsd: pod.CostPerHr,
 		State:         provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE,
@@ -671,10 +675,14 @@ func (p *Provider) instanceFromCreate(spec *provisionerv1.Spec, created *createP
 		Provider:   p.Name(),
 		Spec:       spec,
 		Region:     spec.GetRegion(),
-		Hardware: &provisionerv1.Hardware{
-			GpuSku:   resolvedSKU,
-			GpuCount: int32(gpuCount),
-		},
+		Hardware: func() *provisionerv1.Hardware {
+			hw := &provisionerv1.Hardware{
+				GpuSku:   resolvedSKU,
+				GpuCount: int32(gpuCount),
+			}
+			stampFabric(hw, resolvedSKU)
+			return hw
+		}(),
 		Metadata: map[string]*structpb.Value{
 			"runpod.class": structpb.NewStringValue(resolvedClass),
 		},
@@ -752,21 +760,21 @@ func isWrappedNotFound(err error) bool {
 // Go side. Omit-empty everywhere; the API treats missing fields as
 // "use the documented default."
 type createPodRequest struct {
-	Name              string            `json:"name,omitempty"`
-	ImageName         string            `json:"imageName,omitempty"`
-	GPUTypeIDs        []string          `json:"gpuTypeIds,omitempty"`
-	GPUTypePriority   string            `json:"gpuTypePriority,omitempty"`
-	GPUCount          int               `json:"gpuCount,omitempty"`
-	MinRAMPerGPU      int               `json:"minRAMPerGPU,omitempty"` // RunPod expresses RAM per-GPU; we convert from per-instance.
-	CloudType         string            `json:"cloudType,omitempty"`
-	ComputeType       string            `json:"computeType,omitempty"`
-	ContainerDiskInGB int               `json:"containerDiskInGb,omitempty"`
-	VolumeInGB        int               `json:"volumeInGb,omitempty"`
-	NetworkVolumeID   string            `json:"networkVolumeId,omitempty"`
-	VolumeMountPath   string            `json:"volumeMountPath,omitempty"` // where networkVolumeId attaches inside the pod
+	Name              string   `json:"name,omitempty"`
+	ImageName         string   `json:"imageName,omitempty"`
+	GPUTypeIDs        []string `json:"gpuTypeIds,omitempty"`
+	GPUTypePriority   string   `json:"gpuTypePriority,omitempty"`
+	GPUCount          int      `json:"gpuCount,omitempty"`
+	MinRAMPerGPU      int      `json:"minRAMPerGPU,omitempty"` // RunPod expresses RAM per-GPU; we convert from per-instance.
+	CloudType         string   `json:"cloudType,omitempty"`
+	ComputeType       string   `json:"computeType,omitempty"`
+	ContainerDiskInGB int      `json:"containerDiskInGb,omitempty"`
+	VolumeInGB        int      `json:"volumeInGb,omitempty"`
+	NetworkVolumeID   string   `json:"networkVolumeId,omitempty"`
+	VolumeMountPath   string   `json:"volumeMountPath,omitempty"` // where networkVolumeId attaches inside the pod
 
-	Ports             []string          `json:"ports,omitempty"`
-	Env               map[string]string `json:"env,omitempty"` // RunPod's REST uses a flat key/value map.
+	Ports []string          `json:"ports,omitempty"`
+	Env   map[string]string `json:"env,omitempty"` // RunPod's REST uses a flat key/value map.
 	// DockerStartCmd REPLACES the image's CMD with these argv tokens
 	// (ENTRYPOINT — the engine binary — stays). RunPod's REST API
 	// removed the legacy single-string `dockerArgs` in favor of these
@@ -800,10 +808,24 @@ type podBody struct {
 	CreatedAt     string  `json:"createdAt"`
 	DesiredStatus string  `json:"desiredStatus"`
 	// LastStartedAt is RunPod's UTC timestamp for when the pod's
-	// container process last started. Empty until the image pull
-	// finishes and the container comes up, so a non-empty value is the
-	// "image-pull done, engine now initializing" signal the deploy
-	// phase-split reads (see deployer.go classifyEnginePhase).
+	// container process last started. classifyEnginePhase treats a
+	// non-empty value as the "image-pull done, engine now initializing"
+	// signal (see deployer.go).
+	//
+	// WRONG: that reading is disproven. Traced live 2026-08-09, RunPod
+	// stamps this at pod-record creation, NOT at container start -- it
+	// read 06:19:04.093 against a createdAt of 06:19:04.100 (7ms
+	// earlier) and never changed across a 2m14s deploy. Because
+	// classifyEnginePhase tests `started` first, a non-empty value on
+	// the first probe pins the phase to engine:init at t=0 and makes
+	// runpod:image-pull unreachable, which is why that phase measures
+	// ~0s on every run.
+	//
+	// Do not use this field as a container-start boundary. The working
+	// signal is `runtime` (null until the container starts), exposed by
+	// GraphQL v1 and REST v2 but absent from REST v1. See issue 208,
+	// docs/deployment-observability.md ("Known gap"), and
+	// docs/design/0005-engine-image-coldstart.md.
 	LastStartedAt string   `json:"lastStartedAt"`
 	PublicIP      string   `json:"publicIp"`
 	Ports         []string `json:"ports"`
@@ -873,13 +895,59 @@ func (p *podBody) dataCenter() string {
 // record lands a few seconds later (see the RunPod-machine gotcha in
 // CLAUDE.md), so a non-nil but empty Machine still counts as "not
 // scheduled." Any real field populated means capacity was found.
+//
+// "A few seconds later" turned out to be optimistic (issue 208): traced
+// live 2026-08-09, `machine` stayed {} for an entire 2m14s deploy while
+// RunPod populated the top-level `machineId` immediately. Keying only on
+// the nested object meant this returned false throughout and the
+// runpod:scheduling -> image-pull transition never fired, so a non-empty
+// MachineID counts as scheduled too.
 func (p *podBody) machinePresent() bool {
+	if p.MachineID != "" {
+		return true
+	}
 	m := p.Machine
 	if m == nil {
 		return false
 	}
 	return m.GPUTypeID != "" || m.DataCenterID != "" || m.GPUCount > 0 ||
 		(m.GPUType != nil && m.GPUType.ID != "")
+}
+
+// podV2Body is the slice of RunPod's v2 pod-status response this adapter
+// reads. Only `runtime` matters: it is null until the container starts,
+// which makes it the image-pull -> engine-init boundary (issue 208). v1
+// does not return this field at all.
+type podV2Body struct {
+	Runtime *podV2Runtime `json:"runtime"`
+}
+
+// podV2Runtime is RunPod's container-runtime block. Field presence is
+// the signal; the values are utilization samples we don't use.
+type podV2Runtime struct {
+	Ports  []podV2RuntimePort `json:"ports"`
+	CPU    *podV2Util         `json:"cpu"`
+	Memory *podV2Util         `json:"memory"`
+	GPUs   []podV2Util        `json:"gpus"`
+}
+
+type podV2RuntimePort struct {
+	PrivatePort int `json:"privatePort"`
+}
+
+type podV2Util struct {
+	Util int `json:"util"`
+}
+
+// containerStarted reports whether the engine container is actually
+// running. Mirrors machinePresent's defensiveness: RunPod has a habit of
+// returning a present-but-empty object ("machine": {}), so an empty
+// runtime block counts as not-started rather than started.
+func (r *podV2Runtime) containerStarted() bool {
+	if r == nil {
+		return false
+	}
+	return len(r.Ports) > 0 || r.CPU != nil || r.Memory != nil || len(r.GPUs) > 0
 }
 
 // Compile-time check.

@@ -410,3 +410,92 @@ message TouchDeploymentResponse {
   // new last_activity_at without a follow-up Describe.
   Deployment deployment = 1;
 }
+
+// EngineRegistryService is the push side of fleet tracking: engines announce
+// themselves and keep announcing, rather than the control plane polling to
+// find out what exists.
+//
+// Separate from DeploymentService on purpose. The caller is an engine rather
+// than an operator, it may be reporting an engine nobody provisioned, and it
+// sits outside the trust boundary the operator API assumes.
+//
+// **This does not replace the /health poller.** The poller drives quarantine,
+// and quarantine is router eligibility, which is data-path correctness; the
+// design doc's guardrail keeps pull carrying anything the data path rides on.
+// The registry answers a different question: what is this engine, did its
+// group assemble, and is it still there. See
+// docs/design/0006-ch10-provider-reality-and-control-channel.md Part 4.
+service EngineRegistryService {
+  // RegisterEngine is both the first announcement and every renewal after
+  // it. One method, because the distinction is not useful to the caller and
+  // collapsing them makes the agent a retry loop with no state machine: an
+  // engine that crashes and returns simply registers again.
+  //
+  // Idempotent on Engine.id. The response carries the interval the control
+  // plane wants the next renewal by, so detection latency is a property of
+  // the control plane's configuration rather than of what each agent
+  // happened to hardcode.
+  rpc RegisterEngine(RegisterEngineRequest) returns (RegisterEngineResponse);
+
+  // ListEngines returns every engine the registry knows, including those the
+  // sweeper has marked LOST. Lost members are retained rather than deleted so
+  // an operator can see what went away; this is the read surface the fleet
+  // verbs (issue 205) render.
+  rpc ListEngines(ListEnginesRequest) returns (ListEnginesResponse);
+
+  // DrainEngine takes a member out of service properly: stop new work landing
+  // on it, let in-flight finish, then release every node it spans.
+  //
+  // Synchronous, and therefore bounded by the server's write timeout. That is
+  // a deliberate constraint rather than an oversight: iplane has already been
+  // bitten once by a long-running unary call being severed mid-flight
+  // (CreateDeployment, Ch 9), so the handler rejects a timeout the transport
+  // cannot carry instead of discovering it the hard way.
+  rpc DrainEngine(DrainEngineRequest) returns (DrainEngineResponse);
+}
+
+message RegisterEngineRequest {
+  // Engine fields the caller owns. id is required; registered_at,
+  // last_seen_at and lease_expires_at are set by the control plane and
+  // ignored if supplied.
+  Engine engine = 1;
+}
+
+message RegisterEngineResponse {
+  // The stored engine, with the control-plane-assigned timestamps filled in.
+  Engine engine = 1;
+  // Renew before this many seconds elapse or the engine is declared LOST.
+  // Server-assigned so the fleet's detection window is tunable in one place.
+  int32 lease_seconds = 2;
+}
+
+message ListEnginesRequest {
+  // Optional filters. Empty means every engine.
+  string deployment_id = 1;
+  EngineState state = 2;
+}
+
+message ListEnginesResponse {
+  repeated Engine engines = 1;
+}
+
+// ---- Fleet drain (issue 205) -------------------------------------------
+
+message DrainEngineRequest {
+  // Engine to take out of service.
+  string engine_id = 1;
+  // How long to let in-flight work finish before releasing. 0 = server
+  // default. Ignored when force is set.
+  int32 timeout_seconds = 2;
+  // Skip the wait. In-flight requests on this member see their connections
+  // cut.
+  bool force = 3;
+}
+
+message DrainEngineResponse {
+  Engine engine = 1;
+  // Instances released, in span order. The point of draining a member rather
+  // than its replicas one at a time: a distributed engine's whole group goes
+  // in one action, with nothing left billing.
+  repeated string released_instance_ids = 2;
+}

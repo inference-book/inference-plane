@@ -39,6 +39,59 @@ message Spec {
   map<string, string> tags = 6;
 }
 
+// FabricScope is how far an instance's fast GPU interconnect reaches.
+//
+// Deliberately vendor-neutral. NVLink, AMD xGMI and Intel Xe Link are all
+// INTRA_NODE; InfiniBand, RoCE and AWS EFA are all INTER_NODE. The control
+// plane asks for a scope and a bandwidth; which technology delivers it is the
+// adapter's business, and no control-plane logic branches on the vendor name
+// (see Hardware.fabric_technology, which carries it for humans only).
+//
+// An earlier draft (docs/design/0003-kv-domain.md) modelled this as
+// `enum Interconnect { NONE, RDMA, NVLINK }`. That conflated two axes:
+// NVLink is one vendor's intra-node link, RDMA is a cross-node access
+// semantic. docs/design/0006 supersedes it with this enum.
+//
+// NOTE: the two scopes are NOT ordered. INTER_NODE does not imply
+// INTRA_NODE -- a PCIe-only box behind InfiniBand has a fast cross-node
+// fabric and no fast link between its own cards. A requirement that needs
+// both at once therefore needs two fields, not one enum value. We carry one
+// axis while the only consumer wanting both (a cross-node pool, issue 212)
+// is descoped; add the second axis when that lands.
+enum FabricScope {
+  FABRIC_SCOPE_UNSPECIFIED = 0;
+  // No fast fabric required. PCIe / TCP between cards is fine. This is the
+  // Ch 6-9 default: independent replicas that never exchange tensors.
+  FABRIC_SCOPE_NONE = 1;
+  // Cards within one node share a fast link. What a tensor-parallel group
+  // needs, since every card holds a slice of every layer.
+  FABRIC_SCOPE_INTRA_NODE = 2;
+  // Nodes share a fast link. What cross-node pipeline parallelism needs.
+  FABRIC_SCOPE_INTER_NODE = 3;
+}
+
+// FabricSource records how much to trust a FabricScope reading, because no
+// provider reports intra-node topology as a queryable spec field and the
+// sourcing differs per adapter (see docs/design/0006 Part 2).
+//
+// The distinction is load-bearing, not bookkeeping: UNKNOWN must never
+// satisfy a fabric requirement. Probing live on 2026-08-09, a quarter of
+// Vast's SXM machines reported zero NVLink bandwidth on boards that are
+// physically always NVLinked, so "no reading" and "measured zero" are
+// indistinguishable in the payload and both have to fail closed.
+enum FabricSource {
+  FABRIC_SOURCE_UNSPECIFIED = 0;
+  // Curated catalog keyed on SKU name and form factor. Trustworthy about the
+  // card, silent about what the host actually wired up.
+  FABRIC_SOURCE_DECLARED = 1;
+  // The provider reported a reading (Vast's bw_nvlink). Outranks DECLARED
+  // when they disagree: a bridged card named "PCIe" is a real machine a
+  // name-only catalog would wrongly exclude.
+  FABRIC_SOURCE_MEASURED = 2;
+  // No catalog entry and no usable reading. Fails every fabric requirement.
+  FABRIC_SOURCE_UNKNOWN = 3;
+}
+
 // ResourceRequirements is what the operator needs to run their workload.
 // Three layers, from most-honest to most-convenient:
 //
@@ -104,6 +157,27 @@ message ResourceRequirements {
   // is passed verbatim to the provider. Mutually exclusive with class
   // (and constraints are ignored -- the SKU is the answer).
   string sku = 6;
+
+  // Fabric the instance's GPUs must be wired for. Constrains SKU selection
+  // the same way min_vram_gb does: the resolver drops candidates whose
+  // fabric is not known to satisfy this. UNSPECIFIED (the Ch 6-9 default)
+  // means the operator does not care.
+  //
+  // A candidate whose fabric is FABRIC_SOURCE_UNKNOWN never satisfies a set
+  // fabric_scope. That is the point of the field -- guessing costs a rented
+  // pool before it reports an answer. `sku` remains the override for
+  // operators who know better than the catalog.
+  FabricScope fabric_scope = 7;
+
+  // Minimum fabric bandwidth, GIGABITS per second, aggregate per GPU.
+  // 0 = any bandwidth satisfying fabric_scope.
+  //
+  // Gigabits, not gigabytes, and the 8x is a real trap: NVLink is universally
+  // quoted in GB/s (an A100's 300 GB/s) while InfiniBand and EFA are quoted in
+  // Gbps (RunPod's 3200 Gbps clusters). Adapters convert at the wire boundary,
+  // matching the same single-unit rule Hardware uses for memory, so that A100
+  // arrives here as 2400.
+  int32 min_fabric_gbps = 8;
 }
 
 // Hardware is the cross-provider physical-characteristics base for
@@ -144,6 +218,32 @@ message Hardware {
   // `disk_space` (GB); RunPod as the pod's `containerDiskInGb`.
   // All converted to MB at the adapter boundary.
   int32 disk_mb = 20;
+
+  // GPU interconnect -- what this instance's fabric turned out to be, as
+  // opposed to ResourceRequirements.fabric_scope, which is what was asked
+  // for. Populated by each adapter from whatever its provider exposes; see
+  // docs/design/0006 Part 2 for the per-provider sourcing.
+  //
+  // fabric_source is not decoration. Read fabric_scope WITHOUT it and an
+  // unknown fabric reads as a definite NONE, which is the exact mistake the
+  // pair exists to prevent.
+  FabricScope fabric_scope = 30;
+  FabricSource fabric_source = 31;
+
+  // Aggregate per-GPU fabric bandwidth in GIGABITS per second, 0 when
+  // unknown. Same unit (and same 8x trap) as
+  // ResourceRequirements.min_fabric_gbps.
+  int32 fabric_gbps = 32;
+
+  // Vendor technology behind fabric_scope: "nvlink", "nvswitch", "xgmi",
+  // "infiniband", "roce", "efa". DIAGNOSTIC ONLY -- for `iplane instance
+  // describe` and debugging.
+  //
+  // Nothing in the control plane may branch on this string. That rule is what
+  // keeps the vendor-neutral seam vendor-neutral; the moment a resolver reads
+  // it, this has quietly become the vendor enum 0006 removed. Policy reads
+  // fabric_scope and fabric_gbps.
+  string fabric_technology = 33;
 }
 
 // SshTarget is the reachability tuple returned for instances that expose
@@ -510,6 +610,28 @@ message Deployment {
   // Field 22/23 were the removed default_priority draft; 28 is the next
   // free number (kept distinct so that history note stays intact).
   repeated VolumeMount mounts = 28;
+
+  // engine_entrypoint is the command that starts the engine inside the
+  // image, e.g. ["vllm", "serve"] or ["python3", "-m",
+  // "vllm.entrypoints.openai.api_server"].
+  //
+  // Normally empty, and normally it should stay that way. iplane has never
+  // needed to know this: it replaces the image's CMD with the engine's
+  // arguments and lets the image's own ENTRYPOINT supply the binary.
+  //
+  // It exists for one case. Running the registration agent beside the
+  // engine on the image-native path means overriding the container's
+  // entrypoint with a wrapper, and a wrapper has to exec the engine
+  // itself, so it needs a command that iplane otherwise never sees. There
+  // is no safe default to infer: vllm/vllm-openai changed its entrypoint
+  // between the versions Ch 9 uses, so guessing would break deploys to
+  // make a fleet view nicer.
+  //
+  // Set it and the agent runs. Leave it and the deployment still works
+  // exactly as before, with liveness coming from the /health poller. The
+  // sshdocker path never needs this: it runs the agent as a separate
+  // container and leaves the engine's entrypoint alone.
+  repeated string engine_entrypoint = 29;
 }
 
 // VolumeMount is one filesystem mount a deployment's engine needs. The
@@ -672,4 +794,92 @@ enum DeploymentState {
   DEPLOYMENT_STATE_TERMINATED = 7;
   // Terminal failure (deploy or runtime).
   DEPLOYMENT_STATE_FAILED = 8;
+}
+
+// EngineState is what a registered engine reports about itself. Wider than
+// the router's healthy/quarantined pair, because a probe answers a question
+// the control plane already thought to ask and cannot describe a group.
+//
+// Two of these have no single-card equivalent and are the reason the
+// registry exists alongside the /health poller:
+//
+//   - ASSEMBLING: processes are alive and the group has not formed. Four
+//     workers running is not four workers in one group; they have to find
+//     each other and settle ranks before the endpoint serves a token. No
+//     probe can see this, because there is no endpoint yet to ask.
+//   - SERVING_DEGRADED: the group assembled, serves correct tokens, and lost
+//     a large fraction of its throughput because a link inside it is down.
+//     /health says "serving", which is true, and useless.
+enum EngineState {
+  ENGINE_STATE_UNSPECIFIED = 0;
+  // Some workers joined, the group has not formed. No endpoint yet.
+  ENGINE_STATE_ASSEMBLING = 1;
+  // Group formed, endpoint answering.
+  ENGINE_STATE_SERVING = 2;
+  // Assembled and correct, running well below expected throughput.
+  ENGINE_STATE_SERVING_DEGRADED = 3;
+  // The control plane stopped hearing from it: the lease expired. Set by the
+  // sweeper, never reported by an engine about itself.
+  ENGINE_STATE_LOST = 4;
+  // Taken out of service on purpose: new work is no longer routed here and
+  // the engine is finishing what it has. Operator-initiated (issue 205's
+  // fleet drain), so like LOST it is the control plane's word rather than
+  // the engine's, and unlike LOST it is not a failure.
+  ENGINE_STATE_DRAINING = 5;
+}
+
+// EngineNode is one machine an engine spans. The fact no probe can report,
+// and the input failure attribution needs: when a member dies, which node
+// took it down (issue 214).
+message EngineNode {
+  // Provider-assigned host identity. RunPod's top-level machineId, Vast's
+  // machine_id, an EC2 instance id. Opaque to the control plane and only
+  // meaningful to the provider that issued it.
+  string host_id = 1;
+  // Provider that issued host_id, so two providers' identifiers cannot
+  // collide.
+  string provider = 2;
+  // Rank of this node within the engine's group, 0-based. The engine assigns
+  // it; the control plane never interprets it beyond ordering the display.
+  int32 node_index = 3;
+  // GPUs this node contributes to the group.
+  int32 gpu_count = 4;
+}
+
+// Engine is one registered data plane: an endpoint serving one model over a
+// span of nodes and cards.
+//
+// Deliberately NOT a field on Deployment. An engine that announces itself
+// need not have been rented by us, which is what makes a fleet of
+// operator-run engines expressible later; deployment_id links the two when
+// the engine does correspond to something we provisioned.
+message Engine {
+  // Engine-chosen stable identity. Survives re-registration: registering
+  // twice with the same id is a renewal, not a second member.
+  string id = 1;
+  // Set when this engine runs on a deployment the control plane created.
+  // Empty for engines that registered themselves without being provisioned.
+  string deployment_id = 2;
+  string model = 3;
+  // The single OpenAI-compatible endpoint, regardless of span. One engine is
+  // one endpoint whether it holds one card or sixteen.
+  string endpoint = 4;
+
+  EngineState state = 5;
+  // Nodes this engine spans, in node_index order. Length 1 is the ordinary
+  // single-machine case, not a special case.
+  repeated EngineNode span = 6;
+
+  // Operational readings the engine computes anyway. Observational only:
+  // routing decisions must not consume these. The router keeps its own
+  // in-flight counts precisely so a routing decision never depends on an
+  // observation pipeline being up.
+  int32 in_flight = 7;
+  double cache_utilization = 8;
+
+  google.protobuf.Timestamp registered_at = 20;
+  google.protobuf.Timestamp last_seen_at = 21;
+  // When the current lease runs out. Past this with no renewal, the sweeper
+  // moves the engine to LOST.
+  google.protobuf.Timestamp lease_expires_at = 22;
 }

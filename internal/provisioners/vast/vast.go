@@ -241,11 +241,11 @@ func (p *Provider) Spawn(ctx context.Context, spec *provisionerv1.Spec) (*provis
 	// Search-then-rent loop: try the SKU list in order until we find
 	// an offer to rent.
 	var (
-		picked   *offerSummary
+		picked    *offerSummary
 		pickedFor string
 	)
 	for _, gpuName := range gpuTypeIDs {
-		offer, err := p.findOffer(ctx, gpuName, gpuCount, diskGB)
+		offer, err := p.findOffer(ctx, gpuName, gpuCount, diskGB, reqs)
 		if err != nil {
 			return nil, wrapErr("spawn:search", err)
 		}
@@ -288,13 +288,25 @@ func (p *Provider) Spawn(ctx context.Context, spec *provisionerv1.Spec) (*provis
 			State:      provisionerv1.InstanceState_INSTANCE_STATE_PENDING,
 			Region:     spec.GetRegion(),
 			CreatedAt:  timestamppb.New(p.clock()),
-			Hardware: &provisionerv1.Hardware{
-				GpuSku:   pickedFor,
-				GpuCount: int32(gpuCount),
-			},
+			Hardware: func() *provisionerv1.Hardware {
+				hw := &provisionerv1.Hardware{
+					GpuSku:   pickedFor,
+					GpuCount: int32(gpuCount),
+				}
+				stampFabric(hw, pickedFor, picked.BwNvlink)
+				return hw
+			}(),
 		}, nil
 	}
-	return p.instanceFromAPI(inst, spec, pickedFor), nil
+	out := p.instanceFromAPI(inst, spec, pickedFor)
+	// Prefer the OFFER's reading over the rented record's. The offer is what
+	// the marketplace filter matched and it always carries bw_nvlink; the
+	// instance record is not guaranteed to echo it, and falling back to the
+	// declared tier there would downgrade a host we just measured to UNKNOWN.
+	if picked.BwNvlink != nil {
+		stampFabric(out.GetHardware(), pickedFor, picked.BwNvlink)
+	}
+	return out, nil
 }
 
 // Terminate deletes a rented Vast.ai instance via DELETE /api/v0/instances/{id}.
@@ -400,7 +412,7 @@ func (p *Provider) List(ctx context.Context, filter map[string]string) ([]*provi
 // SKU catalog stores the underscored form for stable Go-identifier
 // hygiene; we transform back at the wire boundary via
 // gpuNameForVast.
-func (p *Provider) findOffer(ctx context.Context, gpuName string, gpuCount, diskGB int) (*offerSummary, error) {
+func (p *Provider) findOffer(ctx context.Context, gpuName string, gpuCount, diskGB int, reqs *provisionerv1.ResourceRequirements) (*offerSummary, error) {
 	q := map[string]any{
 		"gpu_name": map[string]string{"eq": gpuNameForVast(gpuName)},
 		"num_gpus": map[string]int{"eq": gpuCount},
@@ -410,6 +422,23 @@ func (p *Provider) findOffer(ctx context.Context, gpuName string, gpuCount, disk
 	}
 	if diskGB > 0 {
 		q["disk_space"] = map[string]int{"gte": diskGB}
+	}
+	// Fabric filter, pushed server-side. Vast's query language filters on
+	// bw_nvlink directly, so the marketplace does the narrowing and we never
+	// page through hosts that cannot satisfy the request.
+	//
+	// The floor is at least 1 GB/s rather than 0, because a filter of >= 0
+	// matches every host including the unmeasured ones and would silently
+	// undo the whole point. Values are gigaBYTES here: Vast's unit, not ours.
+	if reqs.GetFabricScope() == provisionerv1.FabricScope_FABRIC_SCOPE_INTRA_NODE {
+		minGBps := 1
+		if want := int(reqs.GetMinFabricGbps()); want > 0 {
+			minGBps = want / 8
+			if minGBps < 1 {
+				minGBps = 1
+			}
+		}
+		q["bw_nvlink"] = map[string]int{"gte": minGBps}
 	}
 	qBytes, err := json.Marshal(q)
 	if err != nil {
@@ -444,11 +473,11 @@ func gpuNameForVast(gpuName string) string {
 // returns Vast.ai's rent response (success bool + new_contract id).
 func (p *Provider) rentOffer(ctx context.Context, offerID int, image, label string, diskGB int) (*rentResponse, error) {
 	body := map[string]any{
-		"client_id":  "me",
-		"image":      image,
-		"disk":       diskGB,
-		"label":      label,
-		"runtype":    "ssh",
+		"client_id": "me",
+		"image":     image,
+		"disk":      diskGB,
+		"label":     label,
+		"runtype":   "ssh",
 		// onstart_cmd is left empty so the engine container is started
 		// later by sshdocker. Vast's default is to drop into the image
 		// entrypoint; we rely on sshd being present in the image.
@@ -513,15 +542,19 @@ func (p *Provider) instanceFromAPI(api *apiInstance, originalSpec *provisionerv1
 		CreatedAt:     timestamppb.New(p.clock()),
 		Region:        api.GeolocationCountry,
 		HourlyRateUsd: api.DphTotal,
-		Hardware: &provisionerv1.Hardware{
-			GpuSku:    gpuName,
-			GpuCount:  int32(api.NumGPUs),
-			GpuVramMb: int32(api.GpuRAM),
-			Vcpus:     int32(api.CPUCores),
-			CpuModel:  api.CPUName,
-			CpuRamMb:  int32(api.CPURam),
-			DiskMb:    diskMB,
-		},
+		Hardware: func() *provisionerv1.Hardware {
+			hw := &provisionerv1.Hardware{
+				GpuSku:    gpuName,
+				GpuCount:  int32(api.NumGPUs),
+				GpuVramMb: int32(api.GpuRAM),
+				Vcpus:     int32(api.CPUCores),
+				CpuModel:  api.CPUName,
+				CpuRamMb:  int32(api.CPURam),
+				DiskMb:    diskMB,
+			}
+			stampFabric(hw, gpuName, api.BwNvlink)
+			return hw
+		}(),
 		Metadata: vastMetadata(api),
 	}
 	if api.SSHHost != "" {
@@ -602,6 +635,17 @@ type offerSummary struct {
 	NumGPUs  int     `json:"num_gpus"`
 	DiskGB   float64 `json:"disk_space"`
 	DphTotal float64 `json:"dph_total"`
+
+	// BwNvlink is Vast's measured NVLink bandwidth for the host, in
+	// gigaBYTES per second. Vast is the only provider that reports this.
+	//
+	// Pointer, not float64, and the distinction is load-bearing: Vast sends
+	// 0.0 both for "this host has no NVLink" and for "we never measured it",
+	// and a plain float cannot tell an absent field from a real zero. nil
+	// means no reading at all, so the fabric catalog arbitrates instead of
+	// a zero being trusted as fact. In the 2026-08-09 probe, 9 of 38
+	// "A100 SXM4" offers reported zero on a board that always has NVLink.
+	BwNvlink *float64 `json:"bw_nvlink"`
 }
 
 type bundlesResponse struct {
@@ -629,15 +673,16 @@ type apiInstance struct {
 	// Host details -- populated by both the bundles search
 	// response and the instance record. Used to fill Hardware and
 	// metadata.
-	CPUName      string  `json:"cpu_name"`
-	CPUCores     int     `json:"cpu_cores"`
-	CPURam       int     `json:"cpu_ram"` // MB
-	DiskSpace    float64 `json:"disk_space"` // GB
-	HostID       int     `json:"host_id"`
-	MachineID    int     `json:"machine_id"`
-	Reliability2 float64 `json:"reliability2"`
-	Verification string  `json:"verification"`
-	IsBid        bool    `json:"is_bid"`
+	CPUName      string   `json:"cpu_name"`
+	CPUCores     int      `json:"cpu_cores"`
+	CPURam       int      `json:"cpu_ram"`    // MB
+	DiskSpace    float64  `json:"disk_space"` // GB
+	HostID       int      `json:"host_id"`
+	MachineID    int      `json:"machine_id"`
+	BwNvlink     *float64 `json:"bw_nvlink"` // see offerSummary.BwNvlink
+	Reliability2 float64  `json:"reliability2"`
+	Verification string   `json:"verification"`
+	IsBid        bool     `json:"is_bid"`
 }
 
 type instanceResponse struct {

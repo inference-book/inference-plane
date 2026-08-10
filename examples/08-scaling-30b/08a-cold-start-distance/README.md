@@ -80,9 +80,14 @@ EU-RO-1, 2026-07-28). The per-phase split, read off
 | total | 233.8s | 101.2s |
 
 The whole `storage_tier` difference lives in `engine:init` (the download vs
-the mount); scheduling and create-pod are identical. Note iplane folds
-image-pull + weight-download + model-load into the single `engine:init`
-phase, so even a warm deploy still pays the ~10 GB engine-image pull there.
+the mount); scheduling and create-pod are identical.
+
+This run predates the phase-ladder fix (issue 208), so its `engine:init`
+still has the engine-image pull folded in — which is why the warm column
+is 97.6s rather than near-zero. A rerun today reports the pull as its own
+`runpod:image-pull` row on both columns, leaving `engine:init` as the
+weight download + model load that `storage_tier` actually changes.
+
 The exact seconds depend on the model, the region's capacity, and HF
 bandwidth on the day. A 1.5B's ~3 GB download makes a modest gap; the book's
 32B / 65 GB anchor makes it dramatic (that download dominates `engine:init`,
@@ -92,8 +97,9 @@ and the warm mount erases it).
 
 - **Tempo** — search `deployment.provision`. Compare the two traces: the
   cold deploy has a fat `engine:init` child span (the download); the warm
-  deploy's `engine:init` is a sliver (the mount). The other phases
-  (`scheduling`, `image-pull`) look the same.
+  deploy's `engine:init` is a sliver (the mount). `scheduling` and
+  `image-pull` look the same on both, which is the point: warm-cache
+  erases the weight download, not the image pull.
 - **Grafana** — "Inference Plane Deployment & Lifecycle" dashboard, the
   **"Engine-init: warm vs cold"** panel. That is the `storage_tier` split,
   read straight off `iplane.deployment.phase.duration`.
@@ -140,6 +146,14 @@ Figure 9.7's cold-start distance, measured on a real 72B FP8 flagship
 
 **~11x faster**, ~$4.41 → ~$0.40 of B200 time per deploy. Almost the whole
 cold start is `engine:init`, and ~41 min of that is the 73 GB HF download.
+
+The totals above are what the A/B proves. Read the warm bar carefully
+though: those 239s are *not* all mount-and-load. They still include the
+~25 GB engine-image pull, which warm-cache does nothing for. These two
+runs predate the phase-ladder fix (issue 208) and so report the pull
+inside `engine:init`; a rerun today splits it out as `runpod:image-pull`.
+On a 1.5B the pull alone was 109s of a 152s cold start, so on a rerun
+expect the warm bar to be mostly image pull.
 
 Reproduce it (needs an FP8-capable card, so a Blackwell/Hopper image, and
 the disk + timeouts sized for the model):

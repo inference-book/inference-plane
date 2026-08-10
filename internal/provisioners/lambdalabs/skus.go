@@ -6,6 +6,7 @@ import (
 
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
 	"github.com/inference-book/inference-plane/internal/provisioners"
+	"github.com/inference-book/inference-plane/internal/provisioners/fabric"
 )
 
 // SKUSpec describes one Lambda Labs instance type (the "gpu_<N>x_<gpu>"
@@ -30,6 +31,12 @@ type SKUSpec struct {
 	// PriceUSDPerHour is the on-demand price at cataloging.
 	// Authoritative price comes back on each /instance-types call.
 	PriceUSDPerHour float64
+	// Family maps this SKU onto the cross-provider fabric catalog.
+	// Lambda names the form factor in the instance type itself
+	// ("gpu_1x_a100_sxm4" vs "gpu_1x_h100_pcie"), so the declared tier
+	// reads straight off the SKU the same way RunPod's does. Lambda
+	// exposes no fabric measurement, so DECLARED is the only tier here.
+	Family fabric.Family
 }
 
 // skus is the catalog the resolver iterates. Sorted by VRAM tier
@@ -46,17 +53,17 @@ type SKUSpec struct {
 //   - gpu_8x_v100_n (older arch; iplane doesn't optimize for V100)
 var skus = []SKUSpec{
 	// Small (~24 GB VRAM): A10 is the cheap entry.
-	{Name: "gpu_1x_a10", DisplayName: "1x A10 (24 GB)", VRAMGb: 24, GPUCount: 1, PriceUSDPerHour: 1.29},
+	{Name: "gpu_1x_a10", DisplayName: "1x A10 (24 GB)", VRAMGb: 24, GPUCount: 1, PriceUSDPerHour: 1.29, Family: fabric.FamilyA10},
 	// Medium (~48 GB VRAM): A6000 isn't in Lambda's catalog;
 	// closest equivalent is the A100 PCIE at 40 GB.
-	{Name: "gpu_1x_a100", DisplayName: "1x A100 (40 GB PCIE)", VRAMGb: 40, GPUCount: 1, PriceUSDPerHour: 1.29},
+	{Name: "gpu_1x_a100", DisplayName: "1x A100 (40 GB PCIE)", VRAMGb: 40, GPUCount: 1, PriceUSDPerHour: 1.29, Family: fabric.FamilyA100PCIe},
 	// Large (~80 GB VRAM): A100 SXM4 / H100 PCIE.
-	{Name: "gpu_1x_a100_sxm4", DisplayName: "1x A100 (80 GB SXM4)", VRAMGb: 80, GPUCount: 1, PriceUSDPerHour: 1.99},
-	{Name: "gpu_1x_h100_pcie", DisplayName: "1x H100 (80 GB PCIE)", VRAMGb: 80, GPUCount: 1, PriceUSDPerHour: 3.29},
-	{Name: "gpu_1x_h100_sxm5", DisplayName: "1x H100 (80 GB SXM5)", VRAMGb: 80, GPUCount: 1, PriceUSDPerHour: 4.29},
+	{Name: "gpu_1x_a100_sxm4", DisplayName: "1x A100 (80 GB SXM4)", VRAMGb: 80, GPUCount: 1, PriceUSDPerHour: 1.99, Family: fabric.FamilyA100SXM},
+	{Name: "gpu_1x_h100_pcie", DisplayName: "1x H100 (80 GB PCIE)", VRAMGb: 80, GPUCount: 1, PriceUSDPerHour: 3.29, Family: fabric.FamilyH100PCIe},
+	{Name: "gpu_1x_h100_sxm5", DisplayName: "1x H100 (80 GB SXM5)", VRAMGb: 80, GPUCount: 1, PriceUSDPerHour: 4.29, Family: fabric.FamilyH100SXM},
 	// XL (>=96 GB): GH200 superchip.
-	{Name: "gpu_1x_gh200", DisplayName: "1x GH200 (96 GB)", VRAMGb: 96, GPUCount: 1, PriceUSDPerHour: 2.29},
-	{Name: "gpu_1x_b200_sxm6", DisplayName: "1x B200 (180 GB SXM6)", VRAMGb: 180, GPUCount: 1, PriceUSDPerHour: 6.99},
+	{Name: "gpu_1x_gh200", DisplayName: "1x GH200 (96 GB)", VRAMGb: 96, GPUCount: 1, PriceUSDPerHour: 2.29, Family: fabric.FamilyGH200},
+	{Name: "gpu_1x_b200_sxm6", DisplayName: "1x B200 (180 GB SXM6)", VRAMGb: 180, GPUCount: 1, PriceUSDPerHour: 6.99, Family: fabric.FamilyB200},
 }
 
 // MaxSKUsPerRequest caps the SKUs the resolver will try when no
@@ -85,6 +92,14 @@ func MatchSKUs(reqs *provisionerv1.ResourceRequirements) []string {
 			continue
 		}
 		if reqs.GetGpuCount() > 0 && sku.GPUCount < int(reqs.GetGpuCount()) {
+			continue
+		}
+		// Fabric filter, declared tier only -- Lambda reports no measurement.
+		// See the runpod resolver for why UNKNOWN candidates are dropped.
+		if !fabric.Satisfies(
+			fabric.Resolve(fabric.Observation{Family: sku.Family}),
+			reqs.GetFabricScope(), reqs.GetMinFabricGbps(),
+		) {
 			continue
 		}
 		matches = append(matches, sku)
@@ -154,4 +169,20 @@ func isActiveProviderState(status string) bool {
 		return true
 	}
 	return false
+}
+
+// stampFabric fills the fabric fields on a Hardware record for a Lambda
+// instance type. Lambda reports no measurement, so this is always the
+// declared tier read off the SKU's form factor; an instance type outside our
+// curated catalog resolves to UNKNOWN rather than to a guess.
+func stampFabric(hw *provisionerv1.Hardware, instanceTypeName string) {
+	var family fabric.Family
+	if spec := LookupSKU(instanceTypeName); spec != nil {
+		family = spec.Family
+	}
+	res := fabric.Resolve(fabric.Observation{Family: family})
+	hw.FabricScope = res.Scope
+	hw.FabricSource = res.Source
+	hw.FabricGbps = res.Gbps
+	hw.FabricTechnology = res.Technology
 }

@@ -1513,6 +1513,325 @@ func (x *TouchDeploymentResponse) GetDeployment() *Deployment {
 	return nil
 }
 
+type RegisterEngineRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Engine fields the caller owns. id is required; registered_at,
+	// last_seen_at and lease_expires_at are set by the control plane and
+	// ignored if supplied.
+	Engine        *Engine `protobuf:"bytes,1,opt,name=engine,proto3" json:"engine,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RegisterEngineRequest) Reset() {
+	*x = RegisterEngineRequest{}
+	mi := &file_provisioner_v1_service_proto_msgTypes[26]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RegisterEngineRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RegisterEngineRequest) ProtoMessage() {}
+
+func (x *RegisterEngineRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_provisioner_v1_service_proto_msgTypes[26]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RegisterEngineRequest.ProtoReflect.Descriptor instead.
+func (*RegisterEngineRequest) Descriptor() ([]byte, []int) {
+	return file_provisioner_v1_service_proto_rawDescGZIP(), []int{26}
+}
+
+func (x *RegisterEngineRequest) GetEngine() *Engine {
+	if x != nil {
+		return x.Engine
+	}
+	return nil
+}
+
+type RegisterEngineResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The stored engine, with the control-plane-assigned timestamps filled in.
+	Engine *Engine `protobuf:"bytes,1,opt,name=engine,proto3" json:"engine,omitempty"`
+	// Renew before this many seconds elapse or the engine is declared LOST.
+	// Server-assigned so the fleet's detection window is tunable in one place.
+	LeaseSeconds  int32 `protobuf:"varint,2,opt,name=lease_seconds,json=leaseSeconds,proto3" json:"lease_seconds,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RegisterEngineResponse) Reset() {
+	*x = RegisterEngineResponse{}
+	mi := &file_provisioner_v1_service_proto_msgTypes[27]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RegisterEngineResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RegisterEngineResponse) ProtoMessage() {}
+
+func (x *RegisterEngineResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_provisioner_v1_service_proto_msgTypes[27]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RegisterEngineResponse.ProtoReflect.Descriptor instead.
+func (*RegisterEngineResponse) Descriptor() ([]byte, []int) {
+	return file_provisioner_v1_service_proto_rawDescGZIP(), []int{27}
+}
+
+func (x *RegisterEngineResponse) GetEngine() *Engine {
+	if x != nil {
+		return x.Engine
+	}
+	return nil
+}
+
+func (x *RegisterEngineResponse) GetLeaseSeconds() int32 {
+	if x != nil {
+		return x.LeaseSeconds
+	}
+	return 0
+}
+
+type ListEnginesRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Optional filters. Empty means every engine.
+	DeploymentId  string      `protobuf:"bytes,1,opt,name=deployment_id,json=deploymentId,proto3" json:"deployment_id,omitempty"`
+	State         EngineState `protobuf:"varint,2,opt,name=state,proto3,enum=provisioner.v1.EngineState" json:"state,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListEnginesRequest) Reset() {
+	*x = ListEnginesRequest{}
+	mi := &file_provisioner_v1_service_proto_msgTypes[28]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListEnginesRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListEnginesRequest) ProtoMessage() {}
+
+func (x *ListEnginesRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_provisioner_v1_service_proto_msgTypes[28]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListEnginesRequest.ProtoReflect.Descriptor instead.
+func (*ListEnginesRequest) Descriptor() ([]byte, []int) {
+	return file_provisioner_v1_service_proto_rawDescGZIP(), []int{28}
+}
+
+func (x *ListEnginesRequest) GetDeploymentId() string {
+	if x != nil {
+		return x.DeploymentId
+	}
+	return ""
+}
+
+func (x *ListEnginesRequest) GetState() EngineState {
+	if x != nil {
+		return x.State
+	}
+	return EngineState_ENGINE_STATE_UNSPECIFIED
+}
+
+type ListEnginesResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Engines       []*Engine              `protobuf:"bytes,1,rep,name=engines,proto3" json:"engines,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListEnginesResponse) Reset() {
+	*x = ListEnginesResponse{}
+	mi := &file_provisioner_v1_service_proto_msgTypes[29]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListEnginesResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListEnginesResponse) ProtoMessage() {}
+
+func (x *ListEnginesResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_provisioner_v1_service_proto_msgTypes[29]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListEnginesResponse.ProtoReflect.Descriptor instead.
+func (*ListEnginesResponse) Descriptor() ([]byte, []int) {
+	return file_provisioner_v1_service_proto_rawDescGZIP(), []int{29}
+}
+
+func (x *ListEnginesResponse) GetEngines() []*Engine {
+	if x != nil {
+		return x.Engines
+	}
+	return nil
+}
+
+type DrainEngineRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Engine to take out of service.
+	EngineId string `protobuf:"bytes,1,opt,name=engine_id,json=engineId,proto3" json:"engine_id,omitempty"`
+	// How long to let in-flight work finish before releasing. 0 = server
+	// default. Ignored when force is set.
+	TimeoutSeconds int32 `protobuf:"varint,2,opt,name=timeout_seconds,json=timeoutSeconds,proto3" json:"timeout_seconds,omitempty"`
+	// Skip the wait. In-flight requests on this member see their connections
+	// cut.
+	Force         bool `protobuf:"varint,3,opt,name=force,proto3" json:"force,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DrainEngineRequest) Reset() {
+	*x = DrainEngineRequest{}
+	mi := &file_provisioner_v1_service_proto_msgTypes[30]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DrainEngineRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DrainEngineRequest) ProtoMessage() {}
+
+func (x *DrainEngineRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_provisioner_v1_service_proto_msgTypes[30]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DrainEngineRequest.ProtoReflect.Descriptor instead.
+func (*DrainEngineRequest) Descriptor() ([]byte, []int) {
+	return file_provisioner_v1_service_proto_rawDescGZIP(), []int{30}
+}
+
+func (x *DrainEngineRequest) GetEngineId() string {
+	if x != nil {
+		return x.EngineId
+	}
+	return ""
+}
+
+func (x *DrainEngineRequest) GetTimeoutSeconds() int32 {
+	if x != nil {
+		return x.TimeoutSeconds
+	}
+	return 0
+}
+
+func (x *DrainEngineRequest) GetForce() bool {
+	if x != nil {
+		return x.Force
+	}
+	return false
+}
+
+type DrainEngineResponse struct {
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	Engine *Engine                `protobuf:"bytes,1,opt,name=engine,proto3" json:"engine,omitempty"`
+	// Instances released, in span order. The point of draining a member rather
+	// than its replicas one at a time: a distributed engine's whole group goes
+	// in one action, with nothing left billing.
+	ReleasedInstanceIds []string `protobuf:"bytes,2,rep,name=released_instance_ids,json=releasedInstanceIds,proto3" json:"released_instance_ids,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
+}
+
+func (x *DrainEngineResponse) Reset() {
+	*x = DrainEngineResponse{}
+	mi := &file_provisioner_v1_service_proto_msgTypes[31]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DrainEngineResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DrainEngineResponse) ProtoMessage() {}
+
+func (x *DrainEngineResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_provisioner_v1_service_proto_msgTypes[31]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DrainEngineResponse.ProtoReflect.Descriptor instead.
+func (*DrainEngineResponse) Descriptor() ([]byte, []int) {
+	return file_provisioner_v1_service_proto_rawDescGZIP(), []int{31}
+}
+
+func (x *DrainEngineResponse) GetEngine() *Engine {
+	if x != nil {
+		return x.Engine
+	}
+	return nil
+}
+
+func (x *DrainEngineResponse) GetReleasedInstanceIds() []string {
+	if x != nil {
+		return x.ReleasedInstanceIds
+	}
+	return nil
+}
+
 var File_provisioner_v1_service_proto protoreflect.FileDescriptor
 
 const file_provisioner_v1_service_proto_rawDesc = "" +
@@ -1605,7 +1924,24 @@ const file_provisioner_v1_service_proto_rawDesc = "" +
 	"\x17TouchDeploymentResponse\x12:\n" +
 	"\n" +
 	"deployment\x18\x01 \x01(\v2\x1a.provisioner.v1.DeploymentR\n" +
-	"deployment*E\n" +
+	"deployment\"G\n" +
+	"\x15RegisterEngineRequest\x12.\n" +
+	"\x06engine\x18\x01 \x01(\v2\x16.provisioner.v1.EngineR\x06engine\"m\n" +
+	"\x16RegisterEngineResponse\x12.\n" +
+	"\x06engine\x18\x01 \x01(\v2\x16.provisioner.v1.EngineR\x06engine\x12#\n" +
+	"\rlease_seconds\x18\x02 \x01(\x05R\fleaseSeconds\"l\n" +
+	"\x12ListEnginesRequest\x12#\n" +
+	"\rdeployment_id\x18\x01 \x01(\tR\fdeploymentId\x121\n" +
+	"\x05state\x18\x02 \x01(\x0e2\x1b.provisioner.v1.EngineStateR\x05state\"G\n" +
+	"\x13ListEnginesResponse\x120\n" +
+	"\aengines\x18\x01 \x03(\v2\x16.provisioner.v1.EngineR\aengines\"p\n" +
+	"\x12DrainEngineRequest\x12\x1b\n" +
+	"\tengine_id\x18\x01 \x01(\tR\bengineId\x12'\n" +
+	"\x0ftimeout_seconds\x18\x02 \x01(\x05R\x0etimeoutSeconds\x12\x14\n" +
+	"\x05force\x18\x03 \x01(\bR\x05force\"y\n" +
+	"\x13DrainEngineResponse\x12.\n" +
+	"\x06engine\x18\x01 \x01(\v2\x16.provisioner.v1.EngineR\x06engine\x122\n" +
+	"\x15released_instance_ids\x18\x02 \x03(\tR\x13releasedInstanceIds*E\n" +
 	"\x06Source\x12\x16\n" +
 	"\x12SOURCE_UNSPECIFIED\x10\x00\x12\x10\n" +
 	"\fSOURCE_LOCAL\x10\x01\x12\x11\n" +
@@ -1624,7 +1960,11 @@ const file_provisioner_v1_service_proto_rawDesc = "" +
 	"\x11DestroyDeployment\x12(.provisioner.v1.DestroyDeploymentRequest\x1a).provisioner.v1.DestroyDeploymentResponse\x12h\n" +
 	"\x0fWatchDeployment\x12&.provisioner.v1.WatchDeploymentRequest\x1a+.provisioner.v1.DeploymentStateChangedEvent0\x01\x12b\n" +
 	"\x0fTouchDeployment\x12&.provisioner.v1.TouchDeploymentRequest\x1a'.provisioner.v1.TouchDeploymentResponse\x12b\n" +
-	"\x0fScaleDeployment\x12&.provisioner.v1.ScaleDeploymentRequest\x1a'.provisioner.v1.ScaleDeploymentResponseB\xca\x01\n" +
+	"\x0fScaleDeployment\x12&.provisioner.v1.ScaleDeploymentRequest\x1a'.provisioner.v1.ScaleDeploymentResponse2\xa8\x02\n" +
+	"\x15EngineRegistryService\x12_\n" +
+	"\x0eRegisterEngine\x12%.provisioner.v1.RegisterEngineRequest\x1a&.provisioner.v1.RegisterEngineResponse\x12V\n" +
+	"\vListEngines\x12\".provisioner.v1.ListEnginesRequest\x1a#.provisioner.v1.ListEnginesResponse\x12V\n" +
+	"\vDrainEngine\x12\".provisioner.v1.DrainEngineRequest\x1a#.provisioner.v1.DrainEngineResponseB\xca\x01\n" +
 	"\x12com.provisioner.v1B\fServiceProtoP\x01ZMgithub.com/inference-book/inference-plane/gen/go/provisioner/v1;provisionerv1\xa2\x02\x03PXX\xaa\x02\x0eProvisioner.V1\xca\x02\x0eProvisioner\\V1\xe2\x02\x1aProvisioner\\V1\\GPBMetadata\xea\x02\x0fProvisioner::V1b\x06proto3"
 
 var (
@@ -1640,7 +1980,7 @@ func file_provisioner_v1_service_proto_rawDescGZIP() []byte {
 }
 
 var file_provisioner_v1_service_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_provisioner_v1_service_proto_msgTypes = make([]protoimpl.MessageInfo, 26)
+var file_provisioner_v1_service_proto_msgTypes = make([]protoimpl.MessageInfo, 32)
 var file_provisioner_v1_service_proto_goTypes = []any{
 	(Source)(0),                          // 0: provisioner.v1.Source
 	(*CreateInstanceRequest)(nil),        // 1: provisioner.v1.CreateInstanceRequest
@@ -1669,66 +2009,85 @@ var file_provisioner_v1_service_proto_goTypes = []any{
 	(*DeploymentStateChangedEvent)(nil),  // 24: provisioner.v1.DeploymentStateChangedEvent
 	(*TouchDeploymentRequest)(nil),       // 25: provisioner.v1.TouchDeploymentRequest
 	(*TouchDeploymentResponse)(nil),      // 26: provisioner.v1.TouchDeploymentResponse
-	(*Spec)(nil),                         // 27: provisioner.v1.Spec
-	(*Instance)(nil),                     // 28: provisioner.v1.Instance
-	(*ReplicaSpec)(nil),                  // 29: provisioner.v1.ReplicaSpec
-	(*Deployment)(nil),                   // 30: provisioner.v1.Deployment
-	(DeploymentState)(0),                 // 31: provisioner.v1.DeploymentState
-	(*timestamppb.Timestamp)(nil),        // 32: google.protobuf.Timestamp
+	(*RegisterEngineRequest)(nil),        // 27: provisioner.v1.RegisterEngineRequest
+	(*RegisterEngineResponse)(nil),       // 28: provisioner.v1.RegisterEngineResponse
+	(*ListEnginesRequest)(nil),           // 29: provisioner.v1.ListEnginesRequest
+	(*ListEnginesResponse)(nil),          // 30: provisioner.v1.ListEnginesResponse
+	(*DrainEngineRequest)(nil),           // 31: provisioner.v1.DrainEngineRequest
+	(*DrainEngineResponse)(nil),          // 32: provisioner.v1.DrainEngineResponse
+	(*Spec)(nil),                         // 33: provisioner.v1.Spec
+	(*Instance)(nil),                     // 34: provisioner.v1.Instance
+	(*ReplicaSpec)(nil),                  // 35: provisioner.v1.ReplicaSpec
+	(*Deployment)(nil),                   // 36: provisioner.v1.Deployment
+	(DeploymentState)(0),                 // 37: provisioner.v1.DeploymentState
+	(*timestamppb.Timestamp)(nil),        // 38: google.protobuf.Timestamp
+	(*Engine)(nil),                       // 39: provisioner.v1.Engine
+	(EngineState)(0),                     // 40: provisioner.v1.EngineState
 }
 var file_provisioner_v1_service_proto_depIdxs = []int32{
-	27, // 0: provisioner.v1.CreateInstanceRequest.spec:type_name -> provisioner.v1.Spec
-	28, // 1: provisioner.v1.CreateInstanceResponse.instance:type_name -> provisioner.v1.Instance
-	28, // 2: provisioner.v1.DestroyInstanceResponse.instance:type_name -> provisioner.v1.Instance
+	33, // 0: provisioner.v1.CreateInstanceRequest.spec:type_name -> provisioner.v1.Spec
+	34, // 1: provisioner.v1.CreateInstanceResponse.instance:type_name -> provisioner.v1.Instance
+	34, // 2: provisioner.v1.DestroyInstanceResponse.instance:type_name -> provisioner.v1.Instance
 	0,  // 3: provisioner.v1.DescribeInstanceRequest.source:type_name -> provisioner.v1.Source
-	28, // 4: provisioner.v1.DescribeInstanceResponse.instance:type_name -> provisioner.v1.Instance
+	34, // 4: provisioner.v1.DescribeInstanceResponse.instance:type_name -> provisioner.v1.Instance
 	0,  // 5: provisioner.v1.ListInstancesRequest.source:type_name -> provisioner.v1.Source
-	28, // 6: provisioner.v1.ListInstancesResponse.instances:type_name -> provisioner.v1.Instance
-	28, // 7: provisioner.v1.WaitForInstanceReadyResponse.instance:type_name -> provisioner.v1.Instance
-	29, // 8: provisioner.v1.ScaleDeploymentRequest.add_replicas:type_name -> provisioner.v1.ReplicaSpec
-	30, // 9: provisioner.v1.ScaleDeploymentResponse.deployment:type_name -> provisioner.v1.Deployment
-	30, // 10: provisioner.v1.CreateDeploymentRequest.deployment:type_name -> provisioner.v1.Deployment
-	29, // 11: provisioner.v1.CreateDeploymentRequest.replicas_spec:type_name -> provisioner.v1.ReplicaSpec
-	30, // 12: provisioner.v1.CreateDeploymentResponse.deployment:type_name -> provisioner.v1.Deployment
-	30, // 13: provisioner.v1.DescribeDeploymentResponse.deployment:type_name -> provisioner.v1.Deployment
-	31, // 14: provisioner.v1.ListDeploymentsRequest.state:type_name -> provisioner.v1.DeploymentState
-	30, // 15: provisioner.v1.ListDeploymentsResponse.deployments:type_name -> provisioner.v1.Deployment
-	30, // 16: provisioner.v1.DestroyDeploymentResponse.deployment:type_name -> provisioner.v1.Deployment
-	31, // 17: provisioner.v1.DeploymentStateChangedEvent.from:type_name -> provisioner.v1.DeploymentState
-	31, // 18: provisioner.v1.DeploymentStateChangedEvent.to:type_name -> provisioner.v1.DeploymentState
-	32, // 19: provisioner.v1.DeploymentStateChangedEvent.at:type_name -> google.protobuf.Timestamp
-	30, // 20: provisioner.v1.TouchDeploymentResponse.deployment:type_name -> provisioner.v1.Deployment
-	1,  // 21: provisioner.v1.ProvisionerService.CreateInstance:input_type -> provisioner.v1.CreateInstanceRequest
-	3,  // 22: provisioner.v1.ProvisionerService.DestroyInstance:input_type -> provisioner.v1.DestroyInstanceRequest
-	5,  // 23: provisioner.v1.ProvisionerService.DescribeInstance:input_type -> provisioner.v1.DescribeInstanceRequest
-	7,  // 24: provisioner.v1.ProvisionerService.ListInstances:input_type -> provisioner.v1.ListInstancesRequest
-	9,  // 25: provisioner.v1.ProvisionerService.WaitForInstanceReady:input_type -> provisioner.v1.WaitForInstanceReadyRequest
-	11, // 26: provisioner.v1.ProvisionerService.GetInstanceSSHKey:input_type -> provisioner.v1.GetInstanceSSHKeyRequest
-	15, // 27: provisioner.v1.DeploymentService.CreateDeployment:input_type -> provisioner.v1.CreateDeploymentRequest
-	17, // 28: provisioner.v1.DeploymentService.DescribeDeployment:input_type -> provisioner.v1.DescribeDeploymentRequest
-	19, // 29: provisioner.v1.DeploymentService.ListDeployments:input_type -> provisioner.v1.ListDeploymentsRequest
-	21, // 30: provisioner.v1.DeploymentService.DestroyDeployment:input_type -> provisioner.v1.DestroyDeploymentRequest
-	23, // 31: provisioner.v1.DeploymentService.WatchDeployment:input_type -> provisioner.v1.WatchDeploymentRequest
-	25, // 32: provisioner.v1.DeploymentService.TouchDeployment:input_type -> provisioner.v1.TouchDeploymentRequest
-	13, // 33: provisioner.v1.DeploymentService.ScaleDeployment:input_type -> provisioner.v1.ScaleDeploymentRequest
-	2,  // 34: provisioner.v1.ProvisionerService.CreateInstance:output_type -> provisioner.v1.CreateInstanceResponse
-	4,  // 35: provisioner.v1.ProvisionerService.DestroyInstance:output_type -> provisioner.v1.DestroyInstanceResponse
-	6,  // 36: provisioner.v1.ProvisionerService.DescribeInstance:output_type -> provisioner.v1.DescribeInstanceResponse
-	8,  // 37: provisioner.v1.ProvisionerService.ListInstances:output_type -> provisioner.v1.ListInstancesResponse
-	10, // 38: provisioner.v1.ProvisionerService.WaitForInstanceReady:output_type -> provisioner.v1.WaitForInstanceReadyResponse
-	12, // 39: provisioner.v1.ProvisionerService.GetInstanceSSHKey:output_type -> provisioner.v1.GetInstanceSSHKeyResponse
-	16, // 40: provisioner.v1.DeploymentService.CreateDeployment:output_type -> provisioner.v1.CreateDeploymentResponse
-	18, // 41: provisioner.v1.DeploymentService.DescribeDeployment:output_type -> provisioner.v1.DescribeDeploymentResponse
-	20, // 42: provisioner.v1.DeploymentService.ListDeployments:output_type -> provisioner.v1.ListDeploymentsResponse
-	22, // 43: provisioner.v1.DeploymentService.DestroyDeployment:output_type -> provisioner.v1.DestroyDeploymentResponse
-	24, // 44: provisioner.v1.DeploymentService.WatchDeployment:output_type -> provisioner.v1.DeploymentStateChangedEvent
-	26, // 45: provisioner.v1.DeploymentService.TouchDeployment:output_type -> provisioner.v1.TouchDeploymentResponse
-	14, // 46: provisioner.v1.DeploymentService.ScaleDeployment:output_type -> provisioner.v1.ScaleDeploymentResponse
-	34, // [34:47] is the sub-list for method output_type
-	21, // [21:34] is the sub-list for method input_type
-	21, // [21:21] is the sub-list for extension type_name
-	21, // [21:21] is the sub-list for extension extendee
-	0,  // [0:21] is the sub-list for field type_name
+	34, // 6: provisioner.v1.ListInstancesResponse.instances:type_name -> provisioner.v1.Instance
+	34, // 7: provisioner.v1.WaitForInstanceReadyResponse.instance:type_name -> provisioner.v1.Instance
+	35, // 8: provisioner.v1.ScaleDeploymentRequest.add_replicas:type_name -> provisioner.v1.ReplicaSpec
+	36, // 9: provisioner.v1.ScaleDeploymentResponse.deployment:type_name -> provisioner.v1.Deployment
+	36, // 10: provisioner.v1.CreateDeploymentRequest.deployment:type_name -> provisioner.v1.Deployment
+	35, // 11: provisioner.v1.CreateDeploymentRequest.replicas_spec:type_name -> provisioner.v1.ReplicaSpec
+	36, // 12: provisioner.v1.CreateDeploymentResponse.deployment:type_name -> provisioner.v1.Deployment
+	36, // 13: provisioner.v1.DescribeDeploymentResponse.deployment:type_name -> provisioner.v1.Deployment
+	37, // 14: provisioner.v1.ListDeploymentsRequest.state:type_name -> provisioner.v1.DeploymentState
+	36, // 15: provisioner.v1.ListDeploymentsResponse.deployments:type_name -> provisioner.v1.Deployment
+	36, // 16: provisioner.v1.DestroyDeploymentResponse.deployment:type_name -> provisioner.v1.Deployment
+	37, // 17: provisioner.v1.DeploymentStateChangedEvent.from:type_name -> provisioner.v1.DeploymentState
+	37, // 18: provisioner.v1.DeploymentStateChangedEvent.to:type_name -> provisioner.v1.DeploymentState
+	38, // 19: provisioner.v1.DeploymentStateChangedEvent.at:type_name -> google.protobuf.Timestamp
+	36, // 20: provisioner.v1.TouchDeploymentResponse.deployment:type_name -> provisioner.v1.Deployment
+	39, // 21: provisioner.v1.RegisterEngineRequest.engine:type_name -> provisioner.v1.Engine
+	39, // 22: provisioner.v1.RegisterEngineResponse.engine:type_name -> provisioner.v1.Engine
+	40, // 23: provisioner.v1.ListEnginesRequest.state:type_name -> provisioner.v1.EngineState
+	39, // 24: provisioner.v1.ListEnginesResponse.engines:type_name -> provisioner.v1.Engine
+	39, // 25: provisioner.v1.DrainEngineResponse.engine:type_name -> provisioner.v1.Engine
+	1,  // 26: provisioner.v1.ProvisionerService.CreateInstance:input_type -> provisioner.v1.CreateInstanceRequest
+	3,  // 27: provisioner.v1.ProvisionerService.DestroyInstance:input_type -> provisioner.v1.DestroyInstanceRequest
+	5,  // 28: provisioner.v1.ProvisionerService.DescribeInstance:input_type -> provisioner.v1.DescribeInstanceRequest
+	7,  // 29: provisioner.v1.ProvisionerService.ListInstances:input_type -> provisioner.v1.ListInstancesRequest
+	9,  // 30: provisioner.v1.ProvisionerService.WaitForInstanceReady:input_type -> provisioner.v1.WaitForInstanceReadyRequest
+	11, // 31: provisioner.v1.ProvisionerService.GetInstanceSSHKey:input_type -> provisioner.v1.GetInstanceSSHKeyRequest
+	15, // 32: provisioner.v1.DeploymentService.CreateDeployment:input_type -> provisioner.v1.CreateDeploymentRequest
+	17, // 33: provisioner.v1.DeploymentService.DescribeDeployment:input_type -> provisioner.v1.DescribeDeploymentRequest
+	19, // 34: provisioner.v1.DeploymentService.ListDeployments:input_type -> provisioner.v1.ListDeploymentsRequest
+	21, // 35: provisioner.v1.DeploymentService.DestroyDeployment:input_type -> provisioner.v1.DestroyDeploymentRequest
+	23, // 36: provisioner.v1.DeploymentService.WatchDeployment:input_type -> provisioner.v1.WatchDeploymentRequest
+	25, // 37: provisioner.v1.DeploymentService.TouchDeployment:input_type -> provisioner.v1.TouchDeploymentRequest
+	13, // 38: provisioner.v1.DeploymentService.ScaleDeployment:input_type -> provisioner.v1.ScaleDeploymentRequest
+	27, // 39: provisioner.v1.EngineRegistryService.RegisterEngine:input_type -> provisioner.v1.RegisterEngineRequest
+	29, // 40: provisioner.v1.EngineRegistryService.ListEngines:input_type -> provisioner.v1.ListEnginesRequest
+	31, // 41: provisioner.v1.EngineRegistryService.DrainEngine:input_type -> provisioner.v1.DrainEngineRequest
+	2,  // 42: provisioner.v1.ProvisionerService.CreateInstance:output_type -> provisioner.v1.CreateInstanceResponse
+	4,  // 43: provisioner.v1.ProvisionerService.DestroyInstance:output_type -> provisioner.v1.DestroyInstanceResponse
+	6,  // 44: provisioner.v1.ProvisionerService.DescribeInstance:output_type -> provisioner.v1.DescribeInstanceResponse
+	8,  // 45: provisioner.v1.ProvisionerService.ListInstances:output_type -> provisioner.v1.ListInstancesResponse
+	10, // 46: provisioner.v1.ProvisionerService.WaitForInstanceReady:output_type -> provisioner.v1.WaitForInstanceReadyResponse
+	12, // 47: provisioner.v1.ProvisionerService.GetInstanceSSHKey:output_type -> provisioner.v1.GetInstanceSSHKeyResponse
+	16, // 48: provisioner.v1.DeploymentService.CreateDeployment:output_type -> provisioner.v1.CreateDeploymentResponse
+	18, // 49: provisioner.v1.DeploymentService.DescribeDeployment:output_type -> provisioner.v1.DescribeDeploymentResponse
+	20, // 50: provisioner.v1.DeploymentService.ListDeployments:output_type -> provisioner.v1.ListDeploymentsResponse
+	22, // 51: provisioner.v1.DeploymentService.DestroyDeployment:output_type -> provisioner.v1.DestroyDeploymentResponse
+	24, // 52: provisioner.v1.DeploymentService.WatchDeployment:output_type -> provisioner.v1.DeploymentStateChangedEvent
+	26, // 53: provisioner.v1.DeploymentService.TouchDeployment:output_type -> provisioner.v1.TouchDeploymentResponse
+	14, // 54: provisioner.v1.DeploymentService.ScaleDeployment:output_type -> provisioner.v1.ScaleDeploymentResponse
+	28, // 55: provisioner.v1.EngineRegistryService.RegisterEngine:output_type -> provisioner.v1.RegisterEngineResponse
+	30, // 56: provisioner.v1.EngineRegistryService.ListEngines:output_type -> provisioner.v1.ListEnginesResponse
+	32, // 57: provisioner.v1.EngineRegistryService.DrainEngine:output_type -> provisioner.v1.DrainEngineResponse
+	42, // [42:58] is the sub-list for method output_type
+	26, // [26:42] is the sub-list for method input_type
+	26, // [26:26] is the sub-list for extension type_name
+	26, // [26:26] is the sub-list for extension extendee
+	0,  // [0:26] is the sub-list for field type_name
 }
 
 func init() { file_provisioner_v1_service_proto_init() }
@@ -1743,9 +2102,9 @@ func file_provisioner_v1_service_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_provisioner_v1_service_proto_rawDesc), len(file_provisioner_v1_service_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   26,
+			NumMessages:   32,
 			NumExtensions: 0,
-			NumServices:   2,
+			NumServices:   3,
 		},
 		GoTypes:           file_provisioner_v1_service_proto_goTypes,
 		DependencyIndexes: file_provisioner_v1_service_proto_depIdxs,

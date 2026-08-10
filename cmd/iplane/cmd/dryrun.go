@@ -81,6 +81,10 @@ func dryRunCreate(ctx context.Context, w io.Writer, client provisionerClient, sp
 	reqs := spec.GetRequirements()
 	fmt.Fprintf(w, "[dry-run]   constraints: vram>=%dGB, ram>=%dGB, disk>=%dGB, gpus=%d\n",
 		reqs.GetMinVramGb(), reqs.GetMinRamGb(), reqs.GetMinDiskGb(), maxInt32(reqs.GetGpuCount(), 1))
+	if scope := reqs.GetFabricScope(); scope != provisionerv1.FabricScope_FABRIC_SCOPE_UNSPECIFIED {
+		fmt.Fprintf(w, "[dry-run]   fabric:     %s%s (candidates whose fabric the provider "+
+			"does not report are excluded)\n", fabricScopeLabel(scope), fabricBandwidthNote(reqs.GetMinFabricGbps()))
+	}
 	fmt.Fprintf(w, "[dry-run]   est cost:   %s%s\n", cost, costNote)
 	fmt.Fprintln(w, "[dry-run] no provider calls made, no state file changes.")
 	return nil

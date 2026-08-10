@@ -33,6 +33,36 @@ func replicaInstanceID(deployID string, slot, totalSlots int) string {
 	return fmt.Sprintf("%s-r%d", deployID, slot)
 }
 
+// ownsInstance reports whether instanceID is an Instance this deployment
+// provisioned for itself, as opposed to one the operator created separately
+// and pointed the deployment at.
+//
+// The distinction decides whether destroying the deployment may also
+// terminate the Instance record. An auto-provisioned replica exists only to
+// back this deployment, so leaving it behind is the leak issue 228 is about.
+// An explicitly-placed instance may be shared or reused, so the operator
+// tears it down with `iplane instance destroy`.
+//
+// Ownership is read off the naming convention because that is the only
+// signal there is: replica Instances carry no back-reference to their
+// deployment. Keeping the rule adjacent to replicaInstanceID is what stops
+// the two drifting apart.
+func ownsInstance(deployID, instanceID string) bool {
+	if instanceID == deployID {
+		return true // totalSlots == 1 carve-out
+	}
+	suffix, ok := strings.CutPrefix(instanceID, deployID+"-r")
+	if !ok || suffix == "" {
+		return false
+	}
+	for _, r := range suffix {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 // fanOutResult carries one replica's outcome back to the aggregator.
 // endpoint is empty when the deploy failed or wait_for_engine never
 // returned a URL; err carries the failure reason for DEGRADED /
@@ -362,18 +392,19 @@ func (s *Service) createMultiReplicaDeployment(ctx context.Context, req *provisi
 		}
 		now := timestamppb.New(s.clock())
 		record = &provisionerv1.Deployment{
-			Id:             dep.GetId(),
-			Image:          dep.GetImage(),
-			Model:          dep.GetModel(),
-			EngineArgs:     dep.GetEngineArgs(),
-			Env:            dep.GetEnv(),
-			Mounts:         dep.GetMounts(),
-			EnginePort:     dep.GetEnginePort(),
-			State:          provisionerv1.DeploymentState_DEPLOYMENT_STATE_PENDING,
-			CreatedAt:      now,
-			DebugShell:     dep.GetDebugShell(),
-			IdleTtlSeconds: dep.GetIdleTtlSeconds(),
-			NoIdleDestroy:  dep.GetNoIdleDestroy(),
+			Id:               dep.GetId(),
+			Image:            dep.GetImage(),
+			Model:            dep.GetModel(),
+			EngineArgs:       dep.GetEngineArgs(),
+			EngineEntrypoint: dep.GetEngineEntrypoint(),
+			Env:              dep.GetEnv(),
+			Mounts:           dep.GetMounts(),
+			EnginePort:       dep.GetEnginePort(),
+			State:            provisionerv1.DeploymentState_DEPLOYMENT_STATE_PENDING,
+			CreatedAt:        now,
+			DebugShell:       dep.GetDebugShell(),
+			IdleTtlSeconds:   dep.GetIdleTtlSeconds(),
+			NoIdleDestroy:    dep.GetNoIdleDestroy(),
 		}
 		f.Deployments[dep.GetId()] = record
 		return nil
@@ -672,7 +703,13 @@ func (s *Service) launchReplica(ctx context.Context, deployID string, slot int, 
 		obs.observe(u)
 		_ = s.patchDeploymentSlot(deployID, replicaID, u)
 	}
-	err := s.deployerFor(inst).Deploy(obs.ctx(), dep, inst, key, emit)
+	// Per-slot copy: every slot in a fan-out reads the same dep record but
+	// needs its own agent identity. The engine id IS the replica instance
+	// id rather than a parallel identifier, so the control plane can join a
+	// registration back to the slot that produced it with a lookup instead
+	// of a parse.
+	slotDep := withAgentEnv(dep, replicaID, slot, inst.GetProvider(), s.agentServiceURL)
+	err := s.deployerFor(inst).Deploy(obs.ctx(), slotDep, inst, key, emit)
 	obs.finish(err)
 	endpoint := s.readSlotEndpoint(deployID, slot)
 	if err == nil {

@@ -73,6 +73,14 @@ func buildLocalService(store *file.Store, operatorID string, extra ...provisione
 		provisioners.WithDeploymentExecutor(executor),
 		provisioners.WithModelStore(modelStoreForCLI()),
 	}
+	// Where an engine's agent should register. Not inferred from the listen
+	// address: a daemon on :8080 behind NAT cannot see its own reachable
+	// URL, and a plausible-looking guess produces agents that never arrive.
+	// Same shape as IPLANE_OTEL_ENDPOINT, and `iplane telemetry url`
+	// discovers a cloudflared tunnel for the local case.
+	if url := os.Getenv("IPLANE_AGENT_SERVICE_URL"); url != "" {
+		opts = append(opts, provisioners.WithAgentServiceURL(url))
+	}
 	opts = append(opts, extra...)
 	return provisioners.New(providers, store, operatorID, opts...), nil
 }

@@ -24,21 +24,80 @@ adapter emits — no telemetry wiring.
 
 ## Phases
 
-RunPod's REST v1 exposes no explicit container-runtime state, so the
-deployer reads two observable signals from `GET /pods/{id}` during the
-`/health` wait and maps them to a monotonic phase ladder:
+The deployer reads two observable signals during the `/health` wait and
+maps them to a monotonic phase ladder. They come from different API
+versions because neither carries both: v1 has the host assignment but no
+container-runtime state, v2 has the runtime block.
 
-| Phase                | Signal                                  | What's happening                          |
-| -------------------- | --------------------------------------- | ----------------------------------------- |
-| `runpod:scheduling`  | `machine` empty                         | RunPod finding capacity for the SKU set   |
-| `runpod:image-pull`  | `machine` populated, `lastStartedAt` "" | host assigned, pulling the engine image   |
-| `engine:init`        | `lastStartedAt` populated               | container up, model download + weight load |
-| `engine:serving`     | `/health` 2xx                           | engine answering; deploy is RUNNING        |
+| Phase                | Signal                                              | What's happening                          |
+| -------------------- | --------------------------------------------------- | ----------------------------------------- |
+| `runpod:scheduling`  | v1 `machineId` empty and `machine` empty             | RunPod finding capacity for the SKU set   |
+| `runpod:image-pull`  | v1 host assigned, v2 `runtime` null                  | host assigned, pulling the engine image   |
+| `engine:init`        | v2 `runtime` populated                               | container up, model download + weight load |
+| `engine:serving`     | `/health` 2xx                                        | engine answering; deploy is RUNNING        |
+
+Both signals are **state**, never timestamps. v1's `lastStartedAt` looks
+like a container-start signal and is not one; see the history below.
 
 The status read refines observability only; readiness is still `/health`
 alone. A flaky status read keeps the last known phase (phases never
 regress). Once the container has started, the deployer stops polling
 status — `/health` is the only remaining signal.
+
+### History: why the signals are what they are (issue 208)
+
+Until 2026-08-09 the ladder above described only what the code
+*intended*. Both live A/B runs measured an `image-pull` bucket at or near
+zero, with `engine:init` absorbing the entire cold start:
+
+| run | total | `engine:init` | everything else |
+| --- | ---: | ---: | ---: |
+| 1.5B (2026-07-28) | 233.8s | 230.6s | 3.2s (scheduling + create-pod; no image-pull row) |
+| 72B FP8 (2026-07-29) | 2692s | ~2689s | ~3s |
+
+**Confirmed live on 2026-08-09** (1.5B / RTX 4090, pod
+`31f66dn93v32fa`, traced with `IPLANE_RUNPOD_PHASE_TRACE=1`). Across all
+25 ticks of a 2m14s wait there was exactly one distinct signal
+combination, and `scheduling` / `image-pull` were emitted zero times.
+Two independent bugs, either of which alone breaks the ladder:
+
+1. **`lastStartedAt` is a creation stamp.** It read `06:19:04.093`
+   against a `createdAt` of `06:19:04.100`, so it is populated *7 ms
+   before the pod record exists* and never changes. Since
+   `classifyEnginePhase` tests `started` first, a non-empty value on the
+   first probe pins the phase to `engine:init` at t=0 and makes
+   `image-pull` structurally unreachable.
+2. **`machine` stays `{}`.** `machinePresent()` only looks inside the
+   `machine` object, which stayed empty for the entire deploy while
+   RunPod populated the **top-level `machineId`** immediately. So
+   `scheduling` → `image-pull` cannot fire either.
+
+**Fixed** by keying `machinePresent()` on the top-level `machineId` too,
+and by replacing the `lastStartedAt` test with v2's `runtime` block
+(null until the container starts). Re-verified live the same day on a
+fresh pod, against ground truth derived independently from
+`runtime.uptimeInSeconds`:
+
+| slice | before fix | after fix | ground truth |
+| --- | ---: | ---: | ---: |
+| `runpod:image-pull` | 0s (0%) | **109s (72%)** | ~99s (~70%) |
+| `engine:init` | 134s (100%) | **43s (28%)** | ~41s (~30%) |
+
+The lasting lesson: **phase boundaries must be state, not timestamps.**
+A timestamp answers "did this happen at some point", which is a
+different question from "is this true now" — and `lastStartedAt` was
+stamped 5-7 ms *before* `createdAt` on every pod observed.
+
+Two RunPod-specific traps worth remembering: it returns
+present-but-empty objects (`"machine": {}`, and `runtime` can arrive the
+same way), so presence checks must test for real content; and
+`uptimeInSeconds` is coarse and cached (read 37 three times across 24s),
+so it is fine as evidence but not as a clock.
+
+Note the image pull dominates even a 1.5B cold start, and a *warm*
+deploy pays it in full. Warm-cache pinning erases the weight download,
+not the image. Levers for the image slice are in
+[docs/design/0005-engine-image-coldstart.md](design/0005-engine-image-coldstart.md).
 
 ## Metrics
 

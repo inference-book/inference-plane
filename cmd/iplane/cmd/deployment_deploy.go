@@ -36,6 +36,7 @@ var (
 	deployModel           string
 	deployEnginePort      int32
 	deployEngineArgs      []string
+	deployEngineEntrypnt  []string
 	deployEnv             map[string]string
 	deployClass           string
 	deploySKU             string
@@ -43,6 +44,8 @@ var (
 	deployMinRAM          int32
 	deployMinDisk         int32
 	deployGPUCount        int32
+	deployFabric          string
+	deployFabricBW        int32
 	deployDebugShell      bool
 	deployIdleTTL         time.Duration
 	deployNoIdleDestroy   bool
@@ -176,16 +179,17 @@ func runDeploymentDeploy(cmd *cobra.Command, args []string) error {
 	engineEnv := mergeOtelEnv(deployEnv, deployOtelEndpoint, deployOtelHeaders)
 
 	dep := &provisionerv1.Deployment{
-		Id:             id,
-		InstanceId:     deployInstanceID,
-		Image:          deployImage,
-		Model:          deployModel,
-		EnginePort:     deployEnginePort,
-		EngineArgs:     deployEngineArgs,
-		Env:            engineEnv,
-		DebugShell:     deployDebugShell,
-		IdleTtlSeconds: int32(deployIdleTTL.Seconds()),
-		NoIdleDestroy:  deployNoIdleDestroy,
+		Id:               id,
+		InstanceId:       deployInstanceID,
+		Image:            deployImage,
+		Model:            deployModel,
+		EnginePort:       deployEnginePort,
+		EngineArgs:       deployEngineArgs,
+		EngineEntrypoint: deployEngineEntrypnt,
+		Env:              engineEnv,
+		DebugShell:       deployDebugShell,
+		IdleTtlSeconds:   int32(deployIdleTTL.Seconds()),
+		NoIdleDestroy:    deployNoIdleDestroy,
 	}
 	req := &provisionerv1.CreateDeploymentRequest{
 		Deployment: dep,
@@ -215,17 +219,23 @@ func runDeploymentDeploy(cmd *cobra.Command, args []string) error {
 		// Auto-provision: build a single instance group from the
 		// homogeneous flag set. --replicas N folds into the group's
 		// replicas count.
+		fabricScope, err := parseFabricScope(deployFabric)
+		if err != nil {
+			return err
+		}
 		req.ReplicasSpec = []*provisionerv1.ReplicaSpec{{
 			Provider: deployProvider,
 			Region:   deployRegion,
 			Replicas: deployReplicas,
 			Requirements: &provisionerv1.ResourceRequirements{
-				Class:     deployClass,
-				Sku:       deploySKU,
-				MinVramGb: deployMinVRAM,
-				MinRamGb:  deployMinRAM,
-				MinDiskGb: deployMinDisk,
-				GpuCount:  deployGPUCount,
+				Class:         deployClass,
+				Sku:           deploySKU,
+				MinVramGb:     deployMinVRAM,
+				MinRamGb:      deployMinRAM,
+				MinDiskGb:     deployMinDisk,
+				GpuCount:      deployGPUCount,
+				FabricScope:   fabricScope,
+				MinFabricGbps: deployFabricBW,
 			},
 		}}
 	}
@@ -285,11 +295,15 @@ func init() {
 	f.Int32Var(&deployMinRAM, "min-ram-gb", 0, `minimum system RAM for auto-provisioning, in GB`)
 	f.Int32Var(&deployMinDisk, "min-disk-gb", 0, `minimum container disk for auto-provisioning, in GB`)
 	f.Int32Var(&deployGPUCount, "gpu-count", 0, `number of GPUs for auto-provisioning (default 1)`)
+	f.StringVar(&deployFabric, "fabric", "", fabricFlagUsage)
+	f.Int32Var(&deployFabricBW, "min-fabric-gbps", 0, minFabricGbpsUsage)
 	f.Int32Var(&deployEnginePort, "engine-port", 8000, `port the engine listens on`)
 	f.StringSliceVar(&deployEngineArgs, "engine-args", nil,
 		`additional args passed to the engine entrypoint (comma-separated or repeated)`)
 	f.StringToStringVar(&deployEnv, "env", nil,
 		`env var to set in the engine container, KEY=VALUE (repeatable)`)
+	f.StringSliceVar(&deployEngineEntrypnt, "engine-entrypoint", nil,
+		`command that starts the engine inside the image, e.g. "vllm,serve". Normally unnecessary: iplane replaces the image CMD and lets the image ENTRYPOINT supply the binary. Set it only to run the registration agent alongside the engine on an image-native provider, where the wrapper has to exec the engine itself. There is no safe default to infer (vllm/vllm-openai changed entrypoints between releases), so leaving it unset simply means no agent and liveness stays with the /health poller.`)
 	f.StringVar(&deployOtelEndpoint, "otel-endpoint", os.Getenv("IPLANE_OTEL_ENDPOINT"),
 		`OTLP endpoint URL for the engine to ship traces/metrics to (default: IPLANE_OTEL_ENDPOINT env). Sets OTEL_EXPORTER_OTLP_ENDPOINT on the pod. Examples: Grafana Cloud Free's OTLP HTTP URL, or 'iplane telemetry url' for a cloudflared tunnel to the local stack.`)
 	f.StringToStringVar(&deployOtelHeaders, "otel-headers", parseOtelHeadersEnv(os.Getenv("IPLANE_OTEL_HEADERS")),

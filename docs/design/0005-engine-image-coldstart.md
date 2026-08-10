@@ -59,33 +59,85 @@ So "pinning the engine" is mostly *warm pools + streaming-capable
 providers*, not a new mount primitive. Worth stating plainly so nobody
 tries to force it into the `VolumeManager` shape.
 
-## Concrete near-term enhancement: split the engine:init phase
+## Concrete near-term enhancement: make the engine:init split actually measure
 
-iplane currently folds three very different costs into one `engine:init`
-phase: **image pull + weight download + model load**. That is why the
-warm-vs-cold figure can only show the *total* collapse, and why a warm
-deploy looks confusingly slow (it still pays the image pull, invisibly).
+**Correction (2026-08-08).** An earlier draft of this doc proposed
+building the `image-pull` / `engine:init` split as new work. That split
+is already **written** and has been since the deployment-observability
+feature (commit `8154481`): `deployer.go`'s `classifyEnginePhase` maps
+`machine` → `runpod:image-pull` and `lastStartedAt` → `engine:init`, and
+`docs/deployment-observability.md` documents the ladder. The code is not
+the gap.
 
-The signal to split them already exists. `docs/deployment-observability.md`
-notes RunPod's `lastStartedAt` flips from empty to populated when the image
-pull finishes and the container starts. So the deployer can emit:
+The gap is that the split **measures nothing**. Both validated runs put
+the entire cold start in `engine:init` and ~0s in `image-pull`:
 
-- `runpod:image-pull` — machine assigned → `lastStartedAt` populated.
-- `engine:init` — `lastStartedAt` populated → `/health` 2xx (download + load).
+| run | total | `engine:init` | `image-pull` |
+| --- | ---: | ---: | ---: |
+| 1.5B (2026-07-28) | 233.8s | 230.6s | absent (no row) |
+| 72B FP8 (2026-07-29) | 2692s | ~2689s | ~0s |
 
-With that split, the deployment dashboard attributes the ~20 GB image
-slice separately from the weight slice, the engine-pin opportunity becomes
-**measurable**, and Fig 9.7 / `diagram_coldstart_panel` can honestly show
+A ~20 GB image pull is minutes, so the boundary signal is wrong.
+**Diagnosed live 2026-08-09** (1.5B / RTX 4090, traced with
+`IPLANE_RUNPOD_PHASE_TRACE=1`): two independent bugs, either sufficient
+on its own.
+
+- `lastStartedAt` is stamped at pod-record **creation** (7 ms *before*
+  `createdAt`) and never changes, so `classifyEnginePhase`'s
+  `started`-first switch pins the phase to `engine:init` at t=0.
+- `machine` stays `{}` for the whole deploy while the top-level
+  `machineId` populates immediately, so `machinePresent()` is false
+  throughout and `scheduling` → `image-pull` cannot fire either.
+
+The working boundary is `runtime` (null until the container starts),
+present in GraphQL v1 and REST v2 but absent from the REST v1 endpoint
+the prober uses. Measured against it, the 1.5B cold start was ~99s image
+pull (~70%) + ~41s engine init (~30%), all of it reported as
+`engine:init`. Full trace and proposed fix in issue 208.
+
+So iplane today still folds **image pull + weight download + model load**
+into one `engine:init` phase, exactly as if the split had never been
+written. That is why the warm-vs-cold figure can only show the *total*
+collapse, and why a warm deploy looks confusingly slow (it still pays the
+image pull, invisibly).
+
+### Closed (2026-08-09)
+
+Fixed and re-verified live the same day, on a fresh pod:
+
+1. `machinePresent()` now also accepts the top-level `machineId`.
+2. The container-start test is v2 `/v2/pods/{id}`'s `runtime` block
+   instead of `lastStartedAt`. v2 was already plumbed (`stage.go` polls
+   v2 logs), so no new client was needed. Presence is tested for real
+   content, since RunPod returns present-but-empty objects.
+3. `classifyEnginePhase` documents that both inputs must be state, never
+   timestamps.
+4. The deploy regression test's fake now serves a create-stamped
+   `lastStartedAt` and an empty `machine` — the exact shape RunPod
+   returns — so reintroducing either bug fails the ladder assertion.
+
+| slice | before | after | ground truth |
+| --- | ---: | ---: | ---: |
+| `runpod:image-pull` | 0s (0%) | **109s (72%)** | ~99s (~70%) |
+| `engine:init` | 134s (100%) | **43s (28%)** | ~41s (~30%) |
+
+So the image slice is now measurable, which is the precondition this doc
+needed. It also confirms the premise: on a 1.5B, image pull is ~70% of
+the cold start, and a warm deploy pays all of it.
+
+Only once the slice is real does the engine-pin opportunity become
+**measurable** and can Fig 9.7 / `diagram_coldstart_panel` honestly show
 that warm-cache erases the *weight* slice while the *image* slice is
-unchanged. This is a small, self-contained deployer + telemetry change and
-it directly improves the book figure's honesty.
+unchanged.
 
 ## Proposal
 
-1. **Split `engine:init` into `image-pull` + `engine:init`** on the RunPod
-   deployer using the existing `lastStartedAt` signal. Small, measurable,
-   improves the Ch 9 figure. Do this before any engine-caching work so the
-   payoff is visible.
+1. **Make the existing `image-pull` / `engine:init` split measure
+   something.** The split is already written; its boundary signal
+   (`lastStartedAt`) reads ~0s for image-pull in every run so far.
+   Diagnose the signal, replace it, or drop the phase (see "Work to close
+   it" above). Do this before any engine-caching work, because until the
+   image slice is attributable the payoff of caching it is unmeasurable.
 2. **Frame warm pools as the portable "engine pin"** — a keep-N-warm
    capacity policy layered on the reaper/`--no-idle-destroy` seam iplane
    already has. Design later; name it now so it is not conflated with

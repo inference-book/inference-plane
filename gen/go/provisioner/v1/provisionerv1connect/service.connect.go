@@ -25,6 +25,8 @@ const (
 	ProvisionerServiceName = "provisioner.v1.ProvisionerService"
 	// DeploymentServiceName is the fully-qualified name of the DeploymentService service.
 	DeploymentServiceName = "provisioner.v1.DeploymentService"
+	// EngineRegistryServiceName is the fully-qualified name of the EngineRegistryService service.
+	EngineRegistryServiceName = "provisioner.v1.EngineRegistryService"
 )
 
 // These constants are the fully-qualified names of the RPCs defined in this package. They're
@@ -74,6 +76,15 @@ const (
 	// DeploymentServiceScaleDeploymentProcedure is the fully-qualified name of the DeploymentService's
 	// ScaleDeployment RPC.
 	DeploymentServiceScaleDeploymentProcedure = "/provisioner.v1.DeploymentService/ScaleDeployment"
+	// EngineRegistryServiceRegisterEngineProcedure is the fully-qualified name of the
+	// EngineRegistryService's RegisterEngine RPC.
+	EngineRegistryServiceRegisterEngineProcedure = "/provisioner.v1.EngineRegistryService/RegisterEngine"
+	// EngineRegistryServiceListEnginesProcedure is the fully-qualified name of the
+	// EngineRegistryService's ListEngines RPC.
+	EngineRegistryServiceListEnginesProcedure = "/provisioner.v1.EngineRegistryService/ListEngines"
+	// EngineRegistryServiceDrainEngineProcedure is the fully-qualified name of the
+	// EngineRegistryService's DrainEngine RPC.
+	EngineRegistryServiceDrainEngineProcedure = "/provisioner.v1.EngineRegistryService/DrainEngine"
 )
 
 // ProvisionerServiceClient is a client for the provisioner.v1.ProvisionerService service.
@@ -684,4 +695,169 @@ func (UnimplementedDeploymentServiceHandler) TouchDeployment(context.Context, *c
 
 func (UnimplementedDeploymentServiceHandler) ScaleDeployment(context.Context, *connect.Request[v1.ScaleDeploymentRequest]) (*connect.Response[v1.ScaleDeploymentResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("provisioner.v1.DeploymentService.ScaleDeployment is not implemented"))
+}
+
+// EngineRegistryServiceClient is a client for the provisioner.v1.EngineRegistryService service.
+type EngineRegistryServiceClient interface {
+	// RegisterEngine is both the first announcement and every renewal after
+	// it. One method, because the distinction is not useful to the caller and
+	// collapsing them makes the agent a retry loop with no state machine: an
+	// engine that crashes and returns simply registers again.
+	//
+	// Idempotent on Engine.id. The response carries the interval the control
+	// plane wants the next renewal by, so detection latency is a property of
+	// the control plane's configuration rather than of what each agent
+	// happened to hardcode.
+	RegisterEngine(context.Context, *connect.Request[v1.RegisterEngineRequest]) (*connect.Response[v1.RegisterEngineResponse], error)
+	// ListEngines returns every engine the registry knows, including those the
+	// sweeper has marked LOST. Lost members are retained rather than deleted so
+	// an operator can see what went away; this is the read surface the fleet
+	// verbs (issue 205) render.
+	ListEngines(context.Context, *connect.Request[v1.ListEnginesRequest]) (*connect.Response[v1.ListEnginesResponse], error)
+	// DrainEngine takes a member out of service properly: stop new work landing
+	// on it, let in-flight finish, then release every node it spans.
+	//
+	// Synchronous, and therefore bounded by the server's write timeout. That is
+	// a deliberate constraint rather than an oversight: iplane has already been
+	// bitten once by a long-running unary call being severed mid-flight
+	// (CreateDeployment, Ch 9), so the handler rejects a timeout the transport
+	// cannot carry instead of discovering it the hard way.
+	DrainEngine(context.Context, *connect.Request[v1.DrainEngineRequest]) (*connect.Response[v1.DrainEngineResponse], error)
+}
+
+// NewEngineRegistryServiceClient constructs a client for the provisioner.v1.EngineRegistryService
+// service. By default, it uses the Connect protocol with the binary Protobuf Codec, asks for
+// gzipped responses, and sends uncompressed requests. To use the gRPC or gRPC-Web protocols, supply
+// the connect.WithGRPC() or connect.WithGRPCWeb() options.
+//
+// The URL supplied here should be the base URL for the Connect or gRPC server (for example,
+// http://api.acme.com or https://acme.com/grpc).
+func NewEngineRegistryServiceClient(httpClient connect.HTTPClient, baseURL string, opts ...connect.ClientOption) EngineRegistryServiceClient {
+	baseURL = strings.TrimRight(baseURL, "/")
+	engineRegistryServiceMethods := v1.File_provisioner_v1_service_proto.Services().ByName("EngineRegistryService").Methods()
+	return &engineRegistryServiceClient{
+		registerEngine: connect.NewClient[v1.RegisterEngineRequest, v1.RegisterEngineResponse](
+			httpClient,
+			baseURL+EngineRegistryServiceRegisterEngineProcedure,
+			connect.WithSchema(engineRegistryServiceMethods.ByName("RegisterEngine")),
+			connect.WithClientOptions(opts...),
+		),
+		listEngines: connect.NewClient[v1.ListEnginesRequest, v1.ListEnginesResponse](
+			httpClient,
+			baseURL+EngineRegistryServiceListEnginesProcedure,
+			connect.WithSchema(engineRegistryServiceMethods.ByName("ListEngines")),
+			connect.WithClientOptions(opts...),
+		),
+		drainEngine: connect.NewClient[v1.DrainEngineRequest, v1.DrainEngineResponse](
+			httpClient,
+			baseURL+EngineRegistryServiceDrainEngineProcedure,
+			connect.WithSchema(engineRegistryServiceMethods.ByName("DrainEngine")),
+			connect.WithClientOptions(opts...),
+		),
+	}
+}
+
+// engineRegistryServiceClient implements EngineRegistryServiceClient.
+type engineRegistryServiceClient struct {
+	registerEngine *connect.Client[v1.RegisterEngineRequest, v1.RegisterEngineResponse]
+	listEngines    *connect.Client[v1.ListEnginesRequest, v1.ListEnginesResponse]
+	drainEngine    *connect.Client[v1.DrainEngineRequest, v1.DrainEngineResponse]
+}
+
+// RegisterEngine calls provisioner.v1.EngineRegistryService.RegisterEngine.
+func (c *engineRegistryServiceClient) RegisterEngine(ctx context.Context, req *connect.Request[v1.RegisterEngineRequest]) (*connect.Response[v1.RegisterEngineResponse], error) {
+	return c.registerEngine.CallUnary(ctx, req)
+}
+
+// ListEngines calls provisioner.v1.EngineRegistryService.ListEngines.
+func (c *engineRegistryServiceClient) ListEngines(ctx context.Context, req *connect.Request[v1.ListEnginesRequest]) (*connect.Response[v1.ListEnginesResponse], error) {
+	return c.listEngines.CallUnary(ctx, req)
+}
+
+// DrainEngine calls provisioner.v1.EngineRegistryService.DrainEngine.
+func (c *engineRegistryServiceClient) DrainEngine(ctx context.Context, req *connect.Request[v1.DrainEngineRequest]) (*connect.Response[v1.DrainEngineResponse], error) {
+	return c.drainEngine.CallUnary(ctx, req)
+}
+
+// EngineRegistryServiceHandler is an implementation of the provisioner.v1.EngineRegistryService
+// service.
+type EngineRegistryServiceHandler interface {
+	// RegisterEngine is both the first announcement and every renewal after
+	// it. One method, because the distinction is not useful to the caller and
+	// collapsing them makes the agent a retry loop with no state machine: an
+	// engine that crashes and returns simply registers again.
+	//
+	// Idempotent on Engine.id. The response carries the interval the control
+	// plane wants the next renewal by, so detection latency is a property of
+	// the control plane's configuration rather than of what each agent
+	// happened to hardcode.
+	RegisterEngine(context.Context, *connect.Request[v1.RegisterEngineRequest]) (*connect.Response[v1.RegisterEngineResponse], error)
+	// ListEngines returns every engine the registry knows, including those the
+	// sweeper has marked LOST. Lost members are retained rather than deleted so
+	// an operator can see what went away; this is the read surface the fleet
+	// verbs (issue 205) render.
+	ListEngines(context.Context, *connect.Request[v1.ListEnginesRequest]) (*connect.Response[v1.ListEnginesResponse], error)
+	// DrainEngine takes a member out of service properly: stop new work landing
+	// on it, let in-flight finish, then release every node it spans.
+	//
+	// Synchronous, and therefore bounded by the server's write timeout. That is
+	// a deliberate constraint rather than an oversight: iplane has already been
+	// bitten once by a long-running unary call being severed mid-flight
+	// (CreateDeployment, Ch 9), so the handler rejects a timeout the transport
+	// cannot carry instead of discovering it the hard way.
+	DrainEngine(context.Context, *connect.Request[v1.DrainEngineRequest]) (*connect.Response[v1.DrainEngineResponse], error)
+}
+
+// NewEngineRegistryServiceHandler builds an HTTP handler from the service implementation. It
+// returns the path on which to mount the handler and the handler itself.
+//
+// By default, handlers support the Connect, gRPC, and gRPC-Web protocols with the binary Protobuf
+// and JSON codecs. They also support gzip compression.
+func NewEngineRegistryServiceHandler(svc EngineRegistryServiceHandler, opts ...connect.HandlerOption) (string, http.Handler) {
+	engineRegistryServiceMethods := v1.File_provisioner_v1_service_proto.Services().ByName("EngineRegistryService").Methods()
+	engineRegistryServiceRegisterEngineHandler := connect.NewUnaryHandler(
+		EngineRegistryServiceRegisterEngineProcedure,
+		svc.RegisterEngine,
+		connect.WithSchema(engineRegistryServiceMethods.ByName("RegisterEngine")),
+		connect.WithHandlerOptions(opts...),
+	)
+	engineRegistryServiceListEnginesHandler := connect.NewUnaryHandler(
+		EngineRegistryServiceListEnginesProcedure,
+		svc.ListEngines,
+		connect.WithSchema(engineRegistryServiceMethods.ByName("ListEngines")),
+		connect.WithHandlerOptions(opts...),
+	)
+	engineRegistryServiceDrainEngineHandler := connect.NewUnaryHandler(
+		EngineRegistryServiceDrainEngineProcedure,
+		svc.DrainEngine,
+		connect.WithSchema(engineRegistryServiceMethods.ByName("DrainEngine")),
+		connect.WithHandlerOptions(opts...),
+	)
+	return "/provisioner.v1.EngineRegistryService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case EngineRegistryServiceRegisterEngineProcedure:
+			engineRegistryServiceRegisterEngineHandler.ServeHTTP(w, r)
+		case EngineRegistryServiceListEnginesProcedure:
+			engineRegistryServiceListEnginesHandler.ServeHTTP(w, r)
+		case EngineRegistryServiceDrainEngineProcedure:
+			engineRegistryServiceDrainEngineHandler.ServeHTTP(w, r)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+}
+
+// UnimplementedEngineRegistryServiceHandler returns CodeUnimplemented from all methods.
+type UnimplementedEngineRegistryServiceHandler struct{}
+
+func (UnimplementedEngineRegistryServiceHandler) RegisterEngine(context.Context, *connect.Request[v1.RegisterEngineRequest]) (*connect.Response[v1.RegisterEngineResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("provisioner.v1.EngineRegistryService.RegisterEngine is not implemented"))
+}
+
+func (UnimplementedEngineRegistryServiceHandler) ListEngines(context.Context, *connect.Request[v1.ListEnginesRequest]) (*connect.Response[v1.ListEnginesResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("provisioner.v1.EngineRegistryService.ListEngines is not implemented"))
+}
+
+func (UnimplementedEngineRegistryServiceHandler) DrainEngine(context.Context, *connect.Request[v1.DrainEngineRequest]) (*connect.Response[v1.DrainEngineResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("provisioner.v1.EngineRegistryService.DrainEngine is not implemented"))
 }

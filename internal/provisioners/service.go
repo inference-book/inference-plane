@@ -58,6 +58,13 @@ type Service struct {
 	operatorID string
 	clock      func() time.Time
 
+	// agentServiceURL is the externally reachable control-plane address
+	// stamped onto engine containers for the registration agent. Empty
+	// means the daemon has not been told its own public URL, in which case
+	// nothing is stamped and the agent does not register. See
+	// WithAgentServiceURL.
+	agentServiceURL string
+
 	// pendingReplicaSpecs is the per-fan-out stash that
 	// provisionSlots writes and recordCreateSlots / recordAppendedSlots
 	// reads. Threading the specs through every recordSlots variant
@@ -161,6 +168,20 @@ func WithModelStore(ms modelstores.ModelStore) Option {
 // so they can assert touch ordering precisely.
 func WithTouchDebounceInterval(d time.Duration) Option {
 	return func(s *Service) { s.touchDebounceInterval = d }
+}
+
+// WithAgentServiceURL sets the externally reachable control-plane URL
+// stamped onto engine containers so the agent beside the engine knows where
+// to register.
+//
+// Unset by default and deliberately not inferred from the listen address. A
+// daemon bound to :8080 on a laptop behind NAT cannot see its own reachable
+// URL, and guessing one produces agents that fail to register against an
+// address that looks plausible in the config. The operator supplies it, the
+// same way IPLANE_OTEL_ENDPOINT is supplied for engine telemetry, and
+// `iplane telemetry url` discovers a cloudflared tunnel for the local case.
+func WithAgentServiceURL(url string) Option {
+	return func(s *Service) { s.agentServiceURL = url }
 }
 
 // WithRecorder wires the OTel metrics recorder used for the
@@ -780,6 +801,33 @@ func ValidateAndExpandRequirements(spec *provisionerv1.Spec) error {
 	}
 	if reqs.GetSku() == "" && reqs.GetClass() == "" && reqs.GetMinVramGb() == 0 {
 		return errors.New("requirements: one of class, sku, or min_vram_gb is required")
+	}
+	// A fabric requirement describes how an instance's GPUs reach EACH OTHER,
+	// so it is meaningless with one card and almost certainly a mistake: the
+	// operator asked for an interconnect and would have got a single-GPU
+	// instance that trivially satisfies nothing. Reject rather than silently
+	// ignore, since silently ignoring a constraint is the failure mode the
+	// whole fabric filter exists to prevent.
+	if reqs.GetFabricScope() != provisionerv1.FabricScope_FABRIC_SCOPE_UNSPECIFIED &&
+		reqs.GetFabricScope() != provisionerv1.FabricScope_FABRIC_SCOPE_NONE &&
+		reqs.GetGpuCount() < 2 {
+		return fmt.Errorf("requirements: fabric_scope needs gpu_count >= 2 (got %d); "+
+			"a fabric describes how cards reach each other", reqs.GetGpuCount())
+	}
+	if reqs.GetMinFabricGbps() > 0 && reqs.GetFabricScope() == provisionerv1.FabricScope_FABRIC_SCOPE_UNSPECIFIED {
+		return errors.New("requirements: min_fabric_gbps needs a fabric_scope to qualify")
+	}
+	// INTER_NODE is a valid thing to want and nothing can supply it yet. No
+	// adapter can rent a coherent multi-node pool from code: RunPod's Instant
+	// Clusters are console-only, Vast's cross-node path is undocumented, and
+	// there is no AWS/GCP adapter (probed 2026-08-09, docs/design/0006 Part 1).
+	//
+	// Say that, rather than letting the resolver return an empty candidate
+	// list and reporting "no matching SKU", which would read as a capacity
+	// problem the operator could wait out. Delete this when SpawnGroup lands.
+	if reqs.GetFabricScope() == provisionerv1.FabricScope_FABRIC_SCOPE_INTER_NODE {
+		return errors.New("requirements: no configured provider reports a cross-node fabric; " +
+			"inter-node pools need the group-provisioning capability (issue 212)")
 	}
 
 	// Expand class shorthand. If the operator passed --gpu-class small
@@ -1646,17 +1694,26 @@ func (s *Service) DestroyDeployment(ctx context.Context, req *provisionerv1.Dest
 		return &provisionerv1.DestroyDeploymentResponse{Deployment: rec}, nil
 	}
 
-	// Look up the instance (needed for SSH) + the key.
 	file, err := s.store.Read()
 	if err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
-	inst, ok := file.Instances[rec.GetInstanceId()]
-	if !ok {
-		// Instance is gone; mark TERMINATED locally (force-like).
+
+	// Tear down every replica, not just the singular instance_id.
+	//
+	// The singular field is a Ch 6 relic: recordCreateSlots leaves it EMPTY
+	// for a deployment created directly at N>1 replicas, so reading it here
+	// used to miss every replica, fall through to the "instance gone" branch,
+	// and mark the deployment TERMINATED without calling the provider at all.
+	// The operator saw a clean teardown and kept paying for N GPUs.
+	// EffectiveInstanceIDs handles both shapes.
+	instanceIDs := EffectiveInstanceIDs(rec)
+	if len(instanceIDs) == 0 {
+		// No instance recorded at all (corrupt or already-reaped record).
+		// Mark terminated locally; there is nothing to call a provider about.
 		_ = s.patchDeployment(id, DeployStateUpdate{
 			State:           provisionerv1.DeploymentState_DEPLOYMENT_STATE_TERMINATED,
-			ProgressMessage: "instance gone; marked terminated locally",
+			ProgressMessage: "no instances recorded; marked terminated locally",
 		})
 		final, _ := s.store.Read()
 		return &provisionerv1.DestroyDeploymentResponse{Deployment: final.Deployments[id]}, nil
@@ -1664,41 +1721,99 @@ func (s *Service) DestroyDeployment(ctx context.Context, req *provisionerv1.Dest
 	if s.keyStore == nil {
 		return nil, status.Error(codes.FailedPrecondition, "deployment requires a configured key store")
 	}
-	key, err := s.keyStore.EnsureKeyPair(s.operatorID, inst.GetProvider())
-	if err != nil {
-		return nil, status.Errorf(codes.Internal, "load ssh key: %v", err)
-	}
 
-	// Synchronous destroy (no Wait flag on the request -- destroy
-	// always blocks until terminal state, simpler semantics).
-	// Teardown carries no storage tier (there is no model download to
-	// classify); pass "" so the tier attribute is omitted.
-	obs := s.newDeployObserver(ctx, deployKindTeardown, id, inst, "")
-	emit := func(u DeployStateUpdate) {
-		obs.observe(u)
-		_ = s.patchDeployment(id, u)
-	}
-	destroyErr := s.deployerFor(inst).Destroy(obs.ctx(), rec, inst, key, emit)
-	obs.finish(destroyErr)
-	if destroyErr != nil {
-		return nil, status.Errorf(codes.Internal, "destroy %s: %v", id, destroyErr)
-	}
-
-	// For an auto-provisioned 1:1 deployment (instance id == deployment
-	// id), the engine pod the Deployer just terminated IS the instance,
-	// so mark the instance TERMINATED too. An explicitly-placed
-	// instance (different id, possibly shared / reused) is left alone --
-	// the operator tears it down via `iplane instance destroy`.
-	if inst.GetId() == id {
-		if cur, ok := mustReadInstances(s)[id]; ok && cur.GetState() != provisionerv1.InstanceState_INSTANCE_STATE_TERMINATED {
-			cur.State = provisionerv1.InstanceState_INSTANCE_STATE_TERMINATED
-			cur.TerminatedAt = timestamppb.New(s.clock())
-			_ = s.patchRecord(id, cur)
+	// Serial, not concurrent. Teardown latency is not the operator's pain
+	// here -- leaked spend is -- and a concurrent loop would have every
+	// replica's emit callback racing to patch the same deployment record,
+	// which is the lost-update shape that already bit multi-replica deploys
+	// once. Parallelism is a later optimisation with a real hazard attached.
+	var failures []string
+	for _, instID := range instanceIDs {
+		if instID == "" {
+			continue // unfilled slot from a partially-provisioned fan-out
 		}
+		inst, ok := file.Instances[instID]
+		if !ok {
+			// Record already gone. Not a failure: the desired end state for
+			// this replica is exactly what we observe.
+			continue
+		}
+		key, keyErr := s.keyStore.EnsureKeyPair(s.operatorID, inst.GetProvider())
+		if keyErr != nil {
+			failures = append(failures, fmt.Sprintf("%s: load ssh key: %v", instID, keyErr))
+			continue
+		}
+
+		// Teardown carries no storage tier (there is no model download to
+		// classify); pass "" so the tier attribute is omitted.
+		obs := s.newDeployObserver(ctx, deployKindTeardown, id, inst, "")
+		emit := func(u DeployStateUpdate) {
+			obs.observe(u)
+			_ = s.patchDeployment(id, u)
+		}
+		destroyErr := s.deployerFor(inst).Destroy(obs.ctx(), rec, inst, key, emit)
+		obs.finish(destroyErr)
+		if destroyErr != nil {
+			// Keep going. One replica refusing to die must not strand the
+			// others: the whole point of the fix is that a partial teardown
+			// leaves billing nodes behind.
+			failures = append(failures, fmt.Sprintf("%s: %v", instID, destroyErr))
+			continue
+		}
+		s.markInstanceTerminated(id, instID)
 	}
+
+	if len(failures) > 0 {
+		// Leave the deployment TERMINATING, not TERMINATED. The operator
+		// still has a handle to retry, and a retry converges: replicas that
+		// already went away are skipped above. Reporting success here would
+		// hide exactly the leak this fix exists to close.
+		_ = s.patchDeployment(id, DeployStateUpdate{
+			State:           provisionerv1.DeploymentState_DEPLOYMENT_STATE_TERMINATING,
+			ProgressMessage: fmt.Sprintf("%d of %d replicas failed to destroy; retry to converge", len(failures), len(instanceIDs)),
+			FailureReason:   strings.Join(failures, "; "),
+		})
+		return nil, status.Errorf(codes.Internal, "destroy %s: %s", id, strings.Join(failures, "; "))
+	}
+
+	// Own the terminal state rather than inheriting it from whatever the
+	// executor happened to emit. The sshdocker executor does emit TERMINATED,
+	// but a deployer that does not would have left the record stuck in
+	// TERMINATING after a perfectly successful teardown. With N replicas the
+	// question is sharper still: no single replica's emit should be what
+	// decides the deployment is finished.
+	_ = s.patchDeployment(id, DeployStateUpdate{
+		State:           provisionerv1.DeploymentState_DEPLOYMENT_STATE_TERMINATED,
+		ProgressMessage: fmt.Sprintf("%d replica(s) destroyed", len(instanceIDs)),
+	})
 
 	final, _ := s.store.Read()
 	return &provisionerv1.DestroyDeploymentResponse{Deployment: final.Deployments[id]}, nil
+}
+
+// markInstanceTerminated marks a destroyed replica's Instance record
+// TERMINATED, but only when the deployment provisioned that Instance itself.
+//
+// The guard is the same one the singular path always had, generalised: an
+// auto-provisioned replica exists only to back this deployment and must not
+// outlive it, while an explicitly-placed instance may be shared and is the
+// operator's to destroy. Without this, tearing down a deployment that points
+// at a long-lived pod would silently kill the pod.
+//
+// Best-effort: a read or patch failure leaves the record alone rather than
+// failing the teardown, since the provider call already succeeded and the
+// hardware is gone either way.
+func (s *Service) markInstanceTerminated(deployID, instanceID string) {
+	if !ownsInstance(deployID, instanceID) {
+		return
+	}
+	cur, ok := mustReadInstances(s)[instanceID]
+	if !ok || cur.GetState() == provisionerv1.InstanceState_INSTANCE_STATE_TERMINATED {
+		return
+	}
+	cur.State = provisionerv1.InstanceState_INSTANCE_STATE_TERMINATED
+	cur.TerminatedAt = timestamppb.New(s.clock())
+	_ = s.patchRecord(instanceID, cur)
 }
 
 // mustReadInstances returns the current Instances map (empty on read
