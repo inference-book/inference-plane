@@ -702,7 +702,13 @@ func (s *Service) launchReplica(ctx context.Context, deployID string, slot int, 
 		obs.observe(u)
 		_ = s.patchDeploymentSlot(deployID, replicaID, u)
 	}
-	err := s.deployerFor(inst).Deploy(obs.ctx(), dep, inst, key, emit)
+	// Per-slot copy: every slot in a fan-out reads the same dep record but
+	// needs its own agent identity. The engine id IS the replica instance
+	// id rather than a parallel identifier, so the control plane can join a
+	// registration back to the slot that produced it with a lookup instead
+	// of a parse.
+	slotDep := withAgentEnv(dep, replicaID, slot, inst.GetProvider(), s.agentServiceURL)
+	err := s.deployerFor(inst).Deploy(obs.ctx(), slotDep, inst, key, emit)
 	obs.finish(err)
 	endpoint := s.readSlotEndpoint(deployID, slot)
 	if err == nil {

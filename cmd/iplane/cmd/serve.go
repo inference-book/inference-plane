@@ -433,6 +433,20 @@ func runServe(parent context.Context) error {
 		server.WithDataPlaneRoutes(deploymentRouter.Handle()),
 		server.WithEngineRegistryHandler(engines.NewConnectAdapter(engineRegistry,
 			engines.WithDrainer(provisionerSvc),
+			// The two identity fields a container cannot know about itself:
+			// its provider machine id and its externally reachable endpoint.
+			// The agent is told a correlation key at deploy time and the
+			// control plane completes the record from what it already
+			// recorded when it rented the box.
+			engines.WithLocator(engines.LocatorFunc(
+				func(_ context.Context, engineID string) (engines.NodeIdentity, bool, error) {
+					host, provider, endpoint, found, err := provisionerSvc.LocateEngineNode(engineID)
+					return engines.NodeIdentity{
+						HostID:   host,
+						Provider: provider,
+						Endpoint: endpoint,
+					}, found, err
+				})),
 			// A drain is a synchronous unary call, so its wait cannot exceed
 			// the response write deadline. Deriving the cap from the same
 			// config value keeps the two from drifting; Ch 9's `unexpected

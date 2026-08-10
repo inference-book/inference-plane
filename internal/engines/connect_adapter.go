@@ -28,6 +28,7 @@ import (
 type ConnectAdapter struct {
 	registry        *Registry
 	drainer         Drainer
+	locator         Locator
 	maxDrainTimeout time.Duration
 }
 
@@ -55,7 +56,13 @@ func (a *ConnectAdapter) RegisterEngine(
 	ctx context.Context,
 	req *connect.Request[provisionerv1.RegisterEngineRequest],
 ) (*connect.Response[provisionerv1.RegisterEngineResponse], error) {
-	stored, err := a.registry.Register(req.Msg.GetEngine())
+	// Fill the fields the box could not know before storing, so what the
+	// registry persists is the complete record rather than one the fleet
+	// view has to re-join on every read.
+	incoming := req.Msg.GetEngine()
+	a.enrich(ctx, incoming)
+
+	stored, err := a.registry.Register(incoming)
 	if err != nil {
 		if errors.Is(err, ErrNoID) {
 			return nil, connect.NewError(connect.CodeInvalidArgument, err)

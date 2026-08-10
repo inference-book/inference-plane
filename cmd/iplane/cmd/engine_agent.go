@@ -16,22 +16,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// Env vars the deploy path stamps onto the engine container. They are the
-// injected half of the span: a box cannot see its own provider identity from
-// inside (docs/design/0007 finding 4), so the control plane has to tell it.
-//
-// Named here rather than inline so the deploy-time stamping and the agent
-// that reads it cannot drift apart on a typo.
-const (
-	EnvEngineID        = "IPLANE_ENGINE_ID"
-	EnvEngineDeployID  = "IPLANE_DEPLOYMENT_ID"
-	EnvEngineModel     = "IPLANE_ENGINE_MODEL"
-	EnvEngineEndpoint  = "IPLANE_ENGINE_ENDPOINT"
-	EnvEngineHealthURL = "IPLANE_ENGINE_HEALTH_URL"
-	EnvEngineHostID    = "IPLANE_HOST_ID"
-	EnvEngineNodeIndex = "IPLANE_NODE_INDEX"
-)
-
 var (
 	engineAgentServiceURL string
 	engineAgentID         string
@@ -82,23 +66,23 @@ func init() {
 	// IPLANE_SERVICE_URL by the same spelling the other remote-transport
 	// verbs use, so an operator who has already exported it for
 	// `iplane deployment` does not learn a second name here.
-	f.StringVar(&engineAgentServiceURL, "service-url", os.Getenv("IPLANE_SERVICE_URL"),
+	f.StringVar(&engineAgentServiceURL, "service-url", os.Getenv(engineagent.EnvServiceURL),
 		"control-plane public URL to register with (e.g. https://<tunnel>.trycloudflare.com)")
-	f.StringVar(&engineAgentID, "engine-id", os.Getenv(EnvEngineID),
+	f.StringVar(&engineAgentID, "engine-id", os.Getenv(engineagent.EnvEngineID),
 		"stable engine id; registering twice with the same id is a renewal, not a second member")
-	f.StringVar(&engineAgentDeployID, "deployment-id", os.Getenv(EnvEngineDeployID),
+	f.StringVar(&engineAgentDeployID, "deployment-id", os.Getenv(engineagent.EnvDeploymentID),
 		"deployment this engine belongs to; empty for an engine the control plane did not provision")
-	f.StringVar(&engineAgentModel, "model", os.Getenv(EnvEngineModel),
+	f.StringVar(&engineAgentModel, "model", os.Getenv(engineagent.EnvModel),
 		"model this engine serves")
-	f.StringVar(&engineAgentEndpoint, "endpoint", os.Getenv(EnvEngineEndpoint),
+	f.StringVar(&engineAgentEndpoint, "endpoint", os.Getenv(engineagent.EnvEndpoint),
 		"externally reachable OpenAI-compatible endpoint; injected, since a pod cannot know its own proxy URL")
-	f.StringVar(&engineAgentHealthURL, "health-url", envOr(EnvEngineHealthURL, "http://127.0.0.1:8000/health"),
+	f.StringVar(&engineAgentHealthURL, "health-url", envOr(engineagent.EnvHealthURL, "http://127.0.0.1:8000/health"),
 		"local engine health endpoint separating ASSEMBLING from SERVING")
-	f.StringVar(&engineAgentProvider, "provider", os.Getenv(EnvProvider),
+	f.StringVar(&engineAgentProvider, "provider", os.Getenv(engineagent.EnvProvider),
 		"provider that rented this box; qualifies --host-id so two providers' ids cannot collide")
-	f.StringVar(&engineAgentHostID, "host-id", os.Getenv(EnvEngineHostID),
+	f.StringVar(&engineAgentHostID, "host-id", os.Getenv(engineagent.EnvHostID),
 		"provider machine id for this node (RunPod machineId, Vast machine_id, EC2 instance id). Unreadable from inside the container, so it must be injected")
-	f.IntVar(&engineAgentNodeIndex, "node-index", envInt(EnvEngineNodeIndex, 0),
+	f.IntVar(&engineAgentNodeIndex, "node-index", envInt(engineagent.EnvNodeIndex, 0),
 		"rank of this node within the engine's group, 0-based")
 	f.DurationVar(&engineAgentInterval, "interval", engineagent.DefaultInterval,
 		"starting renewal cadence; the control plane's lease replaces it on the first successful registration")
@@ -117,7 +101,7 @@ func runEngineAgent(ctx context.Context) error {
 		return fmt.Errorf("no control plane to register with: pass --service-url or set IPLANE_SERVICE_URL")
 	}
 	if engineAgentID == "" {
-		return fmt.Errorf("no engine id: pass --engine-id or set %s", EnvEngineID)
+		return fmt.Errorf("no engine id: pass --engine-id or set %s", engineagent.EnvEngineID)
 	}
 
 	ident := engineagent.Identity{
@@ -140,7 +124,7 @@ func runEngineAgent(ctx context.Context) error {
 	}
 	if ident.HostID == "" {
 		log.Warn("no host id injected; this member cannot be attributed to a node",
-			"env", EnvEngineHostID)
+			"env", engineagent.EnvHostID)
 	}
 
 	agent, err := engineagent.New(
