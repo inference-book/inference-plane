@@ -202,11 +202,21 @@ for ((i = 1; i <= REPEAT; i++)); do
       --stream --output json \
       --chat-fraction 1.0 \
       --skip-model-validation \
-      >"${out}" 2>"${WORK}/${arm}-${i}.err" || {
-        echo "    load failed for ${arm}; stderr:" >&2
-        tail -5 "${WORK}/${arm}-${i}.err" >&2
-        exit 1
-      }
+      >"${out}" 2>"${WORK}/${arm}-${i}.err" || true
+    # `iplane load` exits non-zero if ANY request errored, but it prints the
+    # summary first. Judge on whether a usable summary exists, not on the exit
+    # code: a single transient error must not discard a run whose provisioning
+    # is already paid for, and the comparator already warns on errors so the
+    # operator can decide what the error rate means. Losing a $6 run to one bad
+    # request out of fifty is how this was learned.
+    if ! grep -q '"successes"' "${out}" 2>/dev/null; then
+      echo "    load produced no usable summary for ${arm}; stderr:" >&2
+      tail -5 "${WORK}/${arm}-${i}.err" >&2
+      exit 1
+    fi
+    if [[ -s "${WORK}/${arm}-${i}.err" ]] && grep -qi "errored" "${WORK}/${arm}-${i}.err"; then
+      echo "    note: $(grep -i errored "${WORK}/${arm}-${i}.err" | head -1) -- continuing; see the comparator's warnings"
+    fi
     if [[ "${arm}" == "${A_LABEL}" ]]; then A_FILES+=("${out}"); else B_FILES+=("${out}"); fi
   done
 done
