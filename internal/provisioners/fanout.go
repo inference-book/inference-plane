@@ -823,8 +823,74 @@ func (s *Service) patchDeploymentSlot(deployID, replicaInstanceID string, u Depl
 				inst.ProviderId = u.ContainerID
 			}
 		}
+
+		// Surface what the slot is doing on the deployment record.
+		//
+		// Without this the fan-out is a black box: a deploy that spends
+		// twenty minutes pulling an image and loading weights reads as
+		// PENDING with no phase and no message, so an operator cannot tell
+		// a slow deploy from a wedged one without an ssh session and the
+		// provider's console. The singular deploy path has always patched
+		// these; only the fan-out dropped them, which is why the gap went
+		// unnoticed while single-instance deploys were the common shape.
+		//
+		// Diagnostic rather than authoritative. The aggregate outcome
+		// belongs to applyAggregateState once every slot has reported, so
+		// this deliberately never writes a terminal state.
+		if u.Phase != "" {
+			rec.CurrentPhase = slotLabel(rec.GetInstanceIds(), replicaInstanceID, u.Phase)
+		}
+		if u.ProgressMessage != "" {
+			rec.ProgressMessage = slotLabel(rec.GetInstanceIds(), replicaInstanceID, u.ProgressMessage)
+		}
+		if next, ok := provisioningAdvance(rec.GetState(), u.State); ok {
+			rec.State = next
+		}
 		return nil
 	})
+}
+
+// slotLabel prefixes a slot's message with its replica id when a deployment
+// has more than one, so "which replica is stuck" is answerable from the
+// record. A single-slot deployment reads better unprefixed.
+func slotLabel(instanceIDs []string, replicaInstanceID, msg string) string {
+	if len(instanceIDs) <= 1 {
+		return msg
+	}
+	return replicaInstanceID + ": " + msg
+}
+
+// provisioningAdvance reports the state a slot update may move the
+// deployment to, and whether it may move at all.
+//
+// Two rules, both about not fighting the aggregate. Only the in-flight
+// states are propagated: RUNNING, DEGRADED and FAILED are conclusions about
+// the whole fan-out and belong to applyAggregateState, so one slot reaching
+// RUNNING must not declare the deployment running while its siblings are
+// still pulling an image. And movement is forward-only, so a slow slot
+// emitting STARTING after a faster one reached CONFIGURING does not appear
+// to undo progress.
+func provisioningAdvance(current, update provisionerv1.DeploymentState) (provisionerv1.DeploymentState, bool) {
+	rank := func(s provisionerv1.DeploymentState) int {
+		switch s {
+		case provisionerv1.DeploymentState_DEPLOYMENT_STATE_PENDING:
+			return 1
+		case provisionerv1.DeploymentState_DEPLOYMENT_STATE_STARTING:
+			return 2
+		case provisionerv1.DeploymentState_DEPLOYMENT_STATE_CONFIGURING:
+			return 3
+		default:
+			return 0
+		}
+	}
+	ur := rank(update)
+	if ur == 0 {
+		return current, false
+	}
+	if ur <= rank(current) {
+		return current, false
+	}
+	return update, true
 }
 
 // readSlotEndpoint is a small read-only helper the fan-out's result
