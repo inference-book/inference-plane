@@ -30,10 +30,28 @@ first; it is the part that decides whether the run means anything.
 
 ```bash
 DEMO_PAID=1 \
-DEMO_MODEL=Qwen/Qwen2.5-32B-Instruct \
-DEMO_A_SKU=A100_SXM4 DEMO_B_SKU=A100_PCIE DEMO_GPUS=4 \
+DEMO_A_SKU=A100_SXM4_40GB DEMO_B_SKU=A100_PCIE_40GB DEMO_GPUS=4 \
 bash examples/09-multi-gpu/09e-fabric-ab/run.sh
 ```
+
+Defaults that matter, and why they are what they are:
+
+- **`--fabric intra-node` on arm A, `none` on arm B.** This is the experiment,
+  not decoration. Naming a SKU is not enough: Vast lists bridge-capable cards
+  under PCIe names, so a control arm chosen by name alone can silently contain
+  NVLink, and the A/B then compares NVLink against NVLink and reports a small
+  delta that looks like a finding.
+- **`Qwen/Qwen2.5-32B-Instruct`** (override with `DEMO_MODEL`). ~64 GB of
+  weights at FP16, so TP=4 across 4x40 GB puts ~16 GB per card with room for
+  KV. It has to be big enough that the all-reduce traffic between cards is a
+  real cost, or the A/B measures nothing on either fabric.
+- **The 40 GB tier**, not 80 GB. That is where the healthy multi-GPU A100
+  capacity is; the 80 GB NVLink arm was effectively empty when this was
+  written. See #215 for the survey.
+- **Three aligned timeouts.** `config.yaml` raises `write_timeout_sec` to 3600
+  and the script exports a 40m engine-ready budget. The defaults do not cover a
+  4-GPU cold start, and the failure mode is the server severing the response
+  mid-provision while the pods keep billing.
 
 ## What it does
 
