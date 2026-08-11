@@ -110,6 +110,21 @@ type Provider struct {
 	// the host info is populated. Default: net.DialTimeout-based probe
 	// (mirrors RunPod's dialTCPProbe). Tests inject a no-op.
 	sshProbe func(ctx context.Context, host string, port int32) error
+
+	// engineReadyTimeout bounds the wait for a deployed engine to answer
+	// /health. Separate from the SSH wait because it covers the image pull
+	// and the model load, which a large model dominates.
+	engineReadyTimeout time.Duration
+}
+
+// WithEngineReadyTimeout overrides how long Deploy waits for the engine to
+// serve. Mirrors runpod.WithEngineReadyTimeout.
+func WithEngineReadyTimeout(d time.Duration) Option {
+	return func(p *Provider) {
+		if d > 0 {
+			p.engineReadyTimeout = d
+		}
+	}
 }
 
 // Option configures a Provider at construction.
@@ -149,11 +164,12 @@ const defaultSSHReadyTimeout = 12 * time.Minute
 // runpod.New's option-style construction.
 func New(client *Client, opts ...Option) *Provider {
 	p := &Provider{
-		client:           client,
-		clock:            time.Now,
-		sshReadyTimeout:  defaultSSHReadyTimeout,
-		sshReadyInterval: 5 * time.Second,
-		sshProbe:         defaultSSHProbe,
+		client:             client,
+		clock:              time.Now,
+		sshReadyTimeout:    defaultSSHReadyTimeout,
+		sshReadyInterval:   5 * time.Second,
+		sshProbe:           defaultSSHProbe,
+		engineReadyTimeout: defaultEngineReadyTimeout,
 	}
 	for _, opt := range opts {
 		opt(p)
@@ -720,18 +736,34 @@ type rentResponse struct {
 	Msg         string `json:"msg"`
 }
 
+// apiPortBind is one docker port mapping as Vast reports it: the host side
+// of a container port. Vast keys the map by the container port in docker's
+// "8000/tcp" form.
+type apiPortBind struct {
+	HostIP   string `json:"HostIp"`
+	HostPort string `json:"HostPort"`
+}
+
 type apiInstance struct {
-	ID                 int     `json:"id"`
-	Label              string  `json:"label"`
-	ActualStatus       string  `json:"actual_status"`
-	GpuName            string  `json:"gpu_name"`
-	NumGPUs            int     `json:"num_gpus"`
-	GpuRAM             int     `json:"gpu_ram"` // MB per GPU
-	SSHHost            string  `json:"ssh_host"`
-	SSHPort            int     `json:"ssh_port"`
-	GeolocationCountry string  `json:"geolocation_country"`
-	Geolocation        string  `json:"geolocation"`
-	DphTotal           float64 `json:"dph_total"`
+	ID           int    `json:"id"`
+	Label        string `json:"label"`
+	ActualStatus string `json:"actual_status"`
+	GpuName      string `json:"gpu_name"`
+	NumGPUs      int    `json:"num_gpus"`
+	GpuRAM       int    `json:"gpu_ram"` // MB per GPU
+	SSHHost      string `json:"ssh_host"`
+	SSHPort      int    `json:"ssh_port"`
+	// PublicIPAddr and Ports are how an engine becomes reachable. Vast has
+	// no proxy URL equivalent to RunPod's <pod>-<port>.proxy.runpod.net, so
+	// the endpoint is the host's public address plus whichever high port
+	// docker mapped the engine's container port onto. Both are empty until
+	// the container is running, which is why the deployer polls for them
+	// rather than deriving an address up front.
+	PublicIPAddr       string                   `json:"public_ipaddr"`
+	Ports              map[string][]apiPortBind `json:"ports"`
+	GeolocationCountry string                   `json:"geolocation_country"`
+	Geolocation        string                   `json:"geolocation"`
+	DphTotal           float64                  `json:"dph_total"`
 	// Host details -- populated by both the bundles search
 	// response and the instance record. Used to fill Hardware and
 	// metadata.
