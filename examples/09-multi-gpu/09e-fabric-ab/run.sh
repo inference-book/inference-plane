@@ -81,7 +81,11 @@ SERVICE_URL="http://127.0.0.1:8080"
 cleanup() {
   local rc=$?
   echo ""
-  echo "==> teardown"
+  echo "==> teardown (exit ${rc})"
+  # Print this on every path. A run that dies partway still produced summaries
+  # worth keeping, and on the first failed paid run the directory was only
+  # printed on success, so a $6 run's partial data was nearly lost.
+  echo "    raw summaries: ${WORK}"
   for id in "${DEPLOYED[@]:-}"; do
     "${IPLANE}" deployment destroy "${id}" --service-url "${SERVICE_URL}" >/dev/null 2>&1 || true
     "${IPLANE}" instance destroy "${id}" --service-url "${SERVICE_URL}" >/dev/null 2>&1 || true
@@ -94,8 +98,9 @@ cleanup() {
   fi
   exit "${rc}"
 }
-trap cleanup EXIT
+trap cleanup EXIT INT TERM
 
+echo "results will be written to: ${WORK}"
 echo "=============================================================="
 echo "== 09e fabric A/B   mode=$([[ "${PAID}" == "1" ]] && echo PAID || echo GPU-FREE)"
 echo "==   arms      : ${A_LABEL} vs ${B_LABEL}"
