@@ -58,7 +58,14 @@ func buildLocalService(store *file.Store, operatorID string, extra ...provisione
 		providers = append(providers, runpod.New(runpod.NewClient(key), rpOpts...))
 	}
 	if key := os.Getenv("VAST_API_KEY"); key != "" {
-		providers = append(providers, vast.New(vast.NewClient(key)))
+		var vastOpts []vast.Option
+		// Same generic override the other paths honour. Vast is now
+		// image-native, so this bounds the image pull plus model load
+		// rather than an SSH wait.
+		if d := engineReadyTimeout(""); d > 0 {
+			vastOpts = append(vastOpts, vast.WithEngineReadyTimeout(d))
+		}
+		providers = append(providers, vast.New(vast.NewClient(key), vastOpts...))
 	}
 	if key := os.Getenv("LAMBDA_API_KEY"); key != "" {
 		providers = append(providers, lambdalabs.New(lambdalabs.NewClient(key)))
