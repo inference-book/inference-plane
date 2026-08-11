@@ -147,8 +147,16 @@ selecting on fabric needs to rest on something other than throughput, and
 that is the more valuable outcome because it changes the book. Do not tune
 toward a target.
 
+**The harness for this now exists**: `09e-fabric-ab/`. It runs GPU-free by
+default, injecting a known latency delta between two mock engines so the rig
+can be checked against ground truth before any money is spent, and it refuses
+to establish a difference from a single run per arm. Its README carries the
+host-selection traps, which are what actually decide whether a paid run is
+worth anything.
+
 ## See also
 
+- `09e-fabric-ab/` — the fabric A/B harness described above
 - `examples/07-prefix-affinity/` — the other GPU-free walkthrough, same shape
 - `examples/08-scaling-30b/08a-cold-start-distance/` — where `iplane model pin` comes from
 - `docs/design/0006-ch10-provider-reality-and-control-channel.md` — why the channel is a lease

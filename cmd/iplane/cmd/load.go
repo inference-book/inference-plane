@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -272,7 +271,6 @@ func fireLoadRequest(ctx context.Context, c *http.Client, cfg *loadFireConfig, s
 
 	t0 := time.Now()
 	resp, err := c.Do(req)
-	dur := time.Since(t0)
 
 	if err != nil {
 		// Don't count cancellation against errors; it just means the
@@ -290,60 +288,31 @@ func fireLoadRequest(ctx context.Context, c *http.Client, cfg *loadFireConfig, s
 		return
 	}
 
-	// Token-count parsing. For non-streaming JSON responses we look at
-	// usage.completion_tokens; for streaming SSE we accumulate from
-	// each frame's usage block (vLLM emits usage on the final delta;
-	// older engines may not emit it at all -- treated as zero).
-	tokens := parseTokens(resp, cfg.stream)
-	st.recordSuccess(dur, tokens)
-}
+	// Shared with `load session` so both commands measure the same way: token
+	// count from usage.completion_tokens (max across SSE frames), plus
+	// time-to-first-token on the streaming path.
+	//
+	// TTFT used to be unreachable from this command. The summary declared the
+	// fields and recordTTFT existed, but the request path called a
+	// token-only parser, so `iplane load --stream` always reported
+	// ttft_samples=0. Ch 10's fabric A/B needs TTFT specifically -- prefill is
+	// where tensor-parallel traffic is heaviest, so an interconnect effect can
+	// show up there while steady-state throughput barely moves.
+	res := parseChatResponse(resp, cfg.stream, t0)
 
-// parseTokens reads the response body and returns the
-// completion_tokens count when the engine reported one. For
-// non-streaming responses: one JSON object with usage. For
-// streaming (SSE) responses: scan data: lines, look for usage on
-// any frame.
-//
-// Returns 0 when the engine didn't emit a usage block. Errors during
-// parse are silent -- iplane load isn't a correctness tool; mangled
-// responses count as zero-token successes.
-func parseTokens(resp *http.Response, stream bool) int64 {
-	if !stream {
-		raw, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return 0
-		}
-		return tokensFromJSON(raw)
-	}
-	sc := bufio.NewScanner(resp.Body)
-	sc.Buffer(make([]byte, 64*1024), 1024*1024)
-	var tokens int64
-	for sc.Scan() {
-		line := sc.Bytes()
-		if !bytes.HasPrefix(line, []byte("data: ")) {
-			continue
-		}
-		payload := bytes.TrimPrefix(line, []byte("data: "))
-		if bytes.Equal(payload, []byte("[DONE]")) {
-			break
-		}
-		if t := tokensFromJSON(payload); t > tokens {
-			tokens = t
-		}
-	}
-	return tokens
-}
+	// Duration is taken AFTER the body is consumed, which matters most on the
+	// streaming path: c.Do returns as soon as the SSE headers arrive, so
+	// timing there would have recorded time-to-headers and called it latency.
+	// On a real engine that is roughly TTFT, not the cost of the request, and
+	// comparing two engines on it would be meaningless.
+	dur := time.Since(t0)
 
-func tokensFromJSON(raw []byte) int64 {
-	var resp struct {
-		Usage struct {
-			CompletionTokens int64 `json:"completion_tokens"`
-		} `json:"usage"`
+	st.recordSuccess(dur, res.Tokens)
+	// Only when actually measured. A stream that carried no content has
+	// nothing to time, and counting it as zero would flatter the percentile.
+	if res.HasTTFT {
+		st.recordTTFT(res.TTFT)
 	}
-	if err := json.Unmarshal(raw, &resp); err != nil {
-		return 0
-	}
-	return resp.Usage.CompletionTokens
 }
 
 func loadCompletionBody() []byte {
