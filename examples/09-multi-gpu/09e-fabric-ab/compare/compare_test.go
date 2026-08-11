@@ -23,6 +23,15 @@ func run(tokPerSec float64, ttft50, ttft95, lat50 int64) Summary {
 	}
 }
 
+// atRate builds a run that was OFFERED target rps and ACHIEVED actual rps,
+// which is the distinction the saturation warning turns on.
+func atRate(target, actual float64, tokPerSec float64, ttft50 int64) Summary {
+	s := run(tokPerSec, ttft50, ttft50*2, ttft50)
+	s.TargetRPS, s.ActualRPS = target, actual
+	s.Successes = int64(actual * s.DurationSec)
+	return s
+}
+
 func find(cs []Comparison, name string) Comparison {
 	for _, c := range cs {
 		if c.Metric.Name == name {
@@ -177,4 +186,71 @@ func hasWarning(ws []string, substr string) bool {
 		}
 	}
 	return false
+}
+
+
+// Regression from the first real paid run, 2026-08-11. The PCIe arm sustained
+// 1.2 of an offered 4.0 rps; its TTFT read 6589ms against the other arm's
+// 1520ms, which looks like a spectacular fabric result and is mostly a queue.
+//
+// The comparator reported "the arms did not run the same experiment", which is
+// false -- both were configured identically -- and it pointed at the wrong
+// problem, so the real one had to be found by hand in the raw JSON.
+func TestSaturatedArmIsReportedAsSaturationNotMisconfiguration(t *testing.T) {
+	a := Arm{"nvlink", []Summary{
+		atRate(4.0, 3.93, 157.0, 1520), atRate(4.0, 3.93, 148.7, 1478), atRate(4.0, 3.96, 163.7, 1545)}}
+	b := Arm{"pcie", []Summary{
+		atRate(4.0, 1.18, 47.2, 8041), atRate(4.0, 1.31, 42.6, 4320), atRate(4.0, 1.22, 43.0, 6589)}}
+
+	ws := Warnings(a, b)
+
+	if !hasWarning(ws, "SATURATED") {
+		t.Errorf("saturation not reported; the latency rows would be quoted as a fabric result: %v", ws)
+	}
+	if !hasWarning(ws, "pcie never reached the offered load") {
+		t.Errorf("saturation warning does not name the affected arm: %v", ws)
+	}
+	// The arms WERE configured identically. Saying otherwise sends the reader
+	// looking for a setup bug that does not exist.
+	if hasWarning(ws, "did not run the same experiment") {
+		t.Errorf("identical configuration reported as a config mismatch: %v", ws)
+	}
+	// Throughput survives saturation; the warning must say so rather than
+	// casting doubt on the whole table.
+	if !hasWarning(ws, "Throughput remains comparable") {
+		t.Errorf("warning does not preserve the valid half of the result: %v", ws)
+	}
+}
+
+// A healthy arm lands a little under target. That must not read as saturation.
+func TestHealthyArmsSlightlyUnderTargetAreNotSaturated(t *testing.T) {
+	a := Arm{"nvlink", []Summary{atRate(4.0, 3.93, 157, 1520), atRate(4.0, 3.96, 158, 1520)}}
+	b := Arm{"pcie", []Summary{atRate(4.0, 3.88, 150, 1600), atRate(4.0, 3.91, 151, 1600)}}
+
+	if ws := Warnings(a, b); hasWarning(ws, "SATURATED") {
+		t.Errorf("normal load-generator slack reported as saturation: %v", ws)
+	}
+}
+
+// A genuine configuration difference must still be caught. Removing the
+// completed-request check must not have removed the config guard with it.
+func TestConfigMismatchStillCaught(t *testing.T) {
+	a := Arm{"nvlink", []Summary{atRate(4.0, 3.9, 157, 1520), atRate(4.0, 3.9, 157, 1520)}}
+	b := Arm{"pcie", []Summary{atRate(2.0, 2.0, 90, 1600), atRate(2.0, 2.0, 90, 1600)}}
+
+	if ws := Warnings(a, b); !hasWarning(ws, "did not run the same experiment") {
+		t.Errorf("halved target rps not caught as a config mismatch: %v", ws)
+	}
+}
+
+// A slower arm that still keeps up completes fewer tokens but the same number
+// of requests, and nothing should warn: that is just a slower engine.
+func TestFewerCompletedRequestsAloneIsNotAWarning(t *testing.T) {
+	a := Arm{"nvlink", []Summary{atRate(1.0, 1.0, 157, 900), atRate(1.0, 1.0, 157, 900)}}
+	b := Arm{"pcie", []Summary{atRate(1.0, 0.99, 60, 1400), atRate(1.0, 0.99, 60, 1400)}}
+
+	ws := Warnings(a, b)
+	if hasWarning(ws, "did not run the same experiment") || hasWarning(ws, "SATURATED") {
+		t.Errorf("an unsaturated slower arm triggered a warning: %v", ws)
+	}
 }

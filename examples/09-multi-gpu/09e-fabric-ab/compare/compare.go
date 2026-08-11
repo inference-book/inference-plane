@@ -44,6 +44,16 @@ type Summary struct {
 	TTFTP95Ms    int64   `json:"ttft_p95_ms"`
 }
 
+// saturationFraction is how close an arm's achieved rate must stay to the
+// offered rate before its latency figures are trusted.
+//
+// 0.8 rather than something tighter because a healthy arm still lands a little
+// under target: the load generator's own scheduling and the tail of in-flight
+// requests at the cutoff cost a few percent. Measured on a healthy arm:
+// 3.93-3.96 of an offered 4.0, so 0.98. A saturated one read 0.31. The gap
+// between those is wide enough that the exact threshold is not delicate.
+const saturationFraction = 0.8
+
 // Arm is one side of the A/B: a label and every run recorded for it.
 type Arm struct {
 	Label string
@@ -171,9 +181,14 @@ func Warnings(a, b Arm) []string {
 		get    func(Summary) float64
 		tolPct float64
 	}{
+		// Configuration only. Completed-request counts deliberately do NOT
+		// belong here: they are an OUTCOME, and a slower arm finishing fewer
+		// requests under identical settings is the result, not a setup error.
+		// Conflating the two produced a misdiagnosis on the first real run --
+		// it reported "the arms did not run the same experiment" when the
+		// arms were configured identically and one simply could not keep up.
 		{"target rps", func(s Summary) float64 { return s.TargetRPS }, 0},
 		{"duration", func(s Summary) float64 { return s.DurationSec }, 5},
-		{"successful requests", func(s Summary) float64 { return float64(s.Successes) }, 10},
 	} {
 		av := stat(mapf(a.Runs, p.get)).Median
 		bv := stat(mapf(b.Runs, p.get)).Median
@@ -189,6 +204,32 @@ func Warnings(a, b Arm) []string {
 			w = append(w, fmt.Sprintf(
 				"%s differs between arms (%s=%.4g, %s=%.4g, %.1f%% apart): the arms did not run the same experiment",
 				p.name, a.Label, av, b.Label, bv, diff))
+		}
+	}
+
+	// Saturation, which is a different problem from misconfiguration and needs
+	// saying differently.
+	//
+	// An arm that never reached the offered load was queueing, and queueing
+	// delay is not a fabric cost -- it is unbounded in offered load and says
+	// more about the headroom than the hardware. Measured on the first real
+	// run: the PCIe arm sustained 1.2 of an offered 4.0 rps and its TTFT p50
+	// read 6589ms against the other arm's 1520ms, which looks like a
+	// spectacular fabric result and is mostly a queue.
+	//
+	// The throughput comparison survives this and the latency comparison does
+	// not, so the warning says which, rather than casting doubt on the whole
+	// table.
+	for _, arm := range []Arm{a, b} {
+		tgt := stat(mapf(arm.Runs, func(s Summary) float64 { return s.TargetRPS })).Median
+		act := stat(mapf(arm.Runs, func(s Summary) float64 { return s.ActualRPS })).Median
+		if tgt > 0 && act < saturationFraction*tgt {
+			w = append(w, fmt.Sprintf(
+				"%s never reached the offered load (%.2f of %.2f rps): it was SATURATED, so its "+
+					"latency and ttft rows include queueing delay and are not a fabric measurement. "+
+					"Throughput remains comparable -- both arms were offered the same load. "+
+					"For clean latency, re-run below %.1f rps.",
+				arm.Label, act, tgt, act))
 		}
 	}
 

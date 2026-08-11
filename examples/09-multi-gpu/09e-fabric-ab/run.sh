@@ -81,7 +81,11 @@ SERVICE_URL="http://127.0.0.1:8080"
 cleanup() {
   local rc=$?
   echo ""
-  echo "==> teardown"
+  echo "==> teardown (exit ${rc})"
+  # Print this on every path. A run that dies partway still produced summaries
+  # worth keeping, and on the first failed paid run the directory was only
+  # printed on success, so a $6 run's partial data was nearly lost.
+  echo "    raw summaries: ${WORK}"
   for id in "${DEPLOYED[@]:-}"; do
     "${IPLANE}" deployment destroy "${id}" --service-url "${SERVICE_URL}" >/dev/null 2>&1 || true
     "${IPLANE}" instance destroy "${id}" --service-url "${SERVICE_URL}" >/dev/null 2>&1 || true
@@ -94,8 +98,9 @@ cleanup() {
   fi
   exit "${rc}"
 }
-trap cleanup EXIT
+trap cleanup EXIT INT TERM
 
+echo "results will be written to: ${WORK}"
 echo "=============================================================="
 echo "== 09e fabric A/B   mode=$([[ "${PAID}" == "1" ]] && echo PAID || echo GPU-FREE)"
 echo "==   arms      : ${A_LABEL} vs ${B_LABEL}"
@@ -202,11 +207,21 @@ for ((i = 1; i <= REPEAT; i++)); do
       --stream --output json \
       --chat-fraction 1.0 \
       --skip-model-validation \
-      >"${out}" 2>"${WORK}/${arm}-${i}.err" || {
-        echo "    load failed for ${arm}; stderr:" >&2
-        tail -5 "${WORK}/${arm}-${i}.err" >&2
-        exit 1
-      }
+      >"${out}" 2>"${WORK}/${arm}-${i}.err" || true
+    # `iplane load` exits non-zero if ANY request errored, but it prints the
+    # summary first. Judge on whether a usable summary exists, not on the exit
+    # code: a single transient error must not discard a run whose provisioning
+    # is already paid for, and the comparator already warns on errors so the
+    # operator can decide what the error rate means. Losing a $6 run to one bad
+    # request out of fifty is how this was learned.
+    if ! grep -q '"successes"' "${out}" 2>/dev/null; then
+      echo "    load produced no usable summary for ${arm}; stderr:" >&2
+      tail -5 "${WORK}/${arm}-${i}.err" >&2
+      exit 1
+    fi
+    if [[ -s "${WORK}/${arm}-${i}.err" ]] && grep -qi "errored" "${WORK}/${arm}-${i}.err"; then
+      echo "    note: $(grep -i errored "${WORK}/${arm}-${i}.err" | head -1) -- continuing; see the comparator's warnings"
+    fi
     if [[ "${arm}" == "${A_LABEL}" ]]; then A_FILES+=("${out}"); else B_FILES+=("${out}"); fi
   done
 done
