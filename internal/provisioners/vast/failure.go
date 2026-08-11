@@ -1,6 +1,32 @@
 package vast
 
-import "strings"
+import (
+	"context"
+	"strconv"
+	"strings"
+)
+
+// TerminalFailure implements provisioners.FailureReporter.
+//
+// Vast can answer this because its instance record carries docker's verbatim
+// error in status_msg. See the capability's doc comment for the contract; the
+// two rules that matter here are that a transport error is never a terminal
+// failure, and that the provider's own words are what reach the operator.
+//
+// A failed describe returns false rather than propagating: Vast's control API
+// goes slow in bursts and was observed recovering mid-deploy, so an
+// unreachable API says nothing about the instance behind it.
+func (p *Provider) TerminalFailure(ctx context.Context, providerID string) (bool, string) {
+	id, err := strconv.Atoi(providerID)
+	if err != nil {
+		return false, ""
+	}
+	api, err := p.describeContract(ctx, id)
+	if err != nil {
+		return false, ""
+	}
+	return terminalHostFailure(api.CurState, api.StatusMsg)
+}
 
 // Terminal host failures, and why noticing them is worth its own file.
 //
