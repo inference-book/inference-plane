@@ -46,6 +46,8 @@
 #   DEMO_IMAGE      paid only: engine image
 #   DEMO_A_SKU      paid only: arm A sku (the fabric arm)
 #   DEMO_B_SKU      paid only: arm B sku (the control arm)
+#   DEMO_A_FABRIC   paid only: arm A fabric requirement (default intra-node)
+#   DEMO_B_FABRIC   paid only: arm B fabric requirement (default none)
 #   DEMO_GPUS       paid only: GPUs per arm (default 4)
 #   IPLANE_BIN      path to the iplane binary (default <repo>/bin/iplane)
 set -euo pipefail
@@ -102,25 +104,46 @@ echo "=============================================================="
 
 # --- bring up the two arms --------------------------------------------------
 if [[ "${PAID}" == "1" ]]; then
-  MODEL="${DEMO_MODEL:?DEMO_MODEL is required in paid mode}"
+  # Default sized for the 40 GB tier, which is where the healthy multi-GPU
+  # A100 capacity is. A 32B at FP16 is ~64 GB of weights, so TP=4 across
+  # 4x40 GB puts ~16 GB on each card and leaves room for KV. That matters for
+  # this experiment specifically: the model has to be big enough that the
+  # all-reduce traffic between cards is a real cost, or the A/B measures
+  # nothing whichever fabric it lands on. A 70B AWQ int4 (~40 GB) also fits
+  # and stresses the interconnect less.
+  MODEL="${DEMO_MODEL:-Qwen/Qwen2.5-32B-Instruct}"
   IMAGE="${DEMO_IMAGE:-vllm/vllm-openai:v0.7.0}"
   A_SKU="${DEMO_A_SKU:?DEMO_A_SKU is required in paid mode}"
   B_SKU="${DEMO_B_SKU:?DEMO_B_SKU is required in paid mode}"
   GPUS="${DEMO_GPUS:-4}"
   PROVIDER="${IPLANE_PROVIDER:-vast}"
 
-  IPLANE_STATE_DIR="${STATE}" "${IPLANE}" serve --state-dir "${STATE}" \
-    >"${WORK}/serve.log" 2>&1 &
+  # Three timeouts have to agree. The CLI --timeout below bounds the client
+  # wait; write_timeout_sec in config.yaml must exceed it or the server severs
+  # the response mid-provision with the pods still billing; and the provider's
+  # engine-ready budget must not fail a slow-but-fine 4-GPU cold start.
+  export IPLANE_ENGINE_READY_TIMEOUT="${DEMO_ENGINE_READY_TIMEOUT:-40m}"
+  IPLANE_STATE_DIR="${STATE}" "${IPLANE}" serve --config "${HERE}/config.yaml" \
+    --state-dir "${STATE}" >"${WORK}/serve.log" 2>&1 &
   SERVE_PID=$!
   until "${IPLANE}" deployment list --service-url "${SERVICE_URL}" >/dev/null 2>&1; do sleep 1; done
 
   # Deploy both arms before measuring either. Measuring arm A while arm B is
   # still pulling its image would compare a quiet host against a busy one.
-  for pair in "${A_LABEL}:${A_SKU}" "${B_LABEL}:${B_SKU}"; do
-    id="${pair%%:*}"; sku="${pair##*:}"
-    echo "==> deploying ${id} on ${sku} x${GPUS} (this is the slow part)"
+  # --fabric is not decoration, it IS the experiment. The fabric arm must be
+  # guaranteed to have an intra-node link; the control arm must be guaranteed
+  # NOT to. Vast lists bridge-capable cards under PCIe names, so a control arm
+  # chosen by SKU name alone can silently contain NVLink -- and then the A/B
+  # compares NVLink against NVLink, reports a small delta, and the
+  # contamination is invisible in the output.
+  A_FABRIC="${DEMO_A_FABRIC:-intra-node}"
+  B_FABRIC="${DEMO_B_FABRIC:-none}"
+  for pair in "${A_LABEL}|${A_SKU}|${A_FABRIC}" "${B_LABEL}|${B_SKU}|${B_FABRIC}"; do
+    IFS='|' read -r id sku fabric <<<"${pair}"
+    echo "==> deploying ${id} on ${sku} x${GPUS} fabric=${fabric} (this is the slow part)"
     "${IPLANE}" deployment deploy "${id}" \
       --provider "${PROVIDER}" --sku "${sku}" --gpu-count "${GPUS}" \
+      --fabric "${fabric}" \
       --image "${IMAGE}" --model "${MODEL}" \
       --engine-entrypoint python3 --engine-entrypoint=-m \
       --engine-entrypoint vllm.entrypoints.openai.api_server \

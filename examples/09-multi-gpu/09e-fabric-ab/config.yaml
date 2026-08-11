@@ -1,0 +1,52 @@
+# Demo 09e iplane serve config -- the fabric A/B.
+#
+# Exists for one reason: the three timeouts a real deploy needs have to agree,
+# and the defaults do not cover a 4-GPU cold start. See CLAUDE.md's "Real
+# deploys need three timeouts aligned, not one".
+#
+# If you change the global deploy/config.yaml, audit this file for drift.
+
+server:
+  addr: ":8080"
+  read_timeout_sec: 60
+  # A deploy with wait=true holds the HTTP response open for the WHOLE
+  # provision. Four GPUs pulling a ~10 GB engine image and then loading a
+  # 32B across them runs well past the 600s default, and when the server
+  # severs the response mid-provision the client sees "unexpected EOF" with
+  # the pods still billing. This must exceed run.sh's --timeout.
+  write_timeout_sec: 3600
+  shutdown_sec: 30
+
+backend:
+  # Unused: the engine runs in the rented pod. The router forwards to the
+  # deployed endpoint.
+  engine: "mock"
+  url: ""
+  name: "mock"
+
+telemetry:
+  service_name: "inference-plane"
+  environment: "dev"
+  sample_ratio: 1.0
+
+deployment:
+  provider: "vast"
+  billing_mode: "metered_per_second"
+  instance_id: ""
+
+router:
+  # Scheduler off -- direct forward. The A/B measures the engine behind the
+  # router, so queueing would add a variable that has nothing to do with
+  # fabric.
+  queue:
+    servicers: 0
+    capacity: 0
+    in_flight_cap: 0
+    tenant_weights: {}
+
+health:
+  poll_interval: 10s
+  failure_threshold: 3
+  success_threshold: 3
+  probe_timeout: 2s
+  max_concurrent: 32
