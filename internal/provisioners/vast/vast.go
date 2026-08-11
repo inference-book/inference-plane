@@ -58,6 +58,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -130,13 +131,27 @@ func WithSSHProbe(probe func(ctx context.Context, host string, port int32) error
 	return func(p *Provider) { p.sshProbe = probe }
 }
 
+// defaultSSHReadyTimeout is how long to wait for a rented machine to accept
+// SSH.
+//
+// Measured rather than guessed: on the cheapest available box, TCP first
+// accepted 273 seconds after the rent call returned. The previous 5 minutes
+// left 27 seconds of headroom over that single observation, which is not
+// margin so much as luck, and a larger multi-GPU host has more to do before
+// sshd answers.
+//
+// Erring long is cheap here. The wait ends as soon as the port answers, so
+// the only cost of a generous ceiling is how long a genuinely dead machine
+// takes to be called dead.
+const defaultSSHReadyTimeout = 12 * time.Minute
+
 // New builds a Vast Provider on top of a configured Client. Mirrors
 // runpod.New's option-style construction.
 func New(client *Client, opts ...Option) *Provider {
 	p := &Provider{
 		client:           client,
 		clock:            time.Now,
-		sshReadyTimeout:  5 * time.Minute,
+		sshReadyTimeout:  defaultSSHReadyTimeout,
 		sshReadyInterval: 5 * time.Second,
 		sshProbe:         defaultSSHProbe,
 	}
@@ -150,18 +165,28 @@ func New(client *Client, opts ...Option) *Provider {
 // to host:port with a tight timeout and close it. A successful dial
 // means sshd accepted the SYN; the actual SSH handshake happens later
 // in the deployment executor.
+// It dials. That sentence should be unremarkable, and is worth writing down
+// because this function previously did not: it took the arguments, discarded
+// them, and returned nil. It satisfied the type, it was called on the right
+// path, and it reported every address as reachable.
+//
+// The cost of that was not a missing feature but a misleading one. Callers
+// treated "probe passed" as evidence, so WaitForSSHReady returned instantly
+// against machines that were not up, and the failure surfaced minutes later
+// in whatever dialled next. Measured on a rented box: Vast publishes the SSH
+// endpoint about 3 seconds after the rent call and the port does not accept
+// until roughly 273 seconds, so the stub was wrong for four and a half
+// minutes of every rental.
 func defaultSSHProbe(ctx context.Context, host string, port int32) error {
-	d := &http.Client{Timeout: 3 * time.Second}
-	// We don't actually do HTTP here -- but skhttp doesn't expose a
-	// raw TCP dial helper, and importing net adds bloat for the
-	// vast-specific case. RunPod uses net.DialTimeout via its own
-	// dialTCPProbe; we follow the same shape. Defer the move until
-	// real-API testing surfaces a need.
-	_ = d
-	_ = ctx
-	_ = host
-	_ = port
-	return nil
+	if port <= 0 {
+		port = 22
+	}
+	d := net.Dialer{Timeout: 3 * time.Second}
+	conn, err := d.DialContext(ctx, "tcp", net.JoinHostPort(host, strconv.Itoa(int(port))))
+	if err != nil {
+		return err
+	}
+	return conn.Close()
 }
 
 // Name satisfies provisioners.Provider.
@@ -812,8 +837,18 @@ func (p *Provider) WaitForSSHReady(ctx context.Context, providerID string) (*pro
 
 		select {
 		case <-waitCtx.Done():
+			// Distinguish our own deadline from the caller giving up
+			// first. Reporting "within 12m" after 90 seconds sends the
+			// reader looking for a provider problem when the real answer
+			// is that their client timeout is shorter than a boot.
+			waited := timeout
+			if ctx.Err() != nil {
+				return nil, provisioners.NewProviderError(p.Name(), "wait_ssh_ready",
+					fmt.Errorf("caller stopped waiting for instance %s before it became reachable "+
+						"(provider budget was %s); last attempt: %w", providerID, waited, last), 0)
+			}
 			return nil, provisioners.NewProviderError(p.Name(), "wait_ssh_ready",
-				fmt.Errorf("instance %s had no reachable ssh endpoint within %s: %w", providerID, timeout, last), 0)
+				fmt.Errorf("instance %s had no reachable ssh endpoint within %s: %w", providerID, waited, last), 0)
 		case <-time.After(interval):
 		}
 	}
