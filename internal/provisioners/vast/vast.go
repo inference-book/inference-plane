@@ -885,11 +885,19 @@ type apiInstance struct {
 	ID           int    `json:"id"`
 	Label        string `json:"label"`
 	ActualStatus string `json:"actual_status"`
-	GpuName      string `json:"gpu_name"`
-	NumGPUs      int    `json:"num_gpus"`
-	GpuRAM       int    `json:"gpu_ram"` // MB per GPU
-	SSHHost      string `json:"ssh_host"`
-	SSHPort      int    `json:"ssh_port"`
+
+	// CurState and StatusMsg are how the host reports what actually happened.
+	// actual_status alone cannot distinguish "still pulling" from "the
+	// container exited and is never coming back": both were observed as
+	// `loading` and `created` respectively while cur_state had already gone to
+	// `stopped`. StatusMsg carries the whole diagnosis, verbatim from docker.
+	CurState  string `json:"cur_state"`
+	StatusMsg string `json:"status_msg"`
+	GpuName   string `json:"gpu_name"`
+	NumGPUs   int    `json:"num_gpus"`
+	GpuRAM    int    `json:"gpu_ram"` // MB per GPU
+	SSHHost   string `json:"ssh_host"`
+	SSHPort   int    `json:"ssh_port"`
 	// PublicIPAddr and Ports are how an engine becomes reachable. Vast has
 	// no proxy URL equivalent to RunPod's <pod>-<port>.proxy.runpod.net, so
 	// the endpoint is the host's public address plus whichever high port
