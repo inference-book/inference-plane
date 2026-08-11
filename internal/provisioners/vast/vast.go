@@ -524,6 +524,25 @@ func offerVRAMFloorMB(gpuName string, reqs *provisionerv1.ResourceRequirements) 
 	return want * 970
 }
 
+// offerVRAMCeilingMB returns the per-GPU memory an offer must not exceed, in
+// the megabytes Vast reports, or 0 when the SKU does not bound it from above.
+//
+// Only variant SKUs carry a ceiling. For a row that is the only one for its
+// gpu_name there is nothing to disambiguate, and capping it would reject a
+// host that reports slightly more memory than the catalog claims.
+//
+// The 10% headroom mirrors the floor's 3% slack and absorbs the same reporting
+// spread: a "40 GB" card shows up as 40960 on one host and 41000-odd on
+// another, while the part this must exclude reports around 81000, so the gap
+// is wide enough that the tolerance never blurs the two.
+func offerVRAMCeilingMB(gpuName string) int {
+	spec := LookupSKU(gpuName)
+	if spec == nil || spec.VRAMMaxGb <= 0 {
+		return 0
+	}
+	return spec.VRAMMaxGb * 1100
+}
+
 func (p *Provider) findOffer(ctx context.Context, gpuName string, gpuCount, diskGB int, reqs *provisionerv1.ResourceRequirements) (*offerSummary, error) {
 	q := map[string]any{
 		"gpu_name": map[string]string{"eq": gpuNameForVast(gpuName)},
@@ -551,7 +570,15 @@ func (p *Provider) findOffer(ctx context.Context, gpuName string, gpuCount, disk
 	// conversion plus a small margin absorbs the vendors who report 81920
 	// and the ones who report 81251.
 	if floor := offerVRAMFloorMB(gpuName, reqs); floor > 0 {
-		q["gpu_ram"] = map[string]int{"gte": floor}
+		band := map[string]int{"gte": floor}
+		// Upper bound too, for SKUs that name a specific variant of a shared
+		// gpu_name. Without it "A100_SXM4_40GB" would match the 80 GB part as
+		// well, since 80 clears a 40 GB floor: a quietly dearer rental, and in
+		// an A/B where both arms must carry the same card, a confound.
+		if ceil := offerVRAMCeilingMB(gpuName); ceil > 0 {
+			band["lte"] = ceil
+		}
+		q["gpu_ram"] = band
 	}
 	// Fabric filter, pushed server-side. Vast's query language filters on
 	// bw_nvlink directly, so the marketplace does the narrowing and we never
@@ -600,12 +627,20 @@ func (p *Provider) findOffer(ctx context.Context, gpuName string, gpuCount, disk
 	return &resp.Offers[0], nil
 }
 
-// gpuNameForVast converts the underscored SKU token used in our
-// catalog ("RTX_4090") into the space-form gpu_name Vast.ai's API
-// filter expects ("RTX 4090"). Verified via smoke: passing the
-// underscored form to the bundles search returns 0 offers; passing
-// the space form returns the full set.
+// gpuNameForVast converts the SKU token used in our catalog ("RTX_4090") into
+// the space-form gpu_name Vast.ai's API filter expects ("RTX 4090"). Verified
+// via smoke: passing the underscored form to the bundles search returns 0
+// offers; passing the space form returns the full set.
+//
+// Variant SKUs resolve through their WireName first, because iplane's token
+// and Vast's are not the same string for them: "A100_SXM4_40GB" is our name
+// for a card the marketplace only knows as "A100 SXM4". Sending our token
+// would filter on a gpu_name that does not exist and quietly return no offers,
+// which reads exactly like "no capacity".
 func gpuNameForVast(gpuName string) string {
+	if spec := LookupSKU(gpuName); spec != nil && spec.WireName != "" {
+		return strings.ReplaceAll(spec.WireName, "_", " ")
+	}
 	return strings.ReplaceAll(gpuName, "_", " ")
 }
 
@@ -794,6 +829,13 @@ type offerSummary struct {
 	// that works until someone reads the value that came back.
 	InetDown     float64 `json:"inet_down"`
 	Reliability2 float64 `json:"reliability2"`
+
+	// GpuRAM is per-card memory in MB. Decoded because it is the only thing
+	// distinguishing the variants of a shared gpu_name: an offer that came
+	// back for "A100_SXM4_40GB" is only verifiably the 40 GB part by reading
+	// this. Without it, a band that silently stopped working would look
+	// identical to one that worked.
+	GpuRAM int `json:"gpu_ram"`
 }
 
 type bundlesResponse struct {

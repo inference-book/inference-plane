@@ -30,12 +30,37 @@ import (
 // payload from list/get echoes "RTX 4090" (with the space) -- so the
 // adapter normalizes back and forth at the boundary.
 type SKUSpec struct {
-	GpuName            string  // Vast.ai's gpu_name filter token (underscored form)
+	GpuName            string  // iplane's SKU token (underscored form); unique in this catalog
 	DisplayName        string  // human-readable name; matches the gpu_name returned by list/get
 	VRAMGb             int     // GPU memory per card
 	DefaultSystemRAMGb int     // system RAM for a typical single-GPU host with this SKU
 	DefaultDiskGb      int     // typical disk allocation default for this tier
 	PriceUSDPerHour    float64 // marketplace floor at cataloging; for ordering, not authoritative
+
+	// WireName is the gpu_name Vast actually filters on, when it differs from
+	// GpuName. Empty means they are the same.
+	//
+	// It exists because Vast sells physically different cards under one
+	// gpu_name: "A100 SXM4" is both the 40 GB and the 80 GB part. One catalog
+	// row per gpu_name could therefore describe only one of them, and #243
+	// resolved that collision by treating the row's VRAM as a floor, which
+	// correctly stopped a 40 GB card being handed to someone who asked for
+	// 80 GB but also made the 40 GB part unrequestable. Splitting into two
+	// rows that share a WireName lets both be asked for by name.
+	WireName string
+
+	// VRAMMaxGb bounds the card's memory from above, in GB. 0 means unbounded,
+	// which is the right default for a row that is the only one for its
+	// gpu_name.
+	//
+	// Set it on variant rows, because there the upper bound is the whole point:
+	// asking for the 40 GB part and being handed the 80 GB one is a silently
+	// more expensive rental, and in an A/B where both arms must carry the same
+	// card it is a confound rather than a free upgrade. This follows the same
+	// reasoning as the floor in offerVRAMFloorMB, in the other direction:
+	// naming a SKU is asking for that card, not for something sharing its
+	// marketing name.
+	VRAMMaxGb int
 
 	// Family maps this SKU onto the cross-provider fabric catalog.
 	//
@@ -74,6 +99,14 @@ var skus = []SKUSpec{
 	{GpuName: "L40S", DisplayName: "L40S", VRAMGb: 48, DefaultSystemRAMGb: 48, DefaultDiskGb: 40, PriceUSDPerHour: 0.75, Family: fabric.FamilyL40S},
 	{GpuName: "RTX_A6000", DisplayName: "RTX A6000", VRAMGb: 48, DefaultSystemRAMGb: 48, DefaultDiskGb: 40, PriceUSDPerHour: 0.70, Family: fabric.FamilyA6000},
 	{GpuName: "RTX_6000Ada", DisplayName: "RTX 6000 Ada", VRAMGb: 48, DefaultSystemRAMGb: 64, DefaultDiskGb: 40, PriceUSDPerHour: 0.90, Family: fabric.FamilyRTX6000Ada},
+
+	// A100 40 GB. Same wire gpu_name as the 80 GB rows below, distinguished by
+	// the VRAM band. Cheaper, and at the time of cataloging (2026-08) the 40 GB
+	// tier carried most of the healthy multi-GPU A100 capacity on the
+	// marketplace while the 80 GB NVLink tier was nearly all broken or
+	// low-reliability, so this is the tier a 4-GPU A100 request usually wants.
+	{GpuName: "A100_PCIE_40GB", WireName: "A100_PCIE", DisplayName: "A100 PCIE", VRAMGb: 40, VRAMMaxGb: 40, DefaultSystemRAMGb: 96, DefaultDiskGb: 60, PriceUSDPerHour: 0.80, Family: fabric.FamilyA100PCIe},
+	{GpuName: "A100_SXM4_40GB", WireName: "A100_SXM4", DisplayName: "A100 SXM4", VRAMGb: 40, VRAMMaxGb: 40, DefaultSystemRAMGb: 96, DefaultDiskGb: 60, PriceUSDPerHour: 0.90, Family: fabric.FamilyA100SXM},
 
 	// Large (>=80 GB VRAM): 70B-class inference territory.
 	{GpuName: "A100_PCIE", DisplayName: "A100 PCIE", VRAMGb: 80, DefaultSystemRAMGb: 128, DefaultDiskGb: 60, PriceUSDPerHour: 1.20, Family: fabric.FamilyA100PCIe},
