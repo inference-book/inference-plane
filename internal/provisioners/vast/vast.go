@@ -597,6 +597,31 @@ func (p *Provider) findOffer(ctx context.Context, gpuName string, gpuCount, disk
 		}
 		q["bw_nvlink"] = map[string]int{"gte": minGBps}
 	}
+	// The other direction: the operator wants a host with NO intra-node
+	// fabric. Ch 10's A/B control arm is exactly this request, and until now
+	// it could not be made at all.
+	//
+	// It is not the same as leaving fabric_scope unset. UNSPECIFIED means "do
+	// not care" and admits anything; NONE means "must not have one", and the
+	// difference decides whether an experiment is valid. Vast lists
+	// bridge-capable cards under PCIe names -- machine 6566 was an "A100 PCIE"
+	// reporting 300 GB/s on 2026-08-11 -- so a control arm chosen without this
+	// filter can silently contain NVLink and make the A/B compare NVLink
+	// against NVLink.
+	//
+	// What this does and does not guarantee, because the gap matters. It
+	// excludes every host with a POSITIVE reading, which is the observed
+	// contamination. It cannot promise the absence of a link, because Vast
+	// reports 0 both for "no link" and for "never measured": the same probe
+	// that found the bridged PCIe hosts also found roughly a quarter of SXM
+	// machines reporting zero on boards that are physically always NVLinked.
+	// So this is "no measured fabric", not "provably none", and the resolved
+	// Hardware keeps FABRIC_SOURCE_UNKNOWN on a bridge-capable card to say so
+	// rather than claiming a certainty the data does not support. Settling it
+	// for real needs an on-box reading (issue #213).
+	if reqs.GetFabricScope() == provisionerv1.FabricScope_FABRIC_SCOPE_NONE {
+		q["bw_nvlink"] = map[string]int{"lte": 0}
+	}
 	// Marketplace-quality floors, pushed server-side alongside the rest. Both
 	// are Vast marketplace columns rather than workload requirements, which is
 	// why they live here and not on ResourceRequirements: no caller wants a

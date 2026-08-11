@@ -99,12 +99,28 @@ bandwidth and high reliability. **Pre-flight each arm with a 1-GPU slice and a
 small model before renting the 4-GPU one.** That costs cents and has already
 caught a host that would have burned a multi-GPU rental.
 
-**Verify the control arm has no bridges.** A host listed as `A100 PCIE` can
-report `bw_nvlink = 300` — a bridged card. If one lands in the PCIe arm the A/B
-measures NVLink against NVLink and reports a small delta, which is precisely
-the result the chapter would find most interesting, and the contamination is
-invisible in the output. There is currently no way to request "no fabric"
-(issue #258), so check `bw_nvlink` on the chosen offer by hand.
+**Ask for the control arm explicitly, and know what the answer is worth.** A
+host listed as `A100 PCIE` can report `bw_nvlink = 300` — a bridged card. If
+one lands in the PCIe arm the A/B measures NVLink against NVLink and reports a
+small delta, which is precisely the result the chapter would find most
+interesting, and the contamination is invisible in the output.
+
+Set `fabric_scope: NONE` on the control arm. That is a different request from
+leaving it unset: unset means "do not care" and admits anything, `NONE` means
+"must not have one", and the search pushes a `bw_nvlink <= 0` ceiling. Verified
+live on 2026-08-11, it drops both bridged A100 PCIe hosts then on the
+marketplace (machine 6566 at 300 GB/s, machine 140749 at 275).
+
+**It excludes measured fabric; it cannot prove absence.** Vast reports 0 both
+for "no link" and for "never measured" — the same probe that found the bridged
+PCIe hosts also found roughly a quarter of SXM machines reporting zero on
+boards that are physically always NVLinked. So a bridge-capable card with a
+zero reading resolves to `FABRIC_SOURCE_UNKNOWN`, not to `NONE`, and the
+deployment record says so rather than claiming a certainty the data does not
+support. If the control arm silently *did* have NVLink, the A/B would report no
+difference and the write-up would draw the wrong conclusion. Settling it for
+real needs an on-box reading (`nvidia-smi nvlink -s`, issue #213). Until that
+lands, state the residual uncertainty in the write-up.
 
 **A failed host stays the cheapest offer.** Nothing records that it just
 failed, so an immediate retry can rent the identical broken machine (issue
