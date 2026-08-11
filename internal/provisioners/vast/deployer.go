@@ -247,7 +247,23 @@ func (p *Provider) waitForEngineReady(ctx context.Context, contractID int, engin
 	var last string
 
 	for {
-		endpoint, note := p.engineEndpoint(waitCtx, contractID, enginePort)
+		var endpoint, note string
+		api, derr := p.describeContract(waitCtx, contractID)
+		if derr != nil {
+			// Not fatal on its own. Vast's control API goes slow in bursts and
+			// recovers; a `context deadline exceeded (awaiting headers)` here
+			// was observed resolving itself mid-deploy, so it is reported as
+			// progress rather than treated as a dead host.
+			note = fmt.Sprintf("describe contract %d: %v", contractID, derr)
+		} else {
+			// Give up as soon as the host says the container will not run.
+			// Polling on past this point cannot succeed and bills the whole
+			// engine-ready timeout for the privilege.
+			if dead, why := terminalHostFailure(api.CurState, api.StatusMsg); dead {
+				return "", fmt.Errorf("contract %d will not start: %s", contractID, why)
+			}
+			endpoint, note = endpointFromInstance(api, enginePort)
+		}
 		last = note
 		if endpoint != "" {
 			req, err := http.NewRequestWithContext(waitCtx, http.MethodGet, endpoint+"/health", nil)
@@ -290,6 +306,13 @@ func (p *Provider) engineEndpoint(ctx context.Context, contractID int, enginePor
 	if err != nil {
 		return "", fmt.Sprintf("describe contract %d: %v", contractID, err)
 	}
+	return endpointFromInstance(api, enginePort)
+}
+
+// endpointFromInstance is the pure half of engineEndpoint. Split out so the
+// readiness loop can inspect the same instance record for a terminal failure
+// without paying a second API call per tick.
+func endpointFromInstance(api *apiInstance, enginePort int32) (string, string) {
 	if api.PublicIPAddr == "" {
 		return "", "waiting for the host's public address"
 	}
