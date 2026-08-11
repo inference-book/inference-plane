@@ -128,6 +128,76 @@ type SSHReadyWaiter interface {
 	WaitForSSHReady(ctx context.Context, providerID string) (*provisionerv1.SshTarget, error)
 }
 
+// FailureReporter is an optional Provider capability for providers that can
+// tell "this instance will never run" apart from "it is still working".
+//
+// A readiness wait cannot answer that question on its own. It sees an endpoint
+// that has not answered yet, which looks identical whether the image is still
+// pulling or the container exited ten minutes ago. Without a provider signal
+// the only safe behaviour is to keep waiting, so a dead host bills the entire
+// engine-ready timeout: on a 4x A100 that is roughly $1.20 per attempt instead
+// of $0.02, and #214 means a retry can land on the same host again.
+//
+// Providers that cannot answer simply do not implement it, and the wait keeps
+// its previous behaviour. That is not a gap to fill later for its own sake:
+// whether a provider can answer is a real property of its API, measured rather
+// than assumed. See the per-provider notes below.
+//
+// # The contract
+//
+// TerminalFailure reports a fault ONLY when the provider has said so. It must
+// never report one it merely suspects, because the cost of the two mistakes is
+// wildly asymmetric: failing to notice a dead host wastes a timeout, while
+// falsely calling a live one dead kills a deploy that was working. Slow is the
+// normal case here -- a 10 GB engine image on community capacity routinely
+// takes minutes.
+//
+// Consequently a transport error is NOT a terminal failure. Implementations
+// swallow it and return false, which is why this returns no error: a provider
+// API that is briefly unreachable says nothing about the instance behind it,
+// and Vast's control API was observed going slow in bursts and recovering
+// mid-deploy.
+//
+// reason carries the provider's own words and is shown to the operator. It IS
+// the diagnosis: an IPv6 address in a pull error is what identified a broken
+// host network path, and "deploy failed" would have left nothing to act on.
+//
+// # Which providers can answer, measured 2026-08-11
+//
+//   - vast: yes. The instance record carries cur_state plus a status_msg
+//     holding docker's verbatim error, and two hosts failed this way in one
+//     session (a broken IPv6 path to the registry CDN, and a broken NVIDIA
+//     CDI configuration).
+//
+//   - runpod: no, and deliberately not implemented rather than left as an
+//     oversight. Its two failure modes were induced and inspected. A missing
+//     image is rejected at pod-create with a clear message, so it never
+//     reaches a readiness wait and costs nothing. A container that exits is
+//     invisible: RunPod restarts it, desiredStatus stays "RUNNING",
+//     lastStatusChange reports the rental rather than the container, and the
+//     v1 pod record has no status or runtime field at all. The only surface
+//     carrying the failure is the v2 log stream, which is a much larger and
+//     more fragile lift than this capability wants.
+//
+//   - lambdalabs, local, external: not implemented, unexamined.
+type FailureReporter interface {
+	TerminalFailure(ctx context.Context, providerID string) (failed bool, reason string)
+}
+
+// TerminalFailure asks a provider whether an instance has definitively failed,
+// returning false for providers that cannot answer.
+//
+// The nil-and-type-assertion dance lives here so every readiness wait treats a
+// provider without the capability the same way, rather than each one growing
+// its own opinion about what a missing sensor means.
+func TerminalFailure(ctx context.Context, p Provider, providerID string) (bool, string) {
+	fr, ok := p.(FailureReporter)
+	if !ok || providerID == "" {
+		return false, ""
+	}
+	return fr.TerminalFailure(ctx, providerID)
+}
+
 // VolumeManager is an optional Provider capability for providers that
 // offer persistent volumes a model can be pre-staged onto (RunPod
 // network volumes today), so warm-cache deploys mount weights instead of

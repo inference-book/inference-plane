@@ -256,13 +256,19 @@ func (p *Provider) waitForEngineReady(ctx context.Context, contractID int, engin
 			// progress rather than treated as a dead host.
 			note = fmt.Sprintf("describe contract %d: %v", contractID, derr)
 		} else {
-			// Give up as soon as the host says the container will not run.
-			// Polling on past this point cannot succeed and bills the whole
-			// engine-ready timeout for the privilege.
-			if dead, why := terminalHostFailure(api.CurState, api.StatusMsg); dead {
-				return "", fmt.Errorf("contract %d will not start: %s", contractID, why)
-			}
 			endpoint, note = endpointFromInstance(api, enginePort)
+		}
+		// Give up as soon as the provider says the container will not run.
+		// Polling past this point cannot succeed and bills the whole
+		// engine-ready timeout for the privilege.
+		//
+		// Routed through the shared capability rather than calling the local
+		// policy with the record just fetched, which costs one extra GET per
+		// tick. That is the deliberate price of the behaviour living in one
+		// place: when this loop is hoisted, every provider inherits the guard
+		// instead of each adapter re-deciding what a missing sensor means.
+		if dead, why := provisioners.TerminalFailure(waitCtx, p, strconv.Itoa(contractID)); dead {
+			return "", fmt.Errorf("contract %d will not start: %s", contractID, why)
 		}
 		last = note
 		if endpoint != "" {
