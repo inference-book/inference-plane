@@ -87,6 +87,11 @@ smoke-vast: ## Hit the real Vast.ai API (List is free; VAST_RENT=1 also rents + 
 	@test -n "$$VAST_API_KEY" || (echo "VAST_API_KEY not set" && exit 1)
 	go test -tags=smoke_vast -v -count=1 -timeout=5m ./tests/smoke-vast/...
 
+.PHONY: smoke-vast-offers
+smoke-vast-offers: ## Verify Vast still honours the marketplace-quality floors (search only, never rents) -- requires VAST_API_KEY
+	@test -n "$$VAST_API_KEY" || (echo "VAST_API_KEY not set" && exit 1)
+	go test -tags=smoke_vast -v -count=1 -timeout=2m ./internal/provisioners/vast/...
+
 smoke-lambdalabs: ## Hit the real Lambda Labs API (List is free; LAMBDA_RENT=1 also rents + terminates an A10) -- requires LAMBDA_API_KEY
 	@test -n "$$LAMBDA_API_KEY" || (echo "LAMBDA_API_KEY not set" && exit 1)
 	go test -tags=smoke_lambdalabs -v -count=1 -timeout=5m ./tests/smoke-lambdalabs/...
