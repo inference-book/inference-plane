@@ -26,7 +26,7 @@ import (
 //
 // Everything else, the lease, the cadence, the non-fatal failure handling,
 // is shared code rather than a second implementation that drifts.
-func newMockRegisterAgent(serviceURL, engineID, model, endpoint string, nodes, cards int, assemble, degradeAfter time.Duration, log *slog.Logger) (*engineagent.Agent, error) {
+func newMockRegisterAgent(serviceURL, engineID, model, endpoint string, nodes, cards, links int, assemble, degradeAfter time.Duration, log *slog.Logger) (*engineagent.Agent, error) {
 	span := make([]*provisionerv1.EngineNode, 0, nodes)
 	perNode := max(cards/max(nodes, 1), 1)
 	for i := range nodes {
@@ -51,12 +51,41 @@ func newMockRegisterAgent(serviceURL, engineID, model, endpoint string, nodes, c
 		return engineagent.NotReady
 	}
 
-	// Stands in for issue 213's link sensor. The real one reads NVLink
-	// state and error counters off the cards; this one reads a clock. What
-	// matters for the demo is the same either way: the engine keeps serving
-	// correct tokens the whole time, and the only thing that changes is a
-	// reading nothing else in the system is watching.
-	impaired := func(context.Context) bool {
+	// Stands in for the link sensor. The real one reads NVLink state off the
+	// cards; this one reads a clock. What matters for the demo is the same
+	// either way: the engine keeps serving correct tokens the whole time, and
+	// the only thing that changes is a reading nothing else in the system is
+	// watching.
+	//
+	// links == 0 models a board with no NVLink at all, which is the honest
+	// default: most demo runs are not pretending to be an SXM box. It reports
+	// "no reading" rather than "zero links up", because a PCIe pool must not
+	// render as an impaired NVLink pool.
+	readLinks := func(context.Context) *provisionerv1.InterconnectHealth {
+		if links <= 0 {
+			return &provisionerv1.InterconnectHealth{Available: false}
+		}
+		up := int32(links)
+		if degradeAfter > 0 && time.Since(started) >= degradeAfter {
+			up--
+		}
+		return &provisionerv1.InterconnectHealth{
+			Available:  true,
+			LinksTotal: int32(links),
+			LinksUp:    up,
+		}
+	}
+
+	// With a simulated board, the reported state is DERIVED from the reading,
+	// the way production does it, so the fleet view's LINKS column and its
+	// STATE column cannot disagree. Without one there is no sensor to derive
+	// from, so the clock drives the state directly and the column honestly
+	// shows no reading. That fallback is what keeps demo 09c's degraded act
+	// working without it having to pretend to have NVLink.
+	impaired := func(ctx context.Context) bool {
+		if links > 0 {
+			return engineagent.InterconnectImpaired(readLinks(ctx))
+		}
 		return degradeAfter > 0 && time.Since(started) >= degradeAfter
 	}
 
@@ -70,6 +99,7 @@ func newMockRegisterAgent(serviceURL, engineID, model, endpoint string, nodes, c
 		},
 		engineagent.WithSpan(span),
 		engineagent.WithProbe(engineagent.AnyDegraded(ready, impaired)),
+		engineagent.WithInterconnect(readLinks),
 		engineagent.WithLogger(log),
 	)
 }

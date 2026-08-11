@@ -53,6 +53,46 @@ func fleetSpanLabel(e *provisionerv1.Engine) string {
 	return fmt.Sprintf("%dc/%dn", cards, nodes)
 }
 
+// fleetLinkLabel renders link health across the member's span.
+//
+// Three outcomes, and keeping them distinct is the whole point of the column:
+//
+//	"-"     no node reported a reading. A PCIe-only pool, or one whose
+//	        provider hides the NVIDIA tooling in the container. NOT a fault.
+//	"8/8"   every reported link is up.
+//	"6/8"   two links are down somewhere in the span, which is what a member
+//	        sitting in SERVING_DEGRADED looks like from here.
+//
+// Summed across the span rather than shown per node, because the fleet list is
+// one line per member. Which node is impaired is a question for describe; this
+// column exists to make "something in here is degraded" visible at a glance,
+// since the endpoint answers and the tokens are correct either way.
+func fleetLinkLabel(e *provisionerv1.Engine) string {
+	total, up, known := fleetLinks(e)
+	if !known {
+		return "-"
+	}
+	return fmt.Sprintf("%d/%d", up, total)
+}
+
+// fleetLinks sums link health across a span. known is false when no node
+// reported a reading, and it is carried separately from the counts rather than
+// being inferred from total==0 so the JSON consumer can tell "no sensor" from
+// "a board that reports zero links". Collapsing those is how a PCIe pool ends
+// up looking like an impaired NVLink pool.
+func fleetLinks(e *provisionerv1.Engine) (total, up int32, known bool) {
+	for _, n := range e.GetSpan() {
+		ic := n.GetInterconnect()
+		if ic == nil || !ic.GetAvailable() {
+			continue
+		}
+		known = true
+		total += ic.GetLinksTotal()
+		up += ic.GetLinksUp()
+	}
+	return total, up, known
+}
+
 // fleetAge renders how long a member has been registered, coarsely. Operators
 // reading a fleet list want "is this new or has it been up a while", not
 // millisecond precision.
@@ -95,6 +135,9 @@ type fleetRow struct {
 	Endpoint     string `json:"endpoint"`
 	Cards        int32  `json:"cards"`
 	Nodes        int    `json:"nodes"`
+	LinksTotal   int32  `json:"links_total,omitempty"`
+	LinksUp      int32  `json:"links_up,omitempty"`
+	LinksKnown   bool   `json:"links_known"`
 	State        string `json:"state"`
 	DeploymentID string `json:"deployment_id,omitempty"`
 	RegisteredAt string `json:"registered_at,omitempty"`
@@ -113,6 +156,7 @@ func renderFleetJSON(w io.Writer, es []*provisionerv1.Engine) error {
 			State:        fleetStateLabel(e.GetState()),
 			DeploymentID: e.GetDeploymentId(),
 		}
+		row.LinksTotal, row.LinksUp, row.LinksKnown = fleetLinks(e)
 		if ts := e.GetRegisteredAt(); ts != nil {
 			row.RegisteredAt = ts.AsTime().UTC().Format(time.RFC3339)
 		}
@@ -132,14 +176,15 @@ func renderFleetTable(w io.Writer, es []*provisionerv1.Engine, now time.Time) er
 		return err
 	}
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	if _, err := fmt.Fprintln(tw, "MEMBER\tMODEL\tSPAN\tSTATE\tAGE"); err != nil {
+	if _, err := fmt.Fprintln(tw, "MEMBER\tMODEL\tSPAN\tLINKS\tSTATE\tAGE"); err != nil {
 		return err
 	}
 	for _, e := range es {
-		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
+		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
 			e.GetId(),
 			orDash(e.GetModel()),
 			fleetSpanLabel(e),
+			fleetLinkLabel(e),
 			fleetStateLabel(e.GetState()),
 			fleetAge(e, now),
 		); err != nil {

@@ -137,6 +137,13 @@ type Agent struct {
 	span   []*provisionerv1.EngineNode
 	log    *slog.Logger
 
+	// interconnect reads link health for this node. Separate from probe
+	// because it answers a different question: probe says whether the engine
+	// is serving, this says whether it is serving at full speed. Nil means
+	// the agent makes no interconnect claim at all, which is what an agent
+	// built before this existed did.
+	interconnect func(context.Context) *provisionerv1.InterconnectHealth
+
 	// interval is the renewal cadence. Seeded with a conservative default
 	// and replaced by whatever the control plane returns, so detection
 	// latency stays tunable in one place rather than per agent.
@@ -193,6 +200,25 @@ func WithSpan(span []*provisionerv1.EngineNode) Option {
 	return func(a *Agent) {
 		if len(span) > 0 {
 			a.span = span
+		}
+	}
+}
+
+// WithInterconnect supplies the link-health sensor whose reading separates a
+// group serving at full speed from one serving correctly at a fraction of it.
+//
+// Injectable rather than always shelling out, for three reasons: tests and the
+// mock engine can report a board that does not exist, an operator on a
+// provider that hides the NVIDIA tooling inside the container can leave it off
+// instead of paying a failing exec every renewal, and a future DCGM-based
+// reader replaces it without touching the agent.
+//
+// Left unset, the agent makes no interconnect claim at all, which is exactly
+// what an agent built before this existed did.
+func WithInterconnect(read func(context.Context) *provisionerv1.InterconnectHealth) Option {
+	return func(a *Agent) {
+		if read != nil {
+			a.interconnect = read
 		}
 	}
 }
@@ -322,6 +348,20 @@ func (a *Agent) snapshot(ctx context.Context) *provisionerv1.Engine {
 			NodeIndex: a.ident.NodeIndex,
 			GpuCount:  a.cards,
 		}}
+	}
+
+	// Stamp the link reading onto the node this agent actually runs on, and
+	// only that one. An agent can see its own board and nothing else, so
+	// attributing a reading to a fabricated multi-node span would be
+	// reporting hardware it never looked at. Read fresh each tick like the
+	// state above, so a link that recovers stops being reported without
+	// anything having to clear a flag.
+	if a.interconnect != nil {
+		for _, n := range span {
+			if n.GetNodeIndex() == a.ident.NodeIndex {
+				n.Interconnect = a.interconnect(ctx)
+			}
+		}
 	}
 
 	return &provisionerv1.Engine{

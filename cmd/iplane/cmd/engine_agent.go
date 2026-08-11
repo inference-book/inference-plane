@@ -127,10 +127,30 @@ func runEngineAgent(ctx context.Context) error {
 			"env", engineagent.EnvHostID)
 	}
 
+	// Link health, and the reason it is composed with the health probe rather
+	// than replacing it. HTTPProbe can only ever say serving or not, because a
+	// health endpoint answers the question it was built for and a group with a
+	// downed link is serving. AnyDegraded lets the link reading downgrade a
+	// serving engine without being able to promote a broken one, so assembly
+	// never reads as an impairment.
+	//
+	// On a board with no NVLink, or a container where the NVIDIA tooling is
+	// not reachable, the sensor reports no reading and the engine keeps
+	// reporting SERVING. Absence of a reading is not evidence of a fault.
+	interconnect := engineagent.ReadInterconnect
+	if ic := interconnect(ctx); !ic.GetAvailable() {
+		log.Info("no interconnect reading available; link health will show as unknown",
+			"hint", "expected on a PCIe-only box, or where nvidia-smi is not reachable in this container")
+	}
+
 	agent, err := engineagent.New(
 		provisionerv1connect.NewEngineRegistryServiceClient(http.DefaultClient, engineAgentServiceURL),
 		ident,
-		engineagent.WithProbe(engineagent.HTTPProbe(engineAgentHealthURL, 2*time.Second)),
+		engineagent.WithProbe(engineagent.AnyDegraded(
+			engineagent.HTTPProbe(engineAgentHealthURL, 2*time.Second),
+			engineagent.InterconnectProbe(interconnect),
+		)),
+		engineagent.WithInterconnect(interconnect),
 		engineagent.WithCards(cards),
 		engineagent.WithInterval(engineAgentInterval),
 		engineagent.WithLogger(log),
