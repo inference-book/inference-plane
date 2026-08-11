@@ -115,6 +115,53 @@ type Provider struct {
 	// /health. Separate from the SSH wait because it covers the image pull
 	// and the model load, which a large model dominates.
 	engineReadyTimeout time.Duration
+
+	// minInetDownMbps / minReliability are the marketplace-quality floors
+	// applied to every offer search. 0 disables that floor. See
+	// WithHostQualityFloor for why they default to non-zero.
+	minInetDownMbps float64
+	minReliability  float64
+}
+
+// Marketplace-quality floors, applied to every offer search unless
+// WithHostQualityFloor overrides them.
+//
+// Vast is a marketplace of independent hosts, so "cheapest rentable offer"
+// selects for hosts that are cheap for a reason. Ordering by dph_total with no
+// quality floor picked a host whose model download stalled for 30 minutes on a
+// 0.5B, and a rental that cannot pull its weights costs more than the price
+// difference that chose it.
+//
+// Measured against the live marketplace on 2026-08-11, RTX 3090, single GPU:
+//
+//	price-only cheapest:  $0.0684/hr, inet_down 357 Mbps, reliability2 0.9558
+//	with these floors:    $0.0763/hr, inet_down 1009 Mbps, reliability2 0.9878
+//
+// So the floors cost about 12% per hour and buy roughly 3x the download
+// bandwidth. Ordering stays cheapest-first; these only bound which hosts are
+// eligible to be cheapest.
+const (
+	// Exported so the CLI can start from these when only one of the two env
+	// overrides is set, rather than restating the numbers and letting the two
+	// copies drift.
+	DefaultMinInetDownMbps = 1000
+	DefaultMinReliability  = 0.98
+)
+
+// WithHostQualityFloor overrides the marketplace-quality floors used when
+// searching for offers. inet_down is megabits per second as Vast reports it;
+// reliability2 is Vast's host uptime score in [0,1].
+//
+// Either value at or below 0 disables that floor, which is the escape hatch
+// for a search that legitimately returns nothing: on thin capacity a lower
+// floor may beat no host at all. That is an operator's call to make
+// deliberately, not a fallback the adapter takes on its own, because a silent
+// downgrade to a slow host reproduces the failure the floors exist to prevent.
+func WithHostQualityFloor(minInetDownMbps, minReliability float64) Option {
+	return func(p *Provider) {
+		p.minInetDownMbps = max(minInetDownMbps, 0)
+		p.minReliability = max(minReliability, 0)
+	}
 }
 
 // WithEngineReadyTimeout overrides how long Deploy waits for the engine to
@@ -170,6 +217,8 @@ func New(client *Client, opts ...Option) *Provider {
 		sshReadyInterval:   5 * time.Second,
 		sshProbe:           defaultSSHProbe,
 		engineReadyTimeout: defaultEngineReadyTimeout,
+		minInetDownMbps:    DefaultMinInetDownMbps,
+		minReliability:     DefaultMinReliability,
 	}
 	for _, opt := range opts {
 		opt(p)
@@ -297,9 +346,12 @@ func (p *Provider) Spawn(ctx context.Context, spec *provisionerv1.Spec) (*provis
 		}
 	}
 	if picked == nil {
+		// Name the quality floors in the message. They are the one constraint
+		// the operator did not type, so an empty result reads as "no capacity"
+		// when it may well be "capacity exists, all of it below the floor".
 		return nil, provisioners.NewProviderError(p.Name(), "spawn",
-			fmt.Errorf("no rentable offer found for class=%s sku=%s gpu_count=%d (marketplace empty for these constraints right now; retry or relax)",
-				resolvedClass, resolvedSKU, gpuCount), 0)
+			fmt.Errorf("no rentable offer found for class=%s sku=%s gpu_count=%d (search also required inet_down>=%gMbps reliability2>=%g; retry, relax the constraints, or lower the floors via IPLANE_VAST_MIN_INET_DOWN_MBPS / IPLANE_VAST_MIN_RELIABILITY)",
+				resolvedClass, resolvedSKU, gpuCount, p.minInetDownMbps, p.minReliability), 0)
 	}
 
 	rented, err := p.rentOffer(ctx, picked.ID, image, label, diskGB)
@@ -518,6 +570,16 @@ func (p *Provider) findOffer(ctx context.Context, gpuName string, gpuCount, disk
 		}
 		q["bw_nvlink"] = map[string]int{"gte": minGBps}
 	}
+	// Marketplace-quality floors, pushed server-side alongside the rest. Both
+	// are Vast marketplace columns rather than workload requirements, which is
+	// why they live here and not on ResourceRequirements: no caller wants a
+	// slow, flaky host, so there is nothing for an operator to express.
+	if p.minInetDownMbps > 0 {
+		q["inet_down"] = map[string]float64{"gte": p.minInetDownMbps}
+	}
+	if p.minReliability > 0 {
+		q["reliability2"] = map[string]float64{"gte": p.minReliability}
+	}
 	qBytes, err := json.Marshal(q)
 	if err != nil {
 		return nil, fmt.Errorf("encode q: %w", err)
@@ -724,6 +786,14 @@ type offerSummary struct {
 	// a zero being trusted as fact. In the 2026-08-09 probe, 9 of 38
 	// "A100 SXM4" offers reported zero on a board that always has NVLink.
 	BwNvlink *float64 `json:"bw_nvlink"`
+
+	// InetDown (Mbps) and Reliability2 ([0,1]) are the two marketplace-quality
+	// columns findOffer filters on. Decoded rather than ignored so a returned
+	// offer can be checked against the floor that was supposed to exclude it:
+	// a filter the marketplace silently stops honouring looks identical to one
+	// that works until someone reads the value that came back.
+	InetDown     float64 `json:"inet_down"`
+	Reliability2 float64 `json:"reliability2"`
 }
 
 type bundlesResponse struct {

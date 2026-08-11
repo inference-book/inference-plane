@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/inference-book/inference-plane/internal/deployments/sshdocker"
@@ -65,6 +66,12 @@ func buildLocalService(store *file.Store, operatorID string, extra ...provisione
 		if d := engineReadyTimeout(""); d > 0 {
 			vastOpts = append(vastOpts, vast.WithEngineReadyTimeout(d))
 		}
+		// Marketplace-quality floors. Only passed when an operator actually set
+		// one, so the adapter's defaults stay the single source of truth for
+		// what a sane floor is.
+		if inet, rel, ok := vastHostQualityFloor(); ok {
+			vastOpts = append(vastOpts, vast.WithHostQualityFloor(inet, rel))
+		}
 		providers = append(providers, vast.New(vast.NewClient(key), vastOpts...))
 	}
 	if key := os.Getenv("LAMBDA_API_KEY"); key != "" {
@@ -111,6 +118,41 @@ func buildLocalService(store *file.Store, operatorID string, extra ...provisione
 // fatal: refusing to start the daemon over a typo'd timeout would be a
 // worse outcome than using the default and letting the deploy report what
 // happened.
+// vastHostQualityFloor resolves the marketplace-quality floors Vast's offer
+// search applies, returning ok=false when the operator set neither and the
+// adapter should keep its own defaults.
+//
+// The two knobs are independent, so a run that lowers only the bandwidth floor
+// keeps the default reliability floor rather than silently dropping it to zero.
+// That is why this starts from the adapter's exported defaults instead of from
+// nothing.
+//
+// 0 is a meaningful value here (it disables that floor), so a malformed or
+// negative entry is ignored rather than clamped: a typo should not quietly turn
+// a floor off, which is the exact failure the floors were added to prevent.
+func vastHostQualityFloor() (inetDownMbps, reliability float64, ok bool) {
+	inetDownMbps, reliability = vast.DefaultMinInetDownMbps, vast.DefaultMinReliability
+	for _, e := range []struct {
+		key string
+		dst *float64
+	}{
+		{"IPLANE_VAST_MIN_INET_DOWN_MBPS", &inetDownMbps},
+		{"IPLANE_VAST_MIN_RELIABILITY", &reliability},
+	} {
+		v := os.Getenv(e.key)
+		if v == "" {
+			continue
+		}
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil || f < 0 {
+			continue
+		}
+		*e.dst = f
+		ok = true
+	}
+	return inetDownMbps, reliability, ok
+}
+
 func engineReadyTimeout(specific string) time.Duration {
 	for _, key := range []string{specific, "IPLANE_ENGINE_READY_TIMEOUT"} {
 		if key == "" {
