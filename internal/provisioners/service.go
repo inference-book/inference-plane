@@ -310,11 +310,31 @@ func (s *Service) CreateInstance(ctx context.Context, req *provisionerv1.CreateI
 		}, nil
 	}
 
-	// Step 3a: ensure the operator's SSH key is registered with this
-	// provider, if the provider supports it and a key store is wired.
-	// Errors abort before Spawn so the operator does not pay for a
-	// pod that the executor cannot SSH into. Skipped when keyStore is
-	// nil (typical for local-only deployments + tests).
+	spawned, err := s.registerKeyAndSpawn(ctx, provider, spec, record)
+	if err != nil {
+		return nil, err
+	}
+	return &provisionerv1.CreateInstanceResponse{Instance: spawned}, nil
+}
+
+// registerKeyAndSpawn registers the operator's SSH key with the provider
+// where supported, rents the instance, and patches the resulting record.
+//
+// Extracted so the deployment fan-out can provision a machine the same way
+// CreateInstance does. Before this, Spawn had exactly one caller and
+// auto-provisioned deployments on VM-style providers never rented anything:
+// the fan-out wrote a PENDING record and handed it straight to the SSH
+// executor, which then dialled a machine that did not exist. Image-native
+// providers hid the gap, because their Deploy creates the pod itself.
+//
+// Key registration runs before Spawn on purpose. A key registered afterwards
+// races the machine's boot, and a machine the executor cannot log into is
+// one the operator pays for and cannot use.
+//
+// A Spawn failure is recorded on the instance before the error is returned,
+// so a failed slot leaves a FAILED record with the provider's reason rather
+// than a PENDING one that looks like it is still coming.
+func (s *Service) registerKeyAndSpawn(ctx context.Context, provider Provider, spec *provisionerv1.Spec, record *provisionerv1.Instance) (*provisionerv1.Instance, error) {
 	if s.keyStore != nil {
 		if reg, ok := provider.(KeyRegistrar); ok {
 			kp, err := s.keyStore.EnsureKeyPair(s.operatorID, provider.Name())
@@ -331,7 +351,6 @@ func (s *Service) CreateInstance(ctx context.Context, req *provisionerv1.CreateI
 		}
 	}
 
-	// Step 3b: Spawn (no flock held), then patch.
 	stampedSpec := withSystemTags(spec, s.operatorID)
 	spawned, spawnErr := provider.Spawn(ctx, stampedSpec)
 	if spawnErr != nil {
@@ -347,7 +366,7 @@ func (s *Service) CreateInstance(ctx context.Context, req *provisionerv1.CreateI
 	if patchErr := s.patchRecord(spec.GetId(), spawned); patchErr != nil {
 		return nil, status.Errorf(codes.Internal, "spawn succeeded but state patch failed: %v", patchErr)
 	}
-	return &provisionerv1.CreateInstanceResponse{Instance: spawned}, nil
+	return spawned, nil
 }
 
 // DestroyInstance transitions a known record to terminating, calls the

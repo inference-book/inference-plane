@@ -868,7 +868,7 @@ func (s *Service) readSlotEndpoint(deployID string, slot int) string {
 // Idempotent: if an Instance already exists at the synthesized id,
 // reuse it (re-runs of a partially-failed CreateDeployment don't
 // double-rent the slot).
-func (s *Service) placeReplicaInstance(_ context.Context, spec *provisionerv1.ReplicaSpec, baseImage, deployID string, slot, totalSlots int) (*provisionerv1.Instance, error) {
+func (s *Service) placeReplicaInstance(ctx context.Context, spec *provisionerv1.ReplicaSpec, baseImage, deployID string, slot, totalSlots int) (*provisionerv1.Instance, error) {
 	if spec == nil {
 		return nil, status.Error(codes.InvalidArgument, "replica spec is required")
 	}
@@ -918,7 +918,37 @@ func (s *Service) placeReplicaInstance(_ context.Context, spec *provisionerv1.Re
 	if err := s.patchRecord(inst.GetId(), inst); err != nil {
 		return nil, status.Errorf(codes.Internal, "record placed replica r%d: %v", slot, err)
 	}
-	return inst, nil
+
+	// Image-native providers rent the machine as part of Deploy, so the
+	// record above is all this step owes them and spawning here would rent
+	// a second one. Everything else needs a machine before the executor can
+	// SSH into it, and nothing used to provide one: Spawn had a single
+	// caller, CreateInstance, which the auto-provision path does not go
+	// through. That is why a VM-style deploy dialled a host that did not
+	// exist.
+	if _, imageNative := s.providerAsDeployer(inst); imageNative {
+		return inst, nil
+	}
+	provider := s.providers[providerName]
+	spawned, err := s.registerKeyAndSpawn(ctx, provider, pspec, inst)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "provision replica r%d: %v", slot, err)
+	}
+
+	// Rented, but not necessarily reachable. The wait runs even when Spawn
+	// already returned an endpoint, because a published address is not a
+	// working one: Vast's rent response carries ssh_host immediately and
+	// the port refuses connections for a while afterwards. Skipping the
+	// wait on a populated address is the same mistake WaitForInstanceReady
+	// used to make, and it fails identically, as a dial timeout against a
+	// machine that was merely young.
+	if waiter, ok := provider.(SSHReadyWaiter); ok {
+		if target, werr := waiter.WaitForSSHReady(ctx, spawned.GetProviderId()); werr == nil && target.GetHost() != "" {
+			spawned.Ssh = target
+			_ = s.patchRecord(spawned.GetId(), spawned)
+		}
+	}
+	return spawned, nil
 }
 
 // resolveCreateReplicaSpecs expands a CreateDeploymentRequest's
