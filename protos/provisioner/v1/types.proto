@@ -828,6 +828,27 @@ enum EngineState {
   ENGINE_STATE_DRAINING = 5;
 }
 
+// InterconnectHealth is what one node can see about the fast links between
+// its own cards. Ch 10's headline observable, and the one reading that
+// distinguishes a group serving at full speed from one serving correctly at a
+// fraction of it.
+//
+// The `available` flag is the load-bearing field, not the counts. A node with
+// no NVLink (a PCIe-only box) and a node whose provider hides the NVIDIA
+// tooling inside the container are both "no reading", and neither is
+// "zero links up". Collapsing those would either invent a fault on every PCIe
+// pool or hide one on every pool without a sensor, so absence is reported as
+// absence and the counts are meaningless unless available is set.
+message InterconnectHealth {
+  // False means no reading: no NVLink on this node, or no sensor reachable.
+  // Every field below is meaningless when this is false.
+  bool available = 1;
+  // Links the node reports, and how many of them are up. Equal counts are a
+  // healthy board; up < total is the impairment the chapter is about.
+  int32 links_total = 2;
+  int32 links_up = 3;
+}
+
 // EngineNode is one machine an engine spans. The fact no probe can report,
 // and the input failure attribution needs: when a member dies, which node
 // took it down (issue 214).
@@ -844,6 +865,11 @@ message EngineNode {
   int32 node_index = 3;
   // GPUs this node contributes to the group.
   int32 gpu_count = 4;
+  // Link health between this node's own cards. Per-node rather than
+  // per-engine because the links are physical hardware on one machine: a
+  // four-node group can have three healthy boards and one impaired, and an
+  // engine-level summary would say only "something is wrong somewhere".
+  InterconnectHealth interconnect = 5;
 }
 
 // Engine is one registered data plane: an endpoint serving one model over a

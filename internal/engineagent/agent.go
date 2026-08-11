@@ -137,6 +137,13 @@ type Agent struct {
 	span   []*provisionerv1.EngineNode
 	log    *slog.Logger
 
+	// interconnect reads link health for this node. Separate from probe
+	// because it answers a different question: probe says whether the engine
+	// is serving, this says whether it is serving at full speed. Nil means
+	// the agent makes no interconnect claim at all, which is what an agent
+	// built before this existed did.
+	interconnect func(context.Context) *provisionerv1.InterconnectHealth
+
 	// interval is the renewal cadence. Seeded with a conservative default
 	// and replaced by whatever the control plane returns, so detection
 	// latency stays tunable in one place rather than per agent.
