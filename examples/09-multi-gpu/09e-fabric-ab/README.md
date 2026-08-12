@@ -9,6 +9,18 @@ panel. Public apples-to-apples "NVLink vs PCIe-only, same model, same TP
 degree" inference benchmarks are thin, so there is no figure to cite. This
 produces one.
 
+## Measured results
+
+`results/` holds the raw summaries from the 2026-08-11 run that produced Ch 10's
+throughput figure, with `results/RESULTS.md` recording the configuration, the
+hosts, and the caveats. Committed because the number is quoted in the book and
+a claim in print should have its evidence somewhere a reader can reach.
+
+The headline: **157 tok/s on NVLink against 43 tok/s on PCIe, a 3.65x
+difference**, same model and same TP=8 across 8 x A100 40 GB. Read `RESULTS.md`
+before quoting anything from it -- half the table is not a fabric measurement,
+and it says which half.
+
 ## The two modes
 
 **GPU-free (default). Costs nothing.**

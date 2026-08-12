@@ -1,0 +1,1 @@
+{"duration_sec":45.001987208,"target_rps":4,"actual_rps":3.933159644304212,"successes":177,"errors":0,"skipped":0,"completion_tokens":6694,"completion_tokens_per_sec":148.74898677385534,"latency_p50_ms":1480,"latency_p95_ms":1952,"latency_p99_ms":2011,"ttft_samples":177,"ttft_p50_ms":1478,"ttft_p95_ms":1952,"ttft_p99_ms":2011}
