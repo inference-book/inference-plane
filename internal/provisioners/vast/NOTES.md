@@ -61,3 +61,26 @@ needs an on-box reading (`internal/engineagent`'s interconnect sensor).
 Machine-scoped, not datacenter-scoped like RunPod's (`POST /api/v0/volumes/`
 returns `Invalid machine id`), so `iplane model pin` does not port over as-is.
 Issue #254.
+
+## Agent delivery
+
+The cheapest of the three paths, and the last to get one. RunPod needs an
+entrypoint wrapper because the image's own entrypoint is what runs; the SSH
+path needs a sidecar container. Vast hands us the startup script outright, so
+the agent is two blocks above the engine in a file the adapter already writes.
+No wrapper, no sidecar.
+
+The env the agent reads was already arriving -- `rentEngine` forwards
+`dep.GetEnv()` and the deploy path stamps the identity there. Only the launch
+was missing.
+
+The fetch itself is shared with RunPod via `engineagent.AgentPrelude`; only the
+final `exec` differs, because Vast's script carries the whole argv while
+Docker's ENTRYPOINT/CMD split needs a trailing `"$@"`.
+
+**Verified on a real box 2026-08-11:** the prelude reaches the machine intact
+(`onstart contains engine-agent: True`, with the release URL quoted correctly).
+Registration itself was not observed end to end -- the run was torn down while
+still CONFIGURING. Note also that a released agent older than the interconnect
+sensor will register without a link reading, so validating the LINKS column
+needs a release containing it.

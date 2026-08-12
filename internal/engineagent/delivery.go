@@ -67,6 +67,36 @@ func WrapperScript(binaryURL string, engineCmd []string) (string, error) {
 		return "", fmt.Errorf("engineagent: engine entrypoint is required to build a wrapper")
 	}
 
+	prelude, err := AgentPrelude(binaryURL)
+	if err != nil {
+		return "", err
+	}
+	return prelude + "\n" + "exec " + shJoin(engineCmd) + ` "$@"`, nil
+}
+
+// AgentPrelude returns the shell that fetches the agent and starts it in the
+// background, without saying anything about how the engine is then launched.
+//
+// Split out because providers disagree about that last part and agree about
+// everything before it. A provider that runs the workload as docker's
+// ENTRYPOINT gets the engine argv plus "$@", because Docker splits
+// ENTRYPOINT and CMD into one argv and the container's own arguments arrive
+// separately. A provider that hands us a standalone startup script has no
+// such split: the whole argv is already in the script and "$@" would be
+// empty. Sharing the fetch and keeping the exec local is the same division
+// the rest of the provider layer uses -- behaviour shared, provider
+// specifics in the adapter.
+//
+// Everything here is best-effort and swallowed. An engine that can serve
+// tokens must never fail to start because a download failed, a registry was
+// unreachable, or the fetched file would not execute. The symptom of all of
+// those is a member missing from the fleet view, which is the cost we
+// accept; the alternative is a deployment that does not serve because its
+// observability did not install.
+func AgentPrelude(binaryURL string) (string, error) {
+	if binaryURL == "" {
+		return "", fmt.Errorf("engineagent: binary url is required to build an agent prelude")
+	}
 	// curl and wget are both plausible and neither is guaranteed, so try
 	// each. `|| true` on the whole group is what makes the agent optional.
 	return strings.Join([]string{
@@ -80,7 +110,6 @@ func WrapperScript(binaryURL string, engineCmd []string) (string, error) {
 		"    chmod +x /tmp/iplane && /tmp/iplane engine-agent;",
 		"  ) >/tmp/iplane-agent.log 2>&1 &",
 		"} || true;",
-		"exec " + shJoin(engineCmd) + ` "$@"`,
 	}, "\n"), nil
 }
 
