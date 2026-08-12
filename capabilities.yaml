@@ -18,6 +18,235 @@
 
 snapshots:
 
+  # Drafted ahead of the tag: the Ch 10 capability set is locked (issues 203,
+  # 204, 205, 213, 215, 232 all closed) but ch10-final is not cut yet, so `date`
+  # is TBD. v0.2.3 was an interim release that published the agent binary, so
+  # this tag aliases v0.2.4.
+  - tag: ch10-final
+    alias: v0.2.4
+    chapter: 10
+    chapter_title: Multi-GPU and Distributed Inference
+    branch: release/v0.2
+    date: TBD
+
+    summary: |
+      One engine, many cards. Chapter 9 closed at the single-GPU ceiling, and
+      this chapter grows a deployment onto a pool without opening the engine.
+      The control plane gains two jobs. It provisions a set of cards that can
+      act as one, selecting on how they are wired and not only on how much
+      memory they sum to. And it tracks a data plane that can span hardware,
+      which a health probe structurally cannot do, because during assembly
+      there is nothing listening to answer. Both landed. The fabric filter
+      selects on a vendor-neutral scope with provenance, so a candidate whose
+      fabric cannot be vouched for is dropped rather than rented and inspected
+      once the meter is running. Engines register themselves under a renewed
+      lease and report what only they can see. Two fleet verbs make the result
+      readable and drainable. The fabric penalty is measured rather than
+      argued: one 72B at TP-8 sustained 157 tok/s on a fast intra-node fabric
+      against 43 on a shared bus, a factor of 3.65. The engine stays opaque
+      throughout; tensor and pipeline parallelism remain engine concerns the
+      control plane provisions for.
+
+    capabilities:
+
+      - name: Fabric-aware provisioning
+        status: shipped
+        notes: |
+          Each offering's hardware description carries a fabric scope and a
+          bandwidth figure, and the resolver treats both as predicates
+          alongside the memory floor. `--fabric none|intra-node|inter-node`
+          plus `--min-fabric-gbps`. The scope is deliberately vendor-neutral:
+          NVLink, NVSwitch and AMD's xGMI are all intra-node, InfiniBand, RoCE
+          and EFA are all inter-node, and vendor names survive only as a
+          diagnostic string no control-plane logic may branch on. The CLI
+          refuses a vendor word outright rather than aliasing it, because the
+          narrow reading cannot be implemented and the broad reading duplicates
+          a term that exists. A fabric requirement without `--gpu-count >= 2`
+          is rejected rather than ignored.
+        prs: [219, 221, 223]
+        related_issues: [203]
+
+      - name: Fabric provenance (declared / measured / unknown)
+        status: shipped
+        notes: |
+          A fabric value carries where it came from, because a zero reading is
+          ambiguous between a card with no link and a card nobody measured.
+          UNKNOWN never satisfies a fabric requirement; the candidate is
+          dropped rather than rented and inspected afterward, since discovering
+          the answer after the meter starts is the cost the filter exists to
+          remove. Naming a SKU remains the operator's override. Motivated by
+          live inventory: among offers named for a PCIe part a few reported
+          bandwidth implying a bridge is fitted, and among offers named for the
+          always-linked SXM part a quarter reported zero.
+        prs: [221]
+        related_issues: [203]
+
+      - name: Push-based engine registration under a lease
+        status: shipped
+        notes: |
+          An engine registers itself and its span and renews before a deadline,
+          rather than holding a stream open. A 30s lease renewed every 10s, so
+          two renewals can be missed before the control plane concludes the
+          engine is gone, which makes detection time a number the control plane
+          hands out rather than whatever a dropped connection decides. Survives
+          a control-plane restart without the fleet view emptying, and leaves
+          the agent a loop that calls one method and sleeps. State is
+          recomputed per report rather than latched; `lost` is never
+          self-reported, being the control plane's conclusion from a missed
+          deadline. Membership rides this channel while the router's own
+          signals stay router-side, so a routing decision never depends on the
+          reporting path being current.
+        prs: [233]
+        related_issues: [204]
+
+      - name: Agent delivery and injected identity
+        status: partial
+        notes: |
+          Getting the agent onto a machine the control plane does not own. Two
+          image-native paths are proven on rented hardware: an entrypoint
+          wrapper that backgrounds the agent then execs the engine, and agent
+          blocks prepended to a provider's startup script. Both preserve
+          bring-your-own-image. Wrapping requires the engine's start command,
+          which a control plane that passes arguments has never needed and
+          cannot infer, so it becomes operator-supplied configuration.
+          Identity is split three ways by when a fact comes into existence:
+          read locally, injected at creation, or filled in by the control plane
+          afterward. The third category cannot be injected at all, since the
+          machine id is assigned during placement and the endpoint derives from
+          an id the create call returns, so a correlation key plus later
+          enrichment is the resolution. A reported value beats a filled-in one,
+          and enrichment failure never becomes registration failure. Marked
+          partial: the sidecar path is unvalidated, see known_limitations.
+        prs: [234, 236, 237]
+        related_issues: [232]
+
+      - name: Interconnect health telemetry
+        status: shipped
+        notes: |
+          Per-link state and error counters read from inside the container with
+          no special privilege, which is what makes the degraded-but-serving
+          case reportable rather than invisible. An `available` flag keeps "no
+          reading" distinct from "zero links up", the same three-state
+          discipline the fabric provenance tiers use, arriving from the other
+          direction.
+        prs: []
+        related_issues: [213]
+
+      - name: iplane fleet status / fleet drain
+        status: shipped
+        notes: |
+          One list holding single-card and distributed members, differing only
+          by a span column, because from the deployment's side a distributed
+          engine is the same kind of thing. States are wider than the router's
+          healthy-or-quarantined pair: assembling, serving, serving with a link
+          down, lost. A killed member reads as serving until its lease expires,
+          which is the visible face of the push design and correct rather than
+          stale. Drain releases a whole span as one action and waits a bounded
+          period rather than polling an in-flight count that arrives on a
+          deliberately unhurried channel.
+        prs: [227, 230]
+        related_issues: [205]
+
+      - name: Multi-GPU walkthrough and the measured fabric A/B
+        status: shipped
+        notes: |
+          `examples/09-multi-gpu` runs the chapter's second half GPU-free on a
+          mock engine registering over the real control channel, taking a
+          four-card group and a single card through assembling, serving, a
+          downed link, and expiry. The paid arm, `09e-fabric-ab`, is the
+          measured fabric penalty: one 72B at FP16 and TP-8, three interleaved
+          runs per arm, 157 tok/s [148.7-163.7] against 43 tok/s [42.6-47.2].
+          Raw run summaries are committed beside it. Throughput survives
+          saturation and latency does not, so the low-load latency comparison
+          is published as suggestive rather than established.
+        prs: []
+        related_issues: [215]
+
+      - name: Cross-node pool provisioning
+        status: deferred
+        notes: |
+          `--fabric inter-node` is expressible and rejected at validation
+          rather than falling through to "no matching SKU", which would read as
+          capacity an operator could wait out. The blocker is market
+          segmentation rather than engineering: no provider in the commodity
+          rental tier exposes a cross-node pool through an API. Such clusters
+          exist and are advertised at thousands of gigabits, and they are
+          ordered through a web console. Hyperscalers do sell coherent
+          multi-machine capacity programmatically via placement groups and
+          capacity reservations, so reaching that tier needs a hyperscaler
+          adapter that does not exist yet.
+        moved_to: v0.3
+        related_issues: [212]
+
+      - name: Failed-node attribution
+        status: deferred
+        notes: |
+          Recording which node took a member down so a replacement pool avoids
+          that host. The identity plumbing this needs already ships; what is
+          missing is acting on it at placement time.
+        moved_to: v0.3
+        related_issues: [214]
+
+    cli_surface:
+      # New at this tag (additive over ch09-final):
+      - iplane instance create --fabric none|intra-node|inter-node --min-fabric-gbps
+      - iplane fleet status
+      - iplane fleet drain <member> --force
+      - iplane mock-engine --register
+
+    known_limitations:
+      - id: sidecar-delivery-unvalidated
+        notes: |
+          Three agent delivery mechanisms exist and only two have run on
+          hardware, both image-native. The sidecar path, a second container
+          sharing the engine's network namespace, has never run on a real
+          machine and currently has no configured provider exercising it. It is
+          also the one that differs most, since the others prepend shell to a
+          startup command while this relies on namespace sharing to reach the
+          engine's loopback. The chapter presents the sidecar as the cleanest
+          of the delivery strategies, which is a claim about design rather than
+          about validated code. Tracked in issue 276.
+      - id: cross-node-is-taught-not-run
+        notes: |
+          Everything demonstrated at this tag was demonstrated inside one
+          machine. The cross-node case is taught rather than run, for the
+          market reason recorded under the deferred capability above.
+      - id: fabric-ab-confounds-host
+        notes: |
+          The measured 3.65x holds the model, sharding degree, card model, card
+          count, and offered load fixed. It does not hold the host fixed, since
+          the two arms ran on different physical machines. The slow arm also
+          had to be selected by asking for the absence of a fast fabric, a
+          request most catalogs cannot express, so the control group is only as
+          good as the metadata that placed it.
+      - id: comparator-overclaims-on-wide-spread
+        notes: |
+          The A/B comparator calls a difference established when the arms'
+          observed ranges do not overlap, which is too weak when one arm's
+          spread is large relative to the gap. It affects the low-load latency
+          verdict, not the saturated throughput result, whose ranges are far
+          apart. Tracked in issue 273.
+
+    patterns_introduced:
+      - name: provision-connected-pool
+        notes: |
+          The control plane finds a set of cards that can act as one; the
+          engine decides how to shard across them. The fabric filter is the
+          control plane holding up its half, and it is the whole of its new
+          responsibility at provisioning time.
+      - name: push-membership-pull-datapath
+        notes: |
+          Push carries membership, liveness, and the operational picture. Pull
+          and router-local state carry anything the data path's correctness
+          rides on. The fleet view may lag a few seconds and cost nobody a
+          request; a routing decision may not.
+      - name: declare-the-property-not-the-product
+        notes: |
+          Requirements name what the workload needs rather than the product
+          that happens to supply it, the same argument as asking for a memory
+          floor instead of a SKU. Applied one level deeper, it is what lets one
+          vendor's hardware answer a requirement shaped by another's.
+
   - tag: ch09-final
     alias: v0.2.2
     chapter: 9
