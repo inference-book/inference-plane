@@ -240,9 +240,12 @@ func fireSessionTurn(ctx context.Context, c *http.Client, cfg *sessionFireConfig
 		return "", 0, fmt.Errorf("status %d", resp.StatusCode)
 	}
 
-	content, tokens := parseChatResponse(resp, cfg.stream)
-	st.recordSuccess(dur, tokens)
-	return content, tokens, nil
+	res := parseChatResponse(resp, cfg.stream, t0)
+	st.recordSuccess(dur, res.Tokens)
+	if res.HasTTFT {
+		st.recordTTFT(res.TTFT)
+	}
+	return res.Content, res.Tokens, nil
 }
 
 func sessionChatBody(cfg *sessionFireConfig, messages []chatMessage) []byte {
@@ -259,18 +262,41 @@ func sessionChatBody(cfg *sessionFireConfig, messages []chatMessage) []byte {
 	return b
 }
 
-// parseChatResponse extracts the assistant reply text and completion
-// token count from a chat response. Non-streaming: choices[0].message.
-// content + usage.completion_tokens. Streaming (SSE): accumulate
-// choices[0].delta.content across frames, take the max reported usage.
-// Returns zero values on a malformed body -- the load tool is not a
-// correctness checker, so a mangled response is a zero-content,
-// zero-token success rather than a hard failure.
-func parseChatResponse(resp *http.Response, stream bool) (string, int64) {
+// chatResult is one turn's outcome: what came back, how much of it, and
+// how long the caller waited for the first token.
+//
+// TTFT is paired with HasTTFT rather than relying on a zero value, because
+// zero is a legitimate reading on a fast local engine and "not measured" has
+// to stay distinguishable from "measured as very fast". A summary that
+// averaged unmeasured turns in as zero would report a flattering number that
+// is not about the engine at all.
+type chatResult struct {
+	Content string
+	Tokens  int64
+	TTFT    time.Duration
+	HasTTFT bool
+}
+
+// parseChatResponse extracts the assistant reply text, completion token
+// count, and time-to-first-token from a chat response. Non-streaming:
+// choices[0].message.content + usage.completion_tokens. Streaming (SSE):
+// accumulate choices[0].delta.content across frames, take the max reported
+// usage. Returns zero values on a malformed body -- the load tool is not a
+// correctness checker, so a mangled response is a zero-content, zero-token
+// success rather than a hard failure.
+//
+// start is when the request went out, so TTFT covers queueing, prefill and
+// the network, which is what the caller actually experienced.
+//
+// TTFT is only available on the streaming path, and that is a property of
+// the protocol rather than a gap here: a non-streamed response arrives in
+// one piece, so its first token and its last token land at the same instant
+// and the number would just be total latency wearing a different label.
+func parseChatResponse(resp *http.Response, stream bool, start time.Time) chatResult {
 	if !stream {
 		raw, err := io.ReadAll(resp.Body)
 		if err != nil {
-			return "", 0
+			return chatResult{}
 		}
 		var r struct {
 			Choices []struct {
@@ -283,19 +309,21 @@ func parseChatResponse(resp *http.Response, stream bool) (string, int64) {
 			} `json:"usage"`
 		}
 		if err := json.Unmarshal(raw, &r); err != nil {
-			return "", 0
+			return chatResult{}
 		}
 		var content string
 		if len(r.Choices) > 0 {
 			content = r.Choices[0].Message.Content
 		}
-		return content, r.Usage.CompletionTokens
+		return chatResult{Content: content, Tokens: r.Usage.CompletionTokens}
 	}
 
 	sc := bufio.NewScanner(resp.Body)
 	sc.Buffer(make([]byte, 64*1024), 1024*1024)
 	var sb strings.Builder
 	var tokens int64
+	var ttft time.Duration
+	var hasTTFT bool
 	for sc.Scan() {
 		line := sc.Bytes()
 		if !bytes.HasPrefix(line, []byte("data: ")) {
@@ -319,13 +347,25 @@ func parseChatResponse(resp *http.Response, stream bool) (string, int64) {
 			continue
 		}
 		if len(frame.Choices) > 0 {
-			sb.WriteString(frame.Choices[0].Delta.Content)
+			// The clock stops on the first frame carrying actual text.
+			// OpenAI-compatible streams open with a role-only delta, and
+			// counting that as the first token would measure the moment
+			// the engine acknowledged the request rather than the moment
+			// it produced anything, understating TTFT by the whole
+			// prefill on a long prompt.
+			if chunk := frame.Choices[0].Delta.Content; chunk != "" {
+				if !hasTTFT {
+					ttft = time.Since(start)
+					hasTTFT = true
+				}
+				sb.WriteString(chunk)
+			}
 		}
 		if frame.Usage.CompletionTokens > tokens {
 			tokens = frame.Usage.CompletionTokens
 		}
 	}
-	return sb.String(), tokens
+	return chatResult{Content: sb.String(), Tokens: tokens, TTFT: ttft, HasTTFT: hasTTFT}
 }
 
 // sessionID is the stable per-conversation identity stamped into

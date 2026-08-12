@@ -74,6 +74,12 @@ func runInstanceWait(cmd *cobra.Command, args []string) error {
 func init() {
 	instanceCmd.AddCommand(instanceWaitCmd)
 
-	instanceWaitCmd.Flags().DurationVar(&instanceWaitTimeout, "timeout", 90*time.Second,
+	// 90s was tuned for pods that answer in under a minute. A rented
+	// marketplace machine is slower by a different order: measured 273s
+	// from rent to first accepted connection on the cheapest box, and a
+	// larger host has more to do first. The wait returns as soon as the
+	// endpoint answers, so a longer ceiling only changes how long a
+	// genuinely dead instance takes to be reported as such.
+	instanceWaitCmd.Flags().DurationVar(&instanceWaitTimeout, "timeout", 10*time.Minute,
 		`maximum time to wait for the SSH endpoint`)
 }

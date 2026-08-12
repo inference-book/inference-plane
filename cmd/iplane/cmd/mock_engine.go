@@ -17,14 +17,16 @@ import (
 )
 
 var (
-	mockEnginePort     int
-	mockEngineLatency  time.Duration
-	mockEngineRegister string
-	mockEngineID       string
-	mockEngineModel    string
-	mockEngineNodes    int
-	mockEngineCards    int
-	mockEngineAssemble time.Duration
+	mockEnginePort         int
+	mockEngineLatency      time.Duration
+	mockEngineRegister     string
+	mockEngineID           string
+	mockEngineModel        string
+	mockEngineNodes        int
+	mockEngineCards        int
+	mockEngineAssemble     time.Duration
+	mockEngineDegradeAfter time.Duration
+	mockEngineLinks        int
 )
 
 // mockEngineCmd runs a standalone OpenAI-compatible mock engine. It is
@@ -66,6 +68,10 @@ func init() {
 		"total GPUs to report across the span")
 	mockEngineCmd.Flags().DurationVar(&mockEngineAssemble, "assemble-delay", 0,
 		"report ASSEMBLING for this long before flipping to SERVING; models the interval where workers exist but the group has not formed")
+	mockEngineCmd.Flags().DurationVar(&mockEngineDegradeAfter, "degrade-after", 0,
+		"after this long, report SERVING_DEGRADED while still answering requests normally, so the degraded-not-dead state is demonstrable without breaking real hardware. 0 disables")
+	mockEngineCmd.Flags().IntVar(&mockEngineLinks, "links", 0,
+		"simulate an NVLink board with this many links, so `iplane fleet status` renders a real LINKS reading. With --degrade-after, one link goes down and the reported state is derived from that reading rather than from a separate clock. 0 (default) models a board with no NVLink, which reports 'no reading' rather than 'zero links up'")
 }
 
 // newMockEngineMux builds the OpenAI-compatible handler set backed by the
@@ -88,6 +94,10 @@ func newMockEngineMux(be *backends.MockBackend, label string) *http.ServeMux {
 		resp, err := be.Generate(r.Context(), req)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if req.Stream {
+			streamChatCompletion(w, &resp)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -131,7 +141,7 @@ func runMockEngine(parent context.Context, port int) error {
 		agent, err := newMockRegisterAgent(
 			mockEngineRegister, id, mockEngineModel,
 			fmt.Sprintf("http://%s", addr),
-			mockEngineNodes, mockEngineCards, mockEngineAssemble,
+			mockEngineNodes, mockEngineCards, mockEngineLinks, mockEngineAssemble, mockEngineDegradeAfter,
 			slog.New(slog.NewTextHandler(os.Stderr, nil)),
 		)
 		if err != nil {

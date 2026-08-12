@@ -823,8 +823,74 @@ func (s *Service) patchDeploymentSlot(deployID, replicaInstanceID string, u Depl
 				inst.ProviderId = u.ContainerID
 			}
 		}
+
+		// Surface what the slot is doing on the deployment record.
+		//
+		// Without this the fan-out is a black box: a deploy that spends
+		// twenty minutes pulling an image and loading weights reads as
+		// PENDING with no phase and no message, so an operator cannot tell
+		// a slow deploy from a wedged one without an ssh session and the
+		// provider's console. The singular deploy path has always patched
+		// these; only the fan-out dropped them, which is why the gap went
+		// unnoticed while single-instance deploys were the common shape.
+		//
+		// Diagnostic rather than authoritative. The aggregate outcome
+		// belongs to applyAggregateState once every slot has reported, so
+		// this deliberately never writes a terminal state.
+		if u.Phase != "" {
+			rec.CurrentPhase = slotLabel(rec.GetInstanceIds(), replicaInstanceID, u.Phase)
+		}
+		if u.ProgressMessage != "" {
+			rec.ProgressMessage = slotLabel(rec.GetInstanceIds(), replicaInstanceID, u.ProgressMessage)
+		}
+		if next, ok := provisioningAdvance(rec.GetState(), u.State); ok {
+			rec.State = next
+		}
 		return nil
 	})
+}
+
+// slotLabel prefixes a slot's message with its replica id when a deployment
+// has more than one, so "which replica is stuck" is answerable from the
+// record. A single-slot deployment reads better unprefixed.
+func slotLabel(instanceIDs []string, replicaInstanceID, msg string) string {
+	if len(instanceIDs) <= 1 {
+		return msg
+	}
+	return replicaInstanceID + ": " + msg
+}
+
+// provisioningAdvance reports the state a slot update may move the
+// deployment to, and whether it may move at all.
+//
+// Two rules, both about not fighting the aggregate. Only the in-flight
+// states are propagated: RUNNING, DEGRADED and FAILED are conclusions about
+// the whole fan-out and belong to applyAggregateState, so one slot reaching
+// RUNNING must not declare the deployment running while its siblings are
+// still pulling an image. And movement is forward-only, so a slow slot
+// emitting STARTING after a faster one reached CONFIGURING does not appear
+// to undo progress.
+func provisioningAdvance(current, update provisionerv1.DeploymentState) (provisionerv1.DeploymentState, bool) {
+	rank := func(s provisionerv1.DeploymentState) int {
+		switch s {
+		case provisionerv1.DeploymentState_DEPLOYMENT_STATE_PENDING:
+			return 1
+		case provisionerv1.DeploymentState_DEPLOYMENT_STATE_STARTING:
+			return 2
+		case provisionerv1.DeploymentState_DEPLOYMENT_STATE_CONFIGURING:
+			return 3
+		default:
+			return 0
+		}
+	}
+	ur := rank(update)
+	if ur == 0 {
+		return current, false
+	}
+	if ur <= rank(current) {
+		return current, false
+	}
+	return update, true
 }
 
 // readSlotEndpoint is a small read-only helper the fan-out's result
@@ -868,7 +934,7 @@ func (s *Service) readSlotEndpoint(deployID string, slot int) string {
 // Idempotent: if an Instance already exists at the synthesized id,
 // reuse it (re-runs of a partially-failed CreateDeployment don't
 // double-rent the slot).
-func (s *Service) placeReplicaInstance(_ context.Context, spec *provisionerv1.ReplicaSpec, baseImage, deployID string, slot, totalSlots int) (*provisionerv1.Instance, error) {
+func (s *Service) placeReplicaInstance(ctx context.Context, spec *provisionerv1.ReplicaSpec, baseImage, deployID string, slot, totalSlots int) (*provisionerv1.Instance, error) {
 	if spec == nil {
 		return nil, status.Error(codes.InvalidArgument, "replica spec is required")
 	}
@@ -918,7 +984,37 @@ func (s *Service) placeReplicaInstance(_ context.Context, spec *provisionerv1.Re
 	if err := s.patchRecord(inst.GetId(), inst); err != nil {
 		return nil, status.Errorf(codes.Internal, "record placed replica r%d: %v", slot, err)
 	}
-	return inst, nil
+
+	// Image-native providers rent the machine as part of Deploy, so the
+	// record above is all this step owes them and spawning here would rent
+	// a second one. Everything else needs a machine before the executor can
+	// SSH into it, and nothing used to provide one: Spawn had a single
+	// caller, CreateInstance, which the auto-provision path does not go
+	// through. That is why a VM-style deploy dialled a host that did not
+	// exist.
+	if _, imageNative := s.providerAsDeployer(inst); imageNative {
+		return inst, nil
+	}
+	provider := s.providers[providerName]
+	spawned, err := s.registerKeyAndSpawn(ctx, provider, pspec, inst)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "provision replica r%d: %v", slot, err)
+	}
+
+	// Rented, but not necessarily reachable. The wait runs even when Spawn
+	// already returned an endpoint, because a published address is not a
+	// working one: Vast's rent response carries ssh_host immediately and
+	// the port refuses connections for a while afterwards. Skipping the
+	// wait on a populated address is the same mistake WaitForInstanceReady
+	// used to make, and it fails identically, as a dial timeout against a
+	// machine that was merely young.
+	if waiter, ok := provider.(SSHReadyWaiter); ok {
+		if target, werr := waiter.WaitForSSHReady(ctx, spawned.GetProviderId()); werr == nil && target.GetHost() != "" {
+			spawned.Ssh = target
+			_ = s.patchRecord(spawned.GetId(), spawned)
+		}
+	}
+	return spawned, nil
 }
 
 // resolveCreateReplicaSpecs expands a CreateDeploymentRequest's

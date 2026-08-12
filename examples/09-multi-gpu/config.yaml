@@ -1,0 +1,18 @@
+# Demo 09 config: tracking a distributed data plane.
+#
+# Nothing here is about routing. The demo is about what an engine reports
+# about itself over the control channel and what the fleet view can
+# therefore say, so the router is left on its plainest setting and the
+# scheduler is off (Beat 1 direct-forward path).
+#
+# The engine registry needs no configuration: the lease is 30s and the
+# sweep runs every 10s, both fixed. Those two numbers are why act 09d
+# waits as long as it does.
+backend:
+  engine: "mock"
+  name: "mock"
+
+router:
+  routing_policy: round_robin
+  queue:
+    servicers: 0

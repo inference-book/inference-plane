@@ -58,6 +58,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -109,6 +110,68 @@ type Provider struct {
 	// the host info is populated. Default: net.DialTimeout-based probe
 	// (mirrors RunPod's dialTCPProbe). Tests inject a no-op.
 	sshProbe func(ctx context.Context, host string, port int32) error
+
+	// engineReadyTimeout bounds the wait for a deployed engine to answer
+	// /health. Separate from the SSH wait because it covers the image pull
+	// and the model load, which a large model dominates.
+	engineReadyTimeout time.Duration
+
+	// minInetDownMbps / minReliability are the marketplace-quality floors
+	// applied to every offer search. 0 disables that floor. See
+	// WithHostQualityFloor for why they default to non-zero.
+	minInetDownMbps float64
+	minReliability  float64
+}
+
+// Marketplace-quality floors, applied to every offer search unless
+// WithHostQualityFloor overrides them.
+//
+// Vast is a marketplace of independent hosts, so "cheapest rentable offer"
+// selects for hosts that are cheap for a reason. Ordering by dph_total with no
+// quality floor picked a host whose model download stalled for 30 minutes on a
+// 0.5B, and a rental that cannot pull its weights costs more than the price
+// difference that chose it.
+//
+// Measured against the live marketplace on 2026-08-11, RTX 3090, single GPU:
+//
+//	price-only cheapest:  $0.0684/hr, inet_down 357 Mbps, reliability2 0.9558
+//	with these floors:    $0.0763/hr, inet_down 1009 Mbps, reliability2 0.9878
+//
+// So the floors cost about 12% per hour and buy roughly 3x the download
+// bandwidth. Ordering stays cheapest-first; these only bound which hosts are
+// eligible to be cheapest.
+const (
+	// Exported so the CLI can start from these when only one of the two env
+	// overrides is set, rather than restating the numbers and letting the two
+	// copies drift.
+	DefaultMinInetDownMbps = 1000
+	DefaultMinReliability  = 0.98
+)
+
+// WithHostQualityFloor overrides the marketplace-quality floors used when
+// searching for offers. inet_down is megabits per second as Vast reports it;
+// reliability2 is Vast's host uptime score in [0,1].
+//
+// Either value at or below 0 disables that floor, which is the escape hatch
+// for a search that legitimately returns nothing: on thin capacity a lower
+// floor may beat no host at all. That is an operator's call to make
+// deliberately, not a fallback the adapter takes on its own, because a silent
+// downgrade to a slow host reproduces the failure the floors exist to prevent.
+func WithHostQualityFloor(minInetDownMbps, minReliability float64) Option {
+	return func(p *Provider) {
+		p.minInetDownMbps = max(minInetDownMbps, 0)
+		p.minReliability = max(minReliability, 0)
+	}
+}
+
+// WithEngineReadyTimeout overrides how long Deploy waits for the engine to
+// serve. Mirrors runpod.WithEngineReadyTimeout.
+func WithEngineReadyTimeout(d time.Duration) Option {
+	return func(p *Provider) {
+		if d > 0 {
+			p.engineReadyTimeout = d
+		}
+	}
 }
 
 // Option configures a Provider at construction.
@@ -130,15 +193,32 @@ func WithSSHProbe(probe func(ctx context.Context, host string, port int32) error
 	return func(p *Provider) { p.sshProbe = probe }
 }
 
+// defaultSSHReadyTimeout is how long to wait for a rented machine to accept
+// SSH.
+//
+// Measured rather than guessed: on the cheapest available box, TCP first
+// accepted 273 seconds after the rent call returned. The previous 5 minutes
+// left 27 seconds of headroom over that single observation, which is not
+// margin so much as luck, and a larger multi-GPU host has more to do before
+// sshd answers.
+//
+// Erring long is cheap here. The wait ends as soon as the port answers, so
+// the only cost of a generous ceiling is how long a genuinely dead machine
+// takes to be called dead.
+const defaultSSHReadyTimeout = 12 * time.Minute
+
 // New builds a Vast Provider on top of a configured Client. Mirrors
 // runpod.New's option-style construction.
 func New(client *Client, opts ...Option) *Provider {
 	p := &Provider{
-		client:           client,
-		clock:            time.Now,
-		sshReadyTimeout:  5 * time.Minute,
-		sshReadyInterval: 5 * time.Second,
-		sshProbe:         defaultSSHProbe,
+		client:             client,
+		clock:              time.Now,
+		sshReadyTimeout:    defaultSSHReadyTimeout,
+		sshReadyInterval:   5 * time.Second,
+		sshProbe:           defaultSSHProbe,
+		engineReadyTimeout: defaultEngineReadyTimeout,
+		minInetDownMbps:    DefaultMinInetDownMbps,
+		minReliability:     DefaultMinReliability,
 	}
 	for _, opt := range opts {
 		opt(p)
@@ -150,18 +230,28 @@ func New(client *Client, opts ...Option) *Provider {
 // to host:port with a tight timeout and close it. A successful dial
 // means sshd accepted the SYN; the actual SSH handshake happens later
 // in the deployment executor.
+// It dials. That sentence should be unremarkable, and is worth writing down
+// because this function previously did not: it took the arguments, discarded
+// them, and returned nil. It satisfied the type, it was called on the right
+// path, and it reported every address as reachable.
+//
+// The cost of that was not a missing feature but a misleading one. Callers
+// treated "probe passed" as evidence, so WaitForSSHReady returned instantly
+// against machines that were not up, and the failure surfaced minutes later
+// in whatever dialled next. Measured on a rented box: Vast publishes the SSH
+// endpoint about 3 seconds after the rent call and the port does not accept
+// until roughly 273 seconds, so the stub was wrong for four and a half
+// minutes of every rental.
 func defaultSSHProbe(ctx context.Context, host string, port int32) error {
-	d := &http.Client{Timeout: 3 * time.Second}
-	// We don't actually do HTTP here -- but skhttp doesn't expose a
-	// raw TCP dial helper, and importing net adds bloat for the
-	// vast-specific case. RunPod uses net.DialTimeout via its own
-	// dialTCPProbe; we follow the same shape. Defer the move until
-	// real-API testing surfaces a need.
-	_ = d
-	_ = ctx
-	_ = host
-	_ = port
-	return nil
+	if port <= 0 {
+		port = 22
+	}
+	d := net.Dialer{Timeout: 3 * time.Second}
+	conn, err := d.DialContext(ctx, "tcp", net.JoinHostPort(host, strconv.Itoa(int(port))))
+	if err != nil {
+		return err
+	}
+	return conn.Close()
 }
 
 // Name satisfies provisioners.Provider.
@@ -256,9 +346,12 @@ func (p *Provider) Spawn(ctx context.Context, spec *provisionerv1.Spec) (*provis
 		}
 	}
 	if picked == nil {
+		// Name the quality floors in the message. They are the one constraint
+		// the operator did not type, so an empty result reads as "no capacity"
+		// when it may well be "capacity exists, all of it below the floor".
 		return nil, provisioners.NewProviderError(p.Name(), "spawn",
-			fmt.Errorf("no rentable offer found for class=%s sku=%s gpu_count=%d (marketplace empty for these constraints right now; retry or relax)",
-				resolvedClass, resolvedSKU, gpuCount), 0)
+			fmt.Errorf("no rentable offer found for class=%s sku=%s gpu_count=%d (search also required inet_down>=%gMbps reliability2>=%g; retry, relax the constraints, or lower the floors via IPLANE_VAST_MIN_INET_DOWN_MBPS / IPLANE_VAST_MIN_RELIABILITY)",
+				resolvedClass, resolvedSKU, gpuCount, p.minInetDownMbps, p.minReliability), 0)
 	}
 
 	rented, err := p.rentOffer(ctx, picked.ID, image, label, diskGB)
@@ -412,6 +505,44 @@ func (p *Provider) List(ctx context.Context, filter map[string]string) ([]*provi
 // SKU catalog stores the underscored form for stable Go-identifier
 // hygiene; we transform back at the wire boundary via
 // gpuNameForVast.
+// offerVRAMFloorMB returns the per-GPU memory an offer must have, in the
+// megabytes Vast reports, or 0 when nothing constrains it.
+//
+// Takes the larger of what the operator asked for and what the named SKU is
+// documented to have, because both are real constraints: asking for a SKU is
+// asking for that card, not for something sharing its marketing name.
+func offerVRAMFloorMB(gpuName string, reqs *provisionerv1.ResourceRequirements) int {
+	want := int(reqs.GetMinVramGb())
+	if spec := LookupSKU(gpuName); spec != nil && int(spec.VRAMGb) > want {
+		want = int(spec.VRAMGb)
+	}
+	if want <= 0 {
+		return 0
+	}
+	// 3% under the nominal figure, so a card advertised as 80 GB still
+	// matches when the host reports 81251 MB rather than a round 81920.
+	return want * 970
+}
+
+// offerVRAMCeilingMB returns the per-GPU memory an offer must not exceed, in
+// the megabytes Vast reports, or 0 when the SKU does not bound it from above.
+//
+// Only variant SKUs carry a ceiling. For a row that is the only one for its
+// gpu_name there is nothing to disambiguate, and capping it would reject a
+// host that reports slightly more memory than the catalog claims.
+//
+// The 10% headroom mirrors the floor's 3% slack and absorbs the same reporting
+// spread: a "40 GB" card shows up as 40960 on one host and 41000-odd on
+// another, while the part this must exclude reports around 81000, so the gap
+// is wide enough that the tolerance never blurs the two.
+func offerVRAMCeilingMB(gpuName string) int {
+	spec := LookupSKU(gpuName)
+	if spec == nil || spec.VRAMMaxGb <= 0 {
+		return 0
+	}
+	return spec.VRAMMaxGb * 1100
+}
+
 func (p *Provider) findOffer(ctx context.Context, gpuName string, gpuCount, diskGB int, reqs *provisionerv1.ResourceRequirements) (*offerSummary, error) {
 	q := map[string]any{
 		"gpu_name": map[string]string{"eq": gpuNameForVast(gpuName)},
@@ -422,6 +553,32 @@ func (p *Provider) findOffer(ctx context.Context, gpuName string, gpuCount, disk
 	}
 	if diskGB > 0 {
 		q["disk_space"] = map[string]int{"gte": diskGB}
+	}
+	// VRAM floor, also pushed server-side.
+	//
+	// Vast lists several physically different cards under one gpu_name: an
+	// "A100 PCIE" offer may be the 40 GB part or the 80 GB part, and the
+	// marketplace happily returns the cheaper 40 GB one first because the
+	// results are ordered by price. Without this the resolver would rent
+	// half the VRAM the catalog claims for that SKU, and a model sized
+	// against the catalog would OOM on arrival with nothing in the
+	// deployment record hinting why.
+	//
+	// The floor comes from the resolved SKU's catalog entry, so naming a
+	// SKU implies its advertised memory, and an explicit min_vram_gb raises
+	// it further. Vast reports gpu_ram in MB. The 1000 rather than 1024
+	// conversion plus a small margin absorbs the vendors who report 81920
+	// and the ones who report 81251.
+	if floor := offerVRAMFloorMB(gpuName, reqs); floor > 0 {
+		band := map[string]int{"gte": floor}
+		// Upper bound too, for SKUs that name a specific variant of a shared
+		// gpu_name. Without it "A100_SXM4_40GB" would match the 80 GB part as
+		// well, since 80 clears a 40 GB floor: a quietly dearer rental, and in
+		// an A/B where both arms must carry the same card, a confound.
+		if ceil := offerVRAMCeilingMB(gpuName); ceil > 0 {
+			band["lte"] = ceil
+		}
+		q["gpu_ram"] = band
 	}
 	// Fabric filter, pushed server-side. Vast's query language filters on
 	// bw_nvlink directly, so the marketplace does the narrowing and we never
@@ -439,6 +596,41 @@ func (p *Provider) findOffer(ctx context.Context, gpuName string, gpuCount, disk
 			}
 		}
 		q["bw_nvlink"] = map[string]int{"gte": minGBps}
+	}
+	// The other direction: the operator wants a host with NO intra-node
+	// fabric. Ch 10's A/B control arm is exactly this request, and until now
+	// it could not be made at all.
+	//
+	// It is not the same as leaving fabric_scope unset. UNSPECIFIED means "do
+	// not care" and admits anything; NONE means "must not have one", and the
+	// difference decides whether an experiment is valid. Vast lists
+	// bridge-capable cards under PCIe names -- machine 6566 was an "A100 PCIE"
+	// reporting 300 GB/s on 2026-08-11 -- so a control arm chosen without this
+	// filter can silently contain NVLink and make the A/B compare NVLink
+	// against NVLink.
+	//
+	// What this does and does not guarantee, because the gap matters. It
+	// excludes every host with a POSITIVE reading, which is the observed
+	// contamination. It cannot promise the absence of a link, because Vast
+	// reports 0 both for "no link" and for "never measured": the same probe
+	// that found the bridged PCIe hosts also found roughly a quarter of SXM
+	// machines reporting zero on boards that are physically always NVLinked.
+	// So this is "no measured fabric", not "provably none", and the resolved
+	// Hardware keeps FABRIC_SOURCE_UNKNOWN on a bridge-capable card to say so
+	// rather than claiming a certainty the data does not support. Settling it
+	// for real needs an on-box reading (issue #213).
+	if reqs.GetFabricScope() == provisionerv1.FabricScope_FABRIC_SCOPE_NONE {
+		q["bw_nvlink"] = map[string]int{"lte": 0}
+	}
+	// Marketplace-quality floors, pushed server-side alongside the rest. Both
+	// are Vast marketplace columns rather than workload requirements, which is
+	// why they live here and not on ResourceRequirements: no caller wants a
+	// slow, flaky host, so there is nothing for an operator to express.
+	if p.minInetDownMbps > 0 {
+		q["inet_down"] = map[string]float64{"gte": p.minInetDownMbps}
+	}
+	if p.minReliability > 0 {
+		q["reliability2"] = map[string]float64{"gte": p.minReliability}
 	}
 	qBytes, err := json.Marshal(q)
 	if err != nil {
@@ -460,12 +652,20 @@ func (p *Provider) findOffer(ctx context.Context, gpuName string, gpuCount, disk
 	return &resp.Offers[0], nil
 }
 
-// gpuNameForVast converts the underscored SKU token used in our
-// catalog ("RTX_4090") into the space-form gpu_name Vast.ai's API
-// filter expects ("RTX 4090"). Verified via smoke: passing the
-// underscored form to the bundles search returns 0 offers; passing
-// the space form returns the full set.
+// gpuNameForVast converts the SKU token used in our catalog ("RTX_4090") into
+// the space-form gpu_name Vast.ai's API filter expects ("RTX 4090"). Verified
+// via smoke: passing the underscored form to the bundles search returns 0
+// offers; passing the space form returns the full set.
+//
+// Variant SKUs resolve through their WireName first, because iplane's token
+// and Vast's are not the same string for them: "A100_SXM4_40GB" is our name
+// for a card the marketplace only knows as "A100 SXM4". Sending our token
+// would filter on a gpu_name that does not exist and quietly return no offers,
+// which reads exactly like "no capacity".
 func gpuNameForVast(gpuName string) string {
+	if spec := LookupSKU(gpuName); spec != nil && spec.WireName != "" {
+		return strings.ReplaceAll(spec.WireName, "_", " ")
+	}
 	return strings.ReplaceAll(gpuName, "_", " ")
 }
 
@@ -646,6 +846,21 @@ type offerSummary struct {
 	// a zero being trusted as fact. In the 2026-08-09 probe, 9 of 38
 	// "A100 SXM4" offers reported zero on a board that always has NVLink.
 	BwNvlink *float64 `json:"bw_nvlink"`
+
+	// InetDown (Mbps) and Reliability2 ([0,1]) are the two marketplace-quality
+	// columns findOffer filters on. Decoded rather than ignored so a returned
+	// offer can be checked against the floor that was supposed to exclude it:
+	// a filter the marketplace silently stops honouring looks identical to one
+	// that works until someone reads the value that came back.
+	InetDown     float64 `json:"inet_down"`
+	Reliability2 float64 `json:"reliability2"`
+
+	// GpuRAM is per-card memory in MB. Decoded because it is the only thing
+	// distinguishing the variants of a shared gpu_name: an offer that came
+	// back for "A100_SXM4_40GB" is only verifiably the 40 GB part by reading
+	// this. Without it, a band that silently stopped working would look
+	// identical to one that worked.
+	GpuRAM int `json:"gpu_ram"`
 }
 
 type bundlesResponse struct {
@@ -658,18 +873,42 @@ type rentResponse struct {
 	Msg         string `json:"msg"`
 }
 
+// apiPortBind is one docker port mapping as Vast reports it: the host side
+// of a container port. Vast keys the map by the container port in docker's
+// "8000/tcp" form.
+type apiPortBind struct {
+	HostIP   string `json:"HostIp"`
+	HostPort string `json:"HostPort"`
+}
+
 type apiInstance struct {
-	ID                 int     `json:"id"`
-	Label              string  `json:"label"`
-	ActualStatus       string  `json:"actual_status"`
-	GpuName            string  `json:"gpu_name"`
-	NumGPUs            int     `json:"num_gpus"`
-	GpuRAM             int     `json:"gpu_ram"` // MB per GPU
-	SSHHost            string  `json:"ssh_host"`
-	SSHPort            int     `json:"ssh_port"`
-	GeolocationCountry string  `json:"geolocation_country"`
-	Geolocation        string  `json:"geolocation"`
-	DphTotal           float64 `json:"dph_total"`
+	ID           int    `json:"id"`
+	Label        string `json:"label"`
+	ActualStatus string `json:"actual_status"`
+
+	// CurState and StatusMsg are how the host reports what actually happened.
+	// actual_status alone cannot distinguish "still pulling" from "the
+	// container exited and is never coming back": both were observed as
+	// `loading` and `created` respectively while cur_state had already gone to
+	// `stopped`. StatusMsg carries the whole diagnosis, verbatim from docker.
+	CurState  string `json:"cur_state"`
+	StatusMsg string `json:"status_msg"`
+	GpuName   string `json:"gpu_name"`
+	NumGPUs   int    `json:"num_gpus"`
+	GpuRAM    int    `json:"gpu_ram"` // MB per GPU
+	SSHHost   string `json:"ssh_host"`
+	SSHPort   int    `json:"ssh_port"`
+	// PublicIPAddr and Ports are how an engine becomes reachable. Vast has
+	// no proxy URL equivalent to RunPod's <pod>-<port>.proxy.runpod.net, so
+	// the endpoint is the host's public address plus whichever high port
+	// docker mapped the engine's container port onto. Both are empty until
+	// the container is running, which is why the deployer polls for them
+	// rather than deriving an address up front.
+	PublicIPAddr       string                   `json:"public_ipaddr"`
+	Ports              map[string][]apiPortBind `json:"ports"`
+	GeolocationCountry string                   `json:"geolocation_country"`
+	Geolocation        string                   `json:"geolocation"`
+	DphTotal           float64                  `json:"dph_total"`
 	// Host details -- populated by both the bundles search
 	// response and the instance record. Used to fill Hardware and
 	// metadata.
@@ -699,3 +938,95 @@ type instanceListResponse struct {
 // real-API run lands, prune anything that's still unused.
 var _ = json.Marshal
 var _ = url.QueryEscape
+
+// WaitForSSHReady satisfies provisioners.SSHReadyWaiter.
+//
+// Vast returns from the rent call before the machine is reachable: the
+// contract exists, but ssh_host and ssh_port are empty until the host has
+// pulled the image and started sshd, which takes tens of seconds to a couple
+// of minutes. Anything that dials in that window finds no endpoint at all.
+//
+// The scaffolding for this poll (the timeout, the interval, the TCP probe,
+// their options and defaults) was present from the start; only the method
+// was missing, so every caller silently got no wait. `iplane instance wait`
+// reported "already ready" against a machine with no SSH endpoint, and the
+// deploy path dialled into nothing.
+//
+// Two conditions, not one. The record must carry a host and port, and the
+// port must actually accept a connection. Vast publishes the endpoint a few
+// seconds before sshd answers on it, so returning on the record alone hands
+// the caller an address that refuses the next connection.
+func (p *Provider) WaitForSSHReady(ctx context.Context, providerID string) (*provisionerv1.SshTarget, error) {
+	if providerID == "" {
+		return nil, provisioners.NewProviderError(p.Name(), "wait_ssh_ready",
+			fmt.Errorf("providerID is empty"), 0)
+	}
+	id, err := strconv.Atoi(providerID)
+	if err != nil {
+		return nil, provisioners.NewProviderError(p.Name(), "wait_ssh_ready",
+			fmt.Errorf("provider id %q is not a vast contract id: %w", providerID, err), 0)
+	}
+
+	timeout := p.sshReadyTimeout
+	if timeout <= 0 {
+		// Always allow one lookup, so a test that disables polling still
+		// gets a best-effort answer rather than an immediate error.
+		timeout = time.Second
+	}
+	interval := p.sshReadyInterval
+	if interval <= 0 {
+		interval = 5 * time.Second
+	}
+
+	// Deadline on the context rather than arithmetic over p.clock(). The
+	// clock is injectable and tests hold it fixed, which would make a
+	// clock-based deadline unreachable and this loop run forever. Wall time
+	// is also the honest measure here: the wait is against a remote machine
+	// booting, not against anything the caller simulates.
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	var last error
+	for {
+		api, derr := p.describeContract(waitCtx, id)
+		switch {
+		case derr != nil:
+			// A transient read failure is not a verdict; keep polling until
+			// the deadline and report the last error if it never clears.
+			last = derr
+		case api.SSHHost != "":
+			target := &provisionerv1.SshTarget{
+				Host: api.SSHHost,
+				Port: int32(api.SSHPort),
+				User: "root",
+			}
+			if p.sshProbe == nil {
+				return target, nil
+			}
+			if perr := p.sshProbe(waitCtx, target.Host, target.Port); perr == nil {
+				return target, nil
+			} else {
+				last = perr
+			}
+		default:
+			last = fmt.Errorf("ssh_host not yet published")
+		}
+
+		select {
+		case <-waitCtx.Done():
+			// Distinguish our own deadline from the caller giving up
+			// first. Reporting "within 12m" after 90 seconds sends the
+			// reader looking for a provider problem when the real answer
+			// is that their client timeout is shorter than a boot.
+			waited := timeout
+			if ctx.Err() != nil {
+				return nil, provisioners.NewProviderError(p.Name(), "wait_ssh_ready",
+					fmt.Errorf("caller stopped waiting for instance %s before it became reachable "+
+						"(provider budget was %s); last attempt: %w", providerID, waited, last), 0)
+			}
+			return nil, provisioners.NewProviderError(p.Name(), "wait_ssh_ready",
+				fmt.Errorf("instance %s had no reachable ssh endpoint within %s: %w", providerID, waited, last), 0)
+		case <-time.After(interval):
+		}
+	}
+}

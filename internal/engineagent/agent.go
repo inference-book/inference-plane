@@ -69,11 +69,64 @@ type Identity struct {
 	NodeIndex    int32
 }
 
-// Probe reports whether the engine on this box is serving yet. It returns a
-// bool rather than an error because the agent does not act differently on
-// "not ready" and "the probe itself failed": both mean the group has not
-// formed, and both are ASSEMBLING.
-type Probe func(context.Context) bool
+// Readiness is what a local observation of the engine can conclude. Three
+// values, and the third is the one the chapter exists for.
+//
+// Deliberately narrower than EngineState. LOST and DRAINING are the control
+// plane's conclusions, one from an expired lease and one from an operator
+// decision, and neither is something an engine can observe about itself. A
+// probe that returned EngineState could express them; this cannot, so the
+// rule is enforced by the type instead of by a check that has to be
+// remembered.
+type Readiness int
+
+const (
+	// NotReady means the group has not formed. The engine may be starting,
+	// the workers may still be finding each other, or the probe itself may
+	// have failed; the agent does not distinguish, because all three mean
+	// the same thing to a reader of the fleet view and none of them is
+	// serving.
+	NotReady Readiness = iota
+
+	// Ready means the engine is answering.
+	Ready
+
+	// Degraded means the engine is assembled and answering correctly while
+	// running well below what the hardware should give, because something
+	// inside the group is impaired. It is not a failure and it is not
+	// health; a probe built to separate those two has no way to say it.
+	//
+	// A pool with no sensor for this reports Ready, never Degraded. Absence
+	// of a reading is not evidence of a problem, and reporting "degraded"
+	// for every machine we cannot measure would make the state useless.
+	Degraded
+)
+
+// String renders a Readiness for logs.
+func (r Readiness) String() string {
+	switch r {
+	case Ready:
+		return "ready"
+	case Degraded:
+		return "degraded"
+	default:
+		return "not-ready"
+	}
+}
+
+// Probe is a local observation of the engine on this box.
+//
+// It returns a Readiness rather than an error because the agent does not act
+// differently on "not ready" and "the probe itself failed": both mean the
+// group has not formed.
+//
+// The reason this is a local call matters more than the reason it is pushed.
+// During assembly there is no reachable endpoint for anything outside the
+// machine to ask, so an observer positioned elsewhere cannot distinguish a
+// group that is still forming from one that is slow, broken or gone. An
+// observer inside can watch it come up. Issue 213's link sensor is the same
+// argument applied to a different reading, and plugs in here.
+type Probe func(context.Context) Readiness
 
 // Agent registers one engine and keeps its lease alive.
 type Agent struct {
@@ -83,6 +136,13 @@ type Agent struct {
 	cards  int32
 	span   []*provisionerv1.EngineNode
 	log    *slog.Logger
+
+	// interconnect reads link health for this node. Separate from probe
+	// because it answers a different question: probe says whether the engine
+	// is serving, this says whether it is serving at full speed. Nil means
+	// the agent makes no interconnect claim at all, which is what an agent
+	// built before this existed did.
+	interconnect func(context.Context) *provisionerv1.InterconnectHealth
 
 	// interval is the renewal cadence. Seeded with a conservative default
 	// and replaced by whatever the control plane returns, so detection
@@ -140,6 +200,25 @@ func WithSpan(span []*provisionerv1.EngineNode) Option {
 	return func(a *Agent) {
 		if len(span) > 0 {
 			a.span = span
+		}
+	}
+}
+
+// WithInterconnect supplies the link-health sensor whose reading separates a
+// group serving at full speed from one serving correctly at a fraction of it.
+//
+// Injectable rather than always shelling out, for three reasons: tests and the
+// mock engine can report a board that does not exist, an operator on a
+// provider that hides the NVIDIA tooling inside the container can leave it off
+// instead of paying a failing exec every renewal, and a future DCGM-based
+// reader replaces it without touching the agent.
+//
+// Left unset, the agent makes no interconnect claim at all, which is exactly
+// what an agent built before this existed did.
+func WithInterconnect(read func(context.Context) *provisionerv1.InterconnectHealth) Option {
+	return func(a *Agent) {
+		if read != nil {
+			a.interconnect = read
 		}
 	}
 }
@@ -238,12 +317,26 @@ const RenewDivisor = 3
 //
 // The state is read fresh every time rather than latched, so an engine that
 // falls over after assembling reports ASSEMBLING again instead of claiming a
-// readiness it no longer has. LOST is never reported here: it is the control
-// plane's conclusion from an expired lease, and the registry rejects an
-// engine that claims it about itself.
+// readiness it no longer has, and one whose link recovers stops reporting
+// degraded without anything having to clear a flag.
+//
+// LOST and DRAINING are never reported here. Readiness cannot express them,
+// which is the point of it being narrower than EngineState.
 func (a *Agent) snapshot(ctx context.Context) *provisionerv1.Engine {
-	state := provisionerv1.EngineState_ENGINE_STATE_SERVING
-	if a.probe != nil && !a.probe(ctx) {
+	// No probe means no local observation to make, which is the honest
+	// default for an engine exposing no health endpoint.
+	readiness := Ready
+	if a.probe != nil {
+		readiness = a.probe(ctx)
+	}
+
+	var state provisionerv1.EngineState
+	switch readiness {
+	case Ready:
+		state = provisionerv1.EngineState_ENGINE_STATE_SERVING
+	case Degraded:
+		state = provisionerv1.EngineState_ENGINE_STATE_SERVING_DEGRADED
+	default:
 		state = provisionerv1.EngineState_ENGINE_STATE_ASSEMBLING
 	}
 
@@ -257,6 +350,20 @@ func (a *Agent) snapshot(ctx context.Context) *provisionerv1.Engine {
 		}}
 	}
 
+	// Stamp the link reading onto the node this agent actually runs on, and
+	// only that one. An agent can see its own board and nothing else, so
+	// attributing a reading to a fabricated multi-node span would be
+	// reporting hardware it never looked at. Read fresh each tick like the
+	// state above, so a link that recovers stops being reported without
+	// anything having to clear a flag.
+	if a.interconnect != nil {
+		for _, n := range span {
+			if n.GetNodeIndex() == a.ident.NodeIndex {
+				n.Interconnect = a.interconnect(ctx)
+			}
+		}
+	}
+
 	return &provisionerv1.Engine{
 		Id:           a.ident.EngineID,
 		DeploymentId: a.ident.DeploymentID,
@@ -267,25 +374,60 @@ func (a *Agent) snapshot(ctx context.Context) *provisionerv1.Engine {
 	}
 }
 
-// HTTPProbe returns a Probe that treats a 2xx from url as "serving".
+// HTTPProbe returns a Probe that treats a 2xx from url as Ready.
 //
 // The agent runs on the box, so this is a loopback call to the engine's own
 // health endpoint and costs nothing worth budgeting. That locality is the
 // point: the control plane's /health poller cannot see ASSEMBLING because
 // during assembly there is no reachable endpoint for it to ask, while the
 // agent is already inside and can watch the engine come up.
+//
+// It never returns Degraded, and cannot. Health endpoints answer the
+// question they were built for, which is whether the engine is serving, and
+// a degraded group is serving. Detecting that a group is impaired needs a
+// different reading from a different source (issue 213's link sensor);
+// compose the two with AnyDegraded rather than teaching this one to guess.
 func HTTPProbe(url string, timeout time.Duration) Probe {
 	client := &http.Client{Timeout: timeout}
-	return func(ctx context.Context) bool {
+	return func(ctx context.Context) Readiness {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 		if err != nil {
-			return false
+			return NotReady
 		}
 		resp, err := client.Do(req)
 		if err != nil {
-			return false
+			return NotReady
 		}
 		defer resp.Body.Close()
-		return resp.StatusCode >= 200 && resp.StatusCode < 300
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			return Ready
+		}
+		return NotReady
+	}
+}
+
+// AnyDegraded composes a readiness probe with an impairment probe, which is
+// how a health check and a link sensor combine into one reading.
+//
+// Not ready wins over degraded: a group that has not formed is not a
+// degraded group, it is a group that is not serving, and reporting the
+// milder state during startup would make assembly look like a fault. Only
+// once the engine answers does an impairment reading get to downgrade it.
+//
+// impaired is consulted only when serving, so a sensor that is expensive or
+// unavailable during startup is never called then.
+func AnyDegraded(ready Probe, impaired func(context.Context) bool) Probe {
+	return func(ctx context.Context) Readiness {
+		r := Ready
+		if ready != nil {
+			r = ready(ctx)
+		}
+		if r != Ready || impaired == nil {
+			return r
+		}
+		if impaired(ctx) {
+			return Degraded
+		}
+		return Ready
 	}
 }

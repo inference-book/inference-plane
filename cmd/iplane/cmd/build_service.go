@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/inference-book/inference-plane/internal/deployments/sshdocker"
@@ -52,21 +53,41 @@ func buildLocalService(store *file.Store, operatorID string, extra ...provisione
 		// cold-pulling on community capacity (plus the model load) can
 		// exceed that, so let an operator extend it. Ch 9's big-model
 		// deploys are the motivating case.
-		if v := os.Getenv("IPLANE_RUNPOD_ENGINE_READY_TIMEOUT"); v != "" {
-			if d, err := time.ParseDuration(v); err == nil && d > 0 {
-				rpOpts = append(rpOpts, runpod.WithEngineReadyTimeout(d))
-			}
+		if d := engineReadyTimeout("IPLANE_RUNPOD_ENGINE_READY_TIMEOUT"); d > 0 {
+			rpOpts = append(rpOpts, runpod.WithEngineReadyTimeout(d))
 		}
 		providers = append(providers, runpod.New(runpod.NewClient(key), rpOpts...))
 	}
 	if key := os.Getenv("VAST_API_KEY"); key != "" {
-		providers = append(providers, vast.New(vast.NewClient(key)))
+		var vastOpts []vast.Option
+		// Same generic override the other paths honour. Vast is now
+		// image-native, so this bounds the image pull plus model load
+		// rather than an SSH wait.
+		if d := engineReadyTimeout(""); d > 0 {
+			vastOpts = append(vastOpts, vast.WithEngineReadyTimeout(d))
+		}
+		// Marketplace-quality floors. Only passed when an operator actually set
+		// one, so the adapter's defaults stay the single source of truth for
+		// what a sane floor is.
+		if inet, rel, ok := vastHostQualityFloor(); ok {
+			vastOpts = append(vastOpts, vast.WithHostQualityFloor(inet, rel))
+		}
+		providers = append(providers, vast.New(vast.NewClient(key), vastOpts...))
 	}
 	if key := os.Getenv("LAMBDA_API_KEY"); key != "" {
 		providers = append(providers, lambdalabs.New(lambdalabs.NewClient(key)))
 	}
 
-	executor := sshdocker.NewExecutor()
+	// Engine-ready wait for the VM-style deploy path. Mirrors the
+	// image-native path's IPLANE_RUNPOD_ENGINE_READY_TIMEOUT, because the
+	// operator-facing question is identical: how long may a legitimate
+	// deploy take to start serving. Left generic rather than named after
+	// sshdocker, so a second VM-style path does not grow a third spelling.
+	var execOpts []sshdocker.Option
+	if d := engineReadyTimeout(""); d > 0 {
+		execOpts = append(execOpts, sshdocker.WithHealthPoll(2*time.Second, d))
+	}
+	executor := sshdocker.NewExecutor(execOpts...)
 
 	opts := []provisioners.Option{
 		provisioners.WithKeyStore(keyStore),
@@ -83,4 +104,65 @@ func buildLocalService(store *file.Store, operatorID string, extra ...provisione
 	}
 	opts = append(opts, extra...)
 	return provisioners.New(providers, store, operatorID, opts...), nil
+}
+
+// engineReadyTimeout resolves how long a deploy may take to start serving.
+//
+// specific is a provider-scoped env var consulted first, so an operator who
+// already set IPLANE_RUNPOD_ENGINE_READY_TIMEOUT keeps their behaviour;
+// IPLANE_ENGINE_READY_TIMEOUT is the generic fallback that applies to every
+// deploy path. Pass "" to consult only the generic one.
+//
+// Returns 0 when neither is set or the value does not parse, meaning the
+// caller keeps its own default. A malformed duration is ignored rather than
+// fatal: refusing to start the daemon over a typo'd timeout would be a
+// worse outcome than using the default and letting the deploy report what
+// happened.
+// vastHostQualityFloor resolves the marketplace-quality floors Vast's offer
+// search applies, returning ok=false when the operator set neither and the
+// adapter should keep its own defaults.
+//
+// The two knobs are independent, so a run that lowers only the bandwidth floor
+// keeps the default reliability floor rather than silently dropping it to zero.
+// That is why this starts from the adapter's exported defaults instead of from
+// nothing.
+//
+// 0 is a meaningful value here (it disables that floor), so a malformed or
+// negative entry is ignored rather than clamped: a typo should not quietly turn
+// a floor off, which is the exact failure the floors were added to prevent.
+func vastHostQualityFloor() (inetDownMbps, reliability float64, ok bool) {
+	inetDownMbps, reliability = vast.DefaultMinInetDownMbps, vast.DefaultMinReliability
+	for _, e := range []struct {
+		key string
+		dst *float64
+	}{
+		{"IPLANE_VAST_MIN_INET_DOWN_MBPS", &inetDownMbps},
+		{"IPLANE_VAST_MIN_RELIABILITY", &reliability},
+	} {
+		v := os.Getenv(e.key)
+		if v == "" {
+			continue
+		}
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil || f < 0 {
+			continue
+		}
+		*e.dst = f
+		ok = true
+	}
+	return inetDownMbps, reliability, ok
+}
+
+func engineReadyTimeout(specific string) time.Duration {
+	for _, key := range []string{specific, "IPLANE_ENGINE_READY_TIMEOUT"} {
+		if key == "" {
+			continue
+		}
+		if v := os.Getenv(key); v != "" {
+			if d, err := time.ParseDuration(v); err == nil && d > 0 {
+				return d
+			}
+		}
+	}
+	return 0
 }
