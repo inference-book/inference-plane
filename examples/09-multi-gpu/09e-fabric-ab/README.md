@@ -169,10 +169,31 @@ fits either tier.
 | `DEMO_GPUS` | 4 | paid only: GPUs per arm |
 | `DEMO_DISK_GB` | 150 | paid only: container disk |
 
-## Teardown
+## Teardown, and the watchdog
 
 GPU-free mode kills only what it started. Paid mode destroys both deployments
-and both instances on exit, including on failure. **Check `iplane instance
-list` afterwards anyway.** A rented GPU that outlives the script is the
-expensive failure mode, and a shell trap does not run when the process is
-killed rather than exited.
+and both instances on exit, including on failure and on `SIGTERM`.
+
+**That is not sufficient on its own.** A shell trap does not run when the
+process is killed rather than exited, and it is deferred while a foreground
+command is in flight. Anything that kills the run between renting a box and
+tearing it down leaves that box billing.
+
+So before a paid run, arm the independent watchdog:
+
+```bash
+./watchdog.sh 90 /tmp/wd.log &     # destroy every iplane-* instance after 90m
+```
+
+Two rules, both learned the hard way:
+
+- **Arm it before anything can be rented**, not after the first deploy.
+- **Stop it when the run ends.** A watchdog left armed from an earlier run
+  swept a later run's boxes mid-measurement and destroyed a completed
+  experiment. Tie its lifetime to the run.
+
+It exits `0` only after positively confirming the account is clean. If it
+cannot read the provider API at the deadline it exits non-zero and says so,
+rather than reporting success it did not measure — an earlier version made
+exactly that mistake and left a box running for 52 minutes while logging
+"nothing to sweep; clean exit".

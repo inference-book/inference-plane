@@ -11,6 +11,7 @@ import (
 	skhttp "github.com/panyam/servicekit/http"
 
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
+	"github.com/inference-book/inference-plane/internal/engineagent"
 	"github.com/inference-book/inference-plane/internal/provisioners"
 	"github.com/inference-book/inference-plane/internal/sshkeys"
 )
@@ -220,7 +221,44 @@ func onstartScript(engineCmd []string, dep *provisionerv1.Deployment, enginePort
 	for _, a := range argv {
 		quoted = append(quoted, "'"+strings.ReplaceAll(a, "'", `'\''`)+"'")
 	}
-	return "exec " + strings.Join(quoted, " ")
+	return agentPrelude(dep) + "exec " + strings.Join(quoted, " ")
+}
+
+// agentPrelude returns the shell that starts the registration agent beside
+// the engine, or "" to leave the startup script exactly as it was.
+//
+// Vast is the cheapest of the three delivery paths and the last to get one.
+// RunPod needs an entrypoint wrapper because the image's own entrypoint is
+// what runs; the SSH path needs a sidecar container. Here the provider hands
+// us the startup script outright, so the agent is simply two blocks above the
+// engine in a file we already write. No wrapper, no sidecar.
+//
+// The env the agent reads is already arriving: rentEngine forwards
+// dep.GetEnv() into the container, and the deploy path stamps the identity
+// there. Only the launch was missing.
+//
+// "" is the safe answer and the common one. Both conditions have to hold
+// before the script is touched: the deploy path stamped an identity, so there
+// is something to register as, and a binary URL resolves, so there is an
+// agent to fetch. A dev build publishes no artifact and deliberately has no
+// URL, so this is empty on every untagged build and the deploy goes out
+// exactly as it did before. Vast needs no engine-entrypoint check -- unlike
+// RunPod it cannot deploy without one, because the provider never runs the
+// image's own entrypoint.
+func agentPrelude(dep *provisionerv1.Deployment) string {
+	env := dep.GetEnv()
+	if env[engineagent.EnvEngineID] == "" || env[engineagent.EnvServiceURL] == "" {
+		return ""
+	}
+	url, ok := engineagent.BinaryURL("amd64")
+	if !ok {
+		return ""
+	}
+	prelude, err := engineagent.AgentPrelude(url)
+	if err != nil {
+		return ""
+	}
+	return prelude + "\n"
 }
 
 // waitForEngineReady polls until the engine answers /health, returning the
