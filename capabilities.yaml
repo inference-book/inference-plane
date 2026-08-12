@@ -18,16 +18,14 @@
 
 snapshots:
 
-  # Drafted ahead of the tag: the Ch 10 capability set is locked (issues 203,
-  # 204, 205, 213, 215, 232 all closed) but ch10-final is not cut yet, so `date`
-  # is TBD. v0.2.3 was an interim release that published the agent binary, so
-  # this tag aliases v0.2.4.
+  # v0.2.3 was an interim release that published the agent binary, so this tag
+  # aliases v0.2.4.
   - tag: ch10-final
     alias: v0.2.4
     chapter: 10
     chapter_title: Multi-GPU and Distributed Inference
     branch: release/v0.2
-    date: TBD
+    date: 2026-08-12
 
     summary: |
       One engine, many cards. Chapter 9 closed at the single-GPU ceiling, and
