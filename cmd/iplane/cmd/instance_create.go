@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
+	"github.com/inference-book/inference-plane/internal/provisioners"
 )
 
 // Flags scoped to `iplane instance create`. The constraints-first
@@ -83,6 +84,32 @@ and bypasses constraints entirely.`,
 func runInstanceCreate(cmd *cobra.Command, args []string) error {
 	provider := args[0]
 	id := args[1]
+
+	// "auto" is not a provider, it is an instruction to pick one. Resolving it
+	// here rather than inside the Service keeps the choice visible in the Spec
+	// that gets recorded: state should say which vendor was rented, never
+	// "whichever was cheapest that morning".
+	var placement *provisioners.Placement
+	if provider == autoProvider {
+		var err error
+		placement, err = resolveAutoPlacement(cmd, id)
+		if err != nil {
+			return err
+		}
+		provider = placement.Winner.Provider
+		if createSKU == "" {
+			// The winning SKU supersedes the class shorthand that found it.
+			// Class expands to numeric bounds and the resolver already applied
+			// them; carrying both forward trips the mutually-exclusive check,
+			// and the SKU is the more specific of the two.
+			createSKU = placement.Winner.SKU
+			createClass = ""
+		}
+		for _, line := range placement.Describe() {
+			fmt.Fprintf(cmd.ErrOrStderr(), "placement: %s\n", line)
+		}
+	}
+
 	if err := checkProviderAvailable(provider); err != nil {
 		return err
 	}
@@ -117,7 +144,7 @@ func runInstanceCreate(cmd *cobra.Command, args []string) error {
 	if createDryRun {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		return dryRunCreate(ctx, cmd.OutOrStdout(), client, spec)
+		return dryRunCreate(ctx, cmd.OutOrStdout(), client, spec, placement)
 	}
 
 	// 3-minute timeout covers RunPod's slowest p99 spawn and a generous

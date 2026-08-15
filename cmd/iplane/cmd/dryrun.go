@@ -32,7 +32,7 @@ import (
 // dryRunCreate is the create-verb dry-run path. Mirrors the logic the
 // Service goes through (validate -> idempotency lookup -> spawn) but
 // stops at "would Spawn" and prints what would happen.
-func dryRunCreate(ctx context.Context, w io.Writer, client provisionerClient, spec *provisionerv1.Spec) error {
+func dryRunCreate(ctx context.Context, w io.Writer, client provisionerClient, spec *provisionerv1.Spec, placement *provisioners.Placement) error {
 	if err := provisioners.ValidateID(spec.GetId()); err != nil {
 		return err
 	}
@@ -71,7 +71,7 @@ func dryRunCreate(ctx context.Context, w io.Writer, client provisionerClient, sp
 		return fmt.Errorf("dry-run lookup of %q: %w", spec.GetId(), err)
 	}
 
-	cost, costNote := projectedCost(spec)
+	cost, costNote := projectedCost(spec, placement)
 	fmt.Fprintf(w, "[dry-run] would create %q on %s\n", spec.GetId(), spec.GetProvider())
 	if region := spec.GetRegion(); region != "" {
 		fmt.Fprintf(w, "[dry-run]   region:     %s\n", region)
@@ -79,14 +79,31 @@ func dryRunCreate(ctx context.Context, w io.Writer, client provisionerClient, sp
 		fmt.Fprintf(w, "[dry-run]   region:     (unpinned -- runpod schedules wherever capacity exists)\n")
 	}
 	reqs := spec.GetRequirements()
-	fmt.Fprintf(w, "[dry-run]   constraints: vram>=%dGB, ram>=%dGB, disk>=%dGB, gpus=%d\n",
-		reqs.GetMinVramGb(), reqs.GetMinRamGb(), reqs.GetMinDiskGb(), maxInt32(reqs.GetGpuCount(), 1))
+	// An explicit SKU is the whole constraint. Printing the numeric bounds
+	// alongside it reads as though they still apply, and after --provider auto
+	// resolves a SKU they are all zero, which looks like a bug rather than
+	// like a question that has already been answered.
+	if sku := reqs.GetSku(); sku != "" {
+		fmt.Fprintf(w, "[dry-run]   sku:         %s (gpus=%d)\n", sku, maxInt32(reqs.GetGpuCount(), 1))
+	} else {
+		fmt.Fprintf(w, "[dry-run]   constraints: vram>=%dGB, ram>=%dGB, disk>=%dGB, gpus=%d\n",
+			reqs.GetMinVramGb(), reqs.GetMinRamGb(), reqs.GetMinDiskGb(), maxInt32(reqs.GetGpuCount(), 1))
+	}
 	if scope := reqs.GetFabricScope(); scope != provisionerv1.FabricScope_FABRIC_SCOPE_UNSPECIFIED {
 		fmt.Fprintf(w, "[dry-run]   fabric:     %s%s (candidates whose fabric the provider "+
 			"does not report are excluded)\n", fabricScopeLabel(scope), fabricBandwidthNote(reqs.GetMinFabricGbps()))
 	}
 	fmt.Fprintf(w, "[dry-run]   est cost:   %s%s\n", cost, costNote)
-	fmt.Fprintln(w, "[dry-run] no provider calls made, no state file changes.")
+	// The closing line has to stay literally true. Dry-run's contract is that
+	// it touches nothing, and --provider auto does reach the providers to rank
+	// candidates. Those calls are read-only and rent nothing, but "no provider
+	// calls made" would be false, and a contract line nobody can trust is
+	// worse than a longer one.
+	if placement != nil {
+		fmt.Fprintln(w, "[dry-run] the placement query read the providers' catalogs; nothing was rented and no state file changed.")
+	} else {
+		fmt.Fprintln(w, "[dry-run] no provider calls made, no state file changes.")
+	}
 	return nil
 }
 
@@ -128,7 +145,15 @@ func dryRunDestroy(ctx context.Context, w io.Writer, client provisionerClient, i
 // hit's catalog price. The actual rate at Spawn time may differ --
 // RunPod's live pricing can drift from our static catalog. That's
 // fine for an estimate.
-func projectedCost(spec *provisionerv1.Spec) (string, string) {
+func projectedCost(spec *provisionerv1.Spec, placement *provisioners.Placement) (string, string) {
+	// A resolved placement carries the vendor's own live quote for the exact
+	// candidate that won, which beats every estimate below. Reporting
+	// "(unknown)" right after choosing on price would be absurd.
+	if placement != nil {
+		return fmt.Sprintf("$%.4f/hr", placement.Winner.PriceUSDPerHour),
+			fmt.Sprintf(" (live quote for %s on %s, cheapest of %d)",
+				placement.Winner.SKU, placement.Winner.Provider, placement.Considered)
+	}
 	switch spec.GetProvider() {
 	case provisioners.ProviderLocal:
 		return "$0.0000/hr", " (local; the laptop provisions itself)"
