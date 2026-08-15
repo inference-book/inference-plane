@@ -305,8 +305,8 @@ func (p *Provider) Spawn(ctx context.Context, spec *provisionerv1.Spec) (*provis
 		gpuTypeIDs = MatchSKUs(reqs)
 		if len(gpuTypeIDs) == 0 {
 			return nil, provisioners.NewProviderError(p.Name(), "spawn",
-				fmt.Errorf("no SKU in the vast catalog satisfies min_vram_gb=%d min_disk_gb=%d min_ram_gb=%d",
-					reqs.GetMinVramGb(), reqs.GetMinDiskGb(), reqs.GetMinRamGb()), 0)
+				fmt.Errorf("no SKU in the vast catalog satisfies min_vram_gb=%d min_ram_gb=%d",
+					reqs.GetMinVramGb(), reqs.GetMinRamGb()), 0)
 		}
 		resolvedSKU = gpuTypeIDs[0]
 		if resolvedClass == "" {
