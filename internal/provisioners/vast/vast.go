@@ -578,6 +578,18 @@ func (p *Provider) searchOffers(ctx context.Context, gpuName string, gpuCount, d
 	if diskGB > 0 {
 		q["disk_space"] = map[string]int{"gte": diskGB}
 	}
+	// System RAM floor, pushed server-side for the same reason disk is. Vast
+	// reports cpu_ram per offer, so the marketplace can judge the actual host
+	// instead of us guessing from a tier estimate. min_ram_gb is stated per
+	// instance and cpu_ram is the host total, so no per-card scaling applies
+	// here: this is the one provider where the two units already agree.
+	//
+	// 1000 rather than 1024, matching the gpu_ram conversion above, because
+	// hosts report round decimal figures and a binary conversion would reject
+	// machines that are fine (#283).
+	if ramGB := int(reqs.GetMinRamGb()); ramGB > 0 {
+		q["cpu_ram"] = map[string]int{"gte": ramGB * 1000}
+	}
 	// VRAM floor, also pushed server-side.
 	//
 	// Vast lists several physically different cards under one gpu_name: an

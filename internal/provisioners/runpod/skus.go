@@ -121,15 +121,21 @@ const MaxSKUsPerRequest = skucatalog.MaxResults
 // set. DefaultDiskGb is deliberately absent: disk is an independent create
 // param sized from min_disk_gb by the deployer, so it is not a fact a catalog
 // row bounds and must never filter (#281).
+//
+// System RAM DOES cross over, because RunPod is the one provider that can
+// neither let an operator select it nor report it per candidate. It comes with
+// the pod shape and scales with the card count, so a per-card estimate scaled
+// by the requested width is the best answer available. It is still an
+// estimate, which is why the field carries its unit in its name (#283).
 func catalogEntries() []skucatalog.Entry {
 	out := make([]skucatalog.Entry, 0, len(skus))
 	for _, sku := range skus {
 		out = append(out, skucatalog.Entry{
-			Token:           sku.GpuTypeID,
-			VRAMGb:          sku.VRAMGb,
-			SystemRAMGb:     sku.DefaultSystemRAMGb,
-			PriceUSDPerHour: sku.PriceUSDPerHour,
-			Family:          sku.Family,
+			Token:             sku.GpuTypeID,
+			VRAMGb:            sku.VRAMGb,
+			SystemRAMGbPerGPU: sku.DefaultSystemRAMGb,
+			PriceUSDPerHour:   sku.PriceUSDPerHour,
+			Family:            sku.Family,
 		})
 	}
 	return out

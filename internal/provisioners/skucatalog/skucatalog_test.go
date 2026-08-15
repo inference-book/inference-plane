@@ -12,9 +12,9 @@ import (
 // board-integrated fabric, and a card with none at all.
 func testCatalog() []Entry {
 	return []Entry{
-		{Token: "no-fabric-cheap", VRAMGb: 24, SystemRAMGb: 16, PriceUSDPerHour: 0.30, Family: fabric.FamilyRTX4090},
-		{Token: "bridge-capable", VRAMGb: 80, SystemRAMGb: 128, PriceUSDPerHour: 1.20, Family: fabric.FamilyA100PCIe},
-		{Token: "always-fabric", VRAMGb: 80, SystemRAMGb: 128, PriceUSDPerHour: 1.30, Family: fabric.FamilyA100SXM},
+		{Token: "no-fabric-cheap", VRAMGb: 24, SystemRAMGbPerGPU: 16, PriceUSDPerHour: 0.30, Family: fabric.FamilyRTX4090},
+		{Token: "bridge-capable", VRAMGb: 80, SystemRAMGbPerGPU: 128, PriceUSDPerHour: 1.20, Family: fabric.FamilyA100PCIe},
+		{Token: "always-fabric", VRAMGb: 80, SystemRAMGbPerGPU: 128, PriceUSDPerHour: 1.30, Family: fabric.FamilyA100SXM},
 	}
 }
 
@@ -24,7 +24,7 @@ func testCatalog() []Entry {
 // min_ram_gb cannot be judged against its rows.
 func TestUnpublishedSizingFactDoesNotFilter(t *testing.T) {
 	catalog := []Entry{
-		{Token: "publishes-nothing", VRAMGb: 80, SystemRAMGb: 0, PriceUSDPerHour: 1.00, Family: fabric.FamilyA100SXM},
+		{Token: "publishes-nothing", VRAMGb: 80, SystemRAMGbPerGPU: 0, PriceUSDPerHour: 1.00, Family: fabric.FamilyA100SXM},
 	}
 
 	got := Match(catalog, &provisionerv1.ResourceRequirements{MinRamGb: 4096}, FabricDeclared)
@@ -39,8 +39,8 @@ func TestUnpublishedSizingFactDoesNotFilter(t *testing.T) {
 // RunPod and Vast resolution.
 func TestPublishedSizingFactStillFilters(t *testing.T) {
 	catalog := []Entry{
-		{Token: "small-ram", VRAMGb: 80, SystemRAMGb: 64, PriceUSDPerHour: 1.00, Family: fabric.FamilyA100SXM},
-		{Token: "big-ram", VRAMGb: 80, SystemRAMGb: 256, PriceUSDPerHour: 2.00, Family: fabric.FamilyA100SXM},
+		{Token: "small-ram", VRAMGb: 80, SystemRAMGbPerGPU: 64, PriceUSDPerHour: 1.00, Family: fabric.FamilyA100SXM},
+		{Token: "big-ram", VRAMGb: 80, SystemRAMGbPerGPU: 256, PriceUSDPerHour: 2.00, Family: fabric.FamilyA100SXM},
 	}
 
 	got := Match(catalog, &provisionerv1.ResourceRequirements{MinRamGb: 128}, FabricDeclared)
@@ -192,5 +192,40 @@ func TestNoMatchReturnsEmpty(t *testing.T) {
 
 	if len(got) != 0 {
 		t.Errorf("got %v, want no matches", got)
+	}
+}
+
+// min_ram_gb is stated per instance and the catalogs publish per card, so the
+// comparison has to scale with the requested width. Judging a four-card
+// request against one card's figure is what #283 was: it rejected every A100
+// and H100 in the RunPod catalog for a 200 GB ask and landed on a B200, whose
+// single-card 256 was the only figure that cleared the bar.
+func TestPerCardRAMScalesWithRequestedWidth(t *testing.T) {
+	catalog := []Entry{
+		{Token: "a100", VRAMGb: 80, SystemRAMGbPerGPU: 96, PriceUSDPerHour: 1.79, Family: fabric.FamilyA100SXM},
+		{Token: "b200", VRAMGb: 192, SystemRAMGbPerGPU: 256, PriceUSDPerHour: 5.99, Family: fabric.FamilyB200},
+	}
+
+	// Four A100s carry roughly 4 x 96 = 384 GB, so a 200 GB ask fits and the
+	// cheap card must win.
+	got := Match(catalog, &provisionerv1.ResourceRequirements{GpuCount: 4, MinRamGb: 200}, FabricDeclared)
+
+	if len(got) == 0 {
+		t.Fatal("no match for 200 GB across four cards, which four A100s comfortably carry")
+	}
+	if got[0] != "a100" {
+		t.Errorf("cheapest match = %q, want a100; a per-card comparison escalates to the frontier card", got[0])
+	}
+}
+
+// The scaling must not become a way to pass a floor nothing can meet. One card
+// carrying 96 GB does not satisfy a 200 GB instance requirement.
+func TestPerCardRAMStillRejectsAtOneCard(t *testing.T) {
+	catalog := []Entry{
+		{Token: "a100", VRAMGb: 80, SystemRAMGbPerGPU: 96, PriceUSDPerHour: 1.79, Family: fabric.FamilyA100SXM},
+	}
+
+	if got := Match(catalog, &provisionerv1.ResourceRequirements{GpuCount: 1, MinRamGb: 200}, FabricDeclared); len(got) != 0 {
+		t.Errorf("got %v, want nothing: one 96 GB card cannot satisfy a 200 GB instance", got)
 	}
 }
