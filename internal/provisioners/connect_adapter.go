@@ -160,6 +160,15 @@ func (a *ConnectDeploymentAdapter) ScaleDeployment(ctx context.Context, req *con
 	return connect.NewResponse(resp), nil
 }
 
+// MigrateDeployment satisfies the Connect handler for the migrate verb.
+func (a *ConnectDeploymentAdapter) MigrateDeployment(ctx context.Context, req *connect.Request[provisionerv1.MigrateDeploymentRequest]) (*connect.Response[provisionerv1.MigrateDeploymentResponse], error) {
+	resp, err := a.svc.MigrateDeployment(ctx, req.Msg)
+	if err != nil {
+		return nil, statusToConnectErr(err)
+	}
+	return connect.NewResponse(resp), nil
+}
+
 // statusToConnectErr translates a gRPC status.Error (which is what the
 // gRPC service returns) into a *connect.Error with the matching code.
 // Without this translation, connect-rpc receives a non-*connect.Error

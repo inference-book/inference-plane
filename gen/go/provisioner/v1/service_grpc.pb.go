@@ -444,6 +444,7 @@ const (
 	DeploymentService_WatchDeployment_FullMethodName    = "/provisioner.v1.DeploymentService/WatchDeployment"
 	DeploymentService_TouchDeployment_FullMethodName    = "/provisioner.v1.DeploymentService/TouchDeployment"
 	DeploymentService_ScaleDeployment_FullMethodName    = "/provisioner.v1.DeploymentService/ScaleDeployment"
+	DeploymentService_MigrateDeployment_FullMethodName  = "/provisioner.v1.DeploymentService/MigrateDeployment"
 )
 
 // DeploymentServiceClient is the client API for DeploymentService service.
@@ -518,6 +519,27 @@ type DeploymentServiceClient interface {
 	// target == current is a no-op and returns the current record
 	// unchanged. target <= 0 is invalid.
 	ScaleDeployment(ctx context.Context, in *ScaleDeploymentRequest, opts ...grpc.CallOption) (*ScaleDeploymentResponse, error)
+	// MigrateDeployment moves a running deployment to another provider
+	// without changing its id.
+	//
+	// Composed from two things that already ship rather than written:
+	// ScaleDeployment's heterogeneous form grows the deployment onto the
+	// destination, and the drain used by fleet drain and scale-down
+	// releases the source. The router already fans out over whatever
+	// endpoints a deployment currently has, so traffic moves because the
+	// endpoint set changed and not through a cutover step that could drop
+	// a request.
+	//
+	// Grow first, then drain. That ordering is only available because a
+	// migration has no deadline, and it is the ordering that never drops
+	// a request. A reclaim does not get it: notice is often shorter than
+	// a cold start, so the hardware can vanish mid-provision.
+	//
+	// Weights are staged per provider and per region, so a destination
+	// where the model is not pinned pays a full cold start. The response
+	// says so before anything is provisioned rather than leaving an
+	// operator to infer it from a progress bar that stopped moving.
+	MigrateDeployment(ctx context.Context, in *MigrateDeploymentRequest, opts ...grpc.CallOption) (*MigrateDeploymentResponse, error)
 }
 
 type deploymentServiceClient struct {
@@ -607,6 +629,16 @@ func (c *deploymentServiceClient) ScaleDeployment(ctx context.Context, in *Scale
 	return out, nil
 }
 
+func (c *deploymentServiceClient) MigrateDeployment(ctx context.Context, in *MigrateDeploymentRequest, opts ...grpc.CallOption) (*MigrateDeploymentResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(MigrateDeploymentResponse)
+	err := c.cc.Invoke(ctx, DeploymentService_MigrateDeployment_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // DeploymentServiceServer is the server API for DeploymentService service.
 // All implementations should embed UnimplementedDeploymentServiceServer
 // for forward compatibility.
@@ -679,6 +711,27 @@ type DeploymentServiceServer interface {
 	// target == current is a no-op and returns the current record
 	// unchanged. target <= 0 is invalid.
 	ScaleDeployment(context.Context, *ScaleDeploymentRequest) (*ScaleDeploymentResponse, error)
+	// MigrateDeployment moves a running deployment to another provider
+	// without changing its id.
+	//
+	// Composed from two things that already ship rather than written:
+	// ScaleDeployment's heterogeneous form grows the deployment onto the
+	// destination, and the drain used by fleet drain and scale-down
+	// releases the source. The router already fans out over whatever
+	// endpoints a deployment currently has, so traffic moves because the
+	// endpoint set changed and not through a cutover step that could drop
+	// a request.
+	//
+	// Grow first, then drain. That ordering is only available because a
+	// migration has no deadline, and it is the ordering that never drops
+	// a request. A reclaim does not get it: notice is often shorter than
+	// a cold start, so the hardware can vanish mid-provision.
+	//
+	// Weights are staged per provider and per region, so a destination
+	// where the model is not pinned pays a full cold start. The response
+	// says so before anything is provisioned rather than leaving an
+	// operator to infer it from a progress bar that stopped moving.
+	MigrateDeployment(context.Context, *MigrateDeploymentRequest) (*MigrateDeploymentResponse, error)
 }
 
 // UnimplementedDeploymentServiceServer should be embedded to have
@@ -708,6 +761,9 @@ func (UnimplementedDeploymentServiceServer) TouchDeployment(context.Context, *To
 }
 func (UnimplementedDeploymentServiceServer) ScaleDeployment(context.Context, *ScaleDeploymentRequest) (*ScaleDeploymentResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ScaleDeployment not implemented")
+}
+func (UnimplementedDeploymentServiceServer) MigrateDeployment(context.Context, *MigrateDeploymentRequest) (*MigrateDeploymentResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method MigrateDeployment not implemented")
 }
 func (UnimplementedDeploymentServiceServer) testEmbeddedByValue() {}
 
@@ -848,6 +904,24 @@ func _DeploymentService_ScaleDeployment_Handler(srv interface{}, ctx context.Con
 	return interceptor(ctx, in, info, handler)
 }
 
+func _DeploymentService_MigrateDeployment_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MigrateDeploymentRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DeploymentServiceServer).MigrateDeployment(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: DeploymentService_MigrateDeployment_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DeploymentServiceServer).MigrateDeployment(ctx, req.(*MigrateDeploymentRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // DeploymentService_ServiceDesc is the grpc.ServiceDesc for DeploymentService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -878,6 +952,10 @@ var DeploymentService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ScaleDeployment",
 			Handler:    _DeploymentService_ScaleDeployment_Handler,
+		},
+		{
+			MethodName: "MigrateDeployment",
+			Handler:    _DeploymentService_MigrateDeployment_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{
