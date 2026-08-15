@@ -40,9 +40,19 @@ type Entry struct {
 	// VRAMGb is GPU memory per card. Always published, always filters.
 	VRAMGb int
 
-	// SystemRAMGb is the system RAM a typical single-GPU host of this tier
-	// carries. 0 when the provider publishes none (Lambda).
-	SystemRAMGb int
+	// SystemRAMGbPerGPU is the system RAM a typical host of this tier carries
+	// PER CARD, which is the unit both catalogs that publish it are written
+	// in. 0 when the provider publishes none, or when it can settle a RAM
+	// requirement against the real candidate instead of an estimate.
+	//
+	// The unit is in the name because getting it wrong is not hypothetical.
+	// The field used to be SystemRAMGb and was compared straight against
+	// min_ram_gb, which is documented "per instance, not per GPU". A four-card
+	// request asking for 200 GB was judged against one card's 96 and rejected
+	// every A100 and H100 in the catalog, landing on a B200 whose single-card
+	// figure of 256 was the only one that cleared the bar. Asking for the 384
+	// a four-card pod actually carries matched nothing at all (#283).
+	SystemRAMGbPerGPU int
 
 	// GPUCount is the number of cards on the rented shape, for catalogs whose
 	// rows describe a whole instance rather than a card. 0 when the rows are
@@ -118,12 +128,22 @@ func Match(entries []Entry, reqs *provisionerv1.ResourceRequirements, mode Fabri
 		return nil
 	}
 
+	// min_ram_gb is stated per instance and the catalogs publish per card, so
+	// the comparison has to be scaled by how many cards are being asked for.
+	// An absent gpu_count means one, matching the rest of the provisioning
+	// path.
+	gpuCount := int(reqs.GetGpuCount())
+	if gpuCount <= 0 {
+		gpuCount = 1
+	}
+
 	var matches []Entry
 	for _, e := range entries {
 		if e.VRAMGb < int(reqs.GetMinVramGb()) {
 			continue
 		}
-		if e.SystemRAMGb > 0 && int(reqs.GetMinRamGb()) > 0 && e.SystemRAMGb < int(reqs.GetMinRamGb()) {
+		if e.SystemRAMGbPerGPU > 0 && int(reqs.GetMinRamGb()) > 0 &&
+			e.SystemRAMGbPerGPU*gpuCount < int(reqs.GetMinRamGb()) {
 			continue
 		}
 		if e.GPUCount > 0 && reqs.GetGpuCount() > 0 && e.GPUCount < int(reqs.GetGpuCount()) {

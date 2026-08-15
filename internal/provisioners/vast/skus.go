@@ -131,7 +131,15 @@ var skus = []SKUSpec{
 const MaxSKUsPerRequest = skucatalog.MaxResults
 
 // catalogEntries projects the Vast catalog onto the shared resolver's fact
-// set. Two fields deliberately do not cross over. DefaultDiskGb is not a fact
+// set. Three fields deliberately do not cross over.
+//
+// DefaultSystemRAMGb is the newest omission (#283). Vast reports cpu_ram on
+// every offer, so findOffer can push a RAM floor server-side and judge the
+// actual host rather than a tier estimate. Once the real number is reachable,
+// filtering on the estimate can only wrongly exclude, which is the same
+// reasoning that removed the disk filter.
+//
+// DefaultDiskGb is not a fact
 // a catalog row bounds, so it must never filter (#281). WireName and VRAMMaxGb
 // are offer-level concerns: they disambiguate two physical cards sold under
 // one gpu_name, which is settled by the VRAM floor and ceiling findOffer
@@ -142,7 +150,6 @@ func catalogEntries() []skucatalog.Entry {
 		out = append(out, skucatalog.Entry{
 			Token:           sku.GpuName,
 			VRAMGb:          sku.VRAMGb,
-			SystemRAMGb:     sku.DefaultSystemRAMGb,
 			PriceUSDPerHour: sku.PriceUSDPerHour,
 			Family:          sku.Family,
 		})

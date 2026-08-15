@@ -1,6 +1,9 @@
 package vast
 
 import (
+	"context"
+	"encoding/json"
+	"net/http"
 	"testing"
 
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
@@ -43,5 +46,68 @@ func TestMinDiskDoesNotEscalatePriceTier(t *testing.T) {
 	if cheapest.VRAMGb != 80 {
 		t.Errorf("cheapest match is %s at %d GB VRAM, want an 80 GB part; the disk filter escalated the tier",
 			got[0], cheapest.VRAMGb)
+	}
+}
+
+// Vast reports cpu_ram per offer, so a RAM floor belongs in the marketplace
+// query where the real host is judged, not in a catalog filter comparing a
+// tier estimate. Same move the disk floor already made, and the reason the
+// Vast catalog projection no longer carries system RAM at all (#283).
+func TestMinRamPushedIntoTheOfferSearch(t *testing.T) {
+	var gotQuery map[string]any
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v0/bundles/", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.Unmarshal([]byte(r.URL.Query().Get("q")), &gotQuery)
+		writeJSON(w, bundlesResponse{Offers: nil})
+	})
+	p, _ := newTestProvider(t, mux)
+
+	_, err := p.findOffer(context.Background(), "A100_SXM4", 2, 0,
+		&provisionerv1.ResourceRequirements{MinRamGb: 256})
+	if err != nil {
+		t.Fatalf("findOffer: %v", err)
+	}
+
+	ram, ok := gotQuery["cpu_ram"].(map[string]any)
+	if !ok {
+		t.Fatalf("query carried no cpu_ram floor: %v", gotQuery)
+	}
+	// Vast reports cpu_ram in MB.
+	if got := ram["gte"].(float64); got != 256000 {
+		t.Errorf("cpu_ram floor = %v, want 256000 MB", got)
+	}
+}
+
+// An unstated RAM requirement must not become a floor of zero, which would be
+// harmless here but is the shape that silently narrows a search elsewhere.
+func TestNoRamFloorWhenUnstated(t *testing.T) {
+	var gotQuery map[string]any
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v0/bundles/", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.Unmarshal([]byte(r.URL.Query().Get("q")), &gotQuery)
+		writeJSON(w, bundlesResponse{Offers: nil})
+	})
+	p, _ := newTestProvider(t, mux)
+
+	if _, err := p.findOffer(context.Background(), "A100_SXM4", 2, 0,
+		&provisionerv1.ResourceRequirements{}); err != nil {
+		t.Fatalf("findOffer: %v", err)
+	}
+
+	if _, present := gotQuery["cpu_ram"]; present {
+		t.Errorf("query carried a cpu_ram filter for a request that stated none: %v", gotQuery)
+	}
+}
+
+// The catalog stage must stop guessing once the offer search can answer.
+// Filtering on a tier estimate alongside a real per-host floor can only
+// wrongly exclude, which is exactly what the disk filter did.
+func TestCatalogStageNoLongerFiltersOnRam(t *testing.T) {
+	unconstrained := MatchSKUs(&provisionerv1.ResourceRequirements{MinVramGb: 80})
+	withRAM := MatchSKUs(&provisionerv1.ResourceRequirements{MinVramGb: 80, MinRamGb: 4096})
+
+	if len(withRAM) != len(unconstrained) {
+		t.Errorf("an unreachable min_ram_gb changed the catalog match set: got %v, want %v",
+			withRAM, unconstrained)
 	}
 }
