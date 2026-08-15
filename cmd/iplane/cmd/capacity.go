@@ -167,12 +167,12 @@ func renderCandidates(w io.Writer, provider string, candidates []provisioners.Ca
 	}
 
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "HOST\tOFFER\tSKU\tREGION\tGPUS\tVRAM\t$/HR\tFABRIC")
+	fmt.Fprintln(tw, "HOST\tOFFER\tSKU\tREGION\tGPUS\tVRAM\tARCH\t$/HR\tFABRIC")
 	for _, c := range candidates {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\t%dGB\t%.2f\t%s\n",
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\t%dGB\t%s\t%.2f\t%s\n",
 			dashIfEmpty(c.HostID), dashIfEmpty(c.OfferID), c.SKU,
 			dashIfEmpty(c.Region), c.GPUCount, c.VRAMGbPerGPU,
-			c.PriceUSDPerHour, candidateFabricLabel(c))
+			dashIfEmpty(c.Architecture), c.PriceUSDPerHour, candidateFabricLabel(c))
 	}
 	if err := tw.Flush(); err != nil {
 		return err

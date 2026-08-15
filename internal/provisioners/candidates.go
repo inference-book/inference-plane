@@ -2,6 +2,7 @@ package provisioners
 
 import (
 	"context"
+	"strings"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -38,10 +39,13 @@ import (
 //     fabric. findOffer already computes exactly this list and discards
 //     everything except the winner.
 //
-//   - lambdalabs: expected yes, not yet implemented. /instance-types carries
-//     live prices and which regions currently have capacity for a shape. The
-//     adapter already calls that endpoint and reads only the hardware specs
-//     off it.
+//   - lambdalabs: yes, and it is the shape that proved the capability is not
+//     marketplace-specific. Fixed shapes at a published price, where the only
+//     thing that varies is which regions have any right now. /instance-types
+//     answers both, and probing live on 2026-08-15 fifteen of twenty-three
+//     shapes had capacity in no region at all, which is precisely the fact a
+//     static catalog cannot hold. A Lambda candidate has no host identity and
+//     no offer id, and those fields stay empty rather than invented.
 //
 //   - runpod: unknown, deliberately left unimplemented pending a probe rather
 //     than guessed at. Its /gpus endpoint gives prices, and whether it exposes
@@ -93,10 +97,23 @@ type Candidate struct {
 	PriceUSDPerHour float64
 
 	// GPUCount and VRAMGbPerGPU describe the shape on offer. Both come from
-	// the provider's own record, so they can disagree with the catalog, and
-	// where they do the provider is right.
+	// the provider's own record where the provider reports them, so they can
+	// disagree with the catalog, and where they do the provider is right.
+	// VRAMGbPerGPU falls back to the catalog on providers that publish a GPU
+	// count and a system-RAM figure but never the card's memory.
 	GPUCount     int
 	VRAMGbPerGPU int
+
+	// Architecture is the host CPU architecture, normalized to one vocabulary
+	// ("amd64", "arm64"), empty where the provider does not report it.
+	//
+	// It is a typed field rather than an Attrs entry because it decides
+	// whether a deploy works at all: an arm64 host needs an engine image built
+	// for arm64, and Lambda's GH200 shapes are arm64 while everything else in
+	// our catalog is not. Both providers that report it spell it differently
+	// (Vast says "amd64", Lambda says "x86_64" for the same thing), which is
+	// exactly the normalization a shared shape exists to do.
+	Architecture string
 
 	// Fabric is the resolved interconnect verdict, carried whole rather than
 	// as a bandwidth number so the source survives. A candidate that got here
@@ -108,7 +125,41 @@ type Candidate struct {
 	// an operator can see why a candidate is in the list and check a floor
 	// that was supposed to exclude something. Keys are the provider's own
 	// field names. Diagnostic only, nothing branches on it.
+	//
+	// Deliberately NOT where cross-provider facts live. Anything here is an
+	// untyped string under a provider's own key, so it cannot be compared
+	// against another provider's record and must never feed a ranking. A fact
+	// that turns out to matter on a second provider gets promoted to a typed
+	// field and normalized, which is how Architecture arrived.
 	Attrs map[string]string
+}
+
+// Architecture values, normalized across providers. Adapters map their own
+// spelling onto these rather than passing the provider's string through, for
+// the same reason fabric.Family exists: "amd64" and "x86_64" are one fact with
+// two names, and a caller comparing candidates should never have to know which
+// vendor said which.
+const (
+	ArchAMD64 = "amd64"
+	ArchARM64 = "arm64"
+)
+
+// NormalizeArch maps a provider's architecture string onto the shared
+// vocabulary, returning "" for anything unrecognized.
+//
+// Empty means "not reported" and must not be read as "probably x86". A wrong
+// guess here produces a deploy that pulls an image the host cannot run, and
+// the failure surfaces as a container that will not start rather than as
+// anything naming the architecture.
+func NormalizeArch(s string) string {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "amd64", "x86_64", "x86-64":
+		return ArchAMD64
+	case "arm64", "aarch64":
+		return ArchARM64
+	default:
+		return ""
+	}
 }
 
 // ListCandidates asks one provider what it would offer for these

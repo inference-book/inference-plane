@@ -52,3 +52,32 @@ func TestListCandidatesNotFoundForUnconfiguredProvider(t *testing.T) {
 		t.Errorf("code = %v, want NotFound for a provider that is not configured", status.Code(err))
 	}
 }
+
+// Two providers, two spellings, one fact. Vast says "amd64" where Lambda says
+// "x86_64", and a caller comparing candidates across them should never have to
+// know which vendor said which.
+func TestNormalizeArch(t *testing.T) {
+	for in, want := range map[string]string{
+		"amd64":   provisioners.ArchAMD64,
+		"x86_64":  provisioners.ArchAMD64,
+		"X86-64":  provisioners.ArchAMD64,
+		"arm64":   provisioners.ArchARM64,
+		"AArch64": provisioners.ArchARM64,
+		" arm64 ": provisioners.ArchARM64,
+	} {
+		if got := provisioners.NormalizeArch(in); got != want {
+			t.Errorf("NormalizeArch(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// Unreported must stay unreported. Guessing x86 here produces a deploy that
+// pulls an image the host cannot run, and the failure surfaces as a container
+// that will not start rather than as anything naming the architecture.
+func TestNormalizeArchDoesNotGuess(t *testing.T) {
+	for _, in := range []string{"", "   ", "riscv64", "unknown"} {
+		if got := provisioners.NormalizeArch(in); got != "" {
+			t.Errorf("NormalizeArch(%q) = %q, want empty rather than a default", in, got)
+		}
+	}
+}
