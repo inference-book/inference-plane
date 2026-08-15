@@ -881,6 +881,13 @@ type offerSummary struct {
 	// filter: see #283 for why min_ram_gb does not narrow anything here yet.
 	CPURam int `json:"cpu_ram"`
 
+	// MinBid is the floor price for an INTERRUPTIBLE rental of this offer, in
+	// USD/hr, against DphTotal for an on-demand one. Renting at a bid price is
+	// how Vast expresses reclaimable capacity: a higher bidder takes the
+	// machine. Typically a third of the on-demand rate, which is the whole
+	// attraction and the whole risk.
+	MinBid float64 `json:"min_bid"`
+
 	// CPUArch is the host CPU architecture ("amd64"). Normalized onto the
 	// shared vocabulary before it leaves the adapter, because Lambda spells
 	// the same fact "x86_64".

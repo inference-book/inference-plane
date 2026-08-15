@@ -166,6 +166,67 @@ func (FabricSource) EnumDescriptor() ([]byte, []int) {
 	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{1}
 }
 
+// ReclaimPolicy says whether capacity the provider can take back is acceptable.
+//
+// Three states rather than a bool, for the reason absence keeps needing to be
+// representable: UNSPECIFIED is the Ch 6-10 default and must stay free, and it
+// is not the same as an operator deliberately refusing reclaimable capacity.
+type ReclaimPolicy int32
+
+const (
+	// Operator expressed no preference. Providers offer whatever they normally
+	// would, which in practice is the on-demand tier.
+	ReclaimPolicy_RECLAIM_POLICY_UNSPECIFIED ReclaimPolicy = 0
+	// On-demand only. The rental must not be reclaimable, which matters for a
+	// run that cannot survive being interrupted partway.
+	ReclaimPolicy_RECLAIM_POLICY_NEVER ReclaimPolicy = 1
+	// Reclaimable capacity is wanted, for the discount. A provider that cannot
+	// offer it drops out of the candidate set rather than substituting the
+	// dearer tier.
+	ReclaimPolicy_RECLAIM_POLICY_PREFERRED ReclaimPolicy = 2
+)
+
+// Enum value maps for ReclaimPolicy.
+var (
+	ReclaimPolicy_name = map[int32]string{
+		0: "RECLAIM_POLICY_UNSPECIFIED",
+		1: "RECLAIM_POLICY_NEVER",
+		2: "RECLAIM_POLICY_PREFERRED",
+	}
+	ReclaimPolicy_value = map[string]int32{
+		"RECLAIM_POLICY_UNSPECIFIED": 0,
+		"RECLAIM_POLICY_NEVER":       1,
+		"RECLAIM_POLICY_PREFERRED":   2,
+	}
+)
+
+func (x ReclaimPolicy) Enum() *ReclaimPolicy {
+	p := new(ReclaimPolicy)
+	*p = x
+	return p
+}
+
+func (x ReclaimPolicy) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (ReclaimPolicy) Descriptor() protoreflect.EnumDescriptor {
+	return file_provisioner_v1_types_proto_enumTypes[2].Descriptor()
+}
+
+func (ReclaimPolicy) Type() protoreflect.EnumType {
+	return &file_provisioner_v1_types_proto_enumTypes[2]
+}
+
+func (x ReclaimPolicy) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use ReclaimPolicy.Descriptor instead.
+func (ReclaimPolicy) EnumDescriptor() ([]byte, []int) {
+	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{2}
+}
+
 // InstanceState is the lifecycle phase of a provisioned instance, as
 // iplane sees it. Five values, not three -- the two *ing states
 // (PENDING, TERMINATING) exist so partial-failure recovery can
@@ -218,11 +279,11 @@ func (x InstanceState) String() string {
 }
 
 func (InstanceState) Descriptor() protoreflect.EnumDescriptor {
-	return file_provisioner_v1_types_proto_enumTypes[2].Descriptor()
+	return file_provisioner_v1_types_proto_enumTypes[3].Descriptor()
 }
 
 func (InstanceState) Type() protoreflect.EnumType {
-	return &file_provisioner_v1_types_proto_enumTypes[2]
+	return &file_provisioner_v1_types_proto_enumTypes[3]
 }
 
 func (x InstanceState) Number() protoreflect.EnumNumber {
@@ -231,7 +292,7 @@ func (x InstanceState) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use InstanceState.Descriptor instead.
 func (InstanceState) EnumDescriptor() ([]byte, []int) {
-	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{2}
+	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{3}
 }
 
 // Priority is the lane an inbound request joins on its way to the
@@ -285,11 +346,11 @@ func (x Priority) String() string {
 }
 
 func (Priority) Descriptor() protoreflect.EnumDescriptor {
-	return file_provisioner_v1_types_proto_enumTypes[3].Descriptor()
+	return file_provisioner_v1_types_proto_enumTypes[4].Descriptor()
 }
 
 func (Priority) Type() protoreflect.EnumType {
-	return &file_provisioner_v1_types_proto_enumTypes[3]
+	return &file_provisioner_v1_types_proto_enumTypes[4]
 }
 
 func (x Priority) Number() protoreflect.EnumNumber {
@@ -298,7 +359,7 @@ func (x Priority) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use Priority.Descriptor instead.
 func (Priority) EnumDescriptor() ([]byte, []int) {
-	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{3}
+	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{4}
 }
 
 type DeploymentState int32
@@ -360,11 +421,11 @@ func (x DeploymentState) String() string {
 }
 
 func (DeploymentState) Descriptor() protoreflect.EnumDescriptor {
-	return file_provisioner_v1_types_proto_enumTypes[4].Descriptor()
+	return file_provisioner_v1_types_proto_enumTypes[5].Descriptor()
 }
 
 func (DeploymentState) Type() protoreflect.EnumType {
-	return &file_provisioner_v1_types_proto_enumTypes[4]
+	return &file_provisioner_v1_types_proto_enumTypes[5]
 }
 
 func (x DeploymentState) Number() protoreflect.EnumNumber {
@@ -373,7 +434,7 @@ func (x DeploymentState) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use DeploymentState.Descriptor instead.
 func (DeploymentState) EnumDescriptor() ([]byte, []int) {
-	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{4}
+	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{5}
 }
 
 // EngineState is what a registered engine reports about itself. Wider than
@@ -441,11 +502,11 @@ func (x EngineState) String() string {
 }
 
 func (EngineState) Descriptor() protoreflect.EnumDescriptor {
-	return file_provisioner_v1_types_proto_enumTypes[5].Descriptor()
+	return file_provisioner_v1_types_proto_enumTypes[6].Descriptor()
 }
 
 func (EngineState) Type() protoreflect.EnumType {
-	return &file_provisioner_v1_types_proto_enumTypes[5]
+	return &file_provisioner_v1_types_proto_enumTypes[6]
 }
 
 func (x EngineState) Number() protoreflect.EnumNumber {
@@ -454,7 +515,7 @@ func (x EngineState) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use EngineState.Descriptor instead.
 func (EngineState) EnumDescriptor() ([]byte, []int) {
-	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{5}
+	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{6}
 }
 
 // Spec is what the operator asks for. Provider-agnostic. Everything in
@@ -620,6 +681,22 @@ type ResourceRequirements struct {
 	// matching the same single-unit rule Hardware uses for memory, so that A100
 	// arrives here as 2400.
 	MinFabricGbps int32 `protobuf:"varint,8,opt,name=min_fabric_gbps,json=minFabricGbps,proto3" json:"min_fabric_gbps,omitempty"`
+	// Whether the operator will accept capacity the provider can take back.
+	//
+	// Named for the property rather than for a vendor's noun, the same reason
+	// fabric_scope is not called needs_nvlink. Vendors sell this as spot,
+	// interruptible, preemptible and community, and picking one of those words
+	// would bake one marketplace's vocabulary into a cross-provider contract.
+	// What every version has in common is the only thing the control plane
+	// cares about: the hardware is cheaper and it can be reclaimed.
+	//
+	// This constrains selection rather than decorating a create call. A
+	// provider with no reclaimable tier must fail the request rather than
+	// quietly rent on-demand capacity: an operator who asked for reclaimable
+	// asked for a discount, and silently billing them full price is the exact
+	// shape of failure the fabric rules exist to prevent (see #283's
+	// neighbourhood, and the FabricSource doctrine).
+	ReclaimPolicy ReclaimPolicy `protobuf:"varint,9,opt,name=reclaim_policy,json=reclaimPolicy,proto3,enum=provisioner.v1.ReclaimPolicy" json:"reclaim_policy,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -708,6 +785,13 @@ func (x *ResourceRequirements) GetMinFabricGbps() int32 {
 		return x.MinFabricGbps
 	}
 	return 0
+}
+
+func (x *ResourceRequirements) GetReclaimPolicy() ReclaimPolicy {
+	if x != nil {
+		return x.ReclaimPolicy
+	}
+	return ReclaimPolicy_RECLAIM_POLICY_UNSPECIFIED
 }
 
 // Hardware is the cross-provider physical-characteristics base for
@@ -2350,7 +2434,7 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"\x04tags\x18\x06 \x03(\v2\x1e.provisioner.v1.Spec.TagsEntryR\x04tags\x1a7\n" +
 	"\tTagsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xa1\x02\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xe7\x02\n" +
 	"\x14ResourceRequirements\x12\x1e\n" +
 	"\vmin_vram_gb\x18\x01 \x01(\x05R\tminVramGb\x12\x1e\n" +
 	"\vmin_disk_gb\x18\x02 \x01(\x05R\tminDiskGb\x12\x1c\n" +
@@ -2360,7 +2444,8 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"\x05class\x18\x05 \x01(\tR\x05class\x12\x10\n" +
 	"\x03sku\x18\x06 \x01(\tR\x03sku\x12>\n" +
 	"\ffabric_scope\x18\a \x01(\x0e2\x1b.provisioner.v1.FabricScopeR\vfabricScope\x12&\n" +
-	"\x0fmin_fabric_gbps\x18\b \x01(\x05R\rminFabricGbps\"\x9b\x03\n" +
+	"\x0fmin_fabric_gbps\x18\b \x01(\x05R\rminFabricGbps\x12D\n" +
+	"\x0ereclaim_policy\x18\t \x01(\x0e2\x1d.provisioner.v1.ReclaimPolicyR\rreclaimPolicy\"\x9b\x03\n" +
 	"\bHardware\x12\x17\n" +
 	"\agpu_sku\x18\x01 \x01(\tR\x06gpuSku\x12\x1b\n" +
 	"\tgpu_count\x18\x02 \x01(\x05R\bgpuCount\x12\x1e\n" +
@@ -2510,7 +2595,11 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"\x19FABRIC_SOURCE_UNSPECIFIED\x10\x00\x12\x1a\n" +
 	"\x16FABRIC_SOURCE_DECLARED\x10\x01\x12\x1a\n" +
 	"\x16FABRIC_SOURCE_MEASURED\x10\x02\x12\x19\n" +
-	"\x15FABRIC_SOURCE_UNKNOWN\x10\x03*\xc0\x01\n" +
+	"\x15FABRIC_SOURCE_UNKNOWN\x10\x03*g\n" +
+	"\rReclaimPolicy\x12\x1e\n" +
+	"\x1aRECLAIM_POLICY_UNSPECIFIED\x10\x00\x12\x18\n" +
+	"\x14RECLAIM_POLICY_NEVER\x10\x01\x12\x1c\n" +
+	"\x18RECLAIM_POLICY_PREFERRED\x10\x02*\xc0\x01\n" +
 	"\rInstanceState\x12\x1e\n" +
 	"\x1aINSTANCE_STATE_UNSPECIFIED\x10\x00\x12\x1a\n" +
 	"\x16INSTANCE_STATE_PENDING\x10\x01\x12\x19\n" +
@@ -2554,74 +2643,76 @@ func file_provisioner_v1_types_proto_rawDescGZIP() []byte {
 	return file_provisioner_v1_types_proto_rawDescData
 }
 
-var file_provisioner_v1_types_proto_enumTypes = make([]protoimpl.EnumInfo, 6)
+var file_provisioner_v1_types_proto_enumTypes = make([]protoimpl.EnumInfo, 7)
 var file_provisioner_v1_types_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
 var file_provisioner_v1_types_proto_goTypes = []any{
 	(FabricScope)(0),              // 0: provisioner.v1.FabricScope
 	(FabricSource)(0),             // 1: provisioner.v1.FabricSource
-	(InstanceState)(0),            // 2: provisioner.v1.InstanceState
-	(Priority)(0),                 // 3: provisioner.v1.Priority
-	(DeploymentState)(0),          // 4: provisioner.v1.DeploymentState
-	(EngineState)(0),              // 5: provisioner.v1.EngineState
-	(*Spec)(nil),                  // 6: provisioner.v1.Spec
-	(*ResourceRequirements)(nil),  // 7: provisioner.v1.ResourceRequirements
-	(*Hardware)(nil),              // 8: provisioner.v1.Hardware
-	(*SshTarget)(nil),             // 9: provisioner.v1.SshTarget
-	(*Instance)(nil),              // 10: provisioner.v1.Instance
-	(*InstanceRef)(nil),           // 11: provisioner.v1.InstanceRef
-	(*Deployment)(nil),            // 12: provisioner.v1.Deployment
-	(*VolumeMount)(nil),           // 13: provisioner.v1.VolumeMount
-	(*Volume)(nil),                // 14: provisioner.v1.Volume
-	(*ReplicaSpec)(nil),           // 15: provisioner.v1.ReplicaSpec
-	(*InterconnectHealth)(nil),    // 16: provisioner.v1.InterconnectHealth
-	(*EngineNode)(nil),            // 17: provisioner.v1.EngineNode
-	(*Engine)(nil),                // 18: provisioner.v1.Engine
-	nil,                           // 19: provisioner.v1.Spec.TagsEntry
-	nil,                           // 20: provisioner.v1.Instance.MetadataEntry
-	nil,                           // 21: provisioner.v1.InstanceRef.TagsEntry
-	nil,                           // 22: provisioner.v1.Deployment.EnvEntry
-	(*timestamppb.Timestamp)(nil), // 23: google.protobuf.Timestamp
-	(*structpb.Value)(nil),        // 24: google.protobuf.Value
+	(ReclaimPolicy)(0),            // 2: provisioner.v1.ReclaimPolicy
+	(InstanceState)(0),            // 3: provisioner.v1.InstanceState
+	(Priority)(0),                 // 4: provisioner.v1.Priority
+	(DeploymentState)(0),          // 5: provisioner.v1.DeploymentState
+	(EngineState)(0),              // 6: provisioner.v1.EngineState
+	(*Spec)(nil),                  // 7: provisioner.v1.Spec
+	(*ResourceRequirements)(nil),  // 8: provisioner.v1.ResourceRequirements
+	(*Hardware)(nil),              // 9: provisioner.v1.Hardware
+	(*SshTarget)(nil),             // 10: provisioner.v1.SshTarget
+	(*Instance)(nil),              // 11: provisioner.v1.Instance
+	(*InstanceRef)(nil),           // 12: provisioner.v1.InstanceRef
+	(*Deployment)(nil),            // 13: provisioner.v1.Deployment
+	(*VolumeMount)(nil),           // 14: provisioner.v1.VolumeMount
+	(*Volume)(nil),                // 15: provisioner.v1.Volume
+	(*ReplicaSpec)(nil),           // 16: provisioner.v1.ReplicaSpec
+	(*InterconnectHealth)(nil),    // 17: provisioner.v1.InterconnectHealth
+	(*EngineNode)(nil),            // 18: provisioner.v1.EngineNode
+	(*Engine)(nil),                // 19: provisioner.v1.Engine
+	nil,                           // 20: provisioner.v1.Spec.TagsEntry
+	nil,                           // 21: provisioner.v1.Instance.MetadataEntry
+	nil,                           // 22: provisioner.v1.InstanceRef.TagsEntry
+	nil,                           // 23: provisioner.v1.Deployment.EnvEntry
+	(*timestamppb.Timestamp)(nil), // 24: google.protobuf.Timestamp
+	(*structpb.Value)(nil),        // 25: google.protobuf.Value
 }
 var file_provisioner_v1_types_proto_depIdxs = []int32{
-	7,  // 0: provisioner.v1.Spec.requirements:type_name -> provisioner.v1.ResourceRequirements
-	19, // 1: provisioner.v1.Spec.tags:type_name -> provisioner.v1.Spec.TagsEntry
+	8,  // 0: provisioner.v1.Spec.requirements:type_name -> provisioner.v1.ResourceRequirements
+	20, // 1: provisioner.v1.Spec.tags:type_name -> provisioner.v1.Spec.TagsEntry
 	0,  // 2: provisioner.v1.ResourceRequirements.fabric_scope:type_name -> provisioner.v1.FabricScope
-	0,  // 3: provisioner.v1.Hardware.fabric_scope:type_name -> provisioner.v1.FabricScope
-	1,  // 4: provisioner.v1.Hardware.fabric_source:type_name -> provisioner.v1.FabricSource
-	6,  // 5: provisioner.v1.Instance.spec:type_name -> provisioner.v1.Spec
-	8,  // 6: provisioner.v1.Instance.hardware:type_name -> provisioner.v1.Hardware
-	2,  // 7: provisioner.v1.Instance.state:type_name -> provisioner.v1.InstanceState
-	23, // 8: provisioner.v1.Instance.created_at:type_name -> google.protobuf.Timestamp
-	23, // 9: provisioner.v1.Instance.activated_at:type_name -> google.protobuf.Timestamp
-	23, // 10: provisioner.v1.Instance.terminated_at:type_name -> google.protobuf.Timestamp
-	9,  // 11: provisioner.v1.Instance.ssh:type_name -> provisioner.v1.SshTarget
-	20, // 12: provisioner.v1.Instance.metadata:type_name -> provisioner.v1.Instance.MetadataEntry
-	21, // 13: provisioner.v1.InstanceRef.tags:type_name -> provisioner.v1.InstanceRef.TagsEntry
-	23, // 14: provisioner.v1.InstanceRef.created_at:type_name -> google.protobuf.Timestamp
-	22, // 15: provisioner.v1.Deployment.env:type_name -> provisioner.v1.Deployment.EnvEntry
-	4,  // 16: provisioner.v1.Deployment.state:type_name -> provisioner.v1.DeploymentState
-	23, // 17: provisioner.v1.Deployment.created_at:type_name -> google.protobuf.Timestamp
-	23, // 18: provisioner.v1.Deployment.started_at:type_name -> google.protobuf.Timestamp
-	23, // 19: provisioner.v1.Deployment.ready_at:type_name -> google.protobuf.Timestamp
-	23, // 20: provisioner.v1.Deployment.terminated_at:type_name -> google.protobuf.Timestamp
-	23, // 21: provisioner.v1.Deployment.last_activity_at:type_name -> google.protobuf.Timestamp
-	15, // 22: provisioner.v1.Deployment.replica_specs:type_name -> provisioner.v1.ReplicaSpec
-	13, // 23: provisioner.v1.Deployment.mounts:type_name -> provisioner.v1.VolumeMount
-	23, // 24: provisioner.v1.Volume.created_at:type_name -> google.protobuf.Timestamp
-	7,  // 25: provisioner.v1.ReplicaSpec.requirements:type_name -> provisioner.v1.ResourceRequirements
-	16, // 26: provisioner.v1.EngineNode.interconnect:type_name -> provisioner.v1.InterconnectHealth
-	5,  // 27: provisioner.v1.Engine.state:type_name -> provisioner.v1.EngineState
-	17, // 28: provisioner.v1.Engine.span:type_name -> provisioner.v1.EngineNode
-	23, // 29: provisioner.v1.Engine.registered_at:type_name -> google.protobuf.Timestamp
-	23, // 30: provisioner.v1.Engine.last_seen_at:type_name -> google.protobuf.Timestamp
-	23, // 31: provisioner.v1.Engine.lease_expires_at:type_name -> google.protobuf.Timestamp
-	24, // 32: provisioner.v1.Instance.MetadataEntry.value:type_name -> google.protobuf.Value
-	33, // [33:33] is the sub-list for method output_type
-	33, // [33:33] is the sub-list for method input_type
-	33, // [33:33] is the sub-list for extension type_name
-	33, // [33:33] is the sub-list for extension extendee
-	0,  // [0:33] is the sub-list for field type_name
+	2,  // 3: provisioner.v1.ResourceRequirements.reclaim_policy:type_name -> provisioner.v1.ReclaimPolicy
+	0,  // 4: provisioner.v1.Hardware.fabric_scope:type_name -> provisioner.v1.FabricScope
+	1,  // 5: provisioner.v1.Hardware.fabric_source:type_name -> provisioner.v1.FabricSource
+	7,  // 6: provisioner.v1.Instance.spec:type_name -> provisioner.v1.Spec
+	9,  // 7: provisioner.v1.Instance.hardware:type_name -> provisioner.v1.Hardware
+	3,  // 8: provisioner.v1.Instance.state:type_name -> provisioner.v1.InstanceState
+	24, // 9: provisioner.v1.Instance.created_at:type_name -> google.protobuf.Timestamp
+	24, // 10: provisioner.v1.Instance.activated_at:type_name -> google.protobuf.Timestamp
+	24, // 11: provisioner.v1.Instance.terminated_at:type_name -> google.protobuf.Timestamp
+	10, // 12: provisioner.v1.Instance.ssh:type_name -> provisioner.v1.SshTarget
+	21, // 13: provisioner.v1.Instance.metadata:type_name -> provisioner.v1.Instance.MetadataEntry
+	22, // 14: provisioner.v1.InstanceRef.tags:type_name -> provisioner.v1.InstanceRef.TagsEntry
+	24, // 15: provisioner.v1.InstanceRef.created_at:type_name -> google.protobuf.Timestamp
+	23, // 16: provisioner.v1.Deployment.env:type_name -> provisioner.v1.Deployment.EnvEntry
+	5,  // 17: provisioner.v1.Deployment.state:type_name -> provisioner.v1.DeploymentState
+	24, // 18: provisioner.v1.Deployment.created_at:type_name -> google.protobuf.Timestamp
+	24, // 19: provisioner.v1.Deployment.started_at:type_name -> google.protobuf.Timestamp
+	24, // 20: provisioner.v1.Deployment.ready_at:type_name -> google.protobuf.Timestamp
+	24, // 21: provisioner.v1.Deployment.terminated_at:type_name -> google.protobuf.Timestamp
+	24, // 22: provisioner.v1.Deployment.last_activity_at:type_name -> google.protobuf.Timestamp
+	16, // 23: provisioner.v1.Deployment.replica_specs:type_name -> provisioner.v1.ReplicaSpec
+	14, // 24: provisioner.v1.Deployment.mounts:type_name -> provisioner.v1.VolumeMount
+	24, // 25: provisioner.v1.Volume.created_at:type_name -> google.protobuf.Timestamp
+	8,  // 26: provisioner.v1.ReplicaSpec.requirements:type_name -> provisioner.v1.ResourceRequirements
+	17, // 27: provisioner.v1.EngineNode.interconnect:type_name -> provisioner.v1.InterconnectHealth
+	6,  // 28: provisioner.v1.Engine.state:type_name -> provisioner.v1.EngineState
+	18, // 29: provisioner.v1.Engine.span:type_name -> provisioner.v1.EngineNode
+	24, // 30: provisioner.v1.Engine.registered_at:type_name -> google.protobuf.Timestamp
+	24, // 31: provisioner.v1.Engine.last_seen_at:type_name -> google.protobuf.Timestamp
+	24, // 32: provisioner.v1.Engine.lease_expires_at:type_name -> google.protobuf.Timestamp
+	25, // 33: provisioner.v1.Instance.MetadataEntry.value:type_name -> google.protobuf.Value
+	34, // [34:34] is the sub-list for method output_type
+	34, // [34:34] is the sub-list for method input_type
+	34, // [34:34] is the sub-list for extension type_name
+	34, // [34:34] is the sub-list for extension extendee
+	0,  // [0:34] is the sub-list for field type_name
 }
 
 func init() { file_provisioner_v1_types_proto_init() }
@@ -2634,7 +2725,7 @@ func file_provisioner_v1_types_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_provisioner_v1_types_proto_rawDesc), len(file_provisioner_v1_types_proto_rawDesc)),
-			NumEnums:      6,
+			NumEnums:      7,
 			NumMessages:   17,
 			NumExtensions: 0,
 			NumServices:   0,

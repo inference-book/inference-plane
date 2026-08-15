@@ -37,6 +37,15 @@ func (p *Provider) Candidates(ctx context.Context, reqs *provisionerv1.ResourceR
 		reqs = &provisionerv1.ResourceRequirements{}
 	}
 
+	// Lambda sells on-demand only: /instance-types publishes one price per
+	// shape and there is no bid, spot or preemptible tier anywhere in the API.
+	// An operator who asked for reclaimable capacity asked for a discount, so
+	// the honest answer is nothing rather than the full-price rental they did
+	// not ask for (#288).
+	if reqs.GetReclaimPolicy() == provisionerv1.ReclaimPolicy_RECLAIM_POLICY_PREFERRED {
+		return nil, nil
+	}
+
 	req, err := p.client.newReq(http.MethodGet, pathInstanceTypes, nil, nil)
 	if err != nil {
 		return nil, wrapErr("candidates", err)

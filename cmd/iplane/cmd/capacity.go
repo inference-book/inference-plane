@@ -44,6 +44,7 @@ var (
 	capacityMinDisk   int32
 	capacityFabric    string
 	capacityFabricBW  int32
+	capacityReclaim   string
 	capacityOutput    string
 	capacityLimit     int
 	capacityTimeoutSc int
@@ -81,6 +82,11 @@ var capacityCmd = &cobra.Command{
 		}
 		reqs.FabricScope = fabricScope
 		reqs.MinFabricGbps = capacityFabricBW
+		rp, err := parseReclaimPolicy(capacityReclaim)
+		if err != nil {
+			return err
+		}
+		reqs.ReclaimPolicy = rp
 
 		// Expand class shorthand into numeric constraints the same way the
 		// create path does, so `--class large` here means what it means there.
@@ -215,14 +221,14 @@ func renderCandidates(w io.Writer, answers []provisioners.ProviderAnswer, candid
 
 	if len(candidates) > 0 {
 		tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(tw, "PROVIDER\tHOST\tOFFER\tSKU\tREGION\tGPUS\tVRAM\tARCH\t$/HR\tFABRIC\tNOTES")
+		fmt.Fprintln(tw, "PROVIDER\tHOST\tOFFER\tSKU\tREGION\tGPUS\tVRAM\tARCH\t$/HR\tTIER\tFABRIC\tNOTES")
 		for _, c := range candidates {
-			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%d\t%dGB\t%s\t%.2f\t%s\t%s\n",
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%d\t%dGB\t%s\t%.2f\t%s\t%s\t%s\n",
 				c.Provider,
 				dashIfEmpty(c.HostID), dashIfEmpty(c.OfferID), c.SKU,
 				dashIfEmpty(c.Region), c.GPUCount, c.VRAMGbPerGPU,
-				dashIfEmpty(c.Architecture), c.PriceUSDPerHour, candidateFabricLabel(c),
-				renderAttrs(c.Attrs))
+				dashIfEmpty(c.Architecture), c.PriceUSDPerHour, reclaimLabel(c.Reclaimable),
+				candidateFabricLabel(c), renderAttrs(c.Attrs))
 		}
 		if err := tw.Flush(); err != nil {
 			return err
@@ -352,6 +358,19 @@ func renderAttrs(attrs map[string]string) string {
 	return strings.Join(parts, " ")
 }
 
+// reclaimLabel names the tier a price belongs to.
+//
+// It is a column rather than a footnote because it changes what the number
+// next to it means. An hourly rate on capacity that can be taken back is not
+// comparable with one that cannot, and a list sorted on price alone puts the
+// two side by side as though they were the same kind of number.
+func reclaimLabel(reclaimable bool) string {
+	if reclaimable {
+		return "reclaimable"
+	}
+	return "on-demand"
+}
+
 func dashIfEmpty(s string) string {
 	if strings.TrimSpace(s) == "" {
 		return "-"
@@ -372,6 +391,7 @@ func init() {
 	f.Int32Var(&capacityMinRAM, "min-ram-gb", 0, `minimum system RAM, in GB (per instance, not per GPU)`)
 	f.Int32Var(&capacityMinDisk, "min-disk-gb", 0, `minimum container disk, in GB`)
 	f.StringVar(&capacityFabric, "fabric", "", fabricFlagUsage)
+	f.StringVar(&capacityReclaim, "reclaim", "", reclaimFlagUsage)
 	f.Int32Var(&capacityFabricBW, "min-fabric-gbps", 0, minFabricGbpsUsage)
 	f.StringVar(&capacityOutput, "output", "table", `output format: table | json`)
 	f.IntVar(&capacityLimit, "limit", 0, `show at most N candidates (0 = all)`)

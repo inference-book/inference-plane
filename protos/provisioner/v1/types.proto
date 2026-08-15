@@ -178,6 +178,43 @@ message ResourceRequirements {
   // matching the same single-unit rule Hardware uses for memory, so that A100
   // arrives here as 2400.
   int32 min_fabric_gbps = 8;
+
+  // Whether the operator will accept capacity the provider can take back.
+  //
+  // Named for the property rather than for a vendor's noun, the same reason
+  // fabric_scope is not called needs_nvlink. Vendors sell this as spot,
+  // interruptible, preemptible and community, and picking one of those words
+  // would bake one marketplace's vocabulary into a cross-provider contract.
+  // What every version has in common is the only thing the control plane
+  // cares about: the hardware is cheaper and it can be reclaimed.
+  //
+  // This constrains selection rather than decorating a create call. A
+  // provider with no reclaimable tier must fail the request rather than
+  // quietly rent on-demand capacity: an operator who asked for reclaimable
+  // asked for a discount, and silently billing them full price is the exact
+  // shape of failure the fabric rules exist to prevent (see #283's
+  // neighbourhood, and the FabricSource doctrine).
+  ReclaimPolicy reclaim_policy = 9;
+}
+
+// ReclaimPolicy says whether capacity the provider can take back is acceptable.
+//
+// Three states rather than a bool, for the reason absence keeps needing to be
+// representable: UNSPECIFIED is the Ch 6-10 default and must stay free, and it
+// is not the same as an operator deliberately refusing reclaimable capacity.
+enum ReclaimPolicy {
+  // Operator expressed no preference. Providers offer whatever they normally
+  // would, which in practice is the on-demand tier.
+  RECLAIM_POLICY_UNSPECIFIED = 0;
+
+  // On-demand only. The rental must not be reclaimable, which matters for a
+  // run that cannot survive being interrupted partway.
+  RECLAIM_POLICY_NEVER = 1;
+
+  // Reclaimable capacity is wanted, for the discount. A provider that cannot
+  // offer it drops out of the candidate set rather than substituting the
+  // dearer tier.
+  RECLAIM_POLICY_PREFERRED = 2;
 }
 
 // Hardware is the cross-provider physical-characteristics base for

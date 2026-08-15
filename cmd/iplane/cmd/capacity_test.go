@@ -139,3 +139,53 @@ func TestRenderCandidatesSaysNothingWasRented(t *testing.T) {
 func answersFor(provider string, cands ...provisioners.Candidate) []provisioners.ProviderAnswer {
 	return []provisioners.ProviderAnswer{{Provider: provider, Candidates: cands}}
 }
+
+// A typo'd --reclaim must not fall through to "no preference". That would hand
+// an operator the full-price tier they were explicitly trying to avoid, which
+// is precisely the failure #288 named.
+func TestParseReclaimPolicyRejectsTypos(t *testing.T) {
+	for _, in := range []string{"ye", "spot", "interruptible-please", "1"} {
+		if _, err := parseReclaimPolicy(in); err == nil {
+			t.Errorf("parseReclaimPolicy(%q) accepted a value it does not understand", in)
+		}
+	}
+}
+
+// The three understood spellings, and the empty default that keeps the Ch 6-10
+// behaviour free.
+func TestParseReclaimPolicyAcceptsTheDocumentedForms(t *testing.T) {
+	cases := map[string]provisionerv1.ReclaimPolicy{
+		"":          provisionerv1.ReclaimPolicy_RECLAIM_POLICY_UNSPECIFIED,
+		"yes":       provisionerv1.ReclaimPolicy_RECLAIM_POLICY_PREFERRED,
+		"no":        provisionerv1.ReclaimPolicy_RECLAIM_POLICY_NEVER,
+		"on-demand": provisionerv1.ReclaimPolicy_RECLAIM_POLICY_NEVER,
+	}
+	for in, want := range cases {
+		got, err := parseReclaimPolicy(in)
+		if err != nil {
+			t.Errorf("parseReclaimPolicy(%q): %v", in, err)
+			continue
+		}
+		if got != want {
+			t.Errorf("parseReclaimPolicy(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
+
+// The tier belongs in a column, not a footnote, because it changes what the
+// number beside it means: an hourly rate on capacity that can be taken back is
+// not the same kind of number as one that cannot.
+func TestRenderCandidatesNamesTheTier(t *testing.T) {
+	var buf bytes.Buffer
+	err := renderCandidates(&buf, answersFor("vast"), []provisioners.Candidate{
+		{Provider: "vast", SKU: "A100_SXM4", PriceUSDPerHour: 0.13, Reclaimable: true},
+		{Provider: "vast", SKU: "A100_SXM4", PriceUSDPerHour: 0.83},
+	}, "table")
+	if err != nil {
+		t.Fatalf("renderCandidates: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "reclaimable") || !strings.Contains(out, "on-demand") {
+		t.Errorf("output does not distinguish the two tiers:\n%s", out)
+	}
+}

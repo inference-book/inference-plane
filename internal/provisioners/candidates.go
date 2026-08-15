@@ -124,6 +124,14 @@ type Candidate struct {
 	// exactly the normalization a shared shape exists to do.
 	Architecture string
 
+	// Reclaimable says the provider can take this capacity back, which is why
+	// it is cheaper. Typed rather than an Attrs entry because all three
+	// vendors have the concept under three different names, and because it
+	// changes what a price means: an hourly rate on capacity that can vanish
+	// is not comparable with one that cannot, and a merged list ranked on
+	// price alone would put the two side by side as though they were.
+	Reclaimable bool
+
 	// Fabric is the resolved interconnect verdict, carried whole rather than
 	// as a bandwidth number so the source survives. A candidate that got here
 	// on a bridge-capable card reads UNKNOWN, and a ranking that treated that
