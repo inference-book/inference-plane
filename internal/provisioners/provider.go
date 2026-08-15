@@ -296,6 +296,32 @@ const (
 	GPUClassXLarge = "xlarge" // 96 GB+ (H100 96 GB, H200, B-series)
 )
 
+// ClassifyByVRAM names the class a card falls into, derived from its memory
+// rather than from a reverse lookup table. An RTX 4090 is small because 24 GB
+// lands in the [24, 40) band, full stop.
+//
+// Deriving it means the classification cannot drift from the class defaults in
+// classDefaults, which are stated in the same units. A hand-maintained
+// SKU-to-class table on each adapter could, and there were three of them.
+//
+// Adapters call this after their own catalog lookup, so an operator-supplied
+// --gpu-sku outside a curated catalog still yields "" (no opinion) rather than
+// a guess. Callers pass 0 for an unknown card and get "" back.
+func ClassifyByVRAM(vramGb int) string {
+	switch {
+	case vramGb <= 0:
+		return ""
+	case vramGb >= 96:
+		return GPUClassXLarge
+	case vramGb >= 80:
+		return GPUClassLarge
+	case vramGb >= 40:
+		return GPUClassMedium
+	default:
+		return GPUClassSmall
+	}
+}
+
 // ReservedIDPrefix is the prefix the Service rejects on operator-supplied
 // ids, reserving the namespace for a future relaxation to auto-generated
 // ids without colliding with anything that exists.
