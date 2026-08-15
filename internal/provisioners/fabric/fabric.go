@@ -303,6 +303,23 @@ func CouldSatisfy(family Family, wantScope provisionerv1.FabricScope) bool {
 	}
 }
 
+// Stamp resolves an observation and writes the four fabric fields onto a
+// Hardware record. Every adapter did this identically, and the failure it
+// prevents is a partial stamp: scope set without source is a claim with no
+// provenance, and Satisfies would then read a DECLARED-looking verdict off a
+// zero value. Resolving and writing in one call keeps the four fields
+// consistent with each other by construction.
+func Stamp(hw *provisionerv1.Hardware, obs Observation) {
+	if hw == nil {
+		return
+	}
+	res := Resolve(obs)
+	hw.FabricScope = res.Scope
+	hw.FabricSource = res.Source
+	hw.FabricGbps = res.Gbps
+	hw.FabricTechnology = res.Technology
+}
+
 // GbpsFromGBps converts a gigaBYTES-per-second reading, which is how vendors
 // and Vast quote NVLink, into the gigaBITS this package and the proto use.
 // Exists as a named function rather than an inline *8 because the two units

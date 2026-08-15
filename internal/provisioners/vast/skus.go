@@ -1,12 +1,12 @@
 package vast
 
 import (
-	"sort"
 	"strings"
 
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
 	"github.com/inference-book/inference-plane/internal/provisioners"
 	"github.com/inference-book/inference-plane/internal/provisioners/fabric"
+	"github.com/inference-book/inference-plane/internal/provisioners/skucatalog"
 )
 
 // SKUSpec describes what a Vast.ai gpu_name actually delivers: VRAM
@@ -121,13 +121,34 @@ var skus = []SKUSpec{
 }
 
 // MaxSKUsPerRequest caps the SKUs the resolver will try when no
-// operator-supplied --gpu-sku narrows the search. Unlike RunPod, the
-// vast adapter doesn't send the full list to one API call; instead
-// MatchSKUs returns an ordered list and Spawn iterates: search for an
-// offer of SKU[0], if none, search for SKU[1], etc. The cap keeps the
-// fallback bounded so an "any small GPU" request doesn't silently
-// climb into B200 territory after every cheap tier is empty.
-const MaxSKUsPerRequest = 5
+// operator-supplied --gpu-sku narrows the search. The cap and its
+// price-escalation rationale are shared (skucatalog.MaxResults); what is Vast-
+// specific is what the list costs to walk. Unlike RunPod, the vast adapter
+// doesn't send the full list to one API call; instead MatchSKUs returns an
+// ordered list and Spawn iterates: search for an offer of SKU[0], if none,
+// search for SKU[1], etc. So each extra entry is another round trip to the
+// marketplace, not a free fallback.
+const MaxSKUsPerRequest = skucatalog.MaxResults
+
+// catalogEntries projects the Vast catalog onto the shared resolver's fact
+// set. Two fields deliberately do not cross over. DefaultDiskGb is not a fact
+// a catalog row bounds, so it must never filter (#281). WireName and VRAMMaxGb
+// are offer-level concerns: they disambiguate two physical cards sold under
+// one gpu_name, which is settled by the VRAM floor and ceiling findOffer
+// pushes into the search, not by which catalog rows are candidates.
+func catalogEntries() []skucatalog.Entry {
+	out := make([]skucatalog.Entry, 0, len(skus))
+	for _, sku := range skus {
+		out = append(out, skucatalog.Entry{
+			Token:           sku.GpuName,
+			VRAMGb:          sku.VRAMGb,
+			SystemRAMGb:     sku.DefaultSystemRAMGb,
+			PriceUSDPerHour: sku.PriceUSDPerHour,
+			Family:          sku.Family,
+		})
+	}
+	return out
+}
 
 // MatchSKUs is the per-provider resolver in the (a) constraints / (b)
 // resolver / (c) executor model. Given a ResourceRequirements, it
@@ -135,50 +156,18 @@ const MaxSKUsPerRequest = 5
 // every numeric constraint, cheapest first, capped at
 // MaxSKUsPerRequest.
 //
+// FabricPrefilter, because Vast is the one provider that measures the fabric
+// (bw_nvlink on each offer). The catalog only drops families that could never
+// carry the requested fabric and leaves bridge-capable ones searchable, since
+// findOffer pushes the bandwidth filter server-side and the reading on the
+// picked offer is what actually decides. Dropping a "PCIE" SKU here would
+// discard exactly the hosts worth having.
+//
 // Returns an empty slice if no SKU in the catalog satisfies the
 // constraints; Spawn surfaces this as "no matching SKU" rather than
 // silently passing nothing to Vast.ai's search.
 func MatchSKUs(reqs *provisionerv1.ResourceRequirements) []string {
-	if reqs == nil {
-		return nil
-	}
-	var matches []SKUSpec
-	for _, sku := range skus {
-		if sku.VRAMGb < int(reqs.GetMinVramGb()) {
-			continue
-		}
-		// NOTE: min_disk_gb does NOT filter SKUs. DefaultDiskGb is a typical
-		// default for the tier, not a per-SKU ceiling. Spawn reads min_disk_gb
-		// off the requirements and hands it to findOffer, which pushes it into
-		// the offer search, so disk is settled per offer and not per catalog
-		// row. Filtering here rejected hardware that would have served. At 100
-		// GB it dropped the whole 80 GB tier and started the resolver at H100
-		// NVL. A 72B FP8 asking for 150 GB matched nothing at all. RunPod's
-		// resolver carries the same note for the same reason (#281).
-		if int(reqs.GetMinRamGb()) > 0 && sku.DefaultSystemRAMGb < int(reqs.GetMinRamGb()) {
-			continue
-		}
-		// Fabric PRE-filter. CouldSatisfy, not Satisfies: Vast measures each
-		// offer, so the catalog only drops families that could never carry
-		// the requested fabric and leaves bridge-capable ones searchable.
-		// findOffer pushes the bandwidth filter server-side and the reading
-		// on the picked offer is what actually decides.
-		if !fabric.CouldSatisfy(sku.Family, reqs.GetFabricScope()) {
-			continue
-		}
-		matches = append(matches, sku)
-	}
-	sort.SliceStable(matches, func(i, j int) bool {
-		return matches[i].PriceUSDPerHour < matches[j].PriceUSDPerHour
-	})
-	if len(matches) > MaxSKUsPerRequest {
-		matches = matches[:MaxSKUsPerRequest]
-	}
-	out := make([]string, len(matches))
-	for i, m := range matches {
-		out[i] = m.GpuName
-	}
-	return out
+	return skucatalog.Match(catalogEntries(), reqs, skucatalog.FabricPrefilter)
 }
 
 // LookupSKU returns the catalog entry for a known gpu_name, accepting
@@ -203,26 +192,15 @@ func normalizeGpuName(s string) string {
 	return strings.ReplaceAll(strings.TrimSpace(s), " ", "_")
 }
 
-// classifySKU returns the class a SKU belongs to, derived from its
-// VRAM (not a hardcoded reverse table). An RTX 4090 at 24 GB is
-// "small" because it falls in the [24, 40) VRAM band, full stop.
-// Unknown SKUs return "" -- the operator-supplied --gpu-sku case
-// where we have no opinion about classification.
+// classifySKU returns the class a catalogued SKU belongs to. Unknown SKUs
+// return "" -- the operator-supplied --gpu-sku case where we have no opinion
+// about classification.
 func classifySKU(gpuName string) string {
 	sku := LookupSKU(gpuName)
 	if sku == nil {
 		return ""
 	}
-	switch {
-	case sku.VRAMGb >= 96:
-		return provisioners.GPUClassXLarge
-	case sku.VRAMGb >= 80:
-		return provisioners.GPUClassLarge
-	case sku.VRAMGb >= 40:
-		return provisioners.GPUClassMedium
-	default:
-		return provisioners.GPUClassSmall
-	}
+	return provisioners.ClassifyByVRAM(sku.VRAMGb)
 }
 
 // isActiveProviderState reports whether a Vast.ai actual_status counts
@@ -259,9 +237,5 @@ func stampFabric(hw *provisionerv1.Hardware, gpuName string, bwNvlink *float64) 
 		obs.HasMeasurement = true
 		obs.MeasuredGbps = fabric.GbpsFromGBps(*bwNvlink)
 	}
-	res := fabric.Resolve(obs)
-	hw.FabricScope = res.Scope
-	hw.FabricSource = res.Source
-	hw.FabricGbps = res.Gbps
-	hw.FabricTechnology = res.Technology
+	fabric.Stamp(hw, obs)
 }
