@@ -96,6 +96,7 @@ func offerToCandidate(sku string, o *offerSummary) provisioners.Candidate {
 		PriceUSDPerHour: o.DphTotal,
 		GPUCount:        o.NumGPUs,
 		VRAMGbPerGPU:    o.GpuRAM / 1000,
+		Architecture:    provisioners.NormalizeArch(o.CPUArch),
 		Fabric:          fabric.Resolve(obs),
 		Attrs: map[string]string{
 			"inet_down":    strconv.FormatFloat(o.InetDown, 'f', 0, 64),

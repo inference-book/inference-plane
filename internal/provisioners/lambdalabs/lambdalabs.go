@@ -495,7 +495,13 @@ type instanceTypeBlock struct {
 	Description       string `json:"description"`
 	GPUDescription    string `json:"gpu_description"`
 	PriceCentsPerHour int    `json:"price_cents_per_hour"`
-	Specs             struct {
+
+	// Architecture is the host CPU architecture ("x86_64", "arm64"). Load
+	// bearing rather than cosmetic: Lambda's GH200 shapes are arm64, and an
+	// engine image built for x86 will not run on one. Normalized onto the
+	// shared vocabulary before it leaves the adapter.
+	Architecture string `json:"architecture"`
+	Specs        struct {
 		VCPUs      int `json:"vcpus"`
 		MemoryGiB  int `json:"memory_gib"`
 		StorageGiB int `json:"storage_gib"`
@@ -514,6 +520,25 @@ type apiInstance struct {
 		Name        string `json:"name"`
 		Description string `json:"description"`
 	} `json:"region"`
+}
+
+// instanceTypesEntry is one shape plus where it can currently be had.
+//
+// The capacity list is the fact the static catalog cannot hold. Probing live
+// on 2026-08-15, fifteen of Lambda's twenty-three shapes had capacity in no
+// region at all, and an empty list is a real answer rather than a missing one.
+type instanceTypesEntry struct {
+	InstanceType        instanceTypeBlock `json:"instance_type"`
+	RegionsWithCapacity []struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+	} `json:"regions_with_capacity_available"`
+}
+
+// instanceTypesResponse is keyed by instance-type name rather than being a
+// list, which is why the decode target is a map.
+type instanceTypesResponse struct {
+	Data map[string]instanceTypesEntry `json:"data"`
 }
 
 type instanceResponse struct {

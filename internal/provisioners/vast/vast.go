@@ -869,6 +869,11 @@ type offerSummary struct {
 	// filter: see #283 for why min_ram_gb does not narrow anything here yet.
 	CPURam int `json:"cpu_ram"`
 
+	// CPUArch is the host CPU architecture ("amd64"). Normalized onto the
+	// shared vocabulary before it leaves the adapter, because Lambda spells
+	// the same fact "x86_64".
+	CPUArch string `json:"cpu_arch"`
+
 	// GeoLocation is Vast's free-text host location ("SE", "US-TX"). Hosts are
 	// independent operators, so this is what they typed rather than a
 	// controlled region vocabulary, and it is shown rather than matched on.
