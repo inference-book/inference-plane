@@ -17,7 +17,7 @@ import (
 // rank it against real ones.
 func TestRenderCandidatesNeverPrintsUnknownFabricAsZero(t *testing.T) {
 	var buf bytes.Buffer
-	err := renderCandidates(&buf, "vast", []provisioners.Candidate{{
+	err := renderCandidates(&buf, answersFor("vast"), []provisioners.Candidate{{
 		HostID: "9871", OfferID: "2204551", SKU: "A100_PCIE", GPUCount: 4,
 		PriceUSDPerHour: 1.44,
 		Fabric: fabric.Result{
@@ -43,7 +43,7 @@ func TestRenderCandidatesNeverPrintsUnknownFabricAsZero(t *testing.T) {
 // survive into the column an operator actually reads.
 func TestRenderCandidatesDistinguishesMeasuredFromDeclared(t *testing.T) {
 	var buf bytes.Buffer
-	err := renderCandidates(&buf, "vast", []provisioners.Candidate{
+	err := renderCandidates(&buf, answersFor("vast"), []provisioners.Candidate{
 		{HostID: "1", SKU: "A100_PCIE", Fabric: fabric.Result{
 			Scope:  provisionerv1.FabricScope_FABRIC_SCOPE_INTRA_NODE,
 			Source: provisionerv1.FabricSource_FABRIC_SOURCE_MEASURED,
@@ -70,12 +70,20 @@ func TestRenderCandidatesDistinguishesMeasuredFromDeclared(t *testing.T) {
 // else, and "no candidates" alone does not tell them which.
 func TestRenderCandidatesEmptySaysTheProviderWasAsked(t *testing.T) {
 	var buf bytes.Buffer
-	if err := renderCandidates(&buf, "vast", nil, "table"); err != nil {
+	if err := renderCandidates(&buf, answersFor("vast"), nil, "table"); err != nil {
 		t.Fatalf("renderCandidates: %v", err)
 	}
 
-	if !strings.Contains(buf.String(), "asked") {
-		t.Errorf("empty output does not distinguish 'asked and got nothing' from 'unsatisfiable':\n%s", buf.String())
+	// The per-provider line is what carries the distinction now: "answered,
+	// no capacity" against the "cannot answer" wording a provider without the
+	// capability gets. Both must name the provider, because with several in
+	// play a bare summary line cannot say which one had nothing.
+	out := buf.String()
+	if !strings.Contains(out, "answered") {
+		t.Errorf("empty output does not say the provider was asked and answered:\n%s", out)
+	}
+	if !strings.Contains(out, "vast") {
+		t.Errorf("empty output does not name which provider had nothing:\n%s", out)
 	}
 }
 
@@ -114,7 +122,7 @@ func TestReadOnlyStoreOpenSucceedsWhileLockHeld(t *testing.T) {
 // read the output and wonder whether something got rented.
 func TestRenderCandidatesSaysNothingWasRented(t *testing.T) {
 	var buf bytes.Buffer
-	err := renderCandidates(&buf, "vast", []provisioners.Candidate{
+	err := renderCandidates(&buf, answersFor("vast"), []provisioners.Candidate{
 		{HostID: "1", SKU: "A100_PCIE", PriceUSDPerHour: 1.10},
 	}, "table")
 	if err != nil {
@@ -124,4 +132,10 @@ func TestRenderCandidatesSaysNothingWasRented(t *testing.T) {
 	if !strings.Contains(strings.ToLower(buf.String()), "nothing was rented") {
 		t.Errorf("output does not state that nothing was rented:\n%s", buf.String())
 	}
+}
+
+// answersFor builds the single-provider ProviderAnswer slice these rendering
+// tests need, so each one keeps stating only the thing it is about.
+func answersFor(provider string, cands ...provisioners.Candidate) []provisioners.ProviderAnswer {
+	return []provisioners.ProviderAnswer{{Provider: provider, Candidates: cands}}
 }

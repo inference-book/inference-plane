@@ -71,6 +71,12 @@ type CandidateSource interface {
 // zero, and a caller must read that as "not reported" rather than as a
 // measurement, which is the same rule Fabric carries explicitly below.
 type Candidate struct {
+	// Provider names where this came from. Stamped by the Service after the
+	// adapter returns rather than by the adapter itself, so a candidate cannot
+	// be mislabelled and a merged list from several providers is
+	// self-describing.
+	Provider string
+
 	// HostID identifies the physical machine behind the offer, stable across
 	// the offers that come and go on it. Separate from OfferID because on a
 	// marketplace they are different lifetimes: an offer disappears when
@@ -182,5 +188,12 @@ func (s *Service) ListCandidates(ctx context.Context, providerName string, reqs 
 		return nil, status.Errorf(codes.Unimplemented,
 			"provider %q cannot list candidates without renting one", providerName)
 	}
-	return cs.Candidates(ctx, reqs)
+	out, err := cs.Candidates(ctx, reqs)
+	if err != nil {
+		return nil, err
+	}
+	for i := range out {
+		out[i].Provider = providerName
+	}
+	return out, nil
 }
