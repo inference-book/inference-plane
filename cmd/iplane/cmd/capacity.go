@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -167,12 +168,13 @@ func renderCandidates(w io.Writer, provider string, candidates []provisioners.Ca
 	}
 
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "HOST\tOFFER\tSKU\tREGION\tGPUS\tVRAM\tARCH\t$/HR\tFABRIC")
+	fmt.Fprintln(tw, "HOST\tOFFER\tSKU\tREGION\tGPUS\tVRAM\tARCH\t$/HR\tFABRIC\tNOTES")
 	for _, c := range candidates {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\t%dGB\t%s\t%.2f\t%s\n",
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\t%dGB\t%s\t%.2f\t%s\t%s\n",
 			dashIfEmpty(c.HostID), dashIfEmpty(c.OfferID), c.SKU,
 			dashIfEmpty(c.Region), c.GPUCount, c.VRAMGbPerGPU,
-			dashIfEmpty(c.Architecture), c.PriceUSDPerHour, candidateFabricLabel(c))
+			dashIfEmpty(c.Architecture), c.PriceUSDPerHour, candidateFabricLabel(c),
+			renderAttrs(c.Attrs))
 	}
 	if err := tw.Flush(); err != nil {
 		return err
@@ -202,6 +204,30 @@ func candidateFabricLabel(c provisioners.Candidate) string {
 		}
 		return fmt.Sprintf("%s (declared, %d Gb)", fabricScopeLabel(c.Fabric.Scope), c.Fabric.Gbps)
 	}
+}
+
+// renderAttrs prints the provider-reported extras as sorted k=v pairs.
+//
+// Attrs is where per-provider facts live precisely because they cannot be
+// compared across providers, and until now it was reachable only through
+// --output json. Keeping it invisible is what lets an untyped bag quietly
+// accumulate: RunPod's stock level is the single most useful thing it reports,
+// and RunPod has no host, no offer and no region, so without this its rows are
+// three dashes and a price. Sorted so the column is stable between runs.
+func renderAttrs(attrs map[string]string) string {
+	if len(attrs) == 0 {
+		return "-"
+	}
+	keys := make([]string, 0, len(attrs))
+	for k := range attrs {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, k+"="+attrs[k])
+	}
+	return strings.Join(parts, " ")
 }
 
 func dashIfEmpty(s string) string {

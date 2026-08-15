@@ -47,12 +47,15 @@ import (
 //     static catalog cannot hold. A Lambda candidate has no host identity and
 //     no offer id, and those fields stay empty rather than invented.
 //
-//   - runpod: unknown, deliberately left unimplemented pending a probe rather
-//     than guessed at. Its /gpus endpoint gives prices, and whether it exposes
-//     per-SKU availability is a question to answer against the live API, the
-//     way FailureReporter's RunPod entry was settled by inducing both failure
-//     modes. A catalog-only answer would add nothing over what --dry-run
-//     already prints from the static table.
+//   - runpod: yes, and the earlier guess here was wrong. This block used to
+//     say a RunPod answer would add nothing over the static catalog. Probing
+//     the live API on 2026-08-15 found otherwise: gpuTypes.lowestPrice takes a
+//     gpuCount and returns both a live price and a stock level, and 35 of 48
+//     types were obtainable as a single GPU against 11 of 48 as eight.
+//     Availability is a property of a card AT a width, which is exactly what a
+//     catalog cannot express. Note the REST API has no catalog endpoint at
+//     all, so this is the one GraphQL read in the adapter besides SSH keys.
+//     Neither a host nor a region: RunPod schedules where it likes.
 //
 //   - local, external: no, and structurally so. Neither selects among
 //     candidates. local is the one machine the operator already has, and
