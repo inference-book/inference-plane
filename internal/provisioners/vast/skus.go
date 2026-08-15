@@ -147,9 +147,14 @@ func MatchSKUs(reqs *provisionerv1.ResourceRequirements) []string {
 		if sku.VRAMGb < int(reqs.GetMinVramGb()) {
 			continue
 		}
-		if int(reqs.GetMinDiskGb()) > 0 && sku.DefaultDiskGb < int(reqs.GetMinDiskGb()) {
-			continue
-		}
+		// NOTE: min_disk_gb does NOT filter SKUs. DefaultDiskGb is a typical
+		// default for the tier, not a per-SKU ceiling. Spawn reads min_disk_gb
+		// off the requirements and hands it to findOffer, which pushes it into
+		// the offer search, so disk is settled per offer and not per catalog
+		// row. Filtering here rejected hardware that would have served. At 100
+		// GB it dropped the whole 80 GB tier and started the resolver at H100
+		// NVL. A 72B FP8 asking for 150 GB matched nothing at all. RunPod's
+		// resolver carries the same note for the same reason (#281).
 		if int(reqs.GetMinRamGb()) > 0 && sku.DefaultSystemRAMGb < int(reqs.GetMinRamGb()) {
 			continue
 		}
