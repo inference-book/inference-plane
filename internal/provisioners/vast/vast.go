@@ -544,11 +544,35 @@ func offerVRAMCeilingMB(gpuName string) int {
 }
 
 func (p *Provider) findOffer(ctx context.Context, gpuName string, gpuCount, diskGB int, reqs *provisionerv1.ResourceRequirements) (*offerSummary, error) {
+	offers, err := p.searchOffers(ctx, gpuName, gpuCount, diskGB, reqs, spawnOfferLimit)
+	if err != nil {
+		return nil, err
+	}
+	if len(offers) == 0 {
+		return nil, nil
+	}
+	return &offers[0], nil
+}
+
+// spawnOfferLimit is how many offers Spawn asks for. It only ever rents the
+// cheapest, and the rest are headroom for the caller to retry against without
+// a second round trip.
+const spawnOfferLimit = 5
+
+// searchOffers runs the marketplace query and returns the whole page,
+// cheapest first.
+//
+// Split out of findOffer so the read-only candidate listing and the rent path
+// ask the same question. If they built their query separately, a filter added
+// to one would silently not apply to the other, and a candidate list that
+// disagrees with what Spawn would actually pick is worse than no list: it
+// reads as a promise.
+func (p *Provider) searchOffers(ctx context.Context, gpuName string, gpuCount, diskGB int, reqs *provisionerv1.ResourceRequirements, limit int) ([]offerSummary, error) {
 	q := map[string]any{
 		"gpu_name": map[string]string{"eq": gpuNameForVast(gpuName)},
 		"num_gpus": map[string]int{"eq": gpuCount},
 		"rentable": map[string]bool{"eq": true},
-		"limit":    5,
+		"limit":    limit,
 		"order":    [][]string{{"dph_total", "asc"}},
 	}
 	if diskGB > 0 {
@@ -646,10 +670,7 @@ func (p *Provider) findOffer(ctx context.Context, gpuName string, gpuCount, disk
 	if err != nil {
 		return nil, err
 	}
-	if len(resp.Offers) == 0 {
-		return nil, nil
-	}
-	return &resp.Offers[0], nil
+	return resp.Offers, nil
 }
 
 // gpuNameForVast converts the SKU token used in our catalog ("RTX_4090") into
@@ -835,6 +856,23 @@ type offerSummary struct {
 	NumGPUs  int     `json:"num_gpus"`
 	DiskGB   float64 `json:"disk_space"`
 	DphTotal float64 `json:"dph_total"`
+
+	// MachineID is the host behind the offer, which is a different lifetime
+	// from the offer itself: offers appear and vanish as capacity is rented
+	// and released, while the machine stays the machine. It is the only id
+	// worth writing down about a host that turned out to be broken (#214),
+	// and the two broken hosts found on 2026-08-11 were identified this way.
+	MachineID int `json:"machine_id"`
+
+	// CPURam is the host's system RAM in MB. Decoded for the candidate
+	// listing, where an operator comparing offers wants it. Not currently a
+	// filter: see #283 for why min_ram_gb does not narrow anything here yet.
+	CPURam int `json:"cpu_ram"`
+
+	// GeoLocation is Vast's free-text host location ("SE", "US-TX"). Hosts are
+	// independent operators, so this is what they typed rather than a
+	// controlled region vocabulary, and it is shown rather than matched on.
+	GeoLocation string `json:"geolocation"`
 
 	// BwNvlink is Vast's measured NVLink bandwidth for the host, in
 	// gigaBYTES per second. Vast is the only provider that reports this.
