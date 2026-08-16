@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
@@ -34,6 +35,7 @@ import (
 // an operator most wants to ask about capacity is while a daemon is running.
 var (
 	capacityProvider  string
+	capacityAll       bool
 	capacityClass     string
 	capacitySKU       string
 	capacityGPUCount  int32
@@ -60,11 +62,8 @@ var capacityCmd = &cobra.Command{
 		"cannot answer say so rather than returning an empty list, because " +
 		"\"nobody looked\" and \"no capacity\" are different answers.",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		provider := capacityProvider
-		if provider == "" {
-			provider = defaultProvider(provisioners.ProviderRunPod)
-		}
-		if err := ensureProviderAPIKey(provider); err != nil {
+		providers, err := capacityProviders()
+		if err != nil {
 			return err
 		}
 
@@ -87,7 +86,10 @@ var capacityCmd = &cobra.Command{
 		// create path does, so `--class large` here means what it means there.
 		// Without this the listing would answer a different question than the
 		// one a subsequent create would ask.
-		spec := &provisionerv1.Spec{Id: "capacity-query", Provider: provider, Requirements: reqs}
+		// Provider is not read by the expansion (it only resolves class
+		// shorthand into numbers), and with --all there is no single provider
+		// to name, so it is deliberately left unset.
+		spec := &provisionerv1.Spec{Id: "capacity-query", Requirements: reqs}
 		if err := provisioners.ValidateAndExpandRequirements(spec); err != nil {
 			return err
 		}
@@ -100,15 +102,61 @@ var capacityCmd = &cobra.Command{
 		ctx, cancel := context.WithTimeout(cmd.Context(), time.Duration(capacityTimeoutSc)*time.Second)
 		defer cancel()
 
-		candidates, err := svc.ListCandidates(ctx, provider, spec.GetRequirements())
-		if err != nil {
-			return candidateQueryError(provider, err)
+		answers := svc.ListCandidatesAcross(ctx, providers, spec.GetRequirements())
+
+		// A single named provider that could not answer is an error, because
+		// the operator asked one question and got none. Across several it is
+		// a reported outcome, because the other vendors still answered and a
+		// search that dies on its weakest participant is not a search.
+		if len(answers) == 1 && answers[0].Err != nil {
+			return candidateQueryError(answers[0].Provider, answers[0].Err)
 		}
+
+		candidates := provisioners.MergeCandidates(answers)
 		if capacityLimit > 0 && len(candidates) > capacityLimit {
 			candidates = candidates[:capacityLimit]
 		}
-		return renderCandidates(cmd.OutOrStdout(), provider, candidates, capacityOutput)
+		return renderCandidates(cmd.OutOrStdout(), answers, candidates, capacityOutput)
 	},
+}
+
+// capacityProviders resolves --provider / --all into the list to ask.
+//
+// An empty list means "every configured provider" and is passed through as
+// such, because the Service is the thing that knows what is configured and
+// duplicating that here would drift.
+//
+// The API-key precheck only runs for explicitly named providers. Asking for
+// everything should not fail because one vendor's key is absent: that provider
+// simply reports its own error alongside the others, which is the outcome the
+// cross-provider view exists to show.
+func capacityProviders() ([]string, error) {
+	if capacityAll {
+		if capacityProvider != "" {
+			return nil, errors.New("--all and --provider are mutually exclusive")
+		}
+		return nil, nil
+	}
+
+	spec := capacityProvider
+	if spec == "" {
+		spec = defaultProvider(provisioners.ProviderRunPod)
+	}
+	var out []string
+	for _, name := range strings.Split(spec, ",") {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if err := ensureProviderAPIKey(name); err != nil {
+			return nil, err
+		}
+		out = append(out, name)
+	}
+	if len(out) == 0 {
+		return nil, errors.New("--provider was empty")
+	}
+	return out, nil
 }
 
 // buildReadOnlyService opens the state store WITHOUT taking the lifetime lock
@@ -154,34 +202,108 @@ func candidateQueryError(provider string, err error) error {
 	return err
 }
 
-func renderCandidates(w io.Writer, provider string, candidates []provisioners.Candidate, format string) error {
+func renderCandidates(w io.Writer, answers []provisioners.ProviderAnswer, candidates []provisioners.Candidate, format string) error {
 	if format == "json" {
 		enc := json.NewEncoder(w)
 		enc.SetIndent("", "  ")
-		return enc.Encode(candidates)
+		return enc.Encode(map[string]any{
+			"candidates":    candidates,
+			"providers":     summarizeAnswers(answers),
+			"comparability": provisioners.AnalyzeComparability(answers),
+		})
 	}
 
-	if len(candidates) == 0 {
-		fmt.Fprintf(w, "no candidates on %s for these requirements.\n", provider)
-		fmt.Fprintln(w, "the provider was asked and had nothing to offer, which is not the same as the requirements being unsatisfiable elsewhere.")
-		return nil
+	if len(candidates) > 0 {
+		tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(tw, "PROVIDER\tHOST\tOFFER\tSKU\tREGION\tGPUS\tVRAM\tARCH\t$/HR\tFABRIC\tNOTES")
+		for _, c := range candidates {
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%d\t%dGB\t%s\t%.2f\t%s\t%s\n",
+				c.Provider,
+				dashIfEmpty(c.HostID), dashIfEmpty(c.OfferID), c.SKU,
+				dashIfEmpty(c.Region), c.GPUCount, c.VRAMGbPerGPU,
+				dashIfEmpty(c.Architecture), c.PriceUSDPerHour, candidateFabricLabel(c),
+				renderAttrs(c.Attrs))
+		}
+		if err := tw.Flush(); err != nil {
+			return err
+		}
+		fmt.Fprintln(w)
 	}
 
-	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "HOST\tOFFER\tSKU\tREGION\tGPUS\tVRAM\tARCH\t$/HR\tFABRIC\tNOTES")
-	for _, c := range candidates {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\t%dGB\t%s\t%.2f\t%s\t%s\n",
-			dashIfEmpty(c.HostID), dashIfEmpty(c.OfferID), c.SKU,
-			dashIfEmpty(c.Region), c.GPUCount, c.VRAMGbPerGPU,
-			dashIfEmpty(c.Architecture), c.PriceUSDPerHour, candidateFabricLabel(c),
-			renderAttrs(c.Attrs))
-	}
-	if err := tw.Flush(); err != nil {
-		return err
-	}
-
-	fmt.Fprintf(w, "\n%d candidate(s) on %s, cheapest first. Nothing was rented.\n", len(candidates), provider)
+	renderProviderOutcomes(w, answers, len(candidates))
+	renderComparability(w, provisioners.AnalyzeComparability(answers))
 	return nil
+}
+
+// renderProviderOutcomes reports what each vendor actually did, because the
+// merged table cannot show it. A provider that could not answer contributes no
+// rows and so does one with no capacity, and those are opposite findings.
+func renderProviderOutcomes(w io.Writer, answers []provisioners.ProviderAnswer, total int) {
+	if total > 0 {
+		fmt.Fprintf(w, "%d candidate(s) across %d provider(s), cheapest first. Nothing was rented.\n",
+			total, len(answers))
+	} else {
+		fmt.Fprintf(w, "no candidates from %d provider(s) for these requirements. Nothing was rented.\n",
+			len(answers))
+	}
+	for _, a := range answers {
+		switch {
+		case a.Err != nil && !a.CanAnswer():
+			fmt.Fprintf(w, "  %-12s cannot answer without renting one\n", a.Provider)
+		case a.Err != nil:
+			fmt.Fprintf(w, "  %-12s did not answer: %v\n", a.Provider, a.Err)
+		case len(a.Candidates) == 0:
+			fmt.Fprintf(w, "  %-12s answered, no capacity matching these requirements\n", a.Provider)
+		default:
+			fmt.Fprintf(w, "  %-12s %d candidate(s)\n", a.Provider, len(a.Candidates))
+		}
+	}
+}
+
+// renderComparability prints which columns mean the same thing on every row.
+//
+// Without it the table invites a comparison it cannot support: a blank cell
+// reads as neutral, so the vendor that publishes least looks no worse than the
+// one that publishes most. Naming the gaps is cheaper than pretending they are
+// not there and far cheaper than silently ranking on them.
+func renderComparability(w io.Writer, c provisioners.Comparability) {
+	if len(c.Compared) == 0 && len(c.Gaps) == 0 {
+		return
+	}
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Ranked on price only.")
+	if len(c.Compared) > 0 {
+		fmt.Fprintf(w, "  comparable across all answering providers: %s\n", strings.Join(c.Compared, ", "))
+	}
+	for _, g := range c.Gaps {
+		fmt.Fprintf(w, "  %s: reported by %s, not by %s\n",
+			g.Fact, strings.Join(g.ReportedBy, "/"), strings.Join(g.MissingFrom, "/"))
+	}
+	if len(c.Gaps) > 0 {
+		fmt.Fprintln(w, "  a blank in those columns is unmeasured, not zero, and was not ranked on.")
+	}
+}
+
+// summarizeAnswers renders the per-provider outcome for --output json, where
+// the same three-way distinction has to survive without the prose.
+func summarizeAnswers(answers []provisioners.ProviderAnswer) []map[string]any {
+	out := make([]map[string]any, 0, len(answers))
+	for _, a := range answers {
+		row := map[string]any{"provider": a.Provider, "candidates": len(a.Candidates)}
+		switch {
+		case a.Err != nil && !a.CanAnswer():
+			row["outcome"] = "cannot_answer"
+		case a.Err != nil:
+			row["outcome"] = "error"
+			row["error"] = a.Err.Error()
+		case len(a.Candidates) == 0:
+			row["outcome"] = "no_capacity"
+		default:
+			row["outcome"] = "answered"
+		}
+		out = append(out, row)
+	}
+	return out
 }
 
 // candidateFabricLabel renders the fabric verdict WITH its provenance, never
@@ -241,7 +363,8 @@ func init() {
 	rootCmd.AddCommand(capacityCmd)
 
 	f := capacityCmd.Flags()
-	f.StringVar(&capacityProvider, "provider", "", `provider to ask (default $IPLANE_PROVIDER, else runpod)`)
+	f.StringVar(&capacityProvider, "provider", "", `provider(s) to ask, comma-separated (default $IPLANE_PROVIDER, else runpod)`)
+	f.BoolVar(&capacityAll, "all", false, `ask every configured provider, including ones that cannot answer`)
 	f.StringVar(&capacityClass, "class", "", `gpu class shorthand: small | medium | large | xlarge`)
 	f.StringVar(&capacitySKU, "sku", "", `exact provider sku id (bypasses the constraint resolver)`)
 	f.Int32Var(&capacityGPUCount, "gpu-count", 0, `number of GPUs on the instance (default 1)`)
