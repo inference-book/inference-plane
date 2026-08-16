@@ -18,6 +18,8 @@ package modelstores
 import (
 	"context"
 	"fmt"
+
+	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
 )
 
 // ModelStore transforms an operator-supplied model spec into a
@@ -29,6 +31,26 @@ import (
 // spinning a pod).
 type ModelStore interface {
 	Resolve(ctx context.Context, spec string) (Resolved, error)
+}
+
+// ArchitectureSource is an optional capability a ModelStore may also
+// satisfy: reporting the model's shape so a VRAM budget can be computed
+// before any hardware is rented.
+//
+// Optional, and asserted at runtime like the provider capabilities, for
+// the same reason. A store backed by a hub that publishes layer and head
+// counts can answer. A pass-through store, or one pointed at a local
+// path, cannot, and stubbing it would make "this store does not know"
+// indistinguishable from "this model has no layers". A caller that finds
+// the capability absent skips the pre-flight rather than trusting a zero.
+//
+// Request and response are the generated messages rather than a string
+// and a struct, because this read belongs behind the wire contract: it
+// needs the hub credential, and that lives in the daemon's environment.
+// A seam shaped as a bare string is the seam that gets answered on the
+// wrong host.
+type ArchitectureSource interface {
+	Architecture(ctx context.Context, req *provisionerv1.DescribeModelRequest) (*provisionerv1.DescribeModelResponse, error)
 }
 
 // Resolved is what the Service uses to populate the deployment's

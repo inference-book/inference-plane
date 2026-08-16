@@ -2615,6 +2615,204 @@ func (x *UpstreamAuth) GetValuePrefix() string {
 // A volume is datacenter-locked, so serving a model in two regions needs
 // it staged on one volume per region -- replication is per-region, not a
 // property of a single record.
+// ModelArchitecture is the part of a model fixed at training time: what
+// the VRAM budget reads to work out whether the model fits the cards
+// before any of them are rented.
+//
+// Every field is published by the model rather than chosen by the
+// operator, which is the line separating this message from the deploy-
+// time knobs (precision, context length, batch, parallelism) that live
+// elsewhere. Absent means unknown and never zero. A budget computed from
+// a zero layer count reports no KV cache at all, which is a budget that
+// says yes to everything.
+type ModelArchitecture struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Total parameter count, from the hub's tensor accounting rather than
+	// from the model's name. A name is a label the uploader chose.
+	Params int64 `protobuf:"varint,1,opt,name=params,proto3" json:"params,omitempty"`
+	// Transformer blocks (num_hidden_layers).
+	Layers int32 `protobuf:"varint,2,opt,name=layers,proto3" json:"layers,omitempty"`
+	// Key-value heads (num_key_value_heads). Grouped-query attention
+	// shares one KV head across a group of query heads, so the cache
+	// scales with this count rather than with the attention-head count.
+	// A model without GQA publishes no separate figure, and absent there
+	// means "as many as there are attention heads".
+	KvHeads int32 `protobuf:"varint,3,opt,name=kv_heads,json=kvHeads,proto3" json:"kv_heads,omitempty"`
+	// Dimension of a single attention head. Optional in a published
+	// config and derivable, since hidden_size is by construction this
+	// times the attention-head count.
+	HeadDim int32 `protobuf:"varint,4,opt,name=head_dim,json=headDim,proto3" json:"head_dim,omitempty"`
+	// Model dimension (hidden_size). Read only by the activation
+	// estimate, which is the budget's coarsest term.
+	HiddenSize    int32 `protobuf:"varint,5,opt,name=hidden_size,json=hiddenSize,proto3" json:"hidden_size,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ModelArchitecture) Reset() {
+	*x = ModelArchitecture{}
+	mi := &file_provisioner_v1_types_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ModelArchitecture) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ModelArchitecture) ProtoMessage() {}
+
+func (x *ModelArchitecture) ProtoReflect() protoreflect.Message {
+	mi := &file_provisioner_v1_types_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ModelArchitecture.ProtoReflect.Descriptor instead.
+func (*ModelArchitecture) Descriptor() ([]byte, []int) {
+	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *ModelArchitecture) GetParams() int64 {
+	if x != nil {
+		return x.Params
+	}
+	return 0
+}
+
+func (x *ModelArchitecture) GetLayers() int32 {
+	if x != nil {
+		return x.Layers
+	}
+	return 0
+}
+
+func (x *ModelArchitecture) GetKvHeads() int32 {
+	if x != nil {
+		return x.KvHeads
+	}
+	return 0
+}
+
+func (x *ModelArchitecture) GetHeadDim() int32 {
+	if x != nil {
+		return x.HeadDim
+	}
+	return 0
+}
+
+func (x *ModelArchitecture) GetHiddenSize() int32 {
+	if x != nil {
+		return x.HiddenSize
+	}
+	return 0
+}
+
+// DescribeModelRequest asks what a model spec resolves to.
+//
+// This is a read behind the wire contract rather than a local one,
+// because answering it needs the hub credential, and that lives in the
+// daemon's environment. A CLI host without HF_TOKEN answering from its
+// own process would report a gated model as unreadable while the daemon
+// could read it perfectly well -- the shape of the bug that shipped
+// twice already, in the capacity search and in the pin registry.
+type DescribeModelRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Operator-supplied spec, `<org>/<name>` with an optional
+	// `:<revision>` suffix.
+	ModelSpec     string `protobuf:"bytes,1,opt,name=model_spec,json=modelSpec,proto3" json:"model_spec,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DescribeModelRequest) Reset() {
+	*x = DescribeModelRequest{}
+	mi := &file_provisioner_v1_types_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DescribeModelRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DescribeModelRequest) ProtoMessage() {}
+
+func (x *DescribeModelRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_provisioner_v1_types_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DescribeModelRequest.ProtoReflect.Descriptor instead.
+func (*DescribeModelRequest) Descriptor() ([]byte, []int) {
+	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *DescribeModelRequest) GetModelSpec() string {
+	if x != nil {
+		return x.ModelSpec
+	}
+	return ""
+}
+
+// DescribeModelResponse carries what the hub published about a model.
+type DescribeModelResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Architecture  *ModelArchitecture     `protobuf:"bytes,1,opt,name=architecture,proto3" json:"architecture,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DescribeModelResponse) Reset() {
+	*x = DescribeModelResponse{}
+	mi := &file_provisioner_v1_types_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DescribeModelResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DescribeModelResponse) ProtoMessage() {}
+
+func (x *DescribeModelResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_provisioner_v1_types_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DescribeModelResponse.ProtoReflect.Descriptor instead.
+func (*DescribeModelResponse) Descriptor() ([]byte, []int) {
+	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *DescribeModelResponse) GetArchitecture() *ModelArchitecture {
+	if x != nil {
+		return x.Architecture
+	}
+	return nil
+}
+
 type Volume struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// id is the provider-issued volume handle (a RunPod networkVolumeId).
@@ -2643,7 +2841,7 @@ type Volume struct {
 
 func (x *Volume) Reset() {
 	*x = Volume{}
-	mi := &file_provisioner_v1_types_proto_msgTypes[15]
+	mi := &file_provisioner_v1_types_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2655,7 +2853,7 @@ func (x *Volume) String() string {
 func (*Volume) ProtoMessage() {}
 
 func (x *Volume) ProtoReflect() protoreflect.Message {
-	mi := &file_provisioner_v1_types_proto_msgTypes[15]
+	mi := &file_provisioner_v1_types_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2668,7 +2866,7 @@ func (x *Volume) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Volume.ProtoReflect.Descriptor instead.
 func (*Volume) Descriptor() ([]byte, []int) {
-	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{15}
+	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *Volume) GetId() string {
@@ -2786,7 +2984,7 @@ type ReplicaSpec struct {
 
 func (x *ReplicaSpec) Reset() {
 	*x = ReplicaSpec{}
-	mi := &file_provisioner_v1_types_proto_msgTypes[16]
+	mi := &file_provisioner_v1_types_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2798,7 +2996,7 @@ func (x *ReplicaSpec) String() string {
 func (*ReplicaSpec) ProtoMessage() {}
 
 func (x *ReplicaSpec) ProtoReflect() protoreflect.Message {
-	mi := &file_provisioner_v1_types_proto_msgTypes[16]
+	mi := &file_provisioner_v1_types_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2811,7 +3009,7 @@ func (x *ReplicaSpec) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReplicaSpec.ProtoReflect.Descriptor instead.
 func (*ReplicaSpec) Descriptor() ([]byte, []int) {
-	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{16}
+	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *ReplicaSpec) GetProvider() string {
@@ -2875,7 +3073,7 @@ type InterconnectHealth struct {
 
 func (x *InterconnectHealth) Reset() {
 	*x = InterconnectHealth{}
-	mi := &file_provisioner_v1_types_proto_msgTypes[17]
+	mi := &file_provisioner_v1_types_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2887,7 +3085,7 @@ func (x *InterconnectHealth) String() string {
 func (*InterconnectHealth) ProtoMessage() {}
 
 func (x *InterconnectHealth) ProtoReflect() protoreflect.Message {
-	mi := &file_provisioner_v1_types_proto_msgTypes[17]
+	mi := &file_provisioner_v1_types_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2900,7 +3098,7 @@ func (x *InterconnectHealth) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InterconnectHealth.ProtoReflect.Descriptor instead.
 func (*InterconnectHealth) Descriptor() ([]byte, []int) {
-	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{17}
+	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *InterconnectHealth) GetAvailable() bool {
@@ -2952,7 +3150,7 @@ type EngineNode struct {
 
 func (x *EngineNode) Reset() {
 	*x = EngineNode{}
-	mi := &file_provisioner_v1_types_proto_msgTypes[18]
+	mi := &file_provisioner_v1_types_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2964,7 +3162,7 @@ func (x *EngineNode) String() string {
 func (*EngineNode) ProtoMessage() {}
 
 func (x *EngineNode) ProtoReflect() protoreflect.Message {
-	mi := &file_provisioner_v1_types_proto_msgTypes[18]
+	mi := &file_provisioner_v1_types_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2977,7 +3175,7 @@ func (x *EngineNode) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EngineNode.ProtoReflect.Descriptor instead.
 func (*EngineNode) Descriptor() ([]byte, []int) {
-	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{18}
+	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *EngineNode) GetHostId() string {
@@ -3055,7 +3253,7 @@ type Engine struct {
 
 func (x *Engine) Reset() {
 	*x = Engine{}
-	mi := &file_provisioner_v1_types_proto_msgTypes[19]
+	mi := &file_provisioner_v1_types_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3067,7 +3265,7 @@ func (x *Engine) String() string {
 func (*Engine) ProtoMessage() {}
 
 func (x *Engine) ProtoReflect() protoreflect.Message {
-	mi := &file_provisioner_v1_types_proto_msgTypes[19]
+	mi := &file_provisioner_v1_types_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3080,7 +3278,7 @@ func (x *Engine) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Engine.ProtoReflect.Descriptor instead.
 func (*Engine) Descriptor() ([]byte, []int) {
-	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{19}
+	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *Engine) GetId() string {
@@ -3338,7 +3536,19 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"\fUpstreamAuth\x12\x16\n" +
 	"\x06header\x18\x01 \x01(\tR\x06header\x12\x1b\n" +
 	"\tvalue_env\x18\x02 \x01(\tR\bvalueEnv\x12!\n" +
-	"\fvalue_prefix\x18\x03 \x01(\tR\vvaluePrefix\"\xeb\x01\n" +
+	"\fvalue_prefix\x18\x03 \x01(\tR\vvaluePrefix\"\x9a\x01\n" +
+	"\x11ModelArchitecture\x12\x16\n" +
+	"\x06params\x18\x01 \x01(\x03R\x06params\x12\x16\n" +
+	"\x06layers\x18\x02 \x01(\x05R\x06layers\x12\x19\n" +
+	"\bkv_heads\x18\x03 \x01(\x05R\akvHeads\x12\x19\n" +
+	"\bhead_dim\x18\x04 \x01(\x05R\aheadDim\x12\x1f\n" +
+	"\vhidden_size\x18\x05 \x01(\x05R\n" +
+	"hiddenSize\"5\n" +
+	"\x14DescribeModelRequest\x12\x1d\n" +
+	"\n" +
+	"model_spec\x18\x01 \x01(\tR\tmodelSpec\"^\n" +
+	"\x15DescribeModelResponse\x12E\n" +
+	"\farchitecture\x18\x01 \x01(\v2!.provisioner.v1.ModelArchitectureR\farchitecture\"\xeb\x01\n" +
 	"\x06Volume\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1a\n" +
 	"\bprovider\x18\x02 \x01(\tR\bprovider\x12\x16\n" +
@@ -3446,7 +3656,7 @@ func file_provisioner_v1_types_proto_rawDescGZIP() []byte {
 }
 
 var file_provisioner_v1_types_proto_enumTypes = make([]protoimpl.EnumInfo, 8)
-var file_provisioner_v1_types_proto_msgTypes = make([]protoimpl.MessageInfo, 25)
+var file_provisioner_v1_types_proto_msgTypes = make([]protoimpl.MessageInfo, 28)
 var file_provisioner_v1_types_proto_goTypes = []any{
 	(FabricScope)(0),              // 0: provisioner.v1.FabricScope
 	(FabricSource)(0),             // 1: provisioner.v1.FabricSource
@@ -3471,22 +3681,25 @@ var file_provisioner_v1_types_proto_goTypes = []any{
 	(*Placement)(nil),             // 20: provisioner.v1.Placement
 	(*Parallelism)(nil),           // 21: provisioner.v1.Parallelism
 	(*UpstreamAuth)(nil),          // 22: provisioner.v1.UpstreamAuth
-	(*Volume)(nil),                // 23: provisioner.v1.Volume
-	(*ReplicaSpec)(nil),           // 24: provisioner.v1.ReplicaSpec
-	(*InterconnectHealth)(nil),    // 25: provisioner.v1.InterconnectHealth
-	(*EngineNode)(nil),            // 26: provisioner.v1.EngineNode
-	(*Engine)(nil),                // 27: provisioner.v1.Engine
-	nil,                           // 28: provisioner.v1.Spec.TagsEntry
-	nil,                           // 29: provisioner.v1.Instance.MetadataEntry
-	nil,                           // 30: provisioner.v1.InstanceRef.TagsEntry
-	nil,                           // 31: provisioner.v1.Deployment.EnvEntry
-	nil,                           // 32: provisioner.v1.Candidate.AttrsEntry
-	(*timestamppb.Timestamp)(nil), // 33: google.protobuf.Timestamp
-	(*structpb.Value)(nil),        // 34: google.protobuf.Value
+	(*ModelArchitecture)(nil),     // 23: provisioner.v1.ModelArchitecture
+	(*DescribeModelRequest)(nil),  // 24: provisioner.v1.DescribeModelRequest
+	(*DescribeModelResponse)(nil), // 25: provisioner.v1.DescribeModelResponse
+	(*Volume)(nil),                // 26: provisioner.v1.Volume
+	(*ReplicaSpec)(nil),           // 27: provisioner.v1.ReplicaSpec
+	(*InterconnectHealth)(nil),    // 28: provisioner.v1.InterconnectHealth
+	(*EngineNode)(nil),            // 29: provisioner.v1.EngineNode
+	(*Engine)(nil),                // 30: provisioner.v1.Engine
+	nil,                           // 31: provisioner.v1.Spec.TagsEntry
+	nil,                           // 32: provisioner.v1.Instance.MetadataEntry
+	nil,                           // 33: provisioner.v1.InstanceRef.TagsEntry
+	nil,                           // 34: provisioner.v1.Deployment.EnvEntry
+	nil,                           // 35: provisioner.v1.Candidate.AttrsEntry
+	(*timestamppb.Timestamp)(nil), // 36: google.protobuf.Timestamp
+	(*structpb.Value)(nil),        // 37: google.protobuf.Value
 }
 var file_provisioner_v1_types_proto_depIdxs = []int32{
 	9,  // 0: provisioner.v1.Spec.requirements:type_name -> provisioner.v1.ResourceRequirements
-	28, // 1: provisioner.v1.Spec.tags:type_name -> provisioner.v1.Spec.TagsEntry
+	31, // 1: provisioner.v1.Spec.tags:type_name -> provisioner.v1.Spec.TagsEntry
 	0,  // 2: provisioner.v1.ResourceRequirements.fabric_scope:type_name -> provisioner.v1.FabricScope
 	2,  // 3: provisioner.v1.ResourceRequirements.reclaim_policy:type_name -> provisioner.v1.ReclaimPolicy
 	0,  // 4: provisioner.v1.Hardware.fabric_scope:type_name -> provisioner.v1.FabricScope
@@ -3494,27 +3707,27 @@ var file_provisioner_v1_types_proto_depIdxs = []int32{
 	8,  // 6: provisioner.v1.Instance.spec:type_name -> provisioner.v1.Spec
 	10, // 7: provisioner.v1.Instance.hardware:type_name -> provisioner.v1.Hardware
 	3,  // 8: provisioner.v1.Instance.state:type_name -> provisioner.v1.InstanceState
-	33, // 9: provisioner.v1.Instance.created_at:type_name -> google.protobuf.Timestamp
-	33, // 10: provisioner.v1.Instance.activated_at:type_name -> google.protobuf.Timestamp
-	33, // 11: provisioner.v1.Instance.terminated_at:type_name -> google.protobuf.Timestamp
+	36, // 9: provisioner.v1.Instance.created_at:type_name -> google.protobuf.Timestamp
+	36, // 10: provisioner.v1.Instance.activated_at:type_name -> google.protobuf.Timestamp
+	36, // 11: provisioner.v1.Instance.terminated_at:type_name -> google.protobuf.Timestamp
 	11, // 12: provisioner.v1.Instance.ssh:type_name -> provisioner.v1.SshTarget
-	29, // 13: provisioner.v1.Instance.metadata:type_name -> provisioner.v1.Instance.MetadataEntry
-	30, // 14: provisioner.v1.InstanceRef.tags:type_name -> provisioner.v1.InstanceRef.TagsEntry
-	33, // 15: provisioner.v1.InstanceRef.created_at:type_name -> google.protobuf.Timestamp
-	31, // 16: provisioner.v1.Deployment.env:type_name -> provisioner.v1.Deployment.EnvEntry
+	32, // 13: provisioner.v1.Instance.metadata:type_name -> provisioner.v1.Instance.MetadataEntry
+	33, // 14: provisioner.v1.InstanceRef.tags:type_name -> provisioner.v1.InstanceRef.TagsEntry
+	36, // 15: provisioner.v1.InstanceRef.created_at:type_name -> google.protobuf.Timestamp
+	34, // 16: provisioner.v1.Deployment.env:type_name -> provisioner.v1.Deployment.EnvEntry
 	6,  // 17: provisioner.v1.Deployment.state:type_name -> provisioner.v1.DeploymentState
-	33, // 18: provisioner.v1.Deployment.created_at:type_name -> google.protobuf.Timestamp
-	33, // 19: provisioner.v1.Deployment.started_at:type_name -> google.protobuf.Timestamp
-	33, // 20: provisioner.v1.Deployment.ready_at:type_name -> google.protobuf.Timestamp
-	33, // 21: provisioner.v1.Deployment.terminated_at:type_name -> google.protobuf.Timestamp
-	33, // 22: provisioner.v1.Deployment.last_activity_at:type_name -> google.protobuf.Timestamp
+	36, // 18: provisioner.v1.Deployment.created_at:type_name -> google.protobuf.Timestamp
+	36, // 19: provisioner.v1.Deployment.started_at:type_name -> google.protobuf.Timestamp
+	36, // 20: provisioner.v1.Deployment.ready_at:type_name -> google.protobuf.Timestamp
+	36, // 21: provisioner.v1.Deployment.terminated_at:type_name -> google.protobuf.Timestamp
+	36, // 22: provisioner.v1.Deployment.last_activity_at:type_name -> google.protobuf.Timestamp
 	22, // 23: provisioner.v1.Deployment.upstream_auth:type_name -> provisioner.v1.UpstreamAuth
 	21, // 24: provisioner.v1.Deployment.parallelism:type_name -> provisioner.v1.Parallelism
-	24, // 25: provisioner.v1.Deployment.replica_specs:type_name -> provisioner.v1.ReplicaSpec
+	27, // 25: provisioner.v1.Deployment.replica_specs:type_name -> provisioner.v1.ReplicaSpec
 	15, // 26: provisioner.v1.Deployment.mounts:type_name -> provisioner.v1.VolumeMount
 	0,  // 27: provisioner.v1.Candidate.fabric_scope:type_name -> provisioner.v1.FabricScope
 	1,  // 28: provisioner.v1.Candidate.fabric_source:type_name -> provisioner.v1.FabricSource
-	32, // 29: provisioner.v1.Candidate.attrs:type_name -> provisioner.v1.Candidate.AttrsEntry
+	35, // 29: provisioner.v1.Candidate.attrs:type_name -> provisioner.v1.Candidate.AttrsEntry
 	4,  // 30: provisioner.v1.ProviderAnswer.outcome:type_name -> provisioner.v1.AnswerOutcome
 	16, // 31: provisioner.v1.ProviderAnswer.candidates:type_name -> provisioner.v1.Candidate
 	18, // 32: provisioner.v1.Comparability.gaps:type_name -> provisioner.v1.FactGap
@@ -3522,20 +3735,21 @@ var file_provisioner_v1_types_proto_depIdxs = []int32{
 	16, // 34: provisioner.v1.Placement.runners:type_name -> provisioner.v1.Candidate
 	17, // 35: provisioner.v1.Placement.answers:type_name -> provisioner.v1.ProviderAnswer
 	19, // 36: provisioner.v1.Placement.comparability:type_name -> provisioner.v1.Comparability
-	33, // 37: provisioner.v1.Volume.created_at:type_name -> google.protobuf.Timestamp
-	9,  // 38: provisioner.v1.ReplicaSpec.requirements:type_name -> provisioner.v1.ResourceRequirements
-	25, // 39: provisioner.v1.EngineNode.interconnect:type_name -> provisioner.v1.InterconnectHealth
-	7,  // 40: provisioner.v1.Engine.state:type_name -> provisioner.v1.EngineState
-	26, // 41: provisioner.v1.Engine.span:type_name -> provisioner.v1.EngineNode
-	33, // 42: provisioner.v1.Engine.registered_at:type_name -> google.protobuf.Timestamp
-	33, // 43: provisioner.v1.Engine.last_seen_at:type_name -> google.protobuf.Timestamp
-	33, // 44: provisioner.v1.Engine.lease_expires_at:type_name -> google.protobuf.Timestamp
-	34, // 45: provisioner.v1.Instance.MetadataEntry.value:type_name -> google.protobuf.Value
-	46, // [46:46] is the sub-list for method output_type
-	46, // [46:46] is the sub-list for method input_type
-	46, // [46:46] is the sub-list for extension type_name
-	46, // [46:46] is the sub-list for extension extendee
-	0,  // [0:46] is the sub-list for field type_name
+	23, // 37: provisioner.v1.DescribeModelResponse.architecture:type_name -> provisioner.v1.ModelArchitecture
+	36, // 38: provisioner.v1.Volume.created_at:type_name -> google.protobuf.Timestamp
+	9,  // 39: provisioner.v1.ReplicaSpec.requirements:type_name -> provisioner.v1.ResourceRequirements
+	28, // 40: provisioner.v1.EngineNode.interconnect:type_name -> provisioner.v1.InterconnectHealth
+	7,  // 41: provisioner.v1.Engine.state:type_name -> provisioner.v1.EngineState
+	29, // 42: provisioner.v1.Engine.span:type_name -> provisioner.v1.EngineNode
+	36, // 43: provisioner.v1.Engine.registered_at:type_name -> google.protobuf.Timestamp
+	36, // 44: provisioner.v1.Engine.last_seen_at:type_name -> google.protobuf.Timestamp
+	36, // 45: provisioner.v1.Engine.lease_expires_at:type_name -> google.protobuf.Timestamp
+	37, // 46: provisioner.v1.Instance.MetadataEntry.value:type_name -> google.protobuf.Value
+	47, // [47:47] is the sub-list for method output_type
+	47, // [47:47] is the sub-list for method input_type
+	47, // [47:47] is the sub-list for extension type_name
+	47, // [47:47] is the sub-list for extension extendee
+	0,  // [0:47] is the sub-list for field type_name
 }
 
 func init() { file_provisioner_v1_types_proto_init() }
@@ -3549,7 +3763,7 @@ func file_provisioner_v1_types_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_provisioner_v1_types_proto_rawDesc), len(file_provisioner_v1_types_proto_rawDesc)),
 			NumEnums:      8,
-			NumMessages:   25,
+			NumMessages:   28,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

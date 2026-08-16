@@ -4,6 +4,8 @@ import (
 	"math"
 	"strings"
 	"testing"
+
+	"google.golang.org/protobuf/proto"
 )
 
 // anchor is Qwen2.5-32B, the model the book works its budget against:
@@ -13,10 +15,10 @@ import (
 // Every expected figure in this file traces back to that worked example,
 // so a change to the arithmetic that still passes these tests is a change
 // the chapter also has to make.
-var anchor = Arch{
+var anchor = &Arch{
 	Params:     32_760_000_000,
 	Layers:     64,
-	KVHeads:    8,
+	KvHeads:    8,
 	HeadDim:    128,
 	HiddenSize: 5120,
 }
@@ -331,8 +333,8 @@ func TestMinCardsWillNotCountOnAShardThatWouldNotHappen(t *testing.T) {
 	// them instead, so the cache term stops shrinking while the bill
 	// keeps growing, and a candidate that assumed the saving would be
 	// planning a shape that does not exist.
-	narrow := anchor
-	narrow.KVHeads = 2
+	narrow := proto.Clone(anchor).(*Arch)
+	narrow.KvHeads = 2
 	p := Plan{Weights: PrecisionFP16, MaxModelLen: 131_072, MaxBatch: 8}
 	n, _, err := MinCards(narrow, p, 80*GB, DefaultUtilization, 8)
 	if err == nil {
@@ -378,13 +380,13 @@ func TestComputeRejectsIncompleteInputs(t *testing.T) {
 	good := Plan{Weights: PrecisionFP16, MaxModelLen: 4096, MaxBatch: 1}
 	cases := []struct {
 		name string
-		a    Arch
+		a    *Arch
 		p    Plan
 	}{
-		{"no params", Arch{Layers: 1, KVHeads: 1, HeadDim: 1}, good},
-		{"no layers", Arch{Params: 1, KVHeads: 1, HeadDim: 1}, good},
-		{"no kv heads", Arch{Params: 1, Layers: 1, HeadDim: 1}, good},
-		{"no head dim", Arch{Params: 1, Layers: 1, KVHeads: 1}, good},
+		{"no params", &Arch{Layers: 1, KvHeads: 1, HeadDim: 1}, good},
+		{"no layers", &Arch{Params: 1, KvHeads: 1, HeadDim: 1}, good},
+		{"no kv heads", &Arch{Params: 1, Layers: 1, HeadDim: 1}, good},
+		{"no head dim", &Arch{Params: 1, Layers: 1, KvHeads: 1}, good},
 		{"unknown weight precision", anchor, Plan{Weights: "int4", MaxModelLen: 4096, MaxBatch: 1}},
 		{"unknown cache precision", anchor, Plan{Weights: PrecisionFP16, KVCache: "int4", MaxModelLen: 4096, MaxBatch: 1}},
 		{"no context", anchor, Plan{Weights: PrecisionFP16, MaxBatch: 1}},

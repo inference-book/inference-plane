@@ -28,6 +28,8 @@ package vrambudget
 import (
 	"fmt"
 	"strings"
+
+	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
 )
 
 // OverheadFraction is the band budgeted for everything the runtime holds
@@ -67,37 +69,37 @@ const ActivationFactor = 1.5
 // quantized model dequantizes to half precision for the matrix multiply.
 const activationElementBytes = 2
 
-// Arch is the part of a model fixed at training time. Every field comes
-// off the model's published config; none of it is an operator choice.
-type Arch struct {
-	// Params is the total parameter count.
-	Params int64
-	// Layers is the number of transformer blocks (num_hidden_layers).
-	Layers int32
-	// KVHeads is the number of key-value heads (num_key_value_heads).
-	// Grouped-query attention shares one KV head across a group of query
-	// heads, so this is usually far smaller than the attention-head
-	// count, and the cache scales with this one rather than with that
-	// one.
-	KVHeads int32
-	// HeadDim is the dimension of a single attention head.
-	HeadDim int32
-	// HiddenSize is the model dimension (hidden_size). Used only by the
-	// activation estimate.
-	HiddenSize int32
-}
+// Arch is the generated provisionerv1.ModelArchitecture.
+//
+// Aliased rather than redeclared, following the rule the capacity search
+// had to learn the hard way: a wire type travels as the generated
+// message, with no parallel Go struct to keep in sync. A model's shape
+// crosses the wire, because reading it needs the hub credential and that
+// lives in the daemon's environment.
+//
+// The cost of the alias is that Validate cannot be a method on it, which
+// is why ValidateArch is a free function. Same shape as CanAnswer and
+// DescribePlacement next to their aliased messages.
+type Arch = provisionerv1.ModelArchitecture
 
-// Validate reports whether the architecture is usable for a budget.
-func (a Arch) Validate() error {
+// ValidateArch reports whether an architecture is usable for a budget.
+//
+// Absent is unknown rather than zero throughout. A budget computed from a
+// zero layer count reports no KV cache, which is a budget that says yes
+// to everything, so every field that divides or multiplies the cache is
+// checked rather than defaulted.
+func ValidateArch(a *Arch) error {
 	switch {
-	case a.Params <= 0:
-		return fmt.Errorf("parameter count must be positive, got %d", a.Params)
-	case a.Layers <= 0:
-		return fmt.Errorf("layer count must be positive, got %d", a.Layers)
-	case a.KVHeads <= 0:
-		return fmt.Errorf("kv-head count must be positive, got %d", a.KVHeads)
-	case a.HeadDim <= 0:
-		return fmt.Errorf("head dimension must be positive, got %d", a.HeadDim)
+	case a == nil:
+		return fmt.Errorf("model architecture is required")
+	case a.GetParams() <= 0:
+		return fmt.Errorf("parameter count must be positive, got %d", a.GetParams())
+	case a.GetLayers() <= 0:
+		return fmt.Errorf("layer count must be positive, got %d", a.GetLayers())
+	case a.GetKvHeads() <= 0:
+		return fmt.Errorf("kv-head count must be positive, got %d", a.GetKvHeads())
+	case a.GetHeadDim() <= 0:
+		return fmt.Errorf("head dimension must be positive, got %d", a.GetHeadDim())
 	}
 	return nil
 }
@@ -264,8 +266,8 @@ func (b Budget) TotalBytes() int64 {
 // per engine. The communication buffers tensor parallelism itself needs
 // are not modelled and are small relative to the overhead band they fall
 // inside.
-func Compute(a Arch, p Plan) (Budget, error) {
-	if err := a.Validate(); err != nil {
+func Compute(a *Arch, p Plan) (Budget, error) {
+	if err := ValidateArch(a); err != nil {
 		return Budget{}, err
 	}
 	if err := p.Validate(); err != nil {
@@ -276,12 +278,12 @@ func Compute(a Arch, p Plan) (Budget, error) {
 
 	// Weights: parameters times bytes per parameter. The one term that is
 	// exact and known before the engine starts.
-	weights := float64(a.Params) * p.Weights.BytesPerParam()
+	weights := float64(a.GetParams()) * p.Weights.BytesPerParam()
 
 	// KV cache: two (a key and a value, stored separately) times the
 	// state one token contributes at each layer, summed over layers,
 	// times the bytes per element the cache precision sets.
-	perToken := 2 * int64(a.Layers) * int64(a.KVHeads) * int64(a.HeadDim) * p.cacheDtype().BytesPerCacheElement()
+	perToken := 2 * int64(a.GetLayers()) * int64(a.GetKvHeads()) * int64(a.GetHeadDim()) * p.cacheDtype().BytesPerCacheElement()
 	kv := float64(perToken) * float64(p.MaxModelLen) * float64(p.MaxBatch)
 
 	// Activations: scratch for a forward pass, following batch, context,
@@ -289,7 +291,7 @@ func Compute(a Arch, p Plan) (Budget, error) {
 	// how the weights are stored, because a quantized model dequantizes
 	// to half precision for the matrix multiply. Quantization moves the
 	// weight term and leaves this one alone.
-	activations := float64(p.MaxBatch) * float64(p.MaxModelLen) * float64(a.HiddenSize) * activationElementBytes * ActivationFactor
+	activations := float64(p.MaxBatch) * float64(p.MaxModelLen) * float64(a.GetHiddenSize()) * activationElementBytes * ActivationFactor
 
 	perCard := func(total float64) int64 { return int64(total / float64(cards)) }
 
@@ -386,8 +388,8 @@ const GiB int64 = 1 << 30
 // term stops shrinking with the card count while the operator's bill
 // keeps growing. Counting a saving that would not happen is the failure
 // this rules out.
-func MinCards(a Arch, p Plan, cardBytes int64, utilization float64, maxCards int32) (int32, Budget, error) {
-	if err := a.Validate(); err != nil {
+func MinCards(a *Arch, p Plan, cardBytes int64, utilization float64, maxCards int32) (int32, Budget, error) {
+	if err := ValidateArch(a); err != nil {
 		return 0, Budget{}, err
 	}
 	if cardBytes <= 0 {
@@ -400,7 +402,7 @@ func MinCards(a Arch, p Plan, cardBytes int64, utilization float64, maxCards int
 
 	widest := int32(1)
 	for n := int32(1); n <= maxCards; n *= 2 {
-		if n > 1 && a.KVHeads%n != 0 {
+		if n > 1 && a.GetKvHeads()%n != 0 {
 			continue
 		}
 		widest = n
