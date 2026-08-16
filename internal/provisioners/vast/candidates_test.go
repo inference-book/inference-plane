@@ -182,3 +182,41 @@ func prices(cs []provisioners.Candidate) []float64 {
 	}
 	return out
 }
+
+// Vast sells the same machine two ways, and the tier the operator asked for is
+// the tier that gets priced. Quoting the bid floor for an on-demand rental
+// would understate what they are about to pay; quoting on-demand for a
+// reclaimable request would hide the discount they asked for.
+func TestCandidatesPriceTheRequestedTier(t *testing.T) {
+	offer := offerSummary{
+		ID: 1, MachineID: 10, GpuName: "A100 SXM4", NumGPUs: 1, GpuRAM: 81920,
+		DphTotal: 0.83, MinBid: 0.13,
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v0/bundles/", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, bundlesResponse{Offers: []offerSummary{offer}})
+	})
+	p, _ := newTestProvider(t, mux)
+
+	onDemand, err := p.Candidates(context.Background(),
+		&provisionerv1.ResourceRequirements{Sku: "A100_SXM4"})
+	if err != nil {
+		t.Fatalf("Candidates: %v", err)
+	}
+	if onDemand[0].PriceUSDPerHour != 0.83 || onDemand[0].Reclaimable {
+		t.Errorf("default tier = $%.2f reclaimable=%v, want the on-demand 0.83",
+			onDemand[0].PriceUSDPerHour, onDemand[0].Reclaimable)
+	}
+
+	reclaimable, err := p.Candidates(context.Background(), &provisionerv1.ResourceRequirements{
+		Sku:           "A100_SXM4",
+		ReclaimPolicy: provisionerv1.ReclaimPolicy_RECLAIM_POLICY_PREFERRED,
+	})
+	if err != nil {
+		t.Fatalf("Candidates: %v", err)
+	}
+	if reclaimable[0].PriceUSDPerHour != 0.13 || !reclaimable[0].Reclaimable {
+		t.Errorf("reclaimable tier = $%.2f reclaimable=%v, want the bid floor 0.13",
+			reclaimable[0].PriceUSDPerHour, reclaimable[0].Reclaimable)
+	}
+}

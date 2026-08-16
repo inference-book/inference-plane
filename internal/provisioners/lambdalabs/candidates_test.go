@@ -209,3 +209,20 @@ func TestInstanceTypesDecodeIsKeyedByName(t *testing.T) {
 		t.Errorf("architecture = %q, want arm64", got)
 	}
 }
+
+// Lambda has no bid, spot or preemptible tier anywhere in its API. An operator
+// who asked for reclaimable capacity asked for a discount, so the honest
+// answer is nothing rather than the full-price rental they did not ask for.
+func TestCandidatesRefuseToSubstituteOnDemandForReclaimable(t *testing.T) {
+	got, err := candidateProvider(t).Candidates(context.Background(),
+		&provisionerv1.ResourceRequirements{
+			MinVramGb:     80,
+			ReclaimPolicy: provisionerv1.ReclaimPolicy_RECLAIM_POLICY_PREFERRED,
+		})
+	if err != nil {
+		t.Fatalf("Candidates: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("got %d candidate(s) for a reclaimable request; Lambda has no such tier and must not quote on-demand instead: %+v", len(got), got)
+	}
+}

@@ -218,3 +218,43 @@ func TestCandidatesCarryStockStatusAsAProviderAttr(t *testing.T) {
 		t.Errorf("stock_status = %q, want Medium", got[0].Attrs["stock_status"])
 	}
 }
+
+// A bid price that is not below the on-demand price is not a reclaimable tier,
+// it is the same rental relabelled. Probing live, RunPod reported the two as
+// equal on all 38 available shapes, so reporting them as reclaimable would
+// claim a discount that does not exist and promise an interruptible rental
+// this endpoint gives no way to verify.
+func TestCandidatesRejectABidThatIsNotADiscount(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"gpuTypes":[
+		  {"id":"NVIDIA A100-SXM4-80GB","memoryInGb":80,
+		   "lowestPrice":{"uninterruptablePrice":1.39,"minimumBidPrice":1.39,"stockStatus":"Low"}},
+		  {"id":"NVIDIA A100 80GB PCIe","memoryInGb":80,
+		   "lowestPrice":{"uninterruptablePrice":1.19,"minimumBidPrice":0.40,"stockStatus":"Low"}}
+		]}}`))
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	rt := &rewriteTransport{toHost: strings.TrimPrefix(srv.URL, "http://")}
+	p := New(NewClient("k", WithHTTPClient(&http.Client{Transport: rt})))
+
+	got, err := p.Candidates(context.Background(), &provisionerv1.ResourceRequirements{
+		MinVramGb:     80,
+		ReclaimPolicy: provisionerv1.ReclaimPolicy_RECLAIM_POLICY_PREFERRED,
+	})
+	if err != nil {
+		t.Fatalf("Candidates: %v", err)
+	}
+
+	if len(got) != 1 {
+		t.Fatalf("got %d candidates, want only the one with a real discount: %+v", len(got), got)
+	}
+	if got[0].SKU != "NVIDIA A100 80GB PCIe" || got[0].PriceUSDPerHour != 0.40 {
+		t.Errorf("got %s at $%.2f, want the PCIe shape at its 0.40 bid", got[0].SKU, got[0].PriceUSDPerHour)
+	}
+	if !got[0].Reclaimable {
+		t.Error("the surviving candidate was not marked reclaimable")
+	}
+}

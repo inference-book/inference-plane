@@ -25,7 +25,7 @@ import (
 // at all (GET /v1/gpus 400s with "that path does not exist in the
 // specification"). Same split as SSH keys, which is why gqlPost already
 // exists.
-const gpuTypesQuery = `query { gpuTypes { id displayName memoryInGb secureCloud communityCloud lowestPrice(input:{gpuCount:%d}) { uninterruptablePrice stockStatus } } }`
+const gpuTypesQuery = `query { gpuTypes { id displayName memoryInGb secureCloud communityCloud lowestPrice(input:{gpuCount:%d}) { uninterruptablePrice minimumBidPrice stockStatus } } }`
 
 // gpuTypesData is the decode target for gpuTypesQuery.
 type gpuTypesData struct {
@@ -41,6 +41,11 @@ type gpuTypesData struct {
 			// sends null for a type nobody is currently offering, and a plain
 			// float64 would turn "unavailable" into a free GPU.
 			UninterruptablePrice *float64 `json:"uninterruptablePrice"`
+
+			// MinimumBidPrice is the interruptible rate for the same shape.
+			// RunPod can reclaim a bid rental when someone outbids it, which
+			// is why it is cheaper. Pointer for the same reason as above.
+			MinimumBidPrice *float64 `json:"minimumBidPrice"`
 
 			// StockStatus is "Low" / "Medium" / "High", or null when the type
 			// cannot be had at this width. Null is the availability signal, so
@@ -112,6 +117,29 @@ func (p *Provider) Candidates(ctx context.Context, reqs *provisionerv1.ResourceR
 			continue
 		}
 
+		// The tier the operator asked for is the tier we price. A reclaimable
+		// request that came back quoted at the on-demand rate would look like
+		// the discount did not exist.
+		price, reclaimable := *g.LowestPrice.UninterruptablePrice, false
+		if reqs.GetReclaimPolicy() == provisionerv1.ReclaimPolicy_RECLAIM_POLICY_PREFERRED {
+			// A bid price that is not below the on-demand price is not a
+			// reclaimable tier, it is the same rental relabelled. Probing live
+			// on 2026-08-15, minimumBidPrice equalled uninterruptablePrice on
+			// all 38 available shapes, so in practice RunPod contributes
+			// nothing to a reclaimable search today.
+			//
+			// Reporting those as reclaimable would claim a discount that does
+			// not exist AND promise an interruptible rental this endpoint gives
+			// us no way to verify. Dropping them is the same call the resolver
+			// makes for an unknown fabric: we will not vouch for what the
+			// provider did not tell us.
+			if g.LowestPrice.MinimumBidPrice == nil ||
+				*g.LowestPrice.MinimumBidPrice >= *g.LowestPrice.UninterruptablePrice {
+				continue
+			}
+			price, reclaimable = *g.LowestPrice.MinimumBidPrice, true
+		}
+
 		var (
 			family fabric.Family
 			vramGb = g.MemoryInGb
@@ -125,7 +153,8 @@ func (p *Provider) Candidates(ctx context.Context, reqs *provisionerv1.ResourceR
 			// and picks the datacenter itself, so there is nothing here to
 			// name that would still mean anything an hour later.
 			SKU:             g.ID,
-			PriceUSDPerHour: *g.LowestPrice.UninterruptablePrice,
+			PriceUSDPerHour: price,
+			Reclaimable:     reclaimable,
 			GPUCount:        gpuCount,
 			VRAMGbPerGPU:    vramGb,
 			Fabric:          fabric.Resolve(fabric.Observation{Family: family}),

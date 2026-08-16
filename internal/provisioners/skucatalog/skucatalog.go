@@ -169,6 +169,21 @@ func Match(entries []Entry, reqs *provisionerv1.ResourceRequirements, mode Fabri
 	return out
 }
 
+// Reclaimability is deliberately absent from Entry and from this filter.
+//
+// It is the third fact to reach this stage looking like a catalog property and
+// turn out not to be, after disk (#281) and system RAM (#283). No provider's
+// CATALOG knows whether capacity is reclaimable: on Vast it is a property of
+// an individual offer, on RunPod of a shape at a requested width as reported
+// live, and on Lambda it does not exist. A catalog row cannot answer, and the
+// first attempt at this put a plain bool on Entry, which has no way to say so.
+// "Unknown" and "not reclaimable" collapsed into false, and asking for
+// reclaimable capacity matched nothing anywhere.
+//
+// So the adapters settle it in Candidates, against the live record that
+// actually knows. The rule is the same one this package already states for
+// sizing facts: only filter here on what a catalog row genuinely bounds.
+
 // satisfiesFabric applies whichever of the fabric package's two verdicts this
 // provider has earned the right to. CouldSatisfy reads scope only, since a
 // bandwidth floor on a row we have not measured would be comparing a

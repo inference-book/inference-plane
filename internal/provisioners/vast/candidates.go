@@ -62,7 +62,7 @@ func (p *Provider) Candidates(ctx context.Context, reqs *provisionerv1.ResourceR
 			return nil, provisioners.NewProviderError(p.Name(), "candidates", err, 0)
 		}
 		for i := range offers {
-			out = append(out, offerToCandidate(sku, &offers[i]))
+			out = append(out, offerToCandidate(sku, &offers[i], reqs.GetReclaimPolicy()))
 		}
 	}
 
@@ -78,7 +78,7 @@ func (p *Provider) Candidates(ctx context.Context, reqs *provisionerv1.ResourceR
 // sku is our catalog token rather than the offer's gpu_name, because those are
 // not the same string for variant SKUs and the token is what an operator would
 // pass back to --gpu-sku.
-func offerToCandidate(sku string, o *offerSummary) provisioners.Candidate {
+func offerToCandidate(sku string, o *offerSummary, reclaim provisionerv1.ReclaimPolicy) provisioners.Candidate {
 	obs := fabric.Observation{}
 	if spec := LookupSKU(sku); spec != nil {
 		obs.Family = spec.Family
@@ -88,12 +88,23 @@ func offerToCandidate(sku string, o *offerSummary) provisioners.Candidate {
 		obs.MeasuredGbps = fabric.GbpsFromGBps(*o.BwNvlink)
 	}
 
+	// Vast sells the same machine two ways. An interruptible rental is priced
+	// at the bid floor and can be taken by a higher bidder; an on-demand one
+	// is not. Quoting the cheaper number for a rental we would not actually
+	// make would misprice the comparison, so the tier the operator asked for
+	// is the tier we price.
+	price, reclaimable := o.DphTotal, false
+	if reclaim == provisionerv1.ReclaimPolicy_RECLAIM_POLICY_PREFERRED && o.MinBid > 0 {
+		price, reclaimable = o.MinBid, true
+	}
+
 	return provisioners.Candidate{
 		HostID:          strconv.Itoa(o.MachineID),
 		OfferID:         strconv.Itoa(o.ID),
 		SKU:             sku,
 		Region:          o.GeoLocation,
-		PriceUSDPerHour: o.DphTotal,
+		PriceUSDPerHour: price,
+		Reclaimable:     reclaimable,
 		GPUCount:        o.NumGPUs,
 		VRAMGbPerGPU:    o.GpuRAM / 1000,
 		Architecture:    provisioners.NormalizeArch(o.CPUArch),
