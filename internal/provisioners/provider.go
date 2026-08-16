@@ -25,6 +25,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"regexp"
 	"strings"
 
@@ -286,6 +287,50 @@ const (
 // tag map to the external adapter's Spawn/Deploy. Internal plumbing, not
 // an operator-facing label.
 const ExternalEndpointTag = "iplane-external-engine-endpoint"
+
+// Default upstream-auth shape. Almost every hosted OpenAI-compatible API
+// wants a bearer token in Authorization, so an operator naming only the
+// environment variable gets a working credential.
+const (
+	DefaultUpstreamAuthHeader = "Authorization"
+	DefaultUpstreamAuthPrefix = "Bearer "
+)
+
+// ValidateUpstreamAuth checks a credential description and fills its defaults.
+//
+// The env var is required to exist NOW, at deploy time. A deployment
+// registered against a credential that is not set looks perfectly healthy and
+// 401s every request, so the operator finds out from production traffic.
+// Failing the create is the cheaper place to learn it.
+//
+// The value itself is never read into the record. Only the variable's name is
+// persisted, because the record goes to the state file and to every
+// DescribeDeployment response.
+func ValidateUpstreamAuth(auth *provisionerv1.UpstreamAuth) (*provisionerv1.UpstreamAuth, error) {
+	if auth == nil {
+		return nil, nil
+	}
+	if auth.GetValueEnv() == "" {
+		return nil, fmt.Errorf("upstream auth requires value_env, the NAME of an environment variable holding the credential")
+	}
+	if os.Getenv(auth.GetValueEnv()) == "" {
+		return nil, fmt.Errorf("upstream auth names $%s but it is empty or unset; export it before deploying", auth.GetValueEnv())
+	}
+	out := &provisionerv1.UpstreamAuth{
+		Header:      auth.GetHeader(),
+		ValueEnv:    auth.GetValueEnv(),
+		ValuePrefix: auth.GetValuePrefix(),
+	}
+	if out.Header == "" {
+		out.Header = DefaultUpstreamAuthHeader
+	}
+	// An explicitly empty prefix is a real choice (a gateway wanting the bare
+	// token in X-Api-Key), so only an unset header gets the bearer default.
+	if out.ValuePrefix == "" && out.Header == DefaultUpstreamAuthHeader {
+		out.ValuePrefix = DefaultUpstreamAuthPrefix
+	}
+	return out, nil
+}
 
 // GPU class taxonomy. The chapter teaches one vocabulary across providers;
 // each adapter ships its own class -> []SKU table.

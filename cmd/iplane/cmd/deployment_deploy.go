@@ -43,6 +43,9 @@ var (
 	deployMinVRAM         int32
 	deployMinRAM          int32
 	deployMinDisk         int32
+	deployAuthEnv         string
+	deployAuthHeader      string
+	deployAuthPrefix      string
 	deployGPUCount        int32
 	deployFabric          string
 	deployFabricBW        int32
@@ -191,6 +194,16 @@ func runDeploymentDeploy(cmd *cobra.Command, args []string) error {
 		IdleTtlSeconds:   int32(deployIdleTTL.Seconds()),
 		NoIdleDestroy:    deployNoIdleDestroy,
 	}
+	// Only the NAME of the variable travels. The credential is read by the
+	// daemon at forward time, so it never reaches the state file or a
+	// DescribeDeployment response.
+	if deployAuthEnv != "" {
+		dep.UpstreamAuth = &provisionerv1.UpstreamAuth{
+			Header:      deployAuthHeader,
+			ValueEnv:    deployAuthEnv,
+			ValuePrefix: deployAuthPrefix,
+		}
+	}
 	req := &provisionerv1.CreateDeploymentRequest{
 		Deployment: dep,
 		Wait:       deployWait,
@@ -293,6 +306,9 @@ func init() {
 	f.StringVar(&deploySKU, "sku", "", `exact provider sku for auto-provisioning (bypasses the resolver)`)
 	f.Int32Var(&deployMinVRAM, "min-vram-gb", 0, `minimum VRAM per GPU for auto-provisioning, in GB`)
 	f.Int32Var(&deployMinRAM, "min-ram-gb", 0, `minimum system RAM for auto-provisioning, in GB`)
+	f.StringVar(&deployAuthEnv, "upstream-auth-env", "", `name of the env var holding the credential the router presents to an attached engine (hosted APIs behind a gateway)`)
+	f.StringVar(&deployAuthHeader, "upstream-auth-header", "", `header to carry the credential (default Authorization)`)
+	f.StringVar(&deployAuthPrefix, "upstream-auth-prefix", "", `prefix joined to the credential (default "Bearer " when the header is Authorization)`)
 	f.Int32Var(&deployMinDisk, "min-disk-gb", 0, `minimum container disk for auto-provisioning, in GB`)
 	f.Int32Var(&deployGPUCount, "gpu-count", 0, `number of GPUs for auto-provisioning (default 1)`)
 	f.StringVar(&deployFabric, "fabric", "", fabricFlagUsage)
