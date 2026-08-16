@@ -106,6 +106,22 @@ service ProvisionerService {
   // "cheapest across whatever this laptop can reach".
   rpc SelectPlacement(SelectPlacementRequest) returns (SelectPlacementResponse);
 
+  // ListVolumes returns the warm-cache pin registry: which volumes exist
+  // and which models are staged on each.
+  //
+  // An RPC because the daemon owns this state. Reading the file behind
+  // its back works, since writes land through an atomic rename and a
+  // reader can only be stale rather than torn, but stale is the wrong
+  // answer to give about a registry the daemon is actively writing.
+  //
+  // Only the read verb gets one. Pinning stages weights onto a volume by
+  // spinning a pod and blocking until the download finishes, which on a
+  // 70B is minutes, and an RPC held open that long runs into the same
+  // write-timeout problem a cold deploy already has. Remote pin stays
+  // deferred rather than arriving as a side effect of fixing a list
+  // command (#307).
+  rpc ListVolumes(ListVolumesRequest) returns (ListVolumesResponse);
+
 }
 
 // Source selects whether the service consults local state, the provider,
@@ -619,4 +635,15 @@ message SelectPlacementRequest {
 
 message SelectPlacementResponse {
   Placement placement = 1;
+}
+
+message ListVolumesRequest {
+  // Restrict to one provider. Empty returns every volume, since a volume
+  // handle only means something to the provider that issued it and an
+  // operator comparing them wants to see whose is whose.
+  string provider = 1;
+}
+
+message ListVolumesResponse {
+  repeated Volume volumes = 1;
 }

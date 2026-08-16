@@ -188,7 +188,7 @@ func (s *Service) PinModel(ctx context.Context, req PinModelRequest) (*PinModelR
 // ListVolumes returns the pinned cache volumes from the registry, sorted
 // by id. An empty providerFilter returns all; otherwise only that
 // provider's volumes.
-func (s *Service) ListVolumes(_ context.Context, providerFilter string) ([]*provisionerv1.Volume, error) {
+func (s *Service) VolumesFor(_ context.Context, providerFilter string) ([]*provisionerv1.Volume, error) {
 	state, err := s.store.Read()
 	if err != nil {
 		return nil, err
@@ -258,4 +258,17 @@ func (s *Service) UnpinModel(ctx context.Context, req UnpinRequest) (*provisione
 		return nil, err
 	}
 	return updated, nil
+}
+
+// ListVolumes is the RPC surface over VolumesFor.
+//
+// Thin. The reason it exists at all is that the daemon owns this registry, so
+// an operator asking what is pinned should ask the process doing the pinning
+// rather than reading its file from underneath it (#307).
+func (s *Service) ListVolumes(ctx context.Context, req *provisionerv1.ListVolumesRequest) (*provisionerv1.ListVolumesResponse, error) {
+	vols, err := s.VolumesFor(ctx, req.GetProvider())
+	if err != nil {
+		return nil, err
+	}
+	return &provisionerv1.ListVolumesResponse{Volumes: vols}, nil
 }
