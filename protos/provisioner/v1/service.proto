@@ -80,6 +80,32 @@ service ProvisionerService {
   // a private network; not safe to expose publicly without an
   // auth layer in front.
   rpc GetInstanceSSHKey(GetInstanceSSHKeyRequest) returns (GetInstanceSSHKeyResponse);
+  // ListCandidates asks providers what they would rent for a set of
+  // requirements, renting nothing.
+  //
+  // An RPC rather than an in-process call because the inputs live in
+  // the daemon. Provider credentials are in the control plane's
+  // environment, so a CLI running elsewhere cannot answer this question
+  // and must not appear to (#304). The test for what belongs behind
+  // this boundary is where the inputs live, not whether the call
+  // writes: a read that depends on privileged inputs is as much a
+  // service operation as a write.
+  //
+  // Each provider's answer comes back whole. The three ways to
+  // contribute nothing are different findings and only NO_CAPACITY says
+  // anything about the market, so they must survive the wire rather
+  // than collapsing into an empty list.
+  rpc ListCandidates(ListCandidatesRequest) returns (ListCandidatesResponse);
+
+  // SelectPlacement picks the cheapest candidate that fits, across
+  // whichever providers were asked, and returns the reasoning with it.
+  //
+  // Server-side for the same reason as above, and for one more: a
+  // decision made on the caller's host uses the caller's credentials,
+  // so "cheapest across every configured provider" would quietly mean
+  // "cheapest across whatever this laptop can reach".
+  rpc SelectPlacement(SelectPlacementRequest) returns (SelectPlacementResponse);
+
 }
 
 // Source selects whether the service consults local state, the provider,
@@ -563,4 +589,34 @@ message DrainEngineResponse {
   // than its replicas one at a time: a distributed engine's whole group goes
   // in one action, with nothing left billing.
   repeated string released_instance_ids = 2;
+}
+
+message ListCandidatesRequest {
+  // Providers to ask. Empty asks every configured provider, including
+  // the ones that cannot answer, because "which of my vendors can even
+  // tell me this" is a question worth being able to ask.
+  repeated string providers = 1;
+  ResourceRequirements requirements = 2;
+}
+
+message ListCandidatesResponse {
+  // One entry per provider asked, in the order asked, so a run is
+  // reproducible rather than ordered by whoever replied first.
+  repeated ProviderAnswer answers = 1;
+
+  // The union, cheapest first. Ranked server-side so every caller sees
+  // the same order and the ranking rules live in one place.
+  repeated Candidate candidates = 2;
+
+  // What the ranking could honestly compare across the answering set.
+  Comparability comparability = 3;
+}
+
+message SelectPlacementRequest {
+  repeated string providers = 1;
+  ResourceRequirements requirements = 2;
+}
+
+message SelectPlacementResponse {
+  Placement placement = 1;
 }

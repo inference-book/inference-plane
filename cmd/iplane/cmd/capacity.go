@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"os"
 	"sort"
 	"strings"
 	"text/tabwriter"
@@ -14,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
+	"github.com/inference-book/inference-plane/gen/go/provisioner/v1/provisionerv1connect"
 	"github.com/inference-book/inference-plane/internal/provisioners"
 	"github.com/inference-book/inference-plane/internal/provisioners/stores/file"
 )
@@ -98,7 +101,7 @@ var capacityCmd = &cobra.Command{
 			return err
 		}
 
-		svc, err := buildReadOnlyService()
+		client, err := buildCapacityClient()
 		if err != nil {
 			return err
 		}
@@ -106,7 +109,14 @@ var capacityCmd = &cobra.Command{
 		ctx, cancel := context.WithTimeout(cmd.Context(), time.Duration(capacityTimeoutSc)*time.Second)
 		defer cancel()
 
-		answers := svc.ListCandidatesAcross(ctx, providers, spec.GetRequirements())
+		resp, err := client.ListCandidates(ctx, &provisionerv1.ListCandidatesRequest{
+			Providers:    providers,
+			Requirements: spec.GetRequirements(),
+		})
+		if err != nil {
+			return err
+		}
+		answers := resp.GetAnswers()
 
 		// A single named provider that could not answer is an error, because
 		// the operator asked one question and got none. Across several it is
@@ -121,11 +131,11 @@ var capacityCmd = &cobra.Command{
 			}
 		}
 
-		candidates := provisioners.MergeCandidates(answers)
+		candidates := resp.GetCandidates()
 		if capacityLimit > 0 && len(candidates) > capacityLimit {
 			candidates = candidates[:capacityLimit]
 		}
-		return renderCandidates(cmd.OutOrStdout(), answers, candidates, capacityOutput)
+		return renderCandidates(cmd.OutOrStdout(), answers, candidates, resp.GetComparability(), capacityOutput)
 	},
 }
 
@@ -168,6 +178,28 @@ func capacityProviders() ([]string, error) {
 	return out, nil
 }
 
+// buildCapacityClient resolves who answers a capacity question.
+//
+// Remote when --service-url is set, and this is the whole of #304. The first
+// version of these verbs always built a local service, so pointing them at a
+// control plane produced a confident answer from the wrong host: provider
+// credentials live in the daemon's environment, so a CLI without keys reported
+// "no capacity" for vendors the daemon could see perfectly well.
+//
+// The reasoning that got this wrong is worth keeping. The test applied was
+// "does it mutate state", which is why the write verbs got RPCs and the read
+// verbs did not. The test that matters is where the INPUTS live. A read that
+// depends on privileged inputs belongs where those inputs are, exactly as much
+// as a write does.
+func buildCapacityClient() (provisionerClient, error) {
+	if instanceServiceURL != "" {
+		return &connectProvisionerClient{
+			c: provisionerv1connect.NewProvisionerServiceClient(http.DefaultClient, instanceServiceURL),
+		}, nil
+	}
+	return buildReadOnlyService()
+}
+
 // buildReadOnlyService opens the state store WITHOUT taking the lifetime lock
 // and wires the same provider set the daemon uses.
 //
@@ -176,6 +208,9 @@ func capacityProviders() ([]string, error) {
 // touches state, so taking the lock would make the command fail exactly when a
 // daemon is up, which is when an operator is most likely to be asking whether
 // there is capacity to scale onto.
+//
+// Only the local branch of buildCapacityClient uses this. In remote mode there
+// is no store to open, because the daemon holds it.
 func buildReadOnlyService() (*provisioners.Service, error) {
 	dir, err := resolveDeploymentStateDir()
 	if err != nil {
@@ -201,14 +236,14 @@ func cannotAnswerError(provider string) error {
 		"  static catalog would resolve to on %s", provider, provider)
 }
 
-func renderCandidates(w io.Writer, answers []*provisioners.ProviderAnswer, candidates []*provisioners.Candidate, format string) error {
+func renderCandidates(w io.Writer, answers []*provisioners.ProviderAnswer, candidates []*provisioners.Candidate, comp *provisioners.Comparability, format string) error {
 	if format == "json" {
 		enc := json.NewEncoder(w)
 		enc.SetIndent("", "  ")
 		return enc.Encode(map[string]any{
 			"candidates":    candidates,
 			"providers":     summarizeAnswers(answers),
-			"comparability": provisioners.AnalyzeComparability(answers),
+			"comparability": comp,
 		})
 	}
 
@@ -230,7 +265,7 @@ func renderCandidates(w io.Writer, answers []*provisioners.ProviderAnswer, candi
 	}
 
 	renderProviderOutcomes(w, answers, len(candidates))
-	renderComparability(w, provisioners.AnalyzeComparability(answers))
+	renderComparability(w, comp)
 	return nil
 }
 
@@ -375,6 +410,13 @@ func init() {
 	rootCmd.AddCommand(capacityCmd)
 
 	f := capacityCmd.Flags()
+	// capacity is a top-level verb, so it does not inherit the instance
+	// group's persistent --service-url and needs its own bound to the same
+	// variable. Defaulting from IPLANE_SERVICE_URL matches every other verb;
+	// without it, an operator with the env var exported would have this one
+	// command quietly answer from a different place than the rest (#304).
+	f.StringVar(&instanceServiceURL, "service-url", os.Getenv("IPLANE_SERVICE_URL"),
+		`forward to a running iplane serve rather than answering in-process (default $IPLANE_SERVICE_URL)`)
 	f.StringVar(&capacityProvider, "provider", "", `provider(s) to ask, comma-separated (default $IPLANE_PROVIDER, else runpod)`)
 	f.BoolVar(&capacityAll, "all", false, `ask every configured provider, including ones that cannot answer`)
 	f.StringVar(&capacityClass, "class", "", `gpu class shorthand: small | medium | large | xlarge`)

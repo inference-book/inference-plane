@@ -128,3 +128,17 @@ func DescribePlacement(p *Placement) []string {
 	}
 	return out
 }
+
+// SelectPlacement is the RPC surface over SelectCheapest.
+//
+// The decision is made here, where the provider credentials are, rather than
+// on the caller's host. A placement resolved by a CLI that can see fewer
+// vendors than the daemon is not the cheapest placement, and nothing in the
+// result would say so (#304).
+func (s *Service) SelectPlacement(ctx context.Context, req *provisionerv1.SelectPlacementRequest) (*provisionerv1.SelectPlacementResponse, error) {
+	placement, err := s.SelectCheapest(ctx, req.GetProviders(), req.GetRequirements())
+	if err != nil {
+		return nil, err
+	}
+	return &provisionerv1.SelectPlacementResponse{Placement: placement}, nil
+}

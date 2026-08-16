@@ -100,14 +100,17 @@ func NormalizeArch(s string) string {
 	}
 }
 
-// ListCandidates asks one provider what it would offer for these
+// CandidatesFrom asks one provider what it would offer for these
 // requirements, without renting anything.
+//
+// The single-provider primitive. ListCandidates is the RPC over the
+// fan-out; this is what one answer costs.
 //
 // Unimplemented rather than an empty list when the provider has no such
 // capability, because "this provider cannot answer" and "this provider has no
 // capacity right now" are different answers and collapsing them would tell an
 // operator their requirements were unsatisfiable when nobody looked.
-func (s *Service) ListCandidates(ctx context.Context, providerName string, reqs *provisionerv1.ResourceRequirements) ([]*Candidate, error) {
+func (s *Service) CandidatesFrom(ctx context.Context, providerName string, reqs *provisionerv1.ResourceRequirements) ([]*Candidate, error) {
 	provider, ok := s.providers[providerName]
 	if !ok {
 		return nil, status.Errorf(codes.NotFound, "provider %q is not configured", providerName)

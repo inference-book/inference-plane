@@ -55,6 +55,12 @@ const (
 	// ProvisionerServiceGetInstanceSSHKeyProcedure is the fully-qualified name of the
 	// ProvisionerService's GetInstanceSSHKey RPC.
 	ProvisionerServiceGetInstanceSSHKeyProcedure = "/provisioner.v1.ProvisionerService/GetInstanceSSHKey"
+	// ProvisionerServiceListCandidatesProcedure is the fully-qualified name of the ProvisionerService's
+	// ListCandidates RPC.
+	ProvisionerServiceListCandidatesProcedure = "/provisioner.v1.ProvisionerService/ListCandidates"
+	// ProvisionerServiceSelectPlacementProcedure is the fully-qualified name of the
+	// ProvisionerService's SelectPlacement RPC.
+	ProvisionerServiceSelectPlacementProcedure = "/provisioner.v1.ProvisionerService/SelectPlacement"
 	// DeploymentServiceCreateDeploymentProcedure is the fully-qualified name of the DeploymentService's
 	// CreateDeployment RPC.
 	DeploymentServiceCreateDeploymentProcedure = "/provisioner.v1.DeploymentService/CreateDeployment"
@@ -143,6 +149,30 @@ type ProvisionerServiceClient interface {
 	// a private network; not safe to expose publicly without an
 	// auth layer in front.
 	GetInstanceSSHKey(context.Context, *connect.Request[v1.GetInstanceSSHKeyRequest]) (*connect.Response[v1.GetInstanceSSHKeyResponse], error)
+	// ListCandidates asks providers what they would rent for a set of
+	// requirements, renting nothing.
+	//
+	// An RPC rather than an in-process call because the inputs live in
+	// the daemon. Provider credentials are in the control plane's
+	// environment, so a CLI running elsewhere cannot answer this question
+	// and must not appear to (#304). The test for what belongs behind
+	// this boundary is where the inputs live, not whether the call
+	// writes: a read that depends on privileged inputs is as much a
+	// service operation as a write.
+	//
+	// Each provider's answer comes back whole. The three ways to
+	// contribute nothing are different findings and only NO_CAPACITY says
+	// anything about the market, so they must survive the wire rather
+	// than collapsing into an empty list.
+	ListCandidates(context.Context, *connect.Request[v1.ListCandidatesRequest]) (*connect.Response[v1.ListCandidatesResponse], error)
+	// SelectPlacement picks the cheapest candidate that fits, across
+	// whichever providers were asked, and returns the reasoning with it.
+	//
+	// Server-side for the same reason as above, and for one more: a
+	// decision made on the caller's host uses the caller's credentials,
+	// so "cheapest across every configured provider" would quietly mean
+	// "cheapest across whatever this laptop can reach".
+	SelectPlacement(context.Context, *connect.Request[v1.SelectPlacementRequest]) (*connect.Response[v1.SelectPlacementResponse], error)
 }
 
 // NewProvisionerServiceClient constructs a client for the provisioner.v1.ProvisionerService
@@ -192,6 +222,18 @@ func NewProvisionerServiceClient(httpClient connect.HTTPClient, baseURL string, 
 			connect.WithSchema(provisionerServiceMethods.ByName("GetInstanceSSHKey")),
 			connect.WithClientOptions(opts...),
 		),
+		listCandidates: connect.NewClient[v1.ListCandidatesRequest, v1.ListCandidatesResponse](
+			httpClient,
+			baseURL+ProvisionerServiceListCandidatesProcedure,
+			connect.WithSchema(provisionerServiceMethods.ByName("ListCandidates")),
+			connect.WithClientOptions(opts...),
+		),
+		selectPlacement: connect.NewClient[v1.SelectPlacementRequest, v1.SelectPlacementResponse](
+			httpClient,
+			baseURL+ProvisionerServiceSelectPlacementProcedure,
+			connect.WithSchema(provisionerServiceMethods.ByName("SelectPlacement")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -203,6 +245,8 @@ type provisionerServiceClient struct {
 	listInstances        *connect.Client[v1.ListInstancesRequest, v1.ListInstancesResponse]
 	waitForInstanceReady *connect.Client[v1.WaitForInstanceReadyRequest, v1.WaitForInstanceReadyResponse]
 	getInstanceSSHKey    *connect.Client[v1.GetInstanceSSHKeyRequest, v1.GetInstanceSSHKeyResponse]
+	listCandidates       *connect.Client[v1.ListCandidatesRequest, v1.ListCandidatesResponse]
+	selectPlacement      *connect.Client[v1.SelectPlacementRequest, v1.SelectPlacementResponse]
 }
 
 // CreateInstance calls provisioner.v1.ProvisionerService.CreateInstance.
@@ -233,6 +277,16 @@ func (c *provisionerServiceClient) WaitForInstanceReady(ctx context.Context, req
 // GetInstanceSSHKey calls provisioner.v1.ProvisionerService.GetInstanceSSHKey.
 func (c *provisionerServiceClient) GetInstanceSSHKey(ctx context.Context, req *connect.Request[v1.GetInstanceSSHKeyRequest]) (*connect.Response[v1.GetInstanceSSHKeyResponse], error) {
 	return c.getInstanceSSHKey.CallUnary(ctx, req)
+}
+
+// ListCandidates calls provisioner.v1.ProvisionerService.ListCandidates.
+func (c *provisionerServiceClient) ListCandidates(ctx context.Context, req *connect.Request[v1.ListCandidatesRequest]) (*connect.Response[v1.ListCandidatesResponse], error) {
+	return c.listCandidates.CallUnary(ctx, req)
+}
+
+// SelectPlacement calls provisioner.v1.ProvisionerService.SelectPlacement.
+func (c *provisionerServiceClient) SelectPlacement(ctx context.Context, req *connect.Request[v1.SelectPlacementRequest]) (*connect.Response[v1.SelectPlacementResponse], error) {
+	return c.selectPlacement.CallUnary(ctx, req)
 }
 
 // ProvisionerServiceHandler is an implementation of the provisioner.v1.ProvisionerService service.
@@ -288,6 +342,30 @@ type ProvisionerServiceHandler interface {
 	// a private network; not safe to expose publicly without an
 	// auth layer in front.
 	GetInstanceSSHKey(context.Context, *connect.Request[v1.GetInstanceSSHKeyRequest]) (*connect.Response[v1.GetInstanceSSHKeyResponse], error)
+	// ListCandidates asks providers what they would rent for a set of
+	// requirements, renting nothing.
+	//
+	// An RPC rather than an in-process call because the inputs live in
+	// the daemon. Provider credentials are in the control plane's
+	// environment, so a CLI running elsewhere cannot answer this question
+	// and must not appear to (#304). The test for what belongs behind
+	// this boundary is where the inputs live, not whether the call
+	// writes: a read that depends on privileged inputs is as much a
+	// service operation as a write.
+	//
+	// Each provider's answer comes back whole. The three ways to
+	// contribute nothing are different findings and only NO_CAPACITY says
+	// anything about the market, so they must survive the wire rather
+	// than collapsing into an empty list.
+	ListCandidates(context.Context, *connect.Request[v1.ListCandidatesRequest]) (*connect.Response[v1.ListCandidatesResponse], error)
+	// SelectPlacement picks the cheapest candidate that fits, across
+	// whichever providers were asked, and returns the reasoning with it.
+	//
+	// Server-side for the same reason as above, and for one more: a
+	// decision made on the caller's host uses the caller's credentials,
+	// so "cheapest across every configured provider" would quietly mean
+	// "cheapest across whatever this laptop can reach".
+	SelectPlacement(context.Context, *connect.Request[v1.SelectPlacementRequest]) (*connect.Response[v1.SelectPlacementResponse], error)
 }
 
 // NewProvisionerServiceHandler builds an HTTP handler from the service implementation. It returns
@@ -333,6 +411,18 @@ func NewProvisionerServiceHandler(svc ProvisionerServiceHandler, opts ...connect
 		connect.WithSchema(provisionerServiceMethods.ByName("GetInstanceSSHKey")),
 		connect.WithHandlerOptions(opts...),
 	)
+	provisionerServiceListCandidatesHandler := connect.NewUnaryHandler(
+		ProvisionerServiceListCandidatesProcedure,
+		svc.ListCandidates,
+		connect.WithSchema(provisionerServiceMethods.ByName("ListCandidates")),
+		connect.WithHandlerOptions(opts...),
+	)
+	provisionerServiceSelectPlacementHandler := connect.NewUnaryHandler(
+		ProvisionerServiceSelectPlacementProcedure,
+		svc.SelectPlacement,
+		connect.WithSchema(provisionerServiceMethods.ByName("SelectPlacement")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/provisioner.v1.ProvisionerService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case ProvisionerServiceCreateInstanceProcedure:
@@ -347,6 +437,10 @@ func NewProvisionerServiceHandler(svc ProvisionerServiceHandler, opts ...connect
 			provisionerServiceWaitForInstanceReadyHandler.ServeHTTP(w, r)
 		case ProvisionerServiceGetInstanceSSHKeyProcedure:
 			provisionerServiceGetInstanceSSHKeyHandler.ServeHTTP(w, r)
+		case ProvisionerServiceListCandidatesProcedure:
+			provisionerServiceListCandidatesHandler.ServeHTTP(w, r)
+		case ProvisionerServiceSelectPlacementProcedure:
+			provisionerServiceSelectPlacementHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -378,6 +472,14 @@ func (UnimplementedProvisionerServiceHandler) WaitForInstanceReady(context.Conte
 
 func (UnimplementedProvisionerServiceHandler) GetInstanceSSHKey(context.Context, *connect.Request[v1.GetInstanceSSHKeyRequest]) (*connect.Response[v1.GetInstanceSSHKeyResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("provisioner.v1.ProvisionerService.GetInstanceSSHKey is not implemented"))
+}
+
+func (UnimplementedProvisionerServiceHandler) ListCandidates(context.Context, *connect.Request[v1.ListCandidatesRequest]) (*connect.Response[v1.ListCandidatesResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("provisioner.v1.ProvisionerService.ListCandidates is not implemented"))
+}
+
+func (UnimplementedProvisionerServiceHandler) SelectPlacement(context.Context, *connect.Request[v1.SelectPlacementRequest]) (*connect.Response[v1.SelectPlacementResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("provisioner.v1.ProvisionerService.SelectPlacement is not implemented"))
 }
 
 // DeploymentServiceClient is a client for the provisioner.v1.DeploymentService service.

@@ -25,6 +25,8 @@ const (
 	ProvisionerService_ListInstances_FullMethodName        = "/provisioner.v1.ProvisionerService/ListInstances"
 	ProvisionerService_WaitForInstanceReady_FullMethodName = "/provisioner.v1.ProvisionerService/WaitForInstanceReady"
 	ProvisionerService_GetInstanceSSHKey_FullMethodName    = "/provisioner.v1.ProvisionerService/GetInstanceSSHKey"
+	ProvisionerService_ListCandidates_FullMethodName       = "/provisioner.v1.ProvisionerService/ListCandidates"
+	ProvisionerService_SelectPlacement_FullMethodName      = "/provisioner.v1.ProvisionerService/SelectPlacement"
 )
 
 // ProvisionerServiceClient is the client API for ProvisionerService service.
@@ -101,6 +103,30 @@ type ProvisionerServiceClient interface {
 	// a private network; not safe to expose publicly without an
 	// auth layer in front.
 	GetInstanceSSHKey(ctx context.Context, in *GetInstanceSSHKeyRequest, opts ...grpc.CallOption) (*GetInstanceSSHKeyResponse, error)
+	// ListCandidates asks providers what they would rent for a set of
+	// requirements, renting nothing.
+	//
+	// An RPC rather than an in-process call because the inputs live in
+	// the daemon. Provider credentials are in the control plane's
+	// environment, so a CLI running elsewhere cannot answer this question
+	// and must not appear to (#304). The test for what belongs behind
+	// this boundary is where the inputs live, not whether the call
+	// writes: a read that depends on privileged inputs is as much a
+	// service operation as a write.
+	//
+	// Each provider's answer comes back whole. The three ways to
+	// contribute nothing are different findings and only NO_CAPACITY says
+	// anything about the market, so they must survive the wire rather
+	// than collapsing into an empty list.
+	ListCandidates(ctx context.Context, in *ListCandidatesRequest, opts ...grpc.CallOption) (*ListCandidatesResponse, error)
+	// SelectPlacement picks the cheapest candidate that fits, across
+	// whichever providers were asked, and returns the reasoning with it.
+	//
+	// Server-side for the same reason as above, and for one more: a
+	// decision made on the caller's host uses the caller's credentials,
+	// so "cheapest across every configured provider" would quietly mean
+	// "cheapest across whatever this laptop can reach".
+	SelectPlacement(ctx context.Context, in *SelectPlacementRequest, opts ...grpc.CallOption) (*SelectPlacementResponse, error)
 }
 
 type provisionerServiceClient struct {
@@ -165,6 +191,26 @@ func (c *provisionerServiceClient) GetInstanceSSHKey(ctx context.Context, in *Ge
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(GetInstanceSSHKeyResponse)
 	err := c.cc.Invoke(ctx, ProvisionerService_GetInstanceSSHKey_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *provisionerServiceClient) ListCandidates(ctx context.Context, in *ListCandidatesRequest, opts ...grpc.CallOption) (*ListCandidatesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListCandidatesResponse)
+	err := c.cc.Invoke(ctx, ProvisionerService_ListCandidates_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *provisionerServiceClient) SelectPlacement(ctx context.Context, in *SelectPlacementRequest, opts ...grpc.CallOption) (*SelectPlacementResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SelectPlacementResponse)
+	err := c.cc.Invoke(ctx, ProvisionerService_SelectPlacement_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -245,6 +291,30 @@ type ProvisionerServiceServer interface {
 	// a private network; not safe to expose publicly without an
 	// auth layer in front.
 	GetInstanceSSHKey(context.Context, *GetInstanceSSHKeyRequest) (*GetInstanceSSHKeyResponse, error)
+	// ListCandidates asks providers what they would rent for a set of
+	// requirements, renting nothing.
+	//
+	// An RPC rather than an in-process call because the inputs live in
+	// the daemon. Provider credentials are in the control plane's
+	// environment, so a CLI running elsewhere cannot answer this question
+	// and must not appear to (#304). The test for what belongs behind
+	// this boundary is where the inputs live, not whether the call
+	// writes: a read that depends on privileged inputs is as much a
+	// service operation as a write.
+	//
+	// Each provider's answer comes back whole. The three ways to
+	// contribute nothing are different findings and only NO_CAPACITY says
+	// anything about the market, so they must survive the wire rather
+	// than collapsing into an empty list.
+	ListCandidates(context.Context, *ListCandidatesRequest) (*ListCandidatesResponse, error)
+	// SelectPlacement picks the cheapest candidate that fits, across
+	// whichever providers were asked, and returns the reasoning with it.
+	//
+	// Server-side for the same reason as above, and for one more: a
+	// decision made on the caller's host uses the caller's credentials,
+	// so "cheapest across every configured provider" would quietly mean
+	// "cheapest across whatever this laptop can reach".
+	SelectPlacement(context.Context, *SelectPlacementRequest) (*SelectPlacementResponse, error)
 }
 
 // UnimplementedProvisionerServiceServer should be embedded to have
@@ -271,6 +341,12 @@ func (UnimplementedProvisionerServiceServer) WaitForInstanceReady(context.Contex
 }
 func (UnimplementedProvisionerServiceServer) GetInstanceSSHKey(context.Context, *GetInstanceSSHKeyRequest) (*GetInstanceSSHKeyResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetInstanceSSHKey not implemented")
+}
+func (UnimplementedProvisionerServiceServer) ListCandidates(context.Context, *ListCandidatesRequest) (*ListCandidatesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListCandidates not implemented")
+}
+func (UnimplementedProvisionerServiceServer) SelectPlacement(context.Context, *SelectPlacementRequest) (*SelectPlacementResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SelectPlacement not implemented")
 }
 func (UnimplementedProvisionerServiceServer) testEmbeddedByValue() {}
 
@@ -400,6 +476,42 @@ func _ProvisionerService_GetInstanceSSHKey_Handler(srv interface{}, ctx context.
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ProvisionerService_ListCandidates_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListCandidatesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ProvisionerServiceServer).ListCandidates(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ProvisionerService_ListCandidates_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ProvisionerServiceServer).ListCandidates(ctx, req.(*ListCandidatesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ProvisionerService_SelectPlacement_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SelectPlacementRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ProvisionerServiceServer).SelectPlacement(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ProvisionerService_SelectPlacement_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ProvisionerServiceServer).SelectPlacement(ctx, req.(*SelectPlacementRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ProvisionerService_ServiceDesc is the grpc.ServiceDesc for ProvisionerService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -430,6 +542,14 @@ var ProvisionerService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetInstanceSSHKey",
 			Handler:    _ProvisionerService_GetInstanceSSHKey_Handler,
+		},
+		{
+			MethodName: "ListCandidates",
+			Handler:    _ProvisionerService_ListCandidates_Handler,
+		},
+		{
+			MethodName: "SelectPlacement",
+			Handler:    _ProvisionerService_SelectPlacement_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
