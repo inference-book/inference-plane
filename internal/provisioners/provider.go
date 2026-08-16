@@ -25,6 +25,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"regexp"
 	"strings"
 
@@ -287,6 +288,50 @@ const (
 // an operator-facing label.
 const ExternalEndpointTag = "iplane-external-engine-endpoint"
 
+// Default upstream-auth shape. Almost every hosted OpenAI-compatible API
+// wants a bearer token in Authorization, so an operator naming only the
+// environment variable gets a working credential.
+const (
+	DefaultUpstreamAuthHeader = "Authorization"
+	DefaultUpstreamAuthPrefix = "Bearer "
+)
+
+// ValidateUpstreamAuth checks a credential description and fills its defaults.
+//
+// The env var is required to exist NOW, at deploy time. A deployment
+// registered against a credential that is not set looks perfectly healthy and
+// 401s every request, so the operator finds out from production traffic.
+// Failing the create is the cheaper place to learn it.
+//
+// The value itself is never read into the record. Only the variable's name is
+// persisted, because the record goes to the state file and to every
+// DescribeDeployment response.
+func ValidateUpstreamAuth(auth *provisionerv1.UpstreamAuth) (*provisionerv1.UpstreamAuth, error) {
+	if auth == nil {
+		return nil, nil
+	}
+	if auth.GetValueEnv() == "" {
+		return nil, fmt.Errorf("upstream auth requires value_env, the NAME of an environment variable holding the credential")
+	}
+	if os.Getenv(auth.GetValueEnv()) == "" {
+		return nil, fmt.Errorf("upstream auth names $%s but it is empty or unset; export it before deploying", auth.GetValueEnv())
+	}
+	out := &provisionerv1.UpstreamAuth{
+		Header:      auth.GetHeader(),
+		ValueEnv:    auth.GetValueEnv(),
+		ValuePrefix: auth.GetValuePrefix(),
+	}
+	if out.Header == "" {
+		out.Header = DefaultUpstreamAuthHeader
+	}
+	// An explicitly empty prefix is a real choice (a gateway wanting the bare
+	// token in X-Api-Key), so only an unset header gets the bearer default.
+	if out.ValuePrefix == "" && out.Header == DefaultUpstreamAuthHeader {
+		out.ValuePrefix = DefaultUpstreamAuthPrefix
+	}
+	return out, nil
+}
+
 // GPU class taxonomy. The chapter teaches one vocabulary across providers;
 // each adapter ships its own class -> []SKU table.
 const (
@@ -295,6 +340,32 @@ const (
 	GPUClassLarge  = "large"  // 80 GB (A100 80 GB, H100 80 GB)
 	GPUClassXLarge = "xlarge" // 96 GB+ (H100 96 GB, H200, B-series)
 )
+
+// ClassifyByVRAM names the class a card falls into, derived from its memory
+// rather than from a reverse lookup table. An RTX 4090 is small because 24 GB
+// lands in the [24, 40) band, full stop.
+//
+// Deriving it means the classification cannot drift from the class defaults in
+// classDefaults, which are stated in the same units. A hand-maintained
+// SKU-to-class table on each adapter could, and there were three of them.
+//
+// Adapters call this after their own catalog lookup, so an operator-supplied
+// --gpu-sku outside a curated catalog still yields "" (no opinion) rather than
+// a guess. Callers pass 0 for an unknown card and get "" back.
+func ClassifyByVRAM(vramGb int) string {
+	switch {
+	case vramGb <= 0:
+		return ""
+	case vramGb >= 96:
+		return GPUClassXLarge
+	case vramGb >= 80:
+		return GPUClassLarge
+	case vramGb >= 40:
+		return GPUClassMedium
+	default:
+		return GPUClassSmall
+	}
+}
 
 // ReservedIDPrefix is the prefix the Service rejects on operator-supplied
 // ids, reserving the namespace for a future relaxation to auto-generated

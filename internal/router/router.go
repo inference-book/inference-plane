@@ -36,6 +36,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"sync"
 	"time"
 
@@ -66,15 +67,15 @@ const tracerName = "inference-plane/router"
 // name in v0.2; promote to the YAML pairing when the chapter starts
 // quoting specific attribute names in print.
 const (
-	AttrRouterMatch    = "iplane.router.match"     // "deploy_id" | "flat"
-	AttrRouterDeployID = "iplane.router.deploy_id" // chosen deployment id
-	AttrRouterModel    = "iplane.router.model"     // deployment.model
-	AttrRouterUpstream = "iplane.router.upstream"  // engine endpoint URL
-	AttrRouterStatus   = "iplane.router.status"    // status label string (success | engine_error | ...)
-	AttrRouterTenantID = "iplane.router.tenant_id" // operator-asserted tenant; "default" when unannotated
-	AttrRouterPriority = "iplane.router.priority"  // effective lane: "interactive" | "batch"
+	AttrRouterMatch     = "iplane.router.match"      // "deploy_id" | "flat"
+	AttrRouterDeployID  = "iplane.router.deploy_id"  // chosen deployment id
+	AttrRouterModel     = "iplane.router.model"      // deployment.model
+	AttrRouterUpstream  = "iplane.router.upstream"   // engine endpoint URL
+	AttrRouterStatus    = "iplane.router.status"     // status label string (success | engine_error | ...)
+	AttrRouterTenantID  = "iplane.router.tenant_id"  // operator-asserted tenant; "default" when unannotated
+	AttrRouterPriority  = "iplane.router.priority"   // effective lane: "interactive" | "batch"
 	AttrRouterReplicaID = "iplane.router.replica_id" // instance_id of the replica this request was routed to (v0.2 ch7-beat3.3); empty when no replica was healthy (returns 503)
-	AttrQueueWaitMs    = "iplane.queue.wait_ms"    // ms spent waiting in the router queue before dispatch (v0.2 ch7-beat2.7); only set when the request was actually queued (direct-forward path leaves it unset)
+	AttrQueueWaitMs     = "iplane.queue.wait_ms"     // ms spent waiting in the router queue before dispatch (v0.2 ch7-beat2.7); only set when the request was actually queued (direct-forward path leaves it unset)
 )
 
 // Span name for the router's request-dispatch span. Single name across
@@ -430,21 +431,21 @@ func (r *Router) serveDeployID(w http.ResponseWriter, req *http.Request) {
 //
 // Three pieces of instrumentation:
 //
-//   1. OTel span (v0.2 ch7-beat1.6). Wraps the dispatch with a span
-//      named iplane.router.dispatch. The span context flows down to
-//      proxyTo, which injects W3C traceparent into the engine
-//      request -- engines configured with OTel chain their spans
-//      under ours, producing a single trace tree in Tempo.
+//  1. OTel span (v0.2 ch7-beat1.6). Wraps the dispatch with a span
+//     named iplane.router.dispatch. The span context flows down to
+//     proxyTo, which injects W3C traceparent into the engine
+//     request -- engines configured with OTel chain their spans
+//     under ours, producing a single trace tree in Tempo.
 //
-//   2. Metrics (v0.2 ch7-beat1.5). RecordRouterRequest + optional
-//      RecordRouterTokens at request close. Recording inside the
-//      span's ctx makes the OTel SDK attach trace_id exemplars to
-//      the metric observations -- operators can click a slow
-//      histogram bucket and jump straight to the trace.
+//  2. Metrics (v0.2 ch7-beat1.5). RecordRouterRequest + optional
+//     RecordRouterTokens at request close. Recording inside the
+//     span's ctx makes the OTel SDK attach trace_id exemplars to
+//     the metric observations -- operators can click a slow
+//     histogram bucket and jump straight to the trace.
 //
-//   3. Response wrap (v0.2 ch7-beat1.5). tokenCountingWriter
-//      observes bytes flowing through, exposes status code +
-//      completion-token count at handler exit.
+//  3. Response wrap (v0.2 ch7-beat1.5). tokenCountingWriter
+//     observes bytes flowing through, exposes status code +
+//     completion-token count at handler exit.
 //
 // tenant_id is v0.2 Beat-1 scaffold: emitted as the empty string
 // (both span attribute and metric label) until Beat 2 wires
@@ -775,6 +776,16 @@ func (r *Router) proxyTo(w http.ResponseWriter, req *http.Request, dep *provisio
 				pr.In.Context(),
 				propagation.HeaderCarrier(pr.Out.Header),
 			)
+			// Ch 11: present a credential to engines that sit behind an
+			// authenticating gateway (a hosted OpenAI-compatible API, or
+			// an operator's own vLLM behind an ingress that checks a
+			// token). Unset for anything iplane provisioned, which is
+			// reachable because we rented it.
+			//
+			// Set rather than Add, and after the header copy above, so a
+			// caller cannot smuggle their own Authorization through to a
+			// paid upstream by sending one to us.
+			applyUpstreamAuth(pr.Out.Header, dep.GetUpstreamAuth())
 		},
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
 			writeOpenAIError(w, http.StatusBadGateway, fmt.Sprintf("upstream engine call failed: %v", err), "engine_unreachable")
@@ -836,4 +847,27 @@ func writeOpenAIError(w http.ResponseWriter, status int, msg, errType string) {
 	_ = json.NewEncoder(w).Encode(openAIError{
 		Error: openAIErrorBody{Message: msg, Type: errType},
 	})
+}
+
+// applyUpstreamAuth sets the outbound credential for an attached engine.
+//
+// The Deployment carries the NAME of an environment variable, never the
+// secret, so the credential is resolved here in the daemon's own process and
+// never lands in the state file or in a DescribeDeployment response.
+//
+// A missing variable is silently skipped rather than failed. The alternative
+// is a router that starts rejecting live traffic because a credential was
+// rotated out from under it, and a 401 from the upstream is both more
+// accurate and more debuggable than a synthetic error from us. The mistake
+// surfaces at deploy time, where CreateDeployment can check the variable
+// exists before anything is registered.
+func applyUpstreamAuth(h http.Header, auth *provisionerv1.UpstreamAuth) {
+	if auth.GetHeader() == "" || auth.GetValueEnv() == "" {
+		return
+	}
+	secret := os.Getenv(auth.GetValueEnv())
+	if secret == "" {
+		return
+	}
+	h.Set(auth.GetHeader(), auth.GetValuePrefix()+secret)
 }

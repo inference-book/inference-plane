@@ -84,3 +84,29 @@ Registration itself was not observed end to end -- the run was torn down while
 still CONFIGURING. Note also that a released agent older than the interconnect
 sensor will register without a link reading, so validating the LINKS column
 needs a release containing it.
+
+## Bid pricing is a real second tier
+
+Every offer carries `min_bid` alongside `dph_total`. Renting at the bid price
+means a higher bidder can take the machine, which is what makes it cheaper, and
+the discount is not marginal: machine 143692 quoted **$0.83/hr on-demand and
+$0.13/hr reclaimable** on 2026-08-15, the same physical host both times.
+
+Vast is the only one of the three providers with this. RunPod's catalog does
+not expose a distinguishable tier and Lambda has no such concept, so a
+reclaimable search across all providers is in practice a Vast search.
+
+`min_bid` is a floor rather than a price. We quote it, which is the cheapest a
+rental could settle at and not necessarily what one does settle at.
+
+## cpu_ram belongs in the query, not the catalog
+
+Vast reports `cpu_ram` per offer, so a `min_ram_gb` floor is pushed
+server-side in `findOffer` and the marketplace judges the actual host. The
+catalog projection deliberately does **not** carry system RAM as a result:
+once a real per-candidate number is reachable, filtering on a tier estimate can
+only wrongly exclude.
+
+Same shape as the disk floor, and the same lesson as #281. The conversion is
+1000 rather than 1024, matching `gpu_ram`, because hosts report round decimal
+figures and a binary conversion rejects machines that are fine.

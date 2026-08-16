@@ -116,7 +116,7 @@ Per the cadence note above: if the manual path and the iplane move don't each fi
 
 | Chapter | Feature                          | Notes                                                                                              |
 |---------|----------------------------------|----------------------------------------------------------------------------------------------------|
-| Ch 11   | Cross-provider capacity          | **Reframed 2026-08** from "backend router" to hardware acquisition, following Ch 10's `provision-connected-pool` pattern. Ch 10 rents one connected pool from one vendor; Ch 11 is what happens when one vendor cannot supply it. Resolve a topology requirement against several provider catalogs at once, rank on price as a placement input rather than a post-hoc report, and survive spot/preemption by draining and re-placing. Health-aware routing extends the Ch 7 per-replica quarantine to the case where the fallback is different hardware at a different price. HostedAPI (issue 182) matters here as a capacity source with a per-token rather than per-hour cost model, not as a model-selection target; per that issue, generalize `external` rather than shipping a sibling provider. **Not this chapter:** workload- or quality-aware routing between models, which asks the control plane to reason about model semantics and is now an advanced-book topic. |
+| Ch 11   | Cross-provider capacity          | **Largely shipped 2026-08-15/16.** Reframed 2026-08 from "backend router" to hardware acquisition: Ch 10 rents one connected pool from one vendor, Ch 11 is what happens when one vendor cannot supply it. **Shipped:** read-only candidate inspection as an optional `CandidateSource` provider capability, implemented by all three paid adapters (#260); cross-provider resolution ranking the union with an explicit account of what could and could not be compared (#280); price as a placement input via `instance create auto`, carrying its runners-up and the facts it did not weigh (#194); reclaimable capacity as a vendor-neutral `ReclaimPolicy` requirement rather than one marketplace's noun (#288); `deployment migrate`, growing onto the destination before draining the source (#290); outbound auth so a hosted OpenAI-compatible API is routable, with the credential named rather than stored (#182 auth half); and `examples/10-cross-provider/` (#291). The shared SKU resolver hoist (#266) was the prerequisite for all of it. **Still open:** reclaim notice and automatic re-placement (#289, blocked on no vendor publishing a signal we can validate against), object-store staging so a warm cache survives a move (#292, blocked on a dependency choice), per-token cost for hosted endpoints (#302). **Not this chapter:** workload- or quality-aware routing between models, which asks the control plane to reason about model semantics and is now an advanced-book topic. |
 | Ch 12   | TP/PP-aware deploy               | `iplane deploy --tp 4 --pp 2`. Image catalog gains multi-GPU variants.                              |
 | All     | Vast.ai + AWS adapters           | Provider mix becomes real; cost-aware routing has providers to choose between. Cross-provider warm-cache design + the per-provider volume-create matrix (Lambda filesystem-create is API-blocked; AWS/GCP are the clean home) is in [docs/design/0004-cross-provider-warm-cache.md](docs/design/0004-cross-provider-warm-cache.md). |
 | All     | `S3Store` / `GCSStore`           | Object-storage backends for fleet provisioning at scale. The robust cross-provider warm-cache path (see 0004); also engine-image cold-start / streaming in [docs/design/0005-engine-image-coldstart.md](docs/design/0005-engine-image-coldstart.md). |
@@ -185,6 +185,33 @@ These are not features of any single version but design properties that should b
 - **Honest error reporting.** Provider errors surface up with the original message preserved; no swallowing or rewriting that breaks debugging.
 
 ---
+
+## Build only what can be tried on real hardware
+
+A capability iplane cannot exercise against a real provider does not go in, and
+the reason is the book rather than the code. Every chapter closes on something
+a reader can run. A control-plane feature that can only ever be demonstrated
+against a mock is a claim the book makes and cannot support, and a reader who
+tries it on a rented box and finds nothing happens has been taught something
+false.
+
+Mocks are fine as scaffolding for a capability that IS exercisable: `mock-engine`
+keeps the routing and fleet demos free, and the real thing has been run. The
+test is whether a real provider can be made to produce the behaviour at all, not
+whether every demo spends money.
+
+Two named consequences, both currently blocked on the market rather than on
+effort:
+
+- **Multi-node pools as one deployment member (issue 212).** No commodity vendor
+  sells a cross-node pool through an API, so a pool could be modelled and never
+  rented. Ch 10's span column stays degenerate and Ch 11 opens on exactly this
+  gap, which is the honest position: the requirement is expressible and gets
+  refused. Revisit when a vendor sells one.
+- **Reclaim notice (issue 289).** No vendor publishes an impending-reclaim
+  signal, and a reclaim cannot be induced on demand, so an implementation could
+  not be validated against the event it exists to catch. The re-placement half
+  it feeds shipped as issue 290 and is exercisable.
 
 ## Explicitly out of scope
 

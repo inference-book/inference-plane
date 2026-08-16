@@ -50,6 +50,7 @@ type deploymentClient interface {
 	WatchDeployment(context.Context, *provisionerv1.WatchDeploymentRequest, func(*provisionerv1.DeploymentStateChangedEvent) error) error
 	TouchDeployment(context.Context, *provisionerv1.TouchDeploymentRequest) (*provisionerv1.TouchDeploymentResponse, error)
 	ScaleDeployment(context.Context, *provisionerv1.ScaleDeploymentRequest) (*provisionerv1.ScaleDeploymentResponse, error)
+	MigrateDeployment(context.Context, *provisionerv1.MigrateDeploymentRequest) (*provisionerv1.MigrateDeploymentResponse, error)
 }
 
 // inProcessDeploymentClient bridges the gRPC server-stream signature
@@ -83,6 +84,10 @@ func (c *inProcessDeploymentClient) TouchDeployment(ctx context.Context, req *pr
 
 func (c *inProcessDeploymentClient) ScaleDeployment(ctx context.Context, req *provisionerv1.ScaleDeploymentRequest) (*provisionerv1.ScaleDeploymentResponse, error) {
 	return c.svc.ScaleDeployment(ctx, req)
+}
+
+func (c *inProcessDeploymentClient) MigrateDeployment(ctx context.Context, req *provisionerv1.MigrateDeploymentRequest) (*provisionerv1.MigrateDeploymentResponse, error) {
+	return c.svc.MigrateDeployment(ctx, req)
 }
 
 func (c *inProcessDeploymentClient) WatchDeployment(ctx context.Context, req *provisionerv1.WatchDeploymentRequest, onEvent func(*provisionerv1.DeploymentStateChangedEvent) error) error {
@@ -146,6 +151,14 @@ func (a *connectDeploymentClient) TouchDeployment(ctx context.Context, req *prov
 
 func (a *connectDeploymentClient) ScaleDeployment(ctx context.Context, req *provisionerv1.ScaleDeploymentRequest) (*provisionerv1.ScaleDeploymentResponse, error) {
 	resp, err := a.c.ScaleDeployment(ctx, connect.NewRequest(req))
+	if err != nil {
+		return nil, err
+	}
+	return resp.Msg, nil
+}
+
+func (a *connectDeploymentClient) MigrateDeployment(ctx context.Context, req *provisionerv1.MigrateDeploymentRequest) (*provisionerv1.MigrateDeploymentResponse, error) {
+	resp, err := a.c.MigrateDeployment(ctx, connect.NewRequest(req))
 	if err != nil {
 		return nil, err
 	}

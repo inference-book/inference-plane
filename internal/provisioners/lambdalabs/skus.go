@@ -1,12 +1,12 @@
 package lambdalabs
 
 import (
-	"sort"
 	"strings"
 
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
 	"github.com/inference-book/inference-plane/internal/provisioners"
 	"github.com/inference-book/inference-plane/internal/provisioners/fabric"
+	"github.com/inference-book/inference-plane/internal/provisioners/skucatalog"
 )
 
 // SKUSpec describes one Lambda Labs instance type (the "gpu_<N>x_<gpu>"
@@ -67,54 +67,49 @@ var skus = []SKUSpec{
 }
 
 // MaxSKUsPerRequest caps the SKUs the resolver will try when no
-// operator-supplied --gpu-sku narrows the search. Unlike Vast,
-// Lambda doesn't iterate -- each Spawn knows its exact instance
-// type before calling /instance-operations/launch. The cap exists
-// for forward-compat when a future retry path iterates the
+// operator-supplied --gpu-sku narrows the search. The cap and its
+// price-escalation rationale are shared (skucatalog.MaxResults). Lambda is the
+// provider that uses the cap least: it doesn't iterate, since each Spawn knows
+// its exact instance type before calling /instance-operations/launch. The cap
+// exists here for forward-compat when a future retry path iterates the
 // resolver's output.
-const MaxSKUsPerRequest = 5
+const MaxSKUsPerRequest = skucatalog.MaxResults
+
+// catalogEntries projects the Lambda catalog onto the shared resolver's fact
+// set. Lambda is the one provider whose rows describe a whole instance rather
+// than a card, so GPUCount is populated here and nowhere else, and it is the
+// only catalog publishing no system-RAM figure. A zero SystemRAMGb means
+// min_ram_gb cannot narrow this catalog, which is the resolver's rule for a
+// sizing fact nobody stated (see #283 for whether that is the right answer).
+func catalogEntries() []skucatalog.Entry {
+	out := make([]skucatalog.Entry, 0, len(skus))
+	for _, sku := range skus {
+		out = append(out, skucatalog.Entry{
+			Token:           sku.Name,
+			VRAMGb:          sku.VRAMGb,
+			GPUCount:        sku.GPUCount,
+			PriceUSDPerHour: sku.PriceUSDPerHour,
+			Family:          sku.Family,
+		})
+	}
+	return out
+}
 
 // MatchSKUs is the per-provider resolver. Given a
 // ResourceRequirements, returns the ordered list of Lambda instance
 // type names that satisfy every numeric constraint, cheapest first,
 // capped at MaxSKUsPerRequest.
 //
+// FabricDeclared, because Lambda names the form factor in the instance type
+// itself ("gpu_1x_a100_sxm4" vs "gpu_1x_h100_pcie") and reports no
+// measurement, so the declared tier reads straight off the SKU the way
+// RunPod's does.
+//
 // Returns an empty slice if no SKU in the catalog satisfies the
 // constraints; Spawn surfaces this as "no matching SKU" rather
 // than silently passing nothing.
 func MatchSKUs(reqs *provisionerv1.ResourceRequirements) []string {
-	if reqs == nil {
-		return nil
-	}
-	var matches []SKUSpec
-	for _, sku := range skus {
-		if sku.VRAMGb < int(reqs.GetMinVramGb()) {
-			continue
-		}
-		if reqs.GetGpuCount() > 0 && sku.GPUCount < int(reqs.GetGpuCount()) {
-			continue
-		}
-		// Fabric filter, declared tier only -- Lambda reports no measurement.
-		// See the runpod resolver for why UNKNOWN candidates are dropped.
-		if !fabric.Satisfies(
-			fabric.Resolve(fabric.Observation{Family: sku.Family}),
-			reqs.GetFabricScope(), reqs.GetMinFabricGbps(),
-		) {
-			continue
-		}
-		matches = append(matches, sku)
-	}
-	sort.SliceStable(matches, func(i, j int) bool {
-		return matches[i].PriceUSDPerHour < matches[j].PriceUSDPerHour
-	})
-	if len(matches) > MaxSKUsPerRequest {
-		matches = matches[:MaxSKUsPerRequest]
-	}
-	out := make([]string, len(matches))
-	for i, m := range matches {
-		out[i] = m.Name
-	}
-	return out
+	return skucatalog.Match(catalogEntries(), reqs, skucatalog.FabricDeclared)
 }
 
 // LookupSKU returns the catalog entry for a Lambda Labs instance
@@ -132,24 +127,15 @@ func LookupSKU(name string) *SKUSpec {
 	return nil
 }
 
-// classifySKU returns the class a SKU belongs to, derived from
-// VRAM. Unknown SKUs return "" -- the operator-supplied --gpu-sku
-// case where we have no opinion about classification.
+// classifySKU returns the class a catalogued SKU belongs to. Unknown SKUs
+// return "" -- the operator-supplied --gpu-sku case where we have no opinion
+// about classification.
 func classifySKU(name string) string {
 	sku := LookupSKU(name)
 	if sku == nil {
 		return ""
 	}
-	switch {
-	case sku.VRAMGb >= 96:
-		return provisioners.GPUClassXLarge
-	case sku.VRAMGb >= 80:
-		return provisioners.GPUClassLarge
-	case sku.VRAMGb >= 40:
-		return provisioners.GPUClassMedium
-	default:
-		return provisioners.GPUClassSmall
-	}
+	return provisioners.ClassifyByVRAM(sku.VRAMGb)
 }
 
 // isActiveProviderState reports whether a Lambda Labs instance
@@ -180,9 +166,5 @@ func stampFabric(hw *provisionerv1.Hardware, instanceTypeName string) {
 	if spec := LookupSKU(instanceTypeName); spec != nil {
 		family = spec.Family
 	}
-	res := fabric.Resolve(fabric.Observation{Family: family})
-	hw.FabricScope = res.Scope
-	hw.FabricSource = res.Source
-	hw.FabricGbps = res.Gbps
-	hw.FabricTechnology = res.Technology
+	fabric.Stamp(hw, fabric.Observation{Family: family})
 }

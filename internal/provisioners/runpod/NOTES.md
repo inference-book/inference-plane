@@ -32,3 +32,47 @@ create pod: Container image "..." was not found on the registry.
 
 That asymmetry with Vast, which rents the box first and discovers the bad image
 afterwards, is a real architectural difference between the two providers.
+
+## The catalog lives on GraphQL, not REST
+
+`rest.runpod.io/v1` has no catalog endpoint. `GET /v1/gpus` returns 400 with
+"that path does not exist in the specification". The GPU catalog is only on
+`api.runpod.io/graphql`, which is why `Candidates` is the second GraphQL read
+in this adapter after SSH keys, and why `gqlPost` was already there to reuse.
+
+`gpuTypes.lowestPrice` takes a `gpuCount` and this is the reason the call is
+worth making. Availability is a property of a card **at a width**, not of a
+card: probing live on 2026-08-15, **35 of 48 types were obtainable as a single
+GPU and 11 of 48 as eight**. A `stockStatus` of null means the type cannot be
+had at that width at all, and a null price means the same, so both are dropped
+rather than reported.
+
+## RunPod does not expose a reclaimable tier through the catalog
+
+`minimumBidPrice` sits next to `uninterruptablePrice` and looks exactly like a
+spot rate. It is not, or at least the catalog gives no way to tell: the two
+were **equal on all 38 shapes that had any availability** when measured on
+2026-08-15.
+
+A bid price that is not below the on-demand price is the same rental
+relabelled, so `Candidates` drops those for a `RECLAIM_POLICY_PREFERRED`
+request rather than claiming a discount that does not exist and an
+interruptibility this endpoint gives no way to verify.
+
+Worth re-measuring before building on it. The narrow claim is that the catalog
+does not expose a distinguishable tier, so an operator cannot see what they
+would be agreeing to before agreeing to it. Whether RunPod sells interruptible
+capacity by some other route is a separate question; `bidPerGpu` exists on the
+create call and the catalog cannot price it.
+
+## System RAM comes with the pod shape
+
+RunPod is the one provider that can neither let an operator select system RAM
+nor report it per candidate. It arrives with the pod and scales with the card
+count, so `DefaultSystemRAMGb` is a per-card estimate and the shared resolver
+multiplies it by the requested width before comparing against `min_ram_gb`.
+
+Getting that scaling wrong was #283: a four-card request asking for 200 GB was
+judged against one card's 96, which rejected every A100 and H100 and landed on
+a B200 whose single-card 256 was the only figure that cleared the bar. Asking
+for the 384 that four cards actually carry matched nothing at all.

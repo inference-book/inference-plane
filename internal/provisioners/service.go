@@ -1100,6 +1100,16 @@ func (s *Service) CreateDeployment(ctx context.Context, req *provisionerv1.Creat
 		}
 		dep.Env = merged
 	}
+	// Ch 11: carry the upstream credential DESCRIPTION onto the record the
+	// router reads. Resolved from the deploy request's tags, validated here
+	// so a deployment that names a missing variable fails the create rather
+	// than registering healthy and 401ing every request.
+	auth, err := ValidateUpstreamAuth(dep.GetUpstreamAuth())
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	dep.UpstreamAuth = auth
+
 	// Stamp the ModelStore's mounts onto the deployment so the deploy
 	// path can attach them. Empty for the default HF-passthrough store;
 	// a warm-cache store (volumecache) fills them so the engine loads

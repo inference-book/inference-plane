@@ -55,6 +55,15 @@ const (
 	// ProvisionerServiceGetInstanceSSHKeyProcedure is the fully-qualified name of the
 	// ProvisionerService's GetInstanceSSHKey RPC.
 	ProvisionerServiceGetInstanceSSHKeyProcedure = "/provisioner.v1.ProvisionerService/GetInstanceSSHKey"
+	// ProvisionerServiceListCandidatesProcedure is the fully-qualified name of the ProvisionerService's
+	// ListCandidates RPC.
+	ProvisionerServiceListCandidatesProcedure = "/provisioner.v1.ProvisionerService/ListCandidates"
+	// ProvisionerServiceSelectPlacementProcedure is the fully-qualified name of the
+	// ProvisionerService's SelectPlacement RPC.
+	ProvisionerServiceSelectPlacementProcedure = "/provisioner.v1.ProvisionerService/SelectPlacement"
+	// ProvisionerServiceListVolumesProcedure is the fully-qualified name of the ProvisionerService's
+	// ListVolumes RPC.
+	ProvisionerServiceListVolumesProcedure = "/provisioner.v1.ProvisionerService/ListVolumes"
 	// DeploymentServiceCreateDeploymentProcedure is the fully-qualified name of the DeploymentService's
 	// CreateDeployment RPC.
 	DeploymentServiceCreateDeploymentProcedure = "/provisioner.v1.DeploymentService/CreateDeployment"
@@ -76,6 +85,9 @@ const (
 	// DeploymentServiceScaleDeploymentProcedure is the fully-qualified name of the DeploymentService's
 	// ScaleDeployment RPC.
 	DeploymentServiceScaleDeploymentProcedure = "/provisioner.v1.DeploymentService/ScaleDeployment"
+	// DeploymentServiceMigrateDeploymentProcedure is the fully-qualified name of the
+	// DeploymentService's MigrateDeployment RPC.
+	DeploymentServiceMigrateDeploymentProcedure = "/provisioner.v1.DeploymentService/MigrateDeployment"
 	// EngineRegistryServiceRegisterEngineProcedure is the fully-qualified name of the
 	// EngineRegistryService's RegisterEngine RPC.
 	EngineRegistryServiceRegisterEngineProcedure = "/provisioner.v1.EngineRegistryService/RegisterEngine"
@@ -140,6 +152,45 @@ type ProvisionerServiceClient interface {
 	// a private network; not safe to expose publicly without an
 	// auth layer in front.
 	GetInstanceSSHKey(context.Context, *connect.Request[v1.GetInstanceSSHKeyRequest]) (*connect.Response[v1.GetInstanceSSHKeyResponse], error)
+	// ListCandidates asks providers what they would rent for a set of
+	// requirements, renting nothing.
+	//
+	// An RPC rather than an in-process call because the inputs live in
+	// the daemon. Provider credentials are in the control plane's
+	// environment, so a CLI running elsewhere cannot answer this question
+	// and must not appear to (#304). The test for what belongs behind
+	// this boundary is where the inputs live, not whether the call
+	// writes: a read that depends on privileged inputs is as much a
+	// service operation as a write.
+	//
+	// Each provider's answer comes back whole. The three ways to
+	// contribute nothing are different findings and only NO_CAPACITY says
+	// anything about the market, so they must survive the wire rather
+	// than collapsing into an empty list.
+	ListCandidates(context.Context, *connect.Request[v1.ListCandidatesRequest]) (*connect.Response[v1.ListCandidatesResponse], error)
+	// SelectPlacement picks the cheapest candidate that fits, across
+	// whichever providers were asked, and returns the reasoning with it.
+	//
+	// Server-side for the same reason as above, and for one more: a
+	// decision made on the caller's host uses the caller's credentials,
+	// so "cheapest across every configured provider" would quietly mean
+	// "cheapest across whatever this laptop can reach".
+	SelectPlacement(context.Context, *connect.Request[v1.SelectPlacementRequest]) (*connect.Response[v1.SelectPlacementResponse], error)
+	// ListVolumes returns the warm-cache pin registry: which volumes exist
+	// and which models are staged on each.
+	//
+	// An RPC because the daemon owns this state. Reading the file behind
+	// its back works, since writes land through an atomic rename and a
+	// reader can only be stale rather than torn, but stale is the wrong
+	// answer to give about a registry the daemon is actively writing.
+	//
+	// Only the read verb gets one. Pinning stages weights onto a volume by
+	// spinning a pod and blocking until the download finishes, which on a
+	// 70B is minutes, and an RPC held open that long runs into the same
+	// write-timeout problem a cold deploy already has. Remote pin stays
+	// deferred rather than arriving as a side effect of fixing a list
+	// command (#307).
+	ListVolumes(context.Context, *connect.Request[v1.ListVolumesRequest]) (*connect.Response[v1.ListVolumesResponse], error)
 }
 
 // NewProvisionerServiceClient constructs a client for the provisioner.v1.ProvisionerService
@@ -189,6 +240,24 @@ func NewProvisionerServiceClient(httpClient connect.HTTPClient, baseURL string, 
 			connect.WithSchema(provisionerServiceMethods.ByName("GetInstanceSSHKey")),
 			connect.WithClientOptions(opts...),
 		),
+		listCandidates: connect.NewClient[v1.ListCandidatesRequest, v1.ListCandidatesResponse](
+			httpClient,
+			baseURL+ProvisionerServiceListCandidatesProcedure,
+			connect.WithSchema(provisionerServiceMethods.ByName("ListCandidates")),
+			connect.WithClientOptions(opts...),
+		),
+		selectPlacement: connect.NewClient[v1.SelectPlacementRequest, v1.SelectPlacementResponse](
+			httpClient,
+			baseURL+ProvisionerServiceSelectPlacementProcedure,
+			connect.WithSchema(provisionerServiceMethods.ByName("SelectPlacement")),
+			connect.WithClientOptions(opts...),
+		),
+		listVolumes: connect.NewClient[v1.ListVolumesRequest, v1.ListVolumesResponse](
+			httpClient,
+			baseURL+ProvisionerServiceListVolumesProcedure,
+			connect.WithSchema(provisionerServiceMethods.ByName("ListVolumes")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -200,6 +269,9 @@ type provisionerServiceClient struct {
 	listInstances        *connect.Client[v1.ListInstancesRequest, v1.ListInstancesResponse]
 	waitForInstanceReady *connect.Client[v1.WaitForInstanceReadyRequest, v1.WaitForInstanceReadyResponse]
 	getInstanceSSHKey    *connect.Client[v1.GetInstanceSSHKeyRequest, v1.GetInstanceSSHKeyResponse]
+	listCandidates       *connect.Client[v1.ListCandidatesRequest, v1.ListCandidatesResponse]
+	selectPlacement      *connect.Client[v1.SelectPlacementRequest, v1.SelectPlacementResponse]
+	listVolumes          *connect.Client[v1.ListVolumesRequest, v1.ListVolumesResponse]
 }
 
 // CreateInstance calls provisioner.v1.ProvisionerService.CreateInstance.
@@ -230,6 +302,21 @@ func (c *provisionerServiceClient) WaitForInstanceReady(ctx context.Context, req
 // GetInstanceSSHKey calls provisioner.v1.ProvisionerService.GetInstanceSSHKey.
 func (c *provisionerServiceClient) GetInstanceSSHKey(ctx context.Context, req *connect.Request[v1.GetInstanceSSHKeyRequest]) (*connect.Response[v1.GetInstanceSSHKeyResponse], error) {
 	return c.getInstanceSSHKey.CallUnary(ctx, req)
+}
+
+// ListCandidates calls provisioner.v1.ProvisionerService.ListCandidates.
+func (c *provisionerServiceClient) ListCandidates(ctx context.Context, req *connect.Request[v1.ListCandidatesRequest]) (*connect.Response[v1.ListCandidatesResponse], error) {
+	return c.listCandidates.CallUnary(ctx, req)
+}
+
+// SelectPlacement calls provisioner.v1.ProvisionerService.SelectPlacement.
+func (c *provisionerServiceClient) SelectPlacement(ctx context.Context, req *connect.Request[v1.SelectPlacementRequest]) (*connect.Response[v1.SelectPlacementResponse], error) {
+	return c.selectPlacement.CallUnary(ctx, req)
+}
+
+// ListVolumes calls provisioner.v1.ProvisionerService.ListVolumes.
+func (c *provisionerServiceClient) ListVolumes(ctx context.Context, req *connect.Request[v1.ListVolumesRequest]) (*connect.Response[v1.ListVolumesResponse], error) {
+	return c.listVolumes.CallUnary(ctx, req)
 }
 
 // ProvisionerServiceHandler is an implementation of the provisioner.v1.ProvisionerService service.
@@ -285,6 +372,45 @@ type ProvisionerServiceHandler interface {
 	// a private network; not safe to expose publicly without an
 	// auth layer in front.
 	GetInstanceSSHKey(context.Context, *connect.Request[v1.GetInstanceSSHKeyRequest]) (*connect.Response[v1.GetInstanceSSHKeyResponse], error)
+	// ListCandidates asks providers what they would rent for a set of
+	// requirements, renting nothing.
+	//
+	// An RPC rather than an in-process call because the inputs live in
+	// the daemon. Provider credentials are in the control plane's
+	// environment, so a CLI running elsewhere cannot answer this question
+	// and must not appear to (#304). The test for what belongs behind
+	// this boundary is where the inputs live, not whether the call
+	// writes: a read that depends on privileged inputs is as much a
+	// service operation as a write.
+	//
+	// Each provider's answer comes back whole. The three ways to
+	// contribute nothing are different findings and only NO_CAPACITY says
+	// anything about the market, so they must survive the wire rather
+	// than collapsing into an empty list.
+	ListCandidates(context.Context, *connect.Request[v1.ListCandidatesRequest]) (*connect.Response[v1.ListCandidatesResponse], error)
+	// SelectPlacement picks the cheapest candidate that fits, across
+	// whichever providers were asked, and returns the reasoning with it.
+	//
+	// Server-side for the same reason as above, and for one more: a
+	// decision made on the caller's host uses the caller's credentials,
+	// so "cheapest across every configured provider" would quietly mean
+	// "cheapest across whatever this laptop can reach".
+	SelectPlacement(context.Context, *connect.Request[v1.SelectPlacementRequest]) (*connect.Response[v1.SelectPlacementResponse], error)
+	// ListVolumes returns the warm-cache pin registry: which volumes exist
+	// and which models are staged on each.
+	//
+	// An RPC because the daemon owns this state. Reading the file behind
+	// its back works, since writes land through an atomic rename and a
+	// reader can only be stale rather than torn, but stale is the wrong
+	// answer to give about a registry the daemon is actively writing.
+	//
+	// Only the read verb gets one. Pinning stages weights onto a volume by
+	// spinning a pod and blocking until the download finishes, which on a
+	// 70B is minutes, and an RPC held open that long runs into the same
+	// write-timeout problem a cold deploy already has. Remote pin stays
+	// deferred rather than arriving as a side effect of fixing a list
+	// command (#307).
+	ListVolumes(context.Context, *connect.Request[v1.ListVolumesRequest]) (*connect.Response[v1.ListVolumesResponse], error)
 }
 
 // NewProvisionerServiceHandler builds an HTTP handler from the service implementation. It returns
@@ -330,6 +456,24 @@ func NewProvisionerServiceHandler(svc ProvisionerServiceHandler, opts ...connect
 		connect.WithSchema(provisionerServiceMethods.ByName("GetInstanceSSHKey")),
 		connect.WithHandlerOptions(opts...),
 	)
+	provisionerServiceListCandidatesHandler := connect.NewUnaryHandler(
+		ProvisionerServiceListCandidatesProcedure,
+		svc.ListCandidates,
+		connect.WithSchema(provisionerServiceMethods.ByName("ListCandidates")),
+		connect.WithHandlerOptions(opts...),
+	)
+	provisionerServiceSelectPlacementHandler := connect.NewUnaryHandler(
+		ProvisionerServiceSelectPlacementProcedure,
+		svc.SelectPlacement,
+		connect.WithSchema(provisionerServiceMethods.ByName("SelectPlacement")),
+		connect.WithHandlerOptions(opts...),
+	)
+	provisionerServiceListVolumesHandler := connect.NewUnaryHandler(
+		ProvisionerServiceListVolumesProcedure,
+		svc.ListVolumes,
+		connect.WithSchema(provisionerServiceMethods.ByName("ListVolumes")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/provisioner.v1.ProvisionerService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case ProvisionerServiceCreateInstanceProcedure:
@@ -344,6 +488,12 @@ func NewProvisionerServiceHandler(svc ProvisionerServiceHandler, opts ...connect
 			provisionerServiceWaitForInstanceReadyHandler.ServeHTTP(w, r)
 		case ProvisionerServiceGetInstanceSSHKeyProcedure:
 			provisionerServiceGetInstanceSSHKeyHandler.ServeHTTP(w, r)
+		case ProvisionerServiceListCandidatesProcedure:
+			provisionerServiceListCandidatesHandler.ServeHTTP(w, r)
+		case ProvisionerServiceSelectPlacementProcedure:
+			provisionerServiceSelectPlacementHandler.ServeHTTP(w, r)
+		case ProvisionerServiceListVolumesProcedure:
+			provisionerServiceListVolumesHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -375,6 +525,18 @@ func (UnimplementedProvisionerServiceHandler) WaitForInstanceReady(context.Conte
 
 func (UnimplementedProvisionerServiceHandler) GetInstanceSSHKey(context.Context, *connect.Request[v1.GetInstanceSSHKeyRequest]) (*connect.Response[v1.GetInstanceSSHKeyResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("provisioner.v1.ProvisionerService.GetInstanceSSHKey is not implemented"))
+}
+
+func (UnimplementedProvisionerServiceHandler) ListCandidates(context.Context, *connect.Request[v1.ListCandidatesRequest]) (*connect.Response[v1.ListCandidatesResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("provisioner.v1.ProvisionerService.ListCandidates is not implemented"))
+}
+
+func (UnimplementedProvisionerServiceHandler) SelectPlacement(context.Context, *connect.Request[v1.SelectPlacementRequest]) (*connect.Response[v1.SelectPlacementResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("provisioner.v1.ProvisionerService.SelectPlacement is not implemented"))
+}
+
+func (UnimplementedProvisionerServiceHandler) ListVolumes(context.Context, *connect.Request[v1.ListVolumesRequest]) (*connect.Response[v1.ListVolumesResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("provisioner.v1.ProvisionerService.ListVolumes is not implemented"))
 }
 
 // DeploymentServiceClient is a client for the provisioner.v1.DeploymentService service.
@@ -433,6 +595,27 @@ type DeploymentServiceClient interface {
 	// target == current is a no-op and returns the current record
 	// unchanged. target <= 0 is invalid.
 	ScaleDeployment(context.Context, *connect.Request[v1.ScaleDeploymentRequest]) (*connect.Response[v1.ScaleDeploymentResponse], error)
+	// MigrateDeployment moves a running deployment to another provider
+	// without changing its id.
+	//
+	// Composed from two things that already ship rather than written:
+	// ScaleDeployment's heterogeneous form grows the deployment onto the
+	// destination, and the drain used by fleet drain and scale-down
+	// releases the source. The router already fans out over whatever
+	// endpoints a deployment currently has, so traffic moves because the
+	// endpoint set changed and not through a cutover step that could drop
+	// a request.
+	//
+	// Grow first, then drain. That ordering is only available because a
+	// migration has no deadline, and it is the ordering that never drops
+	// a request. A reclaim does not get it: notice is often shorter than
+	// a cold start, so the hardware can vanish mid-provision.
+	//
+	// Weights are staged per provider and per region, so a destination
+	// where the model is not pinned pays a full cold start. The response
+	// says so before anything is provisioned rather than leaving an
+	// operator to infer it from a progress bar that stopped moving.
+	MigrateDeployment(context.Context, *connect.Request[v1.MigrateDeploymentRequest]) (*connect.Response[v1.MigrateDeploymentResponse], error)
 }
 
 // NewDeploymentServiceClient constructs a client for the provisioner.v1.DeploymentService service.
@@ -488,6 +671,12 @@ func NewDeploymentServiceClient(httpClient connect.HTTPClient, baseURL string, o
 			connect.WithSchema(deploymentServiceMethods.ByName("ScaleDeployment")),
 			connect.WithClientOptions(opts...),
 		),
+		migrateDeployment: connect.NewClient[v1.MigrateDeploymentRequest, v1.MigrateDeploymentResponse](
+			httpClient,
+			baseURL+DeploymentServiceMigrateDeploymentProcedure,
+			connect.WithSchema(deploymentServiceMethods.ByName("MigrateDeployment")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -500,6 +689,7 @@ type deploymentServiceClient struct {
 	watchDeployment    *connect.Client[v1.WatchDeploymentRequest, v1.DeploymentStateChangedEvent]
 	touchDeployment    *connect.Client[v1.TouchDeploymentRequest, v1.TouchDeploymentResponse]
 	scaleDeployment    *connect.Client[v1.ScaleDeploymentRequest, v1.ScaleDeploymentResponse]
+	migrateDeployment  *connect.Client[v1.MigrateDeploymentRequest, v1.MigrateDeploymentResponse]
 }
 
 // CreateDeployment calls provisioner.v1.DeploymentService.CreateDeployment.
@@ -535,6 +725,11 @@ func (c *deploymentServiceClient) TouchDeployment(ctx context.Context, req *conn
 // ScaleDeployment calls provisioner.v1.DeploymentService.ScaleDeployment.
 func (c *deploymentServiceClient) ScaleDeployment(ctx context.Context, req *connect.Request[v1.ScaleDeploymentRequest]) (*connect.Response[v1.ScaleDeploymentResponse], error) {
 	return c.scaleDeployment.CallUnary(ctx, req)
+}
+
+// MigrateDeployment calls provisioner.v1.DeploymentService.MigrateDeployment.
+func (c *deploymentServiceClient) MigrateDeployment(ctx context.Context, req *connect.Request[v1.MigrateDeploymentRequest]) (*connect.Response[v1.MigrateDeploymentResponse], error) {
+	return c.migrateDeployment.CallUnary(ctx, req)
 }
 
 // DeploymentServiceHandler is an implementation of the provisioner.v1.DeploymentService service.
@@ -593,6 +788,27 @@ type DeploymentServiceHandler interface {
 	// target == current is a no-op and returns the current record
 	// unchanged. target <= 0 is invalid.
 	ScaleDeployment(context.Context, *connect.Request[v1.ScaleDeploymentRequest]) (*connect.Response[v1.ScaleDeploymentResponse], error)
+	// MigrateDeployment moves a running deployment to another provider
+	// without changing its id.
+	//
+	// Composed from two things that already ship rather than written:
+	// ScaleDeployment's heterogeneous form grows the deployment onto the
+	// destination, and the drain used by fleet drain and scale-down
+	// releases the source. The router already fans out over whatever
+	// endpoints a deployment currently has, so traffic moves because the
+	// endpoint set changed and not through a cutover step that could drop
+	// a request.
+	//
+	// Grow first, then drain. That ordering is only available because a
+	// migration has no deadline, and it is the ordering that never drops
+	// a request. A reclaim does not get it: notice is often shorter than
+	// a cold start, so the hardware can vanish mid-provision.
+	//
+	// Weights are staged per provider and per region, so a destination
+	// where the model is not pinned pays a full cold start. The response
+	// says so before anything is provisioned rather than leaving an
+	// operator to infer it from a progress bar that stopped moving.
+	MigrateDeployment(context.Context, *connect.Request[v1.MigrateDeploymentRequest]) (*connect.Response[v1.MigrateDeploymentResponse], error)
 }
 
 // NewDeploymentServiceHandler builds an HTTP handler from the service implementation. It returns
@@ -644,6 +860,12 @@ func NewDeploymentServiceHandler(svc DeploymentServiceHandler, opts ...connect.H
 		connect.WithSchema(deploymentServiceMethods.ByName("ScaleDeployment")),
 		connect.WithHandlerOptions(opts...),
 	)
+	deploymentServiceMigrateDeploymentHandler := connect.NewUnaryHandler(
+		DeploymentServiceMigrateDeploymentProcedure,
+		svc.MigrateDeployment,
+		connect.WithSchema(deploymentServiceMethods.ByName("MigrateDeployment")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/provisioner.v1.DeploymentService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case DeploymentServiceCreateDeploymentProcedure:
@@ -660,6 +882,8 @@ func NewDeploymentServiceHandler(svc DeploymentServiceHandler, opts ...connect.H
 			deploymentServiceTouchDeploymentHandler.ServeHTTP(w, r)
 		case DeploymentServiceScaleDeploymentProcedure:
 			deploymentServiceScaleDeploymentHandler.ServeHTTP(w, r)
+		case DeploymentServiceMigrateDeploymentProcedure:
+			deploymentServiceMigrateDeploymentHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -695,6 +919,10 @@ func (UnimplementedDeploymentServiceHandler) TouchDeployment(context.Context, *c
 
 func (UnimplementedDeploymentServiceHandler) ScaleDeployment(context.Context, *connect.Request[v1.ScaleDeploymentRequest]) (*connect.Response[v1.ScaleDeploymentResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("provisioner.v1.DeploymentService.ScaleDeployment is not implemented"))
+}
+
+func (UnimplementedDeploymentServiceHandler) MigrateDeployment(context.Context, *connect.Request[v1.MigrateDeploymentRequest]) (*connect.Response[v1.MigrateDeploymentResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("provisioner.v1.DeploymentService.MigrateDeployment is not implemented"))
 }
 
 // EngineRegistryServiceClient is a client for the provisioner.v1.EngineRegistryService service.

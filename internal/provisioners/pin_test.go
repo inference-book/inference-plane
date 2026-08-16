@@ -92,7 +92,7 @@ func TestPinModel_StagesAndRecordsInRegistry(t *testing.T) {
 		t.Errorf("models = %v, want the pinned model", v.GetModels())
 	}
 	// Persisted to the registry.
-	vols, _ := svc.ListVolumes(context.Background(), "")
+	vols, _ := svc.VolumesFor(context.Background(), "")
 	if len(vols) != 1 {
 		t.Fatalf("registry has %d volumes, want 1", len(vols))
 	}
@@ -190,7 +190,7 @@ func TestUnpinModel_WholeVolumeDestroys(t *testing.T) {
 	if len(prov.deleted) != 1 || prov.deleted[0] != "vol-EU-RO-1" {
 		t.Errorf("provider DeleteVolume calls = %v, want [vol-EU-RO-1]", prov.deleted)
 	}
-	vols, _ := svc.ListVolumes(context.Background(), "")
+	vols, _ := svc.VolumesFor(context.Background(), "")
 	if len(vols) != 0 {
 		t.Errorf("registry still has %d volumes after destroy, want 0", len(vols))
 	}

@@ -1,0 +1,18 @@
+# Demo 10 config: capacity across providers.
+#
+# The control plane here exists only so acts 10e and 10f have a deployment
+# to move and drain. Everything before that talks to vendor catalogs and
+# never touches this service at all, which is the point: asking what a
+# vendor would rent you does not need a control plane running, and does
+# not cost anything.
+#
+# Router on its plainest setting, scheduler off. Nothing in this demo is
+# about routing.
+backend:
+  engine: "mock"
+  name: "mock"
+
+router:
+  routing_policy: round_robin
+  queue:
+    servicers: 0

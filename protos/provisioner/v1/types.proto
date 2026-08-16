@@ -178,6 +178,43 @@ message ResourceRequirements {
   // matching the same single-unit rule Hardware uses for memory, so that A100
   // arrives here as 2400.
   int32 min_fabric_gbps = 8;
+
+  // Whether the operator will accept capacity the provider can take back.
+  //
+  // Named for the property rather than for a vendor's noun, the same reason
+  // fabric_scope is not called needs_nvlink. Vendors sell this as spot,
+  // interruptible, preemptible and community, and picking one of those words
+  // would bake one marketplace's vocabulary into a cross-provider contract.
+  // What every version has in common is the only thing the control plane
+  // cares about: the hardware is cheaper and it can be reclaimed.
+  //
+  // This constrains selection rather than decorating a create call. A
+  // provider with no reclaimable tier must fail the request rather than
+  // quietly rent on-demand capacity: an operator who asked for reclaimable
+  // asked for a discount, and silently billing them full price is the exact
+  // shape of failure the fabric rules exist to prevent (see #283's
+  // neighbourhood, and the FabricSource doctrine).
+  ReclaimPolicy reclaim_policy = 9;
+}
+
+// ReclaimPolicy says whether capacity the provider can take back is acceptable.
+//
+// Three states rather than a bool, for the reason absence keeps needing to be
+// representable: UNSPECIFIED is the Ch 6-10 default and must stay free, and it
+// is not the same as an operator deliberately refusing reclaimable capacity.
+enum ReclaimPolicy {
+  // Operator expressed no preference. Providers offer whatever they normally
+  // would, which in practice is the on-demand tier.
+  RECLAIM_POLICY_UNSPECIFIED = 0;
+
+  // On-demand only. The rental must not be reclaimable, which matters for a
+  // run that cannot survive being interrupted partway.
+  RECLAIM_POLICY_NEVER = 1;
+
+  // Reclaimable capacity is wanted, for the discount. A provider that cannot
+  // offer it drops out of the candidate set rather than substituting the
+  // dearer tier.
+  RECLAIM_POLICY_PREFERRED = 2;
 }
 
 // Hardware is the cross-provider physical-characteristics base for
@@ -563,6 +600,15 @@ message Deployment {
   // since restart is rare.
   repeated string unhealthy_instance_ids = 26;
 
+  // Credential the router presents when forwarding to this
+  // deployment's engine. Set for attached engines that sit behind an
+  // authenticating gateway: a hosted OpenAI-compatible API, or an
+  // operator's own vLLM behind an ingress that checks a token.
+  //
+  // Unset for everything iplane provisions itself. A rented pod is
+  // reachable because we rented it, not because we hold a key for it.
+  UpstreamAuth upstream_auth = 30;
+
   // replica_specs records the per-slot ReplicaSpec each slot was
   // originally provisioned from (heterogeneous form) or derived
   // from (homogeneous form: one entry replicated len(instance_ids)
@@ -663,6 +709,192 @@ message VolumeMount {
   string host_path = 2;
   string mount_path = 3;
   string provider = 4;
+}
+
+// Candidate is one thing a provider would rent us, carrying what a
+// placement decision turns on rather than the provider's whole record.
+//
+// Everything here is provider-reported unless noted. A field the
+// provider does not fill stays zero, and a caller must read that as
+// "not reported" rather than as a measurement. The fabric fields carry
+// their own provenance for exactly that reason.
+message Candidate {
+  // Provider this came from. Stamped by the Service after the adapter
+  // returns, so a candidate cannot be mislabelled and a merged list
+  // from several providers is self-describing.
+  string provider = 1;
+
+  // host_id identifies the physical machine behind an offer, stable
+  // across the offers that come and go on it. Separate from offer_id
+  // because on a marketplace they are different lifetimes: an offer
+  // disappears when somebody rents it while the host is still the
+  // host, and "do not place on this box again" is a statement about
+  // the host. Empty where the provider has no such notion.
+  string host_id = 2;
+
+  // offer_id is what a Spawn would name. Short-lived on a marketplace,
+  // so it is useful for acting on a candidate now and worthless for
+  // remembering one.
+  string offer_id = 3;
+
+  // sku in the adapter's vocabulary rather than the provider's wire
+  // form, so it round-trips back as --gpu-sku.
+  string sku = 4;
+
+  // region as the provider labels it. Empty where a provider does not
+  // pin placement or does not say.
+  string region = 5;
+
+  // price_usd_per_hour is the provider's live quote for this
+  // candidate, for the whole shape at the requested width rather than
+  // per card. Every adapter converts to that unit, because a merged
+  // list ranked on a mix of per-card and per-shape prices is wrong in
+  // a way nobody can see.
+  double price_usd_per_hour = 6;
+
+  int32 gpu_count = 7;
+  int32 vram_gb_per_gpu = 8;
+
+  // architecture is the host CPU architecture, normalized ("amd64",
+  // "arm64"), empty where unreported. Typed rather than a provider
+  // attr because it decides whether a deploy works at all: an arm64
+  // host needs an arm64 engine image. Providers spell the same fact
+  // differently, which is what the normalization is for.
+  string architecture = 9;
+
+  // reclaimable says the provider can take this capacity back, which
+  // is why it is cheaper. It changes what the price means: an hourly
+  // rate on capacity that can vanish is not comparable with one that
+  // cannot.
+  bool reclaimable = 10;
+
+  // Fabric verdict, flattened the same way Hardware flattens it. The
+  // source is what stops an unmeasured candidate reading as a zero: a
+  // ranking that treated UNKNOWN as no-fabric would let a provider
+  // that publishes nothing beat one that does.
+  FabricScope fabric_scope = 11;
+  FabricSource fabric_source = 12;
+  int32 fabric_gbps = 13;
+  string fabric_technology = 14;
+
+  // attrs carries the provider-reported values the adapter filtered
+  // on, so an operator can see why a candidate is in the list. Keys
+  // are the provider's own field names.
+  //
+  // Deliberately NOT where cross-provider facts live. Everything here
+  // is an untyped string under one vendor's key, so it cannot be
+  // compared against another vendor's record and must never feed a
+  // ranking. A fact that matters on a second provider gets promoted to
+  // a typed field and normalized.
+  map<string, string> attrs = 15;
+}
+
+// AnswerOutcome is what one provider did when asked for capacity.
+//
+// Four states rather than an empty list, because the three ways to
+// contribute nothing are different findings and an operator acts on
+// each differently. Only NO_CAPACITY says anything about the market.
+enum AnswerOutcome {
+  ANSWER_OUTCOME_UNSPECIFIED = 0;
+  // Answered with candidates.
+  ANSWER_OUTCOME_ANSWERED = 1;
+  // Answered, and has nothing matching. A fact about the market.
+  ANSWER_OUTCOME_NO_CAPACITY = 2;
+  // Has no way to answer at all. A fact about the provider's API, and
+  // the reason to look somewhere else for the information.
+  ANSWER_OUTCOME_CANNOT_ANSWER = 3;
+  // Could have answered and did not. Retry, or check a credential.
+  ANSWER_OUTCOME_FAILED = 4;
+}
+
+// ProviderAnswer is one provider's response, kept whole rather than
+// folded into a combined list.
+message ProviderAnswer {
+  string provider = 1;
+  AnswerOutcome outcome = 2;
+  repeated Candidate candidates = 3;
+  // error carries the provider's own words when outcome is FAILED.
+  // Empty otherwise.
+  string error = 4;
+}
+
+// FactGap records one fact that some answering providers reported and
+// others did not, which is the common case rather than the edge case.
+message FactGap {
+  string fact = 1;
+  repeated string reported_by = 2;
+  repeated string missing_from = 3;
+}
+
+// Comparability describes what a merged candidate list can honestly be
+// compared on.
+//
+// It exists because the failure it prevents is invisible. Put several
+// providers' candidates in one table and the eye ranks them; a row with
+// an empty column reads as neutral rather than as unknown, so a
+// provider that publishes less looks no worse than one that publishes
+// more. This reports, and never filters or reweights.
+message Comparability {
+  // Facts every answering provider populated, so a column-by-column
+  // reading of those is sound.
+  repeated string compared = 1;
+  // Facts reported unevenly. A candidate missing one is unmeasured on
+  // it, not worse, and nothing should be concluded from the blank.
+  repeated FactGap gaps = 2;
+}
+
+// Placement is a decision about where to put something, with enough of
+// the reasoning to argue with.
+//
+// A placement an operator cannot interrogate is one they take on trust,
+// and "why did it pick that" is the first question anyone asks of an
+// automatic choice.
+message Placement {
+  Candidate winner = 1;
+  // The next few that lost, cheapest first. Enough to see whether the
+  // decision was close, not so many that the answer is another list.
+  repeated Candidate runners = 2;
+  // Every candidate across every answering provider, so the operator
+  // can tell a decision made from three options from one made from
+  // three hundred.
+  int32 considered = 3;
+  // Per-provider outcomes behind the decision, so a placement made
+  // while one vendor was unreachable says so rather than looking like
+  // a survey of the whole market.
+  repeated ProviderAnswer answers = 4;
+  // What the ranking could honestly compare. A cheapest-fit decision
+  // across providers that report different facts is still the
+  // cheapest, and is not necessarily the best.
+  Comparability comparability = 5;
+}
+
+// UpstreamAuth names a credential without carrying it.
+//
+// value_env holds the NAME of an environment variable, never the secret
+// itself. That distinction is the whole design: this message is
+// persisted to the state file and returned by DescribeDeployment, so a
+// literal token here would be written to disk in plaintext and handed
+// to anyone who can read a deployment. The router resolves the variable
+// at forward time instead, so the secret lives only in the daemon's
+// environment, which is the same place every provider API key already
+// lives (see internal/provisioners/apikey.go).
+//
+// A proper secret store is a later concern. This is deliberately the
+// same shape as the existing provider-key handling rather than a new
+// mechanism nobody has operational experience with.
+message UpstreamAuth {
+  // Header to set on the forwarded request. Usually "Authorization",
+  // but some gateways want their own ("X-Api-Key").
+  string header = 1;
+
+  // Name of the environment variable holding the credential. NOT the
+  // credential.
+  string value_env = 2;
+
+  // Prefix joined to the resolved value, typically "Bearer ". Kept
+  // separate so the env var holds the bare token, which is how vendors
+  // issue them and how operators paste them.
+  string value_prefix = 3;
 }
 
 // Volume is the registry record for a persistent provider volume that

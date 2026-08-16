@@ -25,6 +25,9 @@ const (
 	ProvisionerService_ListInstances_FullMethodName        = "/provisioner.v1.ProvisionerService/ListInstances"
 	ProvisionerService_WaitForInstanceReady_FullMethodName = "/provisioner.v1.ProvisionerService/WaitForInstanceReady"
 	ProvisionerService_GetInstanceSSHKey_FullMethodName    = "/provisioner.v1.ProvisionerService/GetInstanceSSHKey"
+	ProvisionerService_ListCandidates_FullMethodName       = "/provisioner.v1.ProvisionerService/ListCandidates"
+	ProvisionerService_SelectPlacement_FullMethodName      = "/provisioner.v1.ProvisionerService/SelectPlacement"
+	ProvisionerService_ListVolumes_FullMethodName          = "/provisioner.v1.ProvisionerService/ListVolumes"
 )
 
 // ProvisionerServiceClient is the client API for ProvisionerService service.
@@ -101,6 +104,45 @@ type ProvisionerServiceClient interface {
 	// a private network; not safe to expose publicly without an
 	// auth layer in front.
 	GetInstanceSSHKey(ctx context.Context, in *GetInstanceSSHKeyRequest, opts ...grpc.CallOption) (*GetInstanceSSHKeyResponse, error)
+	// ListCandidates asks providers what they would rent for a set of
+	// requirements, renting nothing.
+	//
+	// An RPC rather than an in-process call because the inputs live in
+	// the daemon. Provider credentials are in the control plane's
+	// environment, so a CLI running elsewhere cannot answer this question
+	// and must not appear to (#304). The test for what belongs behind
+	// this boundary is where the inputs live, not whether the call
+	// writes: a read that depends on privileged inputs is as much a
+	// service operation as a write.
+	//
+	// Each provider's answer comes back whole. The three ways to
+	// contribute nothing are different findings and only NO_CAPACITY says
+	// anything about the market, so they must survive the wire rather
+	// than collapsing into an empty list.
+	ListCandidates(ctx context.Context, in *ListCandidatesRequest, opts ...grpc.CallOption) (*ListCandidatesResponse, error)
+	// SelectPlacement picks the cheapest candidate that fits, across
+	// whichever providers were asked, and returns the reasoning with it.
+	//
+	// Server-side for the same reason as above, and for one more: a
+	// decision made on the caller's host uses the caller's credentials,
+	// so "cheapest across every configured provider" would quietly mean
+	// "cheapest across whatever this laptop can reach".
+	SelectPlacement(ctx context.Context, in *SelectPlacementRequest, opts ...grpc.CallOption) (*SelectPlacementResponse, error)
+	// ListVolumes returns the warm-cache pin registry: which volumes exist
+	// and which models are staged on each.
+	//
+	// An RPC because the daemon owns this state. Reading the file behind
+	// its back works, since writes land through an atomic rename and a
+	// reader can only be stale rather than torn, but stale is the wrong
+	// answer to give about a registry the daemon is actively writing.
+	//
+	// Only the read verb gets one. Pinning stages weights onto a volume by
+	// spinning a pod and blocking until the download finishes, which on a
+	// 70B is minutes, and an RPC held open that long runs into the same
+	// write-timeout problem a cold deploy already has. Remote pin stays
+	// deferred rather than arriving as a side effect of fixing a list
+	// command (#307).
+	ListVolumes(ctx context.Context, in *ListVolumesRequest, opts ...grpc.CallOption) (*ListVolumesResponse, error)
 }
 
 type provisionerServiceClient struct {
@@ -165,6 +207,36 @@ func (c *provisionerServiceClient) GetInstanceSSHKey(ctx context.Context, in *Ge
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(GetInstanceSSHKeyResponse)
 	err := c.cc.Invoke(ctx, ProvisionerService_GetInstanceSSHKey_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *provisionerServiceClient) ListCandidates(ctx context.Context, in *ListCandidatesRequest, opts ...grpc.CallOption) (*ListCandidatesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListCandidatesResponse)
+	err := c.cc.Invoke(ctx, ProvisionerService_ListCandidates_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *provisionerServiceClient) SelectPlacement(ctx context.Context, in *SelectPlacementRequest, opts ...grpc.CallOption) (*SelectPlacementResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SelectPlacementResponse)
+	err := c.cc.Invoke(ctx, ProvisionerService_SelectPlacement_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *provisionerServiceClient) ListVolumes(ctx context.Context, in *ListVolumesRequest, opts ...grpc.CallOption) (*ListVolumesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListVolumesResponse)
+	err := c.cc.Invoke(ctx, ProvisionerService_ListVolumes_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -245,6 +317,45 @@ type ProvisionerServiceServer interface {
 	// a private network; not safe to expose publicly without an
 	// auth layer in front.
 	GetInstanceSSHKey(context.Context, *GetInstanceSSHKeyRequest) (*GetInstanceSSHKeyResponse, error)
+	// ListCandidates asks providers what they would rent for a set of
+	// requirements, renting nothing.
+	//
+	// An RPC rather than an in-process call because the inputs live in
+	// the daemon. Provider credentials are in the control plane's
+	// environment, so a CLI running elsewhere cannot answer this question
+	// and must not appear to (#304). The test for what belongs behind
+	// this boundary is where the inputs live, not whether the call
+	// writes: a read that depends on privileged inputs is as much a
+	// service operation as a write.
+	//
+	// Each provider's answer comes back whole. The three ways to
+	// contribute nothing are different findings and only NO_CAPACITY says
+	// anything about the market, so they must survive the wire rather
+	// than collapsing into an empty list.
+	ListCandidates(context.Context, *ListCandidatesRequest) (*ListCandidatesResponse, error)
+	// SelectPlacement picks the cheapest candidate that fits, across
+	// whichever providers were asked, and returns the reasoning with it.
+	//
+	// Server-side for the same reason as above, and for one more: a
+	// decision made on the caller's host uses the caller's credentials,
+	// so "cheapest across every configured provider" would quietly mean
+	// "cheapest across whatever this laptop can reach".
+	SelectPlacement(context.Context, *SelectPlacementRequest) (*SelectPlacementResponse, error)
+	// ListVolumes returns the warm-cache pin registry: which volumes exist
+	// and which models are staged on each.
+	//
+	// An RPC because the daemon owns this state. Reading the file behind
+	// its back works, since writes land through an atomic rename and a
+	// reader can only be stale rather than torn, but stale is the wrong
+	// answer to give about a registry the daemon is actively writing.
+	//
+	// Only the read verb gets one. Pinning stages weights onto a volume by
+	// spinning a pod and blocking until the download finishes, which on a
+	// 70B is minutes, and an RPC held open that long runs into the same
+	// write-timeout problem a cold deploy already has. Remote pin stays
+	// deferred rather than arriving as a side effect of fixing a list
+	// command (#307).
+	ListVolumes(context.Context, *ListVolumesRequest) (*ListVolumesResponse, error)
 }
 
 // UnimplementedProvisionerServiceServer should be embedded to have
@@ -271,6 +382,15 @@ func (UnimplementedProvisionerServiceServer) WaitForInstanceReady(context.Contex
 }
 func (UnimplementedProvisionerServiceServer) GetInstanceSSHKey(context.Context, *GetInstanceSSHKeyRequest) (*GetInstanceSSHKeyResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetInstanceSSHKey not implemented")
+}
+func (UnimplementedProvisionerServiceServer) ListCandidates(context.Context, *ListCandidatesRequest) (*ListCandidatesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListCandidates not implemented")
+}
+func (UnimplementedProvisionerServiceServer) SelectPlacement(context.Context, *SelectPlacementRequest) (*SelectPlacementResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SelectPlacement not implemented")
+}
+func (UnimplementedProvisionerServiceServer) ListVolumes(context.Context, *ListVolumesRequest) (*ListVolumesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListVolumes not implemented")
 }
 func (UnimplementedProvisionerServiceServer) testEmbeddedByValue() {}
 
@@ -400,6 +520,60 @@ func _ProvisionerService_GetInstanceSSHKey_Handler(srv interface{}, ctx context.
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ProvisionerService_ListCandidates_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListCandidatesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ProvisionerServiceServer).ListCandidates(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ProvisionerService_ListCandidates_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ProvisionerServiceServer).ListCandidates(ctx, req.(*ListCandidatesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ProvisionerService_SelectPlacement_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SelectPlacementRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ProvisionerServiceServer).SelectPlacement(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ProvisionerService_SelectPlacement_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ProvisionerServiceServer).SelectPlacement(ctx, req.(*SelectPlacementRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ProvisionerService_ListVolumes_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListVolumesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ProvisionerServiceServer).ListVolumes(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ProvisionerService_ListVolumes_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ProvisionerServiceServer).ListVolumes(ctx, req.(*ListVolumesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ProvisionerService_ServiceDesc is the grpc.ServiceDesc for ProvisionerService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -431,6 +605,18 @@ var ProvisionerService_ServiceDesc = grpc.ServiceDesc{
 			MethodName: "GetInstanceSSHKey",
 			Handler:    _ProvisionerService_GetInstanceSSHKey_Handler,
 		},
+		{
+			MethodName: "ListCandidates",
+			Handler:    _ProvisionerService_ListCandidates_Handler,
+		},
+		{
+			MethodName: "SelectPlacement",
+			Handler:    _ProvisionerService_SelectPlacement_Handler,
+		},
+		{
+			MethodName: "ListVolumes",
+			Handler:    _ProvisionerService_ListVolumes_Handler,
+		},
 	},
 	Streams:  []grpc.StreamDesc{},
 	Metadata: "provisioner/v1/service.proto",
@@ -444,6 +630,7 @@ const (
 	DeploymentService_WatchDeployment_FullMethodName    = "/provisioner.v1.DeploymentService/WatchDeployment"
 	DeploymentService_TouchDeployment_FullMethodName    = "/provisioner.v1.DeploymentService/TouchDeployment"
 	DeploymentService_ScaleDeployment_FullMethodName    = "/provisioner.v1.DeploymentService/ScaleDeployment"
+	DeploymentService_MigrateDeployment_FullMethodName  = "/provisioner.v1.DeploymentService/MigrateDeployment"
 )
 
 // DeploymentServiceClient is the client API for DeploymentService service.
@@ -518,6 +705,27 @@ type DeploymentServiceClient interface {
 	// target == current is a no-op and returns the current record
 	// unchanged. target <= 0 is invalid.
 	ScaleDeployment(ctx context.Context, in *ScaleDeploymentRequest, opts ...grpc.CallOption) (*ScaleDeploymentResponse, error)
+	// MigrateDeployment moves a running deployment to another provider
+	// without changing its id.
+	//
+	// Composed from two things that already ship rather than written:
+	// ScaleDeployment's heterogeneous form grows the deployment onto the
+	// destination, and the drain used by fleet drain and scale-down
+	// releases the source. The router already fans out over whatever
+	// endpoints a deployment currently has, so traffic moves because the
+	// endpoint set changed and not through a cutover step that could drop
+	// a request.
+	//
+	// Grow first, then drain. That ordering is only available because a
+	// migration has no deadline, and it is the ordering that never drops
+	// a request. A reclaim does not get it: notice is often shorter than
+	// a cold start, so the hardware can vanish mid-provision.
+	//
+	// Weights are staged per provider and per region, so a destination
+	// where the model is not pinned pays a full cold start. The response
+	// says so before anything is provisioned rather than leaving an
+	// operator to infer it from a progress bar that stopped moving.
+	MigrateDeployment(ctx context.Context, in *MigrateDeploymentRequest, opts ...grpc.CallOption) (*MigrateDeploymentResponse, error)
 }
 
 type deploymentServiceClient struct {
@@ -607,6 +815,16 @@ func (c *deploymentServiceClient) ScaleDeployment(ctx context.Context, in *Scale
 	return out, nil
 }
 
+func (c *deploymentServiceClient) MigrateDeployment(ctx context.Context, in *MigrateDeploymentRequest, opts ...grpc.CallOption) (*MigrateDeploymentResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(MigrateDeploymentResponse)
+	err := c.cc.Invoke(ctx, DeploymentService_MigrateDeployment_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // DeploymentServiceServer is the server API for DeploymentService service.
 // All implementations should embed UnimplementedDeploymentServiceServer
 // for forward compatibility.
@@ -679,6 +897,27 @@ type DeploymentServiceServer interface {
 	// target == current is a no-op and returns the current record
 	// unchanged. target <= 0 is invalid.
 	ScaleDeployment(context.Context, *ScaleDeploymentRequest) (*ScaleDeploymentResponse, error)
+	// MigrateDeployment moves a running deployment to another provider
+	// without changing its id.
+	//
+	// Composed from two things that already ship rather than written:
+	// ScaleDeployment's heterogeneous form grows the deployment onto the
+	// destination, and the drain used by fleet drain and scale-down
+	// releases the source. The router already fans out over whatever
+	// endpoints a deployment currently has, so traffic moves because the
+	// endpoint set changed and not through a cutover step that could drop
+	// a request.
+	//
+	// Grow first, then drain. That ordering is only available because a
+	// migration has no deadline, and it is the ordering that never drops
+	// a request. A reclaim does not get it: notice is often shorter than
+	// a cold start, so the hardware can vanish mid-provision.
+	//
+	// Weights are staged per provider and per region, so a destination
+	// where the model is not pinned pays a full cold start. The response
+	// says so before anything is provisioned rather than leaving an
+	// operator to infer it from a progress bar that stopped moving.
+	MigrateDeployment(context.Context, *MigrateDeploymentRequest) (*MigrateDeploymentResponse, error)
 }
 
 // UnimplementedDeploymentServiceServer should be embedded to have
@@ -708,6 +947,9 @@ func (UnimplementedDeploymentServiceServer) TouchDeployment(context.Context, *To
 }
 func (UnimplementedDeploymentServiceServer) ScaleDeployment(context.Context, *ScaleDeploymentRequest) (*ScaleDeploymentResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ScaleDeployment not implemented")
+}
+func (UnimplementedDeploymentServiceServer) MigrateDeployment(context.Context, *MigrateDeploymentRequest) (*MigrateDeploymentResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method MigrateDeployment not implemented")
 }
 func (UnimplementedDeploymentServiceServer) testEmbeddedByValue() {}
 
@@ -848,6 +1090,24 @@ func _DeploymentService_ScaleDeployment_Handler(srv interface{}, ctx context.Con
 	return interceptor(ctx, in, info, handler)
 }
 
+func _DeploymentService_MigrateDeployment_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MigrateDeploymentRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DeploymentServiceServer).MigrateDeployment(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: DeploymentService_MigrateDeployment_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DeploymentServiceServer).MigrateDeployment(ctx, req.(*MigrateDeploymentRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // DeploymentService_ServiceDesc is the grpc.ServiceDesc for DeploymentService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -878,6 +1138,10 @@ var DeploymentService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ScaleDeployment",
 			Handler:    _DeploymentService_ScaleDeployment_Handler,
+		},
+		{
+			MethodName: "MigrateDeployment",
+			Handler:    _DeploymentService_MigrateDeployment_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

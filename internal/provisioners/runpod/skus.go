@@ -1,12 +1,12 @@
 package runpod
 
 import (
-	"sort"
 	"strings"
 
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
 	"github.com/inference-book/inference-plane/internal/provisioners"
 	"github.com/inference-book/inference-plane/internal/provisioners/fabric"
+	"github.com/inference-book/inference-plane/internal/provisioners/skucatalog"
 )
 
 // SKUSpec describes what a RunPod gpuTypeId actually delivers: VRAM,
@@ -31,7 +31,6 @@ type SKUSpec struct {
 	GpuTypeID          string  // RunPod's literal gpuTypeId string
 	VRAMGb             int     // GPU memory per card
 	DefaultSystemRAMGb int     // system RAM for a typical single-GPU pod with this SKU
-	DefaultDiskGb      int     // typical container-disk default for this tier
 	PriceUSDPerHour    float64 // cheapest cloud tier price; for ordering, not authoritative
 
 	// Family maps this SKU onto the cross-provider fabric catalog.
@@ -64,31 +63,31 @@ type SKUSpec struct {
 // list in the problems field, which is enough to update the catalog.
 var skus = []SKUSpec{
 	// Small (>=24 GB VRAM): consumer + entry datacenter.
-	{GpuTypeID: "NVIDIA GeForce RTX 4090", VRAMGb: 24, DefaultSystemRAMGb: 16, DefaultDiskGb: 20, PriceUSDPerHour: 0.39, Family: fabric.FamilyRTX4090},
-	{GpuTypeID: "NVIDIA RTX A5000", VRAMGb: 24, DefaultSystemRAMGb: 24, DefaultDiskGb: 20, PriceUSDPerHour: 0.36, Family: fabric.FamilyA5000},
-	{GpuTypeID: "NVIDIA L4", VRAMGb: 24, DefaultSystemRAMGb: 24, DefaultDiskGb: 20, PriceUSDPerHour: 0.43, Family: fabric.FamilyL4},
+	{GpuTypeID: "NVIDIA GeForce RTX 4090", VRAMGb: 24, DefaultSystemRAMGb: 16, PriceUSDPerHour: 0.39, Family: fabric.FamilyRTX4090},
+	{GpuTypeID: "NVIDIA RTX A5000", VRAMGb: 24, DefaultSystemRAMGb: 24, PriceUSDPerHour: 0.36, Family: fabric.FamilyA5000},
+	{GpuTypeID: "NVIDIA L4", VRAMGb: 24, DefaultSystemRAMGb: 24, PriceUSDPerHour: 0.43, Family: fabric.FamilyL4},
 	// "NVIDIA A30" was retired from RunPod's REST enum (confirmed 2026-07-27:
 	// a create with it in gpuTypeIds 400s with the full enum, A30 absent).
 	// Any min_vram_gb<=24 request included it in the top-5 and failed whole.
-	{GpuTypeID: "NVIDIA GeForce RTX 5090", VRAMGb: 32, DefaultSystemRAMGb: 24, DefaultDiskGb: 20, PriceUSDPerHour: 0.69, Family: fabric.FamilyRTX5090},
+	{GpuTypeID: "NVIDIA GeForce RTX 5090", VRAMGb: 32, DefaultSystemRAMGb: 24, PriceUSDPerHour: 0.69, Family: fabric.FamilyRTX5090},
 
 	// Medium (>=40 GB VRAM): workstation / mid-datacenter.
-	{GpuTypeID: "NVIDIA A40", VRAMGb: 48, DefaultSystemRAMGb: 32, DefaultDiskGb: 40, PriceUSDPerHour: 0.39, Family: fabric.FamilyA40},
-	{GpuTypeID: "NVIDIA L40", VRAMGb: 48, DefaultSystemRAMGb: 32, DefaultDiskGb: 40, PriceUSDPerHour: 0.69, Family: fabric.FamilyL40},
-	{GpuTypeID: "NVIDIA L40S", VRAMGb: 48, DefaultSystemRAMGb: 32, DefaultDiskGb: 40, PriceUSDPerHour: 0.79, Family: fabric.FamilyL40S},
-	{GpuTypeID: "NVIDIA RTX A6000", VRAMGb: 48, DefaultSystemRAMGb: 32, DefaultDiskGb: 40, PriceUSDPerHour: 0.79, Family: fabric.FamilyA6000},
-	{GpuTypeID: "NVIDIA RTX 6000 Ada Generation", VRAMGb: 48, DefaultSystemRAMGb: 48, DefaultDiskGb: 40, PriceUSDPerHour: 0.99, Family: fabric.FamilyRTX6000Ada},
+	{GpuTypeID: "NVIDIA A40", VRAMGb: 48, DefaultSystemRAMGb: 32, PriceUSDPerHour: 0.39, Family: fabric.FamilyA40},
+	{GpuTypeID: "NVIDIA L40", VRAMGb: 48, DefaultSystemRAMGb: 32, PriceUSDPerHour: 0.69, Family: fabric.FamilyL40},
+	{GpuTypeID: "NVIDIA L40S", VRAMGb: 48, DefaultSystemRAMGb: 32, PriceUSDPerHour: 0.79, Family: fabric.FamilyL40S},
+	{GpuTypeID: "NVIDIA RTX A6000", VRAMGb: 48, DefaultSystemRAMGb: 32, PriceUSDPerHour: 0.79, Family: fabric.FamilyA6000},
+	{GpuTypeID: "NVIDIA RTX 6000 Ada Generation", VRAMGb: 48, DefaultSystemRAMGb: 48, PriceUSDPerHour: 0.99, Family: fabric.FamilyRTX6000Ada},
 
 	// Large (>=80 GB VRAM): 70B-class inference territory.
-	{GpuTypeID: "NVIDIA A100 80GB PCIe", VRAMGb: 80, DefaultSystemRAMGb: 96, DefaultDiskGb: 60, PriceUSDPerHour: 1.69, Family: fabric.FamilyA100PCIe},
-	{GpuTypeID: "NVIDIA A100-SXM4-80GB", VRAMGb: 80, DefaultSystemRAMGb: 96, DefaultDiskGb: 60, PriceUSDPerHour: 1.79, Family: fabric.FamilyA100SXM},
-	{GpuTypeID: "NVIDIA H100 PCIe", VRAMGb: 80, DefaultSystemRAMGb: 128, DefaultDiskGb: 60, PriceUSDPerHour: 2.39, Family: fabric.FamilyH100PCIe},
-	{GpuTypeID: "NVIDIA H100 80GB HBM3", VRAMGb: 80, DefaultSystemRAMGb: 128, DefaultDiskGb: 60, PriceUSDPerHour: 2.49, Family: fabric.FamilyH100SXM},
+	{GpuTypeID: "NVIDIA A100 80GB PCIe", VRAMGb: 80, DefaultSystemRAMGb: 96, PriceUSDPerHour: 1.69, Family: fabric.FamilyA100PCIe},
+	{GpuTypeID: "NVIDIA A100-SXM4-80GB", VRAMGb: 80, DefaultSystemRAMGb: 96, PriceUSDPerHour: 1.79, Family: fabric.FamilyA100SXM},
+	{GpuTypeID: "NVIDIA H100 PCIe", VRAMGb: 80, DefaultSystemRAMGb: 128, PriceUSDPerHour: 2.39, Family: fabric.FamilyH100PCIe},
+	{GpuTypeID: "NVIDIA H100 80GB HBM3", VRAMGb: 80, DefaultSystemRAMGb: 128, PriceUSDPerHour: 2.49, Family: fabric.FamilyH100SXM},
 
 	// XL (>=94 GB VRAM): frontier / 400B-class multi-host.
-	{GpuTypeID: "NVIDIA H100 NVL", VRAMGb: 94, DefaultSystemRAMGb: 128, DefaultDiskGb: 100, PriceUSDPerHour: 2.99, Family: fabric.FamilyH100NVL},
-	{GpuTypeID: "NVIDIA H200", VRAMGb: 141, DefaultSystemRAMGb: 192, DefaultDiskGb: 100, PriceUSDPerHour: 3.99, Family: fabric.FamilyH200SXM},
-	{GpuTypeID: "NVIDIA B200", VRAMGb: 192, DefaultSystemRAMGb: 256, DefaultDiskGb: 100, PriceUSDPerHour: 5.99, Family: fabric.FamilyB200},
+	{GpuTypeID: "NVIDIA H100 NVL", VRAMGb: 94, DefaultSystemRAMGb: 128, PriceUSDPerHour: 2.99, Family: fabric.FamilyH100NVL},
+	{GpuTypeID: "NVIDIA H200", VRAMGb: 141, DefaultSystemRAMGb: 192, PriceUSDPerHour: 3.99, Family: fabric.FamilyH200SXM},
+	{GpuTypeID: "NVIDIA B200", VRAMGb: 192, DefaultSystemRAMGb: 256, PriceUSDPerHour: 5.99, Family: fabric.FamilyB200},
 }
 
 // Class-to-constraint-defaults lives in the service layer
@@ -98,14 +97,13 @@ var skus = []SKUSpec{
 // adapter only sees expanded constraints.
 
 // MaxSKUsPerRequest caps the number of gpuTypeIds we send to RunPod on
-// a single create. Two reasons to cap:
+// a single create. The cap and its price-escalation rationale are shared
+// (skucatalog.MaxResults); what is RunPod-specific is why the list has more
+// than one entry at all, and one extra reason to keep it short:
 //
-//   - Class shorthand has no upper bound today (class=small expands to
-//     min_vram_gb=24 with no max). Without a cap, every SKU with
-//     VRAM>=24 enters the candidate list -- including B200 at 192 GB.
-//     An operator who asked for "small" should not silently land on a
-//     frontier GPU because the cheap tier is exhausted; the price would
-//     be 10x higher than expected.
+//   - RunPod takes the whole list on one create and tries the entries in
+//     order (gpuTypePriority=availability or custom controlling the policy),
+//     so the tail of the list is real fallback rather than a second call.
 //
 //   - Some RunPod accounts are restricted from provisioning specific
 //     SKUs (B200, H200, H100 NVL typically require approval). Including
@@ -113,13 +111,34 @@ var skus = []SKUSpec{
 //     across the whole request rather than RunPod just skipping the
 //     restricted entries.
 //
-// Capping at top-5 cheapest preserves real fallback (RunPod will try
-// each in order if the cheapest is unavailable) without exposing the
-// caller to large price-tier jumps. Operators who want a strict ceiling
-// pass --gpu-sku for an explicit single-SKU request; a future
-// max_vram_gb constraint would let class shorthand carry a real upper
-// bound (see ROADMAP for the eventual fix).
-const MaxSKUsPerRequest = 5
+// Operators who want a strict ceiling pass --gpu-sku for an explicit
+// single-SKU request; a future max_vram_gb constraint would let class
+// shorthand carry a real upper bound (see ROADMAP for the eventual fix).
+const MaxSKUsPerRequest = skucatalog.MaxResults
+
+// catalogEntries projects the RunPod catalog onto the shared resolver's fact
+// set. There is no disk figure here, and there is none on SKUSpec either:
+// disk is an independent create param sized from min_disk_gb by the deployer,
+// so it is not a fact a catalog row bounds and must never filter (#281, #285).
+//
+// System RAM DOES cross over, because RunPod is the one provider that can
+// neither let an operator select it nor report it per candidate. It comes with
+// the pod shape and scales with the card count, so a per-card estimate scaled
+// by the requested width is the best answer available. It is still an
+// estimate, which is why the field carries its unit in its name (#283).
+func catalogEntries() []skucatalog.Entry {
+	out := make([]skucatalog.Entry, 0, len(skus))
+	for _, sku := range skus {
+		out = append(out, skucatalog.Entry{
+			Token:             sku.GpuTypeID,
+			VRAMGb:            sku.VRAMGb,
+			SystemRAMGbPerGPU: sku.DefaultSystemRAMGb,
+			PriceUSDPerHour:   sku.PriceUSDPerHour,
+			Family:            sku.Family,
+		})
+	}
+	return out
+}
 
 // MatchSKUs is the per-provider resolver in the (a) constraints /
 // (b) resolver / (c) executor model. Given a ResourceRequirements,
@@ -127,55 +146,18 @@ const MaxSKUsPerRequest = 5
 // numeric constraint, cheapest first, capped at MaxSKUsPerRequest.
 //
 // The returned slice is the gpuTypeIds value the Spawn call passes
-// to RunPod's POST /pods -- RunPod tries them in order (with
-// gpuTypePriority=availability or custom controlling the policy).
+// to RunPod's POST /pods.
+//
+// FabricDeclared, because RunPod supplies no interconnect measurement
+// anywhere in its API. Every fabric verdict here is the tier declared by the
+// form factor in the SKU name, so bridge-capable PCIe parts resolve to UNKNOWN
+// and fail closed rather than being rented to find out.
 //
 // Returns an empty slice if no SKU in the catalog satisfies the
 // constraints; the caller should surface this as "no matching SKU"
 // rather than silently passing an empty list to RunPod.
 func MatchSKUs(reqs *provisionerv1.ResourceRequirements) []string {
-	if reqs == nil {
-		return nil
-	}
-	var matches []SKUSpec
-	for _, sku := range skus {
-		if sku.VRAMGb < int(reqs.GetMinVramGb()) {
-			continue
-		}
-		// NOTE: min_disk_gb does NOT filter SKUs. DefaultDiskGb is a typical
-		// default, not a per-SKU ceiling -- RunPod provisions container disk
-		// as an independent create param (the deployer sizes it from
-		// min_disk_gb). Filtering here would wrongly exclude every SKU when
-		// a big model asks for more disk than any tier's default (e.g. 150
-		// GB for a 72B: max DefaultDiskGb is 100).
-		if int(reqs.GetMinRamGb()) > 0 && sku.DefaultSystemRAMGb < int(reqs.GetMinRamGb()) {
-			continue
-		}
-		// Fabric filter. RunPod supplies no measurement, so every verdict here
-		// is the declared tier: SXM/NVL parts pass, cards with no NVLink at
-		// all are rejected, and bridge-capable PCIe parts resolve to UNKNOWN
-		// and fail closed. Dropping the unknowns is the point -- a silent pass
-		// rents a pool and bills for it before reporting that the fabric was
-		// never there.
-		if !fabric.Satisfies(
-			fabric.Resolve(fabric.Observation{Family: sku.Family}),
-			reqs.GetFabricScope(), reqs.GetMinFabricGbps(),
-		) {
-			continue
-		}
-		matches = append(matches, sku)
-	}
-	sort.SliceStable(matches, func(i, j int) bool {
-		return matches[i].PriceUSDPerHour < matches[j].PriceUSDPerHour
-	})
-	if len(matches) > MaxSKUsPerRequest {
-		matches = matches[:MaxSKUsPerRequest]
-	}
-	out := make([]string, len(matches))
-	for i, m := range matches {
-		out[i] = m.GpuTypeID
-	}
-	return out
+	return skucatalog.Match(catalogEntries(), reqs, skucatalog.FabricDeclared)
 }
 
 // LookupSKU returns the catalog entry for a known gpuTypeId, or nil
@@ -191,36 +173,15 @@ func LookupSKU(gpuTypeID string) *SKUSpec {
 	return nil
 }
 
-// classifySKU returns the class a SKU belongs to, derived from its
-// VRAM (not a hardcoded reverse table). An RTX 4090 at 24 GB is
-// "small" because it falls in the [24, 40) VRAM band, full stop.
-// Unknown SKUs return "" -- the operator-supplied --gpu-sku case
-// where we have no opinion about classification.
+// classifySKU returns the class a catalogued SKU belongs to. Unknown SKUs
+// return "" -- the operator-supplied --gpu-sku case where we have no opinion
+// about classification.
 func classifySKU(gpuTypeID string) string {
 	sku := LookupSKU(gpuTypeID)
 	if sku == nil {
 		return ""
 	}
-	switch {
-	case sku.VRAMGb >= 96:
-		return provisioners.GPUClassXLarge
-	case sku.VRAMGb >= 80:
-		return provisioners.GPUClassLarge
-	case sku.VRAMGb >= 40:
-		return provisioners.GPUClassMedium
-	default:
-		return provisioners.GPUClassSmall
-	}
-}
-
-// knownClasses lists class shorthand keys for error messages.
-func knownClasses() []string {
-	return []string{
-		provisioners.GPUClassSmall,
-		provisioners.GPUClassMedium,
-		provisioners.GPUClassLarge,
-		provisioners.GPUClassXLarge,
-	}
+	return provisioners.ClassifyByVRAM(sku.VRAMGb)
 }
 
 // isActiveProviderState reports whether a RunPod desiredStatus counts
@@ -244,9 +205,5 @@ func stampFabric(hw *provisionerv1.Hardware, gpuTypeID string) {
 	if spec := LookupSKU(gpuTypeID); spec != nil {
 		family = spec.Family
 	}
-	res := fabric.Resolve(fabric.Observation{Family: family})
-	hw.FabricScope = res.Scope
-	hw.FabricSource = res.Source
-	hw.FabricGbps = res.Gbps
-	hw.FabricTechnology = res.Technology
+	fabric.Stamp(hw, fabric.Observation{Family: family})
 }

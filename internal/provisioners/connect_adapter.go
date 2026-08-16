@@ -85,6 +85,33 @@ func (a *ConnectProvisionerAdapter) GetInstanceSSHKey(ctx context.Context, req *
 	return connect.NewResponse(resp), nil
 }
 
+// ListCandidates satisfies the Connect handler for the capacity query.
+func (a *ConnectProvisionerAdapter) ListCandidates(ctx context.Context, req *connect.Request[provisionerv1.ListCandidatesRequest]) (*connect.Response[provisionerv1.ListCandidatesResponse], error) {
+	resp, err := a.svc.ListCandidates(ctx, req.Msg)
+	if err != nil {
+		return nil, statusToConnectErr(err)
+	}
+	return connect.NewResponse(resp), nil
+}
+
+// SelectPlacement satisfies the Connect handler for cheapest-fit placement.
+func (a *ConnectProvisionerAdapter) SelectPlacement(ctx context.Context, req *connect.Request[provisionerv1.SelectPlacementRequest]) (*connect.Response[provisionerv1.SelectPlacementResponse], error) {
+	resp, err := a.svc.SelectPlacement(ctx, req.Msg)
+	if err != nil {
+		return nil, statusToConnectErr(err)
+	}
+	return connect.NewResponse(resp), nil
+}
+
+// ListVolumes satisfies the Connect handler for the pin registry.
+func (a *ConnectProvisionerAdapter) ListVolumes(ctx context.Context, req *connect.Request[provisionerv1.ListVolumesRequest]) (*connect.Response[provisionerv1.ListVolumesResponse], error) {
+	resp, err := a.svc.ListVolumes(ctx, req.Msg)
+	if err != nil {
+		return nil, statusToConnectErr(err)
+	}
+	return connect.NewResponse(resp), nil
+}
+
 // ConnectDeploymentAdapter wraps a gRPC DeploymentServiceServer
 // implementation (typically *Service) and exposes the
 // provisionerv1connect.DeploymentServiceHandler interface. Mirrors
@@ -154,6 +181,15 @@ func (a *ConnectDeploymentAdapter) TouchDeployment(ctx context.Context, req *con
 
 func (a *ConnectDeploymentAdapter) ScaleDeployment(ctx context.Context, req *connect.Request[provisionerv1.ScaleDeploymentRequest]) (*connect.Response[provisionerv1.ScaleDeploymentResponse], error) {
 	resp, err := a.svc.ScaleDeployment(ctx, req.Msg)
+	if err != nil {
+		return nil, statusToConnectErr(err)
+	}
+	return connect.NewResponse(resp), nil
+}
+
+// MigrateDeployment satisfies the Connect handler for the migrate verb.
+func (a *ConnectDeploymentAdapter) MigrateDeployment(ctx context.Context, req *connect.Request[provisionerv1.MigrateDeploymentRequest]) (*connect.Response[provisionerv1.MigrateDeploymentResponse], error) {
+	resp, err := a.svc.MigrateDeployment(ctx, req.Msg)
 	if err != nil {
 		return nil, statusToConnectErr(err)
 	}

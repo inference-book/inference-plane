@@ -28,9 +28,17 @@ var rootCmd = &cobra.Command{
 	// engine agent is fetched onto a rented box by a URL naming a specific
 	// build, so an operator debugging a fleet needs to be able to ask which
 	// version the control plane is and therefore which agent it expects.
-	Version:       version.Version,
-	SilenceUsage:  true,
-	SilenceErrors: false,
+	Version:      version.Version,
+	SilenceUsage: true,
+	// Execute below owns error printing, so cobra must not also print. With
+	// both doing it every failure arrived twice, once as "Error: msg" and once
+	// bare, and on a multi-line message the unprefixed copy read as a second
+	// unrelated failure (#293).
+	//
+	// This direction rather than dropping Execute's print, because Execute has
+	// to stay in the loop: exitWithCode carries an empty message on purpose and
+	// cobra would render it as a bare "Error:" with nothing after it.
+	SilenceErrors: true,
 	Long: `iplane runs and operates the v0.1 inference control plane.
 
 Subcommands:
@@ -61,8 +69,12 @@ type exitCoder interface {
 // signal entirely via exit code + stdout.
 func Execute() {
 	if err := rootCmd.Execute(); err != nil {
+		// The "Error: " prefix is cobra's, kept because operators and the
+		// book's captured listings both already read it. The empty-message
+		// guard is what exitWithCode relies on to set an exit code without
+		// printing anything.
 		if msg := err.Error(); msg != "" {
-			fmt.Fprintln(os.Stderr, msg)
+			fmt.Fprintln(os.Stderr, "Error: "+msg)
 		}
 		var ec exitCoder
 		if errors.As(err, &ec) {
