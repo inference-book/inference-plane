@@ -20,6 +20,281 @@ snapshots:
 
   # v0.2.3 was an interim release that published the agent binary, so this tag
   # aliases v0.2.4.
+  # Cut at the last Chapter 11 commit rather than at main's tip. The --tp/--pp
+  # deploy flags landed the same day and belong to Chapter 12, so including
+  # them would put a capability in this tag that this chapter never describes.
+  - tag: ch11-final
+    alias: v0.3.0
+    chapter: 11
+    chapter_title: Capacity Across Providers
+    branch: release/v0.3
+    date: 2026-08-16
+
+    summary: |
+      One vendor is a single point of supply. Chapter 10 rents a connected
+      pool from one seller; this chapter is what happens when that seller
+      cannot supply it, and the answer is to ask several and then decide.
+      Three things landed that did not exist. A requirement resolves against
+      every configured catalog at once, and the merged view reports which
+      sellers answered, which had nothing, and which cannot answer at all,
+      because only the middle one says anything about the market. Price
+      becomes a placement input rather than a report, and the decision carries
+      its runners-up and the facts it could not weigh. Reclaimable capacity
+      becomes expressible as a property rather than as one marketplace's noun,
+      and asking three sellers for it found that one sells it, one has no such
+      tier, and one publishes a bid price equal to its on-demand price. A
+      deployment can also move: growing onto the destination before draining
+      the source, which is the ordering that drops nothing and is available
+      only because a planned move has no deadline. What is absent is absent
+      for market reasons rather than effort. Nothing listens for an impending
+      reclaim because no seller publishes one, and a cross-node pool is
+      expressible and refused because nobody rents one through an API.
+
+    capabilities:
+
+      - name: Read-only candidate inspection
+        status: shipped
+        notes: |
+          Asking a seller what it would rent, and what it says about each
+          candidate, without renting anything. An optional provider capability
+          asserted at runtime, so a seller that cannot answer is absent rather
+          than stubbed. All three paid adapters implement it and each answers a
+          differently shaped question: a marketplace returns live offers from
+          independent hosts, a fixed catalog returns shapes plus which regions
+          currently have any, and the third returns a stock level per requested
+          width. Read-only and free by contract, and it takes no state lock,
+          because the moment an operator most wants to ask is while a control
+          plane is running. A seller that cannot answer says so rather than
+          returning an empty list, since "nobody looked" and "nothing
+          available" send an operator to different places.
+        prs: [286, 287, 294]
+        related_issues: [260]
+
+      - name: Resolution across several catalogs at once
+        status: shipped
+        notes: |
+          The same requirement asked of every configured seller in parallel,
+          with the union ranked on price. One seller failing never fails the
+          call, since a search whose premise is that one seller may not supply
+          what you need should not die on its weakest participant. Each answer
+          is kept whole rather than folded into one list. The merged view also
+          reports what it could compare: facts every answering seller
+          published, and facts published unevenly, derived from the candidates
+          actually returned rather than from a table of what each seller is
+          supposed to support. Ranking is on price alone, and the output says
+          so, because ranking on more means deciding one seller's fact is
+          commensurable with another's.
+        prs: [296]
+        related_issues: [280]
+
+      - name: Price as a placement input
+        status: shipped
+        notes: |
+          `iplane instance create auto` resolves the cheapest fitting candidate
+          across every configured seller and rents that one, recording which
+          seller was chosen rather than the instruction that led there. The
+          decision carries its reasoning: the runners-up and their price
+          deltas, how many candidates were considered, any seller that could
+          have competed and was unreachable, and the facts the ranking could
+          not compare. Cheapest is not best and the gap is stated where the
+          money is about to be spent, since a card can be cheapest by sitting
+          where the weights are not staged.
+        prs: [298]
+        related_issues: [194]
+
+      - name: Reclaimable capacity as a requirement
+        status: shipped
+        notes: |
+          Capacity the seller may take back, expressed as a property rather
+          than as any one marketplace's word for it. Sellers call this spot,
+          interruptible, preemptible and community; what they share is that it
+          is cheaper and can be reclaimed. Three states rather than a boolean,
+          so "no preference" stays distinct from a run that cannot survive
+          interruption. A seller with no such tier drops out rather than
+          substituting the dearer one, because an operator who asked for
+          reclaimable asked for a discount and silently billing them full
+          price answers a question they did not ask.
+        prs: [299]
+        related_issues: [288]
+
+      - name: Moving a deployment between sellers
+        status: shipped
+        notes: |
+          `iplane deployment migrate` moves a running deployment without
+          changing its id, composed from parts that already shipped rather
+          than written: the heterogeneous scale form grows onto the
+          destination, and the drain built for scaling down releases the
+          source. Traffic moves because the endpoint set changed rather than
+          through a cutover step. Grow first, then drain, which is available
+          only because a planned move has no deadline and is the ordering that
+          never drops a request. The plan says before anything is provisioned
+          whether the weights are staged at the destination, since a cold move
+          is minutes and an operator who was not told reads a stalled deploy as
+          a hang.
+        prs: [301]
+        related_issues: [290]
+
+      - name: Routing to an engine behind a gateway
+        status: partial
+        notes: |
+          A deployment can name a credential the router presents when
+          forwarding, which makes a hosted OpenAI-compatible endpoint routable
+          for the first time. The record holds the NAME of an environment
+          variable and never the value, because the record is written to the
+          state file and returned by describe. The header is set rather than
+          added and after the caller's headers are copied, so a client cannot
+          send their own credential through to a paid upstream. The variable
+          must exist at deploy time, since a deployment registered against a
+          missing credential looks healthy and fails every request. Marked
+          partial: pricing an endpoint billed per token is not built, so a
+          per-token seller still cannot be compared against a per-hour one.
+        prs: [303]
+        related_issues: [182, 302]
+
+      - name: One resolver over every catalog
+        status: shipped
+        notes: |
+          The selection algorithm was written once per adapter and the copies
+          had drifted, so a lesson learned in one was absent from the others.
+          Hoisting it made the divergence impossible to express and forced a
+          rule to be stated: only filter on facts a catalog row genuinely
+          bounds. Card memory and interconnect are properties of the hardware;
+          disk, system memory and reclaimability belong to the rented shape and
+          are settled per candidate. The rule was learned three times, each
+          time as a real defect.
+        prs: [284, 282, 295]
+        related_issues: [266, 281, 283]
+
+      - name: Cross-provider walkthrough
+        status: shipped
+        notes: |
+          `examples/10-cross-provider/`, six acts, renting nothing. The first
+          walkthrough since Chapter 7 that cannot be credential-free, because
+          its subject is sellers disagreeing about what they will tell you and
+          a fake seller agrees with itself. It refuses to start without a key
+          rather than skipping acts, and every act is free: a marketplace
+          account with no balance runs the whole thing. That is the difference
+          from Chapter 10's fabric measurement, which needed two paid pools and
+          could never be a walkthrough.
+        prs: [308]
+        related_issues: [291]
+
+      - name: Reclaim notice and automatic re-placement
+        status: deferred
+        notes: |
+          The drain and the re-placement both exist; nothing joins them,
+          because nothing listens for a seller signalling an impending
+          reclaim. No seller we integrate publishes such a signal, and a
+          reclaim cannot be induced on demand, so an implementation could not
+          be validated against the event it exists to catch. Deferred on that
+          basis rather than on effort. This is why the chapter shows a
+          migration and not a preemption.
+        related_issues: [289]
+        moved_to: v1.0
+
+      - name: Object-store model staging
+        status: deferred
+        notes: |
+          A pinned volume is scoped to one seller and one region, so weights do
+          not follow a deployment that moves and the replacement pays a cold
+          start on the occasion when time is shortest. The provider-independent
+          tier that would fix it needs an object-store client the project does
+          not have, and a decision about cross-region egress cost that belongs
+          in the placement decision rather than in a postmortem.
+        related_issues: [292, 254]
+        moved_to: v1.0
+
+    cli_surface:
+      # New at this tag (additive over ch10-final):
+      - iplane capacity --provider a,b,c | --all
+      - iplane capacity --reclaim yes|no
+      - iplane capacity --output json --limit N
+      - iplane instance create auto <id>
+      - iplane deployment migrate <id> --to <provider> --dry-run
+      - iplane deployment deploy --upstream-auth-env <VAR>
+      - iplane model ls --service-url <url>
+
+    known_limitations:
+      - id: one-seller-of-three-sells-reclaimable
+        notes: |
+          Reclaimable capacity is expressible everywhere and available from one
+          of the three integrated sellers. A second has no such tier at all. A
+          third publishes a bid price that reads exactly like a spot rate and
+          was equal to its on-demand price on every available shape when
+          measured, so those candidates are dropped rather than reported as a
+          discount that does not exist. That reading is an inference from one
+          probe on one day, and the narrow claim is that the catalog does not
+          expose a distinguishable tier.
+
+      - id: migration-happy-path-unverified
+        notes: |
+          What is verified for a migration is the planning, the warm-versus-cold
+          check, the preconditions, and that a failed grow leaves the source
+          serving. That a successful grow-then-drain ends with exactly the
+          destination serving needs a paid run on two sellers and has not
+          happened.
+
+      - id: sizing-requirements-differ-by-seller
+        notes: |
+          A memory requirement is enforced three different ways, none of them
+          wrong given what each seller will say. One publishes per-host memory
+          and the floor is pushed into its search. One can neither let an
+          operator select it nor report it per candidate, so an estimate is
+          scaled by the requested card count. One publishes nothing in the
+          static catalog and the requirement is accepted and not applied.
+          Whether to refuse a requirement a seller cannot honour is undecided.
+
+      - id: no-per-token-pricing
+        notes: |
+          An endpoint billed per token is routable and not priceable, so it
+          cannot be compared against a pool billed per hour. The comparison is
+          the hard part and it is open.
+
+      - id: capacity-answers-are-a-market-snapshot
+        notes: |
+          Every measured claim about what sellers offer was true on one day.
+          These are claims about a market rather than about the control plane,
+          and they should be re-measured before anything is built on them.
+
+    patterns_introduced:
+      - name: one-seller-is-a-single-point-of-supply
+        notes: |
+          A requirement one seller cannot fill is not a requirement that cannot
+          be filled, and the argument for shopping several is availability
+          before it is price. What varies between sellers is not only which
+          hardware is free this afternoon but which commercial arrangements
+          exist at all.
+
+      - name: silence-is-not-evidence
+        notes: |
+          A seller that declines to state a fact must not win on that fact by
+          default. The ordering form is harder to hold than the filtering form,
+          because a dropped candidate leaves a visible gap and a floated one
+          does not.
+
+      - name: bounds-the-thing-or-ordered-alongside-it
+        notes: |
+          For a fact that bounds the hardware, absence fails closed, since the
+          only other way to learn is to rent and pay. For a fact describing
+          something ordered alongside it, absence must not filter at all,
+          because rejecting hardware over a number nobody stated is inventing a
+          constraint. Getting the sign wrong produces an ordering that is an
+          artifact of the policy rather than a fact about the hardware.
+
+      - name: place-continuously-not-once
+        notes: |
+          Rented capacity can be taken back, so draining is an ordinary
+          operation and a control plane needs an answer ready for where a
+          deployment goes next.
+
+      - name: where-the-inputs-live-decides-the-boundary
+        notes: |
+          What puts an operation behind a service boundary is where its inputs
+          live, not whether it writes. A read that depends on privileged inputs
+          is as much a service operation as a write. Applying the write-shaped
+          test instead produced the same defect twice, in two commands written
+          days apart.
+
   - tag: ch10-final
     alias: v0.2.4
     chapter: 10
