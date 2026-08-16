@@ -50,7 +50,7 @@ func TestCandidatesSkipShapesWithNoCapacity(t *testing.T) {
 	}
 
 	for _, c := range got {
-		if c.SKU == "gpu_1x_h100_sxm5" {
+		if c.GetSku() == "gpu_1x_h100_sxm5" {
 			t.Errorf("a shape with an empty capacity list was offered as a candidate: %+v", c)
 		}
 	}
@@ -72,7 +72,7 @@ func TestCandidatesFanOutPerRegion(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("got %d candidates, want one per region with capacity", len(got))
 	}
-	seen := map[string]bool{got[0].Region: true, got[1].Region: true}
+	seen := map[string]bool{got[0].GetRegion(): true, got[1].Region: true}
 	if !seen["us-east-1"] || !seen["us-west-2"] {
 		t.Errorf("regions = %v, want us-east-1 and us-west-2", seen)
 	}
@@ -90,9 +90,9 @@ func TestCandidatesLeaveHostAndOfferEmpty(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("got %d candidates, want 1", len(got))
 	}
-	if got[0].HostID != "" || got[0].OfferID != "" {
+	if got[0].GetHostId() != "" || got[0].GetOfferId() != "" {
 		t.Errorf("HostID=%q OfferID=%q, want both empty on a provider with no such concept",
-			got[0].HostID, got[0].OfferID)
+			got[0].GetHostId(), got[0].GetOfferId())
 	}
 }
 
@@ -115,10 +115,10 @@ func TestCandidatesUseTheLivePriceNotTheCatalog(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("got %d candidates, want 1", len(got))
 	}
-	if got[0].PriceUSDPerHour != 7.77 {
-		t.Errorf("price = %v, want the live 7.77 rather than the catalog's figure", got[0].PriceUSDPerHour)
+	if got[0].GetPriceUsdPerHour() != 7.77 {
+		t.Errorf("price = %v, want the live 7.77 rather than the catalog's figure", got[0].GetPriceUsdPerHour())
 	}
-	if catalog := LookupSKU("gpu_1x_a100_sxm4"); catalog != nil && got[0].PriceUSDPerHour == catalog.PriceUSDPerHour {
+	if catalog := LookupSKU("gpu_1x_a100_sxm4"); catalog != nil && got[0].GetPriceUsdPerHour() == catalog.PriceUSDPerHour {
 		t.Error("price came from the static catalog; the network call bought us nothing")
 	}
 }
@@ -133,16 +133,16 @@ func TestCandidatesNormalizeArchitecture(t *testing.T) {
 		t.Fatalf("Candidates: %v", err)
 	}
 
-	byName := map[string]provisioners.Candidate{}
+	byName := map[string]*provisioners.Candidate{}
 	for _, c := range got {
-		byName[c.SKU] = c
+		byName[c.GetSku()] = c
 	}
-	if a := byName["gpu_1x_gh200"].Architecture; a != provisioners.ArchARM64 {
+	if a := byName["gpu_1x_gh200"].GetArchitecture(); a != provisioners.ArchARM64 {
 		t.Errorf("gh200 architecture = %q, want %q", a, provisioners.ArchARM64)
 	}
 	// "x86_64" on the wire, "amd64" once normalized. Passing the raw string
 	// through would leave a caller comparing it against Vast's "amd64".
-	if a := byName["gpu_1x_a100_sxm4"].Architecture; a != provisioners.ArchAMD64 {
+	if a := byName["gpu_1x_a100_sxm4"].GetArchitecture(); a != provisioners.ArchAMD64 {
 		t.Errorf("a100 architecture = %q, want %q normalized from x86_64", a, provisioners.ArchAMD64)
 	}
 }
@@ -168,8 +168,8 @@ func TestCandidatesReportZeroVRAMForAnUncataloguedShape(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("got %d candidates, want 1", len(got))
 	}
-	if got[0].VRAMGbPerGPU != 0 {
-		t.Errorf("VRAM = %d for a shape we have no catalog entry for, want 0 rather than a guess", got[0].VRAMGbPerGPU)
+	if got[0].GetVramGbPerGpu() != 0 {
+		t.Errorf("VRAM = %d for a shape we have no catalog entry for, want 0 rather than a guess", got[0].GetVramGbPerGpu())
 	}
 }
 
@@ -183,13 +183,13 @@ func TestCandidatesFilterThroughTheSameResolverAsSpawn(t *testing.T) {
 	}
 
 	for _, c := range got {
-		spec := LookupSKU(c.SKU)
+		spec := LookupSKU(c.GetSku())
 		if spec == nil {
-			t.Errorf("candidate %q is not in the catalog", c.SKU)
+			t.Errorf("candidate %q is not in the catalog", c.GetSku())
 			continue
 		}
 		if spec.VRAMGb < 96 {
-			t.Errorf("candidate %q has %d GB VRAM, below the stated floor", c.SKU, spec.VRAMGb)
+			t.Errorf("candidate %q has %d GB VRAM, below the stated floor", c.GetSku(), spec.VRAMGb)
 		}
 	}
 }

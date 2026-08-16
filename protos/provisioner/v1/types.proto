@@ -711,6 +711,163 @@ message VolumeMount {
   string provider = 4;
 }
 
+// Candidate is one thing a provider would rent us, carrying what a
+// placement decision turns on rather than the provider's whole record.
+//
+// Everything here is provider-reported unless noted. A field the
+// provider does not fill stays zero, and a caller must read that as
+// "not reported" rather than as a measurement. The fabric fields carry
+// their own provenance for exactly that reason.
+message Candidate {
+  // Provider this came from. Stamped by the Service after the adapter
+  // returns, so a candidate cannot be mislabelled and a merged list
+  // from several providers is self-describing.
+  string provider = 1;
+
+  // host_id identifies the physical machine behind an offer, stable
+  // across the offers that come and go on it. Separate from offer_id
+  // because on a marketplace they are different lifetimes: an offer
+  // disappears when somebody rents it while the host is still the
+  // host, and "do not place on this box again" is a statement about
+  // the host. Empty where the provider has no such notion.
+  string host_id = 2;
+
+  // offer_id is what a Spawn would name. Short-lived on a marketplace,
+  // so it is useful for acting on a candidate now and worthless for
+  // remembering one.
+  string offer_id = 3;
+
+  // sku in the adapter's vocabulary rather than the provider's wire
+  // form, so it round-trips back as --gpu-sku.
+  string sku = 4;
+
+  // region as the provider labels it. Empty where a provider does not
+  // pin placement or does not say.
+  string region = 5;
+
+  // price_usd_per_hour is the provider's live quote for this
+  // candidate, for the whole shape at the requested width rather than
+  // per card. Every adapter converts to that unit, because a merged
+  // list ranked on a mix of per-card and per-shape prices is wrong in
+  // a way nobody can see.
+  double price_usd_per_hour = 6;
+
+  int32 gpu_count = 7;
+  int32 vram_gb_per_gpu = 8;
+
+  // architecture is the host CPU architecture, normalized ("amd64",
+  // "arm64"), empty where unreported. Typed rather than a provider
+  // attr because it decides whether a deploy works at all: an arm64
+  // host needs an arm64 engine image. Providers spell the same fact
+  // differently, which is what the normalization is for.
+  string architecture = 9;
+
+  // reclaimable says the provider can take this capacity back, which
+  // is why it is cheaper. It changes what the price means: an hourly
+  // rate on capacity that can vanish is not comparable with one that
+  // cannot.
+  bool reclaimable = 10;
+
+  // Fabric verdict, flattened the same way Hardware flattens it. The
+  // source is what stops an unmeasured candidate reading as a zero: a
+  // ranking that treated UNKNOWN as no-fabric would let a provider
+  // that publishes nothing beat one that does.
+  FabricScope fabric_scope = 11;
+  FabricSource fabric_source = 12;
+  int32 fabric_gbps = 13;
+  string fabric_technology = 14;
+
+  // attrs carries the provider-reported values the adapter filtered
+  // on, so an operator can see why a candidate is in the list. Keys
+  // are the provider's own field names.
+  //
+  // Deliberately NOT where cross-provider facts live. Everything here
+  // is an untyped string under one vendor's key, so it cannot be
+  // compared against another vendor's record and must never feed a
+  // ranking. A fact that matters on a second provider gets promoted to
+  // a typed field and normalized.
+  map<string, string> attrs = 15;
+}
+
+// AnswerOutcome is what one provider did when asked for capacity.
+//
+// Four states rather than an empty list, because the three ways to
+// contribute nothing are different findings and an operator acts on
+// each differently. Only NO_CAPACITY says anything about the market.
+enum AnswerOutcome {
+  ANSWER_OUTCOME_UNSPECIFIED = 0;
+  // Answered with candidates.
+  ANSWER_OUTCOME_ANSWERED = 1;
+  // Answered, and has nothing matching. A fact about the market.
+  ANSWER_OUTCOME_NO_CAPACITY = 2;
+  // Has no way to answer at all. A fact about the provider's API, and
+  // the reason to look somewhere else for the information.
+  ANSWER_OUTCOME_CANNOT_ANSWER = 3;
+  // Could have answered and did not. Retry, or check a credential.
+  ANSWER_OUTCOME_FAILED = 4;
+}
+
+// ProviderAnswer is one provider's response, kept whole rather than
+// folded into a combined list.
+message ProviderAnswer {
+  string provider = 1;
+  AnswerOutcome outcome = 2;
+  repeated Candidate candidates = 3;
+  // error carries the provider's own words when outcome is FAILED.
+  // Empty otherwise.
+  string error = 4;
+}
+
+// FactGap records one fact that some answering providers reported and
+// others did not, which is the common case rather than the edge case.
+message FactGap {
+  string fact = 1;
+  repeated string reported_by = 2;
+  repeated string missing_from = 3;
+}
+
+// Comparability describes what a merged candidate list can honestly be
+// compared on.
+//
+// It exists because the failure it prevents is invisible. Put several
+// providers' candidates in one table and the eye ranks them; a row with
+// an empty column reads as neutral rather than as unknown, so a
+// provider that publishes less looks no worse than one that publishes
+// more. This reports, and never filters or reweights.
+message Comparability {
+  // Facts every answering provider populated, so a column-by-column
+  // reading of those is sound.
+  repeated string compared = 1;
+  // Facts reported unevenly. A candidate missing one is unmeasured on
+  // it, not worse, and nothing should be concluded from the blank.
+  repeated FactGap gaps = 2;
+}
+
+// Placement is a decision about where to put something, with enough of
+// the reasoning to argue with.
+//
+// A placement an operator cannot interrogate is one they take on trust,
+// and "why did it pick that" is the first question anyone asks of an
+// automatic choice.
+message Placement {
+  Candidate winner = 1;
+  // The next few that lost, cheapest first. Enough to see whether the
+  // decision was close, not so many that the answer is another list.
+  repeated Candidate runners = 2;
+  // Every candidate across every answering provider, so the operator
+  // can tell a decision made from three options from one made from
+  // three hundred.
+  int32 considered = 3;
+  // Per-provider outcomes behind the decision, so a placement made
+  // while one vendor was unreachable says so rather than looking like
+  // a survey of the whole market.
+  repeated ProviderAnswer answers = 4;
+  // What the ranking could honestly compare. A cheapest-fit decision
+  // across providers that report different facts is still the
+  // cheapest, and is not necessarily the best.
+  Comparability comparability = 5;
+}
+
 // UpstreamAuth names a credential without carrying it.
 //
 // value_env holds the NAME of an environment variable, never the secret

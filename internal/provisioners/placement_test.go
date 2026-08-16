@@ -14,8 +14,8 @@ import (
 	"github.com/inference-book/inference-plane/internal/provisioners/local"
 )
 
-func priced(provider, sku string, price float64) provisioners.Candidate {
-	return provisioners.Candidate{Provider: provider, SKU: sku, PriceUSDPerHour: price}
+func priced(provider, sku string, price float64) *provisioners.Candidate {
+	return &provisioners.Candidate{Provider: provider, Sku: sku, PriceUsdPerHour: price}
 }
 
 // The point of Act 3: the cheapest wins across vendors, not the first vendor
@@ -23,8 +23,8 @@ func priced(provider, sku string, price float64) provisioners.Candidate {
 // accident of ordering rather than a decision.
 func TestSelectCheapestPicksAcrossProviders(t *testing.T) {
 	svc := serviceWith(t,
-		&stubSource{Provider: local.New(), name: "dear", cands: []provisioners.Candidate{priced("dear", "a", 5.00)}},
-		&stubSource{Provider: local.New(), name: "cheap", cands: []provisioners.Candidate{priced("cheap", "b", 1.00)}},
+		&stubSource{Provider: local.New(), name: "dear", cands: []*provisioners.Candidate{priced("dear", "a", 5.00)}},
+		&stubSource{Provider: local.New(), name: "cheap", cands: []*provisioners.Candidate{priced("cheap", "b", 1.00)}},
 	)
 
 	// "dear" is asked first on purpose.
@@ -34,18 +34,18 @@ func TestSelectCheapestPicksAcrossProviders(t *testing.T) {
 		t.Fatalf("SelectCheapest: %v", err)
 	}
 
-	if got.Winner.Provider != "cheap" {
-		t.Errorf("winner came from %q, want the cheaper vendor regardless of ask order", got.Winner.Provider)
+	if got.GetWinner().GetProvider() != "cheap" {
+		t.Errorf("winner came from %q, want the cheaper vendor regardless of ask order", got.GetWinner().GetProvider())
 	}
-	if got.Considered != 2 {
-		t.Errorf("considered = %d, want 2", got.Considered)
+	if got.GetConsidered() != 2 {
+		t.Errorf("considered = %d, want 2", got.GetConsidered())
 	}
 }
 
 // A placement an operator cannot interrogate is one they take on trust, and
 // "why that one" is the first question anyone asks of an automatic choice.
 func TestPlacementCarriesItsRunnersUp(t *testing.T) {
-	svc := serviceWith(t, &stubSource{Provider: local.New(), name: "p", cands: []provisioners.Candidate{
+	svc := serviceWith(t, &stubSource{Provider: local.New(), name: "p", cands: []*provisioners.Candidate{
 		priced("p", "cheapest", 1.00), priced("p", "second", 1.50), priced("p", "third", 2.00),
 	}})
 
@@ -54,10 +54,10 @@ func TestPlacementCarriesItsRunnersUp(t *testing.T) {
 		t.Fatalf("SelectCheapest: %v", err)
 	}
 
-	if len(got.Runners) != 2 {
-		t.Fatalf("runners = %d, want the two that lost", len(got.Runners))
+	if len(got.GetRunners()) != 2 {
+		t.Fatalf("runners = %d, want the two that lost", len(got.GetRunners()))
 	}
-	desc := strings.Join(got.Describe(), "\n")
+	desc := strings.Join(provisioners.DescribePlacement(got), "\n")
 	if !strings.Contains(desc, "cheapest") || !strings.Contains(desc, "second") {
 		t.Errorf("description does not let an operator see the alternatives:\n%s", desc)
 	}
@@ -95,7 +95,7 @@ func TestNoCapacityIsDistinctFromNobodyLooked(t *testing.T) {
 // only be noise repeated on every placement.
 func TestDescribeNotesUnreachableVendorsButNotMuteOnes(t *testing.T) {
 	svc := serviceWith(t,
-		&stubSource{Provider: local.New(), name: "ok", cands: []provisioners.Candidate{priced("ok", "a", 1.00)}},
+		&stubSource{Provider: local.New(), name: "ok", cands: []*provisioners.Candidate{priced("ok", "a", 1.00)}},
 		&stubSource{Provider: local.New(), name: "flaky", err: errors.New("connection refused")},
 		local.New(),
 	)
@@ -106,7 +106,7 @@ func TestDescribeNotesUnreachableVendorsButNotMuteOnes(t *testing.T) {
 		t.Fatalf("SelectCheapest: %v", err)
 	}
 
-	desc := strings.Join(got.Describe(), "\n")
+	desc := strings.Join(provisioners.DescribePlacement(got), "\n")
 	if !strings.Contains(desc, "flaky") {
 		t.Errorf("an unreachable competitor was not disclosed:\n%s", desc)
 	}
@@ -120,10 +120,10 @@ func TestDescribeNotesUnreachableVendorsButNotMuteOnes(t *testing.T) {
 // ranking and a recommendation.
 func TestDescribeDisclosesWhatItCouldNotCompare(t *testing.T) {
 	svc := serviceWith(t,
-		&stubSource{Provider: local.New(), name: "rich", cands: []provisioners.Candidate{
-			{Provider: "rich", SKU: "a", PriceUSDPerHour: 1.00, Region: "eu-1"}}},
-		&stubSource{Provider: local.New(), name: "sparse", cands: []provisioners.Candidate{
-			{Provider: "sparse", SKU: "b", PriceUSDPerHour: 2.00}}},
+		&stubSource{Provider: local.New(), name: "rich", cands: []*provisioners.Candidate{
+			&provisioners.Candidate{Provider: "rich", Sku: "a", PriceUsdPerHour: 1.00, Region: "eu-1"}}},
+		&stubSource{Provider: local.New(), name: "sparse", cands: []*provisioners.Candidate{
+			&provisioners.Candidate{Provider: "sparse", Sku: "b", PriceUsdPerHour: 2.00}}},
 	)
 
 	got, err := svc.SelectCheapest(context.Background(),
@@ -132,7 +132,7 @@ func TestDescribeDisclosesWhatItCouldNotCompare(t *testing.T) {
 		t.Fatalf("SelectCheapest: %v", err)
 	}
 
-	desc := strings.Join(got.Describe(), "\n")
+	desc := strings.Join(provisioners.DescribePlacement(got), "\n")
 	if !strings.Contains(desc, "region") || !strings.Contains(desc, "not ranked on") {
 		t.Errorf("the decision did not disclose the fact it could not compare:\n%s", desc)
 	}

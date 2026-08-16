@@ -34,7 +34,7 @@ const candidateOfferLimit = 20
 // by SKU, because the operator's question is "what should I rent" and not
 // "what does each SKU cost". A SKU whose offers all fail the marketplace
 // quality floors contributes nothing and is not reported as an empty group.
-func (p *Provider) Candidates(ctx context.Context, reqs *provisionerv1.ResourceRequirements) ([]provisioners.Candidate, error) {
+func (p *Provider) Candidates(ctx context.Context, reqs *provisionerv1.ResourceRequirements) ([]*provisioners.Candidate, error) {
 	if reqs == nil {
 		reqs = &provisionerv1.ResourceRequirements{}
 	}
@@ -55,7 +55,7 @@ func (p *Provider) Candidates(ctx context.Context, reqs *provisionerv1.ResourceR
 		diskGB = defaultDiskGB
 	}
 
-	var out []provisioners.Candidate
+	var out []*provisioners.Candidate
 	for _, sku := range skus {
 		offers, err := p.searchOffers(ctx, sku, gpuCount, diskGB, reqs, candidateOfferLimit)
 		if err != nil {
@@ -67,7 +67,7 @@ func (p *Provider) Candidates(ctx context.Context, reqs *provisionerv1.ResourceR
 	}
 
 	sort.SliceStable(out, func(i, j int) bool {
-		return out[i].PriceUSDPerHour < out[j].PriceUSDPerHour
+		return out[i].GetPriceUsdPerHour() < out[j].GetPriceUsdPerHour()
 	})
 	return out, nil
 }
@@ -78,7 +78,7 @@ func (p *Provider) Candidates(ctx context.Context, reqs *provisionerv1.ResourceR
 // sku is our catalog token rather than the offer's gpu_name, because those are
 // not the same string for variant SKUs and the token is what an operator would
 // pass back to --gpu-sku.
-func offerToCandidate(sku string, o *offerSummary, reclaim provisionerv1.ReclaimPolicy) provisioners.Candidate {
+func offerToCandidate(sku string, o *offerSummary, reclaim provisionerv1.ReclaimPolicy) *provisioners.Candidate {
 	obs := fabric.Observation{}
 	if spec := LookupSKU(sku); spec != nil {
 		obs.Family = spec.Family
@@ -98,17 +98,21 @@ func offerToCandidate(sku string, o *offerSummary, reclaim provisionerv1.Reclaim
 		price, reclaimable = o.MinBid, true
 	}
 
-	return provisioners.Candidate{
-		HostID:          strconv.Itoa(o.MachineID),
-		OfferID:         strconv.Itoa(o.ID),
-		SKU:             sku,
-		Region:          o.GeoLocation,
-		PriceUSDPerHour: price,
-		Reclaimable:     reclaimable,
-		GPUCount:        o.NumGPUs,
-		VRAMGbPerGPU:    o.GpuRAM / 1000,
-		Architecture:    provisioners.NormalizeArch(o.CPUArch),
-		Fabric:          fabric.Resolve(obs),
+	res := fabric.Resolve(obs)
+	return &provisioners.Candidate{
+		HostId:           strconv.Itoa(o.MachineID),
+		OfferId:          strconv.Itoa(o.ID),
+		Sku:              sku,
+		Region:           o.GeoLocation,
+		PriceUsdPerHour:  price,
+		Reclaimable:      reclaimable,
+		GpuCount:         int32(o.NumGPUs),
+		VramGbPerGpu:     int32(o.GpuRAM / 1000),
+		Architecture:     provisioners.NormalizeArch(o.CPUArch),
+		FabricScope:      res.Scope,
+		FabricSource:     res.Source,
+		FabricGbps:       res.Gbps,
+		FabricTechnology: res.Technology,
 		Attrs: map[string]string{
 			"inet_down":    strconv.FormatFloat(o.InetDown, 'f', 0, 64),
 			"reliability2": strconv.FormatFloat(o.Reliability2, 'f', 4, 64),

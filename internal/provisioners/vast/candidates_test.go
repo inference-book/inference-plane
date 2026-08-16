@@ -57,11 +57,11 @@ func TestCandidatesSeparatesHostFromOffer(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("got %d candidates, want 1", len(got))
 	}
-	if got[0].HostID != "6566" {
-		t.Errorf("HostID = %q, want the machine_id 6566", got[0].HostID)
+	if got[0].GetHostId() != "6566" {
+		t.Errorf("HostID = %q, want the machine_id 6566", got[0].GetHostId())
 	}
-	if got[0].OfferID != "2210418" {
-		t.Errorf("OfferID = %q, want the offer id 2210418", got[0].OfferID)
+	if got[0].GetOfferId() != "2210418" {
+		t.Errorf("OfferID = %q, want the offer id 2210418", got[0].GetOfferId())
 	}
 }
 
@@ -88,11 +88,11 @@ func TestCandidatesKeepsFabricProvenance(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("got %d candidates, want 2", len(got))
 	}
-	if got[0].Fabric.Source != provisionerv1.FabricSource_FABRIC_SOURCE_MEASURED {
-		t.Errorf("measured host source = %v, want MEASURED", got[0].Fabric.Source)
+	if got[0].GetFabricSource() != provisionerv1.FabricSource_FABRIC_SOURCE_MEASURED {
+		t.Errorf("measured host source = %v, want MEASURED", got[0].GetFabricSource())
 	}
-	if got[1].Fabric.Source != provisionerv1.FabricSource_FABRIC_SOURCE_UNKNOWN {
-		t.Errorf("unmeasured host source = %v, want UNKNOWN rather than a verdict", got[1].Fabric.Source)
+	if got[1].GetFabricSource() != provisionerv1.FabricSource_FABRIC_SOURCE_UNKNOWN {
+		t.Errorf("unmeasured host source = %v, want UNKNOWN rather than a verdict", got[1].GetFabricSource())
 	}
 }
 
@@ -127,7 +127,7 @@ func TestCandidatesOrderCheapestAcrossSKUs(t *testing.T) {
 		t.Fatalf("got %d candidates, want at least 2", len(got))
 	}
 	for i := 1; i < len(got); i++ {
-		if got[i-1].PriceUSDPerHour > got[i].PriceUSDPerHour {
+		if got[i-1].GetPriceUsdPerHour() > got[i].GetPriceUsdPerHour() {
 			t.Fatalf("candidates not cheapest-first: %v", prices(got))
 		}
 	}
@@ -175,10 +175,10 @@ func TestCandidatesUseTheSameQueryAsSpawn(t *testing.T) {
 	}
 }
 
-func prices(cs []provisioners.Candidate) []float64 {
+func prices(cs []*provisioners.Candidate) []float64 {
 	out := make([]float64, len(cs))
 	for i, c := range cs {
-		out[i] = c.PriceUSDPerHour
+		out[i] = c.GetPriceUsdPerHour()
 	}
 	return out
 }
@@ -203,9 +203,9 @@ func TestCandidatesPriceTheRequestedTier(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Candidates: %v", err)
 	}
-	if onDemand[0].PriceUSDPerHour != 0.83 || onDemand[0].Reclaimable {
+	if onDemand[0].GetPriceUsdPerHour() != 0.83 || onDemand[0].GetReclaimable() {
 		t.Errorf("default tier = $%.2f reclaimable=%v, want the on-demand 0.83",
-			onDemand[0].PriceUSDPerHour, onDemand[0].Reclaimable)
+			onDemand[0].GetPriceUsdPerHour(), onDemand[0].GetReclaimable())
 	}
 
 	reclaimable, err := p.Candidates(context.Background(), &provisionerv1.ResourceRequirements{
@@ -215,8 +215,8 @@ func TestCandidatesPriceTheRequestedTier(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Candidates: %v", err)
 	}
-	if reclaimable[0].PriceUSDPerHour != 0.13 || !reclaimable[0].Reclaimable {
+	if reclaimable[0].GetPriceUsdPerHour() != 0.13 || !reclaimable[0].GetReclaimable() {
 		t.Errorf("reclaimable tier = $%.2f reclaimable=%v, want the bid floor 0.13",
-			reclaimable[0].PriceUSDPerHour, reclaimable[0].Reclaimable)
+			reclaimable[0].GetPriceUsdPerHour(), reclaimable[0].GetReclaimable())
 	}
 }
