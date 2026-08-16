@@ -55,7 +55,7 @@ func (s *Service) ListCandidatesAcross(ctx context.Context, providerNames []stri
 		wg.Add(1)
 		go func(i int, name string) {
 			defer wg.Done()
-			cands, err := s.ListCandidates(ctx, name, reqs)
+			cands, err := s.CandidatesFrom(ctx, name, reqs)
 			answers[i] = answerFor(name, cands, err)
 		}(i, name)
 	}
@@ -178,4 +178,18 @@ func anyCandidateReports(cands []*Candidate, reported func(*Candidate) bool) boo
 		}
 	}
 	return false
+}
+
+// ListCandidates is the RPC surface over the fan-out.
+//
+// Thin on purpose. Ranking and the comparability analysis happen here rather
+// than in each caller, so a remote CLI and an in-process one see the same
+// order and the same account of what could be compared.
+func (s *Service) ListCandidates(ctx context.Context, req *provisionerv1.ListCandidatesRequest) (*provisionerv1.ListCandidatesResponse, error) {
+	answers := s.ListCandidatesAcross(ctx, req.GetProviders(), req.GetRequirements())
+	return &provisionerv1.ListCandidatesResponse{
+		Answers:       answers,
+		Candidates:    MergeCandidates(answers),
+		Comparability: AnalyzeComparability(answers),
+	}, nil
 }

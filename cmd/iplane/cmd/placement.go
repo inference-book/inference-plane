@@ -56,16 +56,23 @@ func resolveAutoPlacement(cmd *cobra.Command, id string) (*provisioners.Placemen
 		return nil, err
 	}
 
-	svc, err := buildReadOnlyService()
+	// Through the same client the rest of the CLI uses, so a placement
+	// resolved against a remote control plane is decided by the daemon that
+	// holds the credentials. Deciding locally would silently mean "cheapest
+	// across whatever this host can reach", which is not the question the
+	// operator asked (#304).
+	client, err := buildCapacityClient()
 	if err != nil {
 		return nil, err
 	}
 	ctx, cancel := context.WithTimeout(cmd.Context(), autoPlacementTimeout)
 	defer cancel()
 
-	placement, err := svc.SelectCheapest(ctx, nil, spec.GetRequirements())
+	resp, err := client.SelectPlacement(ctx, &provisionerv1.SelectPlacementRequest{
+		Requirements: spec.GetRequirements(),
+	})
 	if err != nil {
 		return nil, fmt.Errorf("--provider auto: %w", err)
 	}
-	return placement, nil
+	return resp.GetPlacement(), nil
 }

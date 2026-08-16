@@ -29,7 +29,7 @@ func candidateService(t *testing.T) *provisioners.Service {
 func TestListCandidatesUnimplementedRatherThanEmpty(t *testing.T) {
 	svc := candidateService(t)
 
-	got, err := svc.ListCandidates(context.Background(), provisioners.ProviderLocal,
+	got, err := svc.CandidatesFrom(context.Background(), provisioners.ProviderLocal,
 		&provisionerv1.ResourceRequirements{MinVramGb: 80})
 
 	if err == nil {
@@ -46,7 +46,7 @@ func TestListCandidatesUnimplementedRatherThanEmpty(t *testing.T) {
 func TestListCandidatesNotFoundForUnconfiguredProvider(t *testing.T) {
 	svc := candidateService(t)
 
-	_, err := svc.ListCandidates(context.Background(), "vast", &provisionerv1.ResourceRequirements{})
+	_, err := svc.CandidatesFrom(context.Background(), "vast", &provisionerv1.ResourceRequirements{})
 
 	if status.Code(err) != codes.NotFound {
 		t.Errorf("code = %v, want NotFound for a provider that is not configured", status.Code(err))

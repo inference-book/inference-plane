@@ -85,6 +85,24 @@ func (a *ConnectProvisionerAdapter) GetInstanceSSHKey(ctx context.Context, req *
 	return connect.NewResponse(resp), nil
 }
 
+// ListCandidates satisfies the Connect handler for the capacity query.
+func (a *ConnectProvisionerAdapter) ListCandidates(ctx context.Context, req *connect.Request[provisionerv1.ListCandidatesRequest]) (*connect.Response[provisionerv1.ListCandidatesResponse], error) {
+	resp, err := a.svc.ListCandidates(ctx, req.Msg)
+	if err != nil {
+		return nil, statusToConnectErr(err)
+	}
+	return connect.NewResponse(resp), nil
+}
+
+// SelectPlacement satisfies the Connect handler for cheapest-fit placement.
+func (a *ConnectProvisionerAdapter) SelectPlacement(ctx context.Context, req *connect.Request[provisionerv1.SelectPlacementRequest]) (*connect.Response[provisionerv1.SelectPlacementResponse], error) {
+	resp, err := a.svc.SelectPlacement(ctx, req.Msg)
+	if err != nil {
+		return nil, statusToConnectErr(err)
+	}
+	return connect.NewResponse(resp), nil
+}
+
 // ConnectDeploymentAdapter wraps a gRPC DeploymentServiceServer
 // implementation (typically *Service) and exposes the
 // provisionerv1connect.DeploymentServiceHandler interface. Mirrors

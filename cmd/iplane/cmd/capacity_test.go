@@ -21,7 +21,7 @@ func TestRenderCandidatesNeverPrintsUnknownFabricAsZero(t *testing.T) {
 		PriceUsdPerHour: 1.44,
 		FabricScope:     provisionerv1.FabricScope_FABRIC_SCOPE_UNSPECIFIED,
 		FabricSource:    provisionerv1.FabricSource_FABRIC_SOURCE_UNKNOWN,
-	}}, "table")
+	}}, nil, "table")
 	if err != nil {
 		t.Fatalf("renderCandidates: %v", err)
 	}
@@ -49,7 +49,7 @@ func TestRenderCandidatesDistinguishesMeasuredFromDeclared(t *testing.T) {
 			FabricScope:  provisionerv1.FabricScope_FABRIC_SCOPE_INTRA_NODE,
 			FabricSource: provisionerv1.FabricSource_FABRIC_SOURCE_DECLARED,
 			FabricGbps:   4800},
-	}, "table")
+	}, nil, "table")
 	if err != nil {
 		t.Fatalf("renderCandidates: %v", err)
 	}
@@ -65,7 +65,7 @@ func TestRenderCandidatesDistinguishesMeasuredFromDeclared(t *testing.T) {
 // else, and "no candidates" alone does not tell them which.
 func TestRenderCandidatesEmptySaysTheProviderWasAsked(t *testing.T) {
 	var buf bytes.Buffer
-	if err := renderCandidates(&buf, answersFor("vast"), nil, "table"); err != nil {
+	if err := renderCandidates(&buf, answersFor("vast"), nil, nil, "table"); err != nil {
 		t.Fatalf("renderCandidates: %v", err)
 	}
 
@@ -119,7 +119,7 @@ func TestRenderCandidatesSaysNothingWasRented(t *testing.T) {
 	var buf bytes.Buffer
 	err := renderCandidates(&buf, answersFor("vast"), []*provisioners.Candidate{
 		{HostId: "1", Sku: "A100_PCIE", PriceUsdPerHour: 1.10},
-	}, "table")
+	}, nil, "table")
 	if err != nil {
 		t.Fatalf("renderCandidates: %v", err)
 	}
@@ -179,7 +179,7 @@ func TestRenderCandidatesNamesTheTier(t *testing.T) {
 	err := renderCandidates(&buf, answersFor("vast"), []*provisioners.Candidate{
 		{Provider: "vast", Sku: "A100_SXM4", PriceUsdPerHour: 0.13, Reclaimable: true},
 		{Provider: "vast", Sku: "A100_SXM4", PriceUsdPerHour: 0.83},
-	}, "table")
+	}, nil, "table")
 	if err != nil {
 		t.Fatalf("renderCandidates: %v", err)
 	}
