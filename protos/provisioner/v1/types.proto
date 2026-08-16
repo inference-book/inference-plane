@@ -609,6 +609,11 @@ message Deployment {
   // reachable because we rented it, not because we hold a key for it.
   UpstreamAuth upstream_auth = 30;
 
+  // How the engine should split the model across the cards it was
+  // given. Unset means the engine decides, which for a single card is
+  // the only sensible answer.
+  Parallelism parallelism = 31;
+
   // replica_specs records the per-slot ReplicaSpec each slot was
   // originally provisioned from (heterogeneous form) or derived
   // from (homogeneous form: one entry replicated len(instance_ids)
@@ -866,6 +871,32 @@ message Placement {
   // across providers that report different facts is still the
   // cheapest, and is not necessarily the best.
   Comparability comparability = 5;
+}
+
+// Parallelism is how many ways an engine splits a model across the cards
+// it was handed.
+//
+// The control plane does not implement either kind of parallelism and
+// never looks inside the engine, which is the line this project has kept
+// since the caching chapter. What it does is refuse a split the hardware
+// cannot carry, which is a check only it can make: the engine discovers
+// the mismatch when it starts and dies, minutes after the rental began
+// billing, while the control plane knows the card count before renting
+// anything.
+//
+// Both fields are engine-facing rather than provider-facing. They travel
+// to the engine as arguments, so the vocabulary question is which
+// engine's spelling to use, not which vendor's.
+message Parallelism {
+  // Cards a single layer is sharded across. Every card holds a slice of
+  // every layer, so the per-layer exchange runs on the critical path of
+  // every token and wants a fast intra-node link.
+  int32 tensor_parallel_size = 1;
+
+  // Stages the model's layers are split into. Stages talk once per
+  // micro-batch boundary rather than per layer, which is why this is
+  // the split that tolerates a slower link between nodes.
+  int32 pipeline_parallel_size = 2;
 }
 
 // UpstreamAuth names a credential without carrying it.

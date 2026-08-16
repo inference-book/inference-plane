@@ -397,6 +397,8 @@ func (s *Service) createMultiReplicaDeployment(ctx context.Context, req *provisi
 			Model:            dep.GetModel(),
 			EngineArgs:       dep.GetEngineArgs(),
 			EngineEntrypoint: dep.GetEngineEntrypoint(),
+			UpstreamAuth:     dep.GetUpstreamAuth(),
+			Parallelism:      dep.GetParallelism(),
 			Env:              dep.GetEnv(),
 			Mounts:           dep.GetMounts(),
 			EnginePort:       dep.GetEnginePort(),
