@@ -1110,6 +1110,17 @@ func (s *Service) CreateDeployment(ctx context.Context, req *provisionerv1.Creat
 	}
 	dep.UpstreamAuth = auth
 
+	// Ch 12: turn a requested split into engine arguments, refusing one the
+	// cards cannot carry. Translating here rather than in each deploy path
+	// means all three providers get it unchanged, and the record shows
+	// exactly what the engine was told rather than something derived later.
+	cards, cardsKnown := deploymentGPUCount(req.GetReplicasSpec())
+	parArgs, err := ValidateParallelism(dep.GetParallelism(), cards, cardsKnown)
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	dep.EngineArgs = append(dep.GetEngineArgs(), parArgs...)
+
 	// Stamp the ModelStore's mounts onto the deployment so the deploy
 	// path can attach them. Empty for the default HF-passthrough store;
 	// a warm-cache store (volumecache) fills them so the engine loads
@@ -1223,6 +1234,13 @@ func (s *Service) CreateDeployment(ctx context.Context, req *provisionerv1.Creat
 			DebugShell:     dep.GetDebugShell(),
 			IdleTtlSeconds: dep.GetIdleTtlSeconds(),
 			NoIdleDestroy:  dep.GetNoIdleDestroy(),
+			// Operator intent, and the record is what every later reader
+			// sees: the deployers get this record and so does the router.
+			// A field left out here is a flag the operator set and nothing
+			// downstream ever learns about.
+			EngineEntrypoint: dep.GetEngineEntrypoint(),
+			UpstreamAuth:     dep.GetUpstreamAuth(),
+			Parallelism:      dep.GetParallelism(),
 		}
 		// v0.2 ch7-beat3.1: instance_ids is the canonical multi-
 		// instance list. #83 leaves it empty on Service-driven
