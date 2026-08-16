@@ -76,6 +76,9 @@ const (
 	// DeploymentServiceScaleDeploymentProcedure is the fully-qualified name of the DeploymentService's
 	// ScaleDeployment RPC.
 	DeploymentServiceScaleDeploymentProcedure = "/provisioner.v1.DeploymentService/ScaleDeployment"
+	// DeploymentServiceMigrateDeploymentProcedure is the fully-qualified name of the
+	// DeploymentService's MigrateDeployment RPC.
+	DeploymentServiceMigrateDeploymentProcedure = "/provisioner.v1.DeploymentService/MigrateDeployment"
 	// EngineRegistryServiceRegisterEngineProcedure is the fully-qualified name of the
 	// EngineRegistryService's RegisterEngine RPC.
 	EngineRegistryServiceRegisterEngineProcedure = "/provisioner.v1.EngineRegistryService/RegisterEngine"
@@ -433,6 +436,27 @@ type DeploymentServiceClient interface {
 	// target == current is a no-op and returns the current record
 	// unchanged. target <= 0 is invalid.
 	ScaleDeployment(context.Context, *connect.Request[v1.ScaleDeploymentRequest]) (*connect.Response[v1.ScaleDeploymentResponse], error)
+	// MigrateDeployment moves a running deployment to another provider
+	// without changing its id.
+	//
+	// Composed from two things that already ship rather than written:
+	// ScaleDeployment's heterogeneous form grows the deployment onto the
+	// destination, and the drain used by fleet drain and scale-down
+	// releases the source. The router already fans out over whatever
+	// endpoints a deployment currently has, so traffic moves because the
+	// endpoint set changed and not through a cutover step that could drop
+	// a request.
+	//
+	// Grow first, then drain. That ordering is only available because a
+	// migration has no deadline, and it is the ordering that never drops
+	// a request. A reclaim does not get it: notice is often shorter than
+	// a cold start, so the hardware can vanish mid-provision.
+	//
+	// Weights are staged per provider and per region, so a destination
+	// where the model is not pinned pays a full cold start. The response
+	// says so before anything is provisioned rather than leaving an
+	// operator to infer it from a progress bar that stopped moving.
+	MigrateDeployment(context.Context, *connect.Request[v1.MigrateDeploymentRequest]) (*connect.Response[v1.MigrateDeploymentResponse], error)
 }
 
 // NewDeploymentServiceClient constructs a client for the provisioner.v1.DeploymentService service.
@@ -488,6 +512,12 @@ func NewDeploymentServiceClient(httpClient connect.HTTPClient, baseURL string, o
 			connect.WithSchema(deploymentServiceMethods.ByName("ScaleDeployment")),
 			connect.WithClientOptions(opts...),
 		),
+		migrateDeployment: connect.NewClient[v1.MigrateDeploymentRequest, v1.MigrateDeploymentResponse](
+			httpClient,
+			baseURL+DeploymentServiceMigrateDeploymentProcedure,
+			connect.WithSchema(deploymentServiceMethods.ByName("MigrateDeployment")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -500,6 +530,7 @@ type deploymentServiceClient struct {
 	watchDeployment    *connect.Client[v1.WatchDeploymentRequest, v1.DeploymentStateChangedEvent]
 	touchDeployment    *connect.Client[v1.TouchDeploymentRequest, v1.TouchDeploymentResponse]
 	scaleDeployment    *connect.Client[v1.ScaleDeploymentRequest, v1.ScaleDeploymentResponse]
+	migrateDeployment  *connect.Client[v1.MigrateDeploymentRequest, v1.MigrateDeploymentResponse]
 }
 
 // CreateDeployment calls provisioner.v1.DeploymentService.CreateDeployment.
@@ -535,6 +566,11 @@ func (c *deploymentServiceClient) TouchDeployment(ctx context.Context, req *conn
 // ScaleDeployment calls provisioner.v1.DeploymentService.ScaleDeployment.
 func (c *deploymentServiceClient) ScaleDeployment(ctx context.Context, req *connect.Request[v1.ScaleDeploymentRequest]) (*connect.Response[v1.ScaleDeploymentResponse], error) {
 	return c.scaleDeployment.CallUnary(ctx, req)
+}
+
+// MigrateDeployment calls provisioner.v1.DeploymentService.MigrateDeployment.
+func (c *deploymentServiceClient) MigrateDeployment(ctx context.Context, req *connect.Request[v1.MigrateDeploymentRequest]) (*connect.Response[v1.MigrateDeploymentResponse], error) {
+	return c.migrateDeployment.CallUnary(ctx, req)
 }
 
 // DeploymentServiceHandler is an implementation of the provisioner.v1.DeploymentService service.
@@ -593,6 +629,27 @@ type DeploymentServiceHandler interface {
 	// target == current is a no-op and returns the current record
 	// unchanged. target <= 0 is invalid.
 	ScaleDeployment(context.Context, *connect.Request[v1.ScaleDeploymentRequest]) (*connect.Response[v1.ScaleDeploymentResponse], error)
+	// MigrateDeployment moves a running deployment to another provider
+	// without changing its id.
+	//
+	// Composed from two things that already ship rather than written:
+	// ScaleDeployment's heterogeneous form grows the deployment onto the
+	// destination, and the drain used by fleet drain and scale-down
+	// releases the source. The router already fans out over whatever
+	// endpoints a deployment currently has, so traffic moves because the
+	// endpoint set changed and not through a cutover step that could drop
+	// a request.
+	//
+	// Grow first, then drain. That ordering is only available because a
+	// migration has no deadline, and it is the ordering that never drops
+	// a request. A reclaim does not get it: notice is often shorter than
+	// a cold start, so the hardware can vanish mid-provision.
+	//
+	// Weights are staged per provider and per region, so a destination
+	// where the model is not pinned pays a full cold start. The response
+	// says so before anything is provisioned rather than leaving an
+	// operator to infer it from a progress bar that stopped moving.
+	MigrateDeployment(context.Context, *connect.Request[v1.MigrateDeploymentRequest]) (*connect.Response[v1.MigrateDeploymentResponse], error)
 }
 
 // NewDeploymentServiceHandler builds an HTTP handler from the service implementation. It returns
@@ -644,6 +701,12 @@ func NewDeploymentServiceHandler(svc DeploymentServiceHandler, opts ...connect.H
 		connect.WithSchema(deploymentServiceMethods.ByName("ScaleDeployment")),
 		connect.WithHandlerOptions(opts...),
 	)
+	deploymentServiceMigrateDeploymentHandler := connect.NewUnaryHandler(
+		DeploymentServiceMigrateDeploymentProcedure,
+		svc.MigrateDeployment,
+		connect.WithSchema(deploymentServiceMethods.ByName("MigrateDeployment")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/provisioner.v1.DeploymentService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case DeploymentServiceCreateDeploymentProcedure:
@@ -660,6 +723,8 @@ func NewDeploymentServiceHandler(svc DeploymentServiceHandler, opts ...connect.H
 			deploymentServiceTouchDeploymentHandler.ServeHTTP(w, r)
 		case DeploymentServiceScaleDeploymentProcedure:
 			deploymentServiceScaleDeploymentHandler.ServeHTTP(w, r)
+		case DeploymentServiceMigrateDeploymentProcedure:
+			deploymentServiceMigrateDeploymentHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -695,6 +760,10 @@ func (UnimplementedDeploymentServiceHandler) TouchDeployment(context.Context, *c
 
 func (UnimplementedDeploymentServiceHandler) ScaleDeployment(context.Context, *connect.Request[v1.ScaleDeploymentRequest]) (*connect.Response[v1.ScaleDeploymentResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("provisioner.v1.DeploymentService.ScaleDeployment is not implemented"))
+}
+
+func (UnimplementedDeploymentServiceHandler) MigrateDeployment(context.Context, *connect.Request[v1.MigrateDeploymentRequest]) (*connect.Response[v1.MigrateDeploymentResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("provisioner.v1.DeploymentService.MigrateDeployment is not implemented"))
 }
 
 // EngineRegistryServiceClient is a client for the provisioner.v1.EngineRegistryService service.

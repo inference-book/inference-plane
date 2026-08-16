@@ -250,6 +250,71 @@ service DeploymentService {
   // target == current is a no-op and returns the current record
   // unchanged. target <= 0 is invalid.
   rpc ScaleDeployment(ScaleDeploymentRequest) returns (ScaleDeploymentResponse);
+
+  // MigrateDeployment moves a running deployment to another provider
+  // without changing its id.
+  //
+  // Composed from two things that already ship rather than written:
+  // ScaleDeployment's heterogeneous form grows the deployment onto the
+  // destination, and the drain used by fleet drain and scale-down
+  // releases the source. The router already fans out over whatever
+  // endpoints a deployment currently has, so traffic moves because the
+  // endpoint set changed and not through a cutover step that could drop
+  // a request.
+  //
+  // Grow first, then drain. That ordering is only available because a
+  // migration has no deadline, and it is the ordering that never drops
+  // a request. A reclaim does not get it: notice is often shorter than
+  // a cold start, so the hardware can vanish mid-provision.
+  //
+  // Weights are staged per provider and per region, so a destination
+  // where the model is not pinned pays a full cold start. The response
+  // says so before anything is provisioned rather than leaving an
+  // operator to infer it from a progress bar that stopped moving.
+  rpc MigrateDeployment(MigrateDeploymentRequest) returns (MigrateDeploymentResponse);
+}
+
+message MigrateDeploymentRequest {
+  // Deployment to move. Must be RUNNING or DEGRADED. The id does not
+  // change: callers keep addressing the same thing.
+  string id = 1;
+
+  // Destination. provider is required; requirements defaults to what the
+  // source replicas were asked for, so "same shape, different vendor" is
+  // the short form and the common one.
+  ReplicaSpec to = 2;
+
+  // Seconds to let in-flight work finish on the source replicas before
+  // releasing them. 0 uses the drain default. A grace period that
+  // expires with work still running is the documented outcome, not an
+  // error.
+  int32 drain_timeout_sec = 3;
+
+  // Cut the source loose immediately, without waiting for in-flight
+  // work. Requests being served on the source see their connections
+  // dropped.
+  bool force = 4;
+
+  // Plan the move and return it without provisioning anything.
+  bool dry_run = 5;
+}
+
+message MigrateDeploymentResponse {
+  string id = 1;
+  string from_provider = 2;
+  string to_provider = 3;
+
+  // Replicas that were drained and released.
+  repeated string source_instance_ids = 4;
+  // Replicas provisioned at the destination. Empty on a dry run.
+  repeated string added_instance_ids = 5;
+
+  // False when the model is not staged at the destination, so the move
+  // pays a cold start. The dominant cost of most migrations.
+  bool warm_cache_follows = 6;
+
+  // Things to read before starting rather than after.
+  repeated string warnings = 7;
 }
 
 message ScaleDeploymentRequest {
