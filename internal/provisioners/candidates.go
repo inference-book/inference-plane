@@ -8,7 +8,6 @@ import (
 	"google.golang.org/grpc/status"
 
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
-	"github.com/inference-book/inference-plane/internal/provisioners/fabric"
 )
 
 // CandidateSource is an optional Provider capability for providers that can
@@ -61,95 +60,17 @@ import (
 //     candidates. local is the one machine the operator already has, and
 //     external attaches to an engine somebody else is running.
 type CandidateSource interface {
-	Candidates(ctx context.Context, reqs *provisionerv1.ResourceRequirements) ([]Candidate, error)
+	Candidates(ctx context.Context, reqs *provisionerv1.ResourceRequirements) ([]*Candidate, error)
 }
 
-// Candidate is one thing a provider would rent us, carrying what a placement
-// decision actually turns on rather than the provider's whole record.
+// Candidate is the generated provisionerv1.Candidate.
 //
-// Everything here is provider-reported. A field this type cannot fill stays
-// zero, and a caller must read that as "not reported" rather than as a
-// measurement, which is the same rule Fabric carries explicitly below.
-type Candidate struct {
-	// Provider names where this came from. Stamped by the Service after the
-	// adapter returns rather than by the adapter itself, so a candidate cannot
-	// be mislabelled and a merged list from several providers is
-	// self-describing.
-	Provider string
-
-	// HostID identifies the physical machine behind the offer, stable across
-	// the offers that come and go on it. Separate from OfferID because on a
-	// marketplace they are different lifetimes: an offer disappears when
-	// somebody rents it, while the host is still the host, and "do not place
-	// on this box again" (#214) is a statement about the host.
-	//
-	// Empty when the provider has no notion of a host distinct from the thing
-	// being rented.
-	HostID string
-
-	// OfferID is what a Spawn would actually name. On a marketplace this is
-	// short-lived, so it is useful for acting on a candidate immediately and
-	// worthless for remembering one.
-	OfferID string
-
-	// SKU is the provider's own token for the card, in the adapter's
-	// vocabulary rather than the marketplace's wire form.
-	SKU string
-
-	// Region is the provider's placement label, empty where a provider does
-	// not pin or does not say.
-	Region string
-
-	// PriceUSDPerHour is what the provider quotes for this candidate now. This
-	// is a live figure rather than the static catalog estimate, which is most
-	// of why asking is worth a network call.
-	PriceUSDPerHour float64
-
-	// GPUCount and VRAMGbPerGPU describe the shape on offer. Both come from
-	// the provider's own record where the provider reports them, so they can
-	// disagree with the catalog, and where they do the provider is right.
-	// VRAMGbPerGPU falls back to the catalog on providers that publish a GPU
-	// count and a system-RAM figure but never the card's memory.
-	GPUCount     int
-	VRAMGbPerGPU int
-
-	// Architecture is the host CPU architecture, normalized to one vocabulary
-	// ("amd64", "arm64"), empty where the provider does not report it.
-	//
-	// It is a typed field rather than an Attrs entry because it decides
-	// whether a deploy works at all: an arm64 host needs an engine image built
-	// for arm64, and Lambda's GH200 shapes are arm64 while everything else in
-	// our catalog is not. Both providers that report it spell it differently
-	// (Vast says "amd64", Lambda says "x86_64" for the same thing), which is
-	// exactly the normalization a shared shape exists to do.
-	Architecture string
-
-	// Reclaimable says the provider can take this capacity back, which is why
-	// it is cheaper. Typed rather than an Attrs entry because all three
-	// vendors have the concept under three different names, and because it
-	// changes what a price means: an hourly rate on capacity that can vanish
-	// is not comparable with one that cannot, and a merged list ranked on
-	// price alone would put the two side by side as though they were.
-	Reclaimable bool
-
-	// Fabric is the resolved interconnect verdict, carried whole rather than
-	// as a bandwidth number so the source survives. A candidate that got here
-	// on a bridge-capable card reads UNKNOWN, and a ranking that treated that
-	// as a zero would let a vendor who publishes nothing beat one who does.
-	Fabric fabric.Result
-
-	// Attrs carries the provider-reported values the adapter filtered on, so
-	// an operator can see why a candidate is in the list and check a floor
-	// that was supposed to exclude something. Keys are the provider's own
-	// field names. Diagnostic only, nothing branches on it.
-	//
-	// Deliberately NOT where cross-provider facts live. Anything here is an
-	// untyped string under a provider's own key, so it cannot be compared
-	// against another provider's record and must never feed a ranking. A fact
-	// that turns out to matter on a second provider gets promoted to a typed
-	// field and normalized, which is how Architecture arrived.
-	Attrs map[string]string
-}
+// Aliased rather than redeclared. The package doc's rule is that wire
+// types travel as the generated messages with no parallel Go struct to keep
+// in sync, and the first cut of this broke that rule: the Go-only shape is
+// what left the capacity search with no RPC and therefore answering from the
+// wrong host entirely (#304).
+type Candidate = provisionerv1.Candidate
 
 // Architecture values, normalized across providers. Adapters map their own
 // spelling onto these rather than passing the provider's string through, for
@@ -186,7 +107,7 @@ func NormalizeArch(s string) string {
 // capability, because "this provider cannot answer" and "this provider has no
 // capacity right now" are different answers and collapsing them would tell an
 // operator their requirements were unsatisfiable when nobody looked.
-func (s *Service) ListCandidates(ctx context.Context, providerName string, reqs *provisionerv1.ResourceRequirements) ([]Candidate, error) {
+func (s *Service) ListCandidates(ctx context.Context, providerName string, reqs *provisionerv1.ResourceRequirements) ([]*Candidate, error) {
 	provider, ok := s.providers[providerName]
 	if !ok {
 		return nil, status.Errorf(codes.NotFound, "provider %q is not configured", providerName)
@@ -200,8 +121,8 @@ func (s *Service) ListCandidates(ctx context.Context, providerName string, reqs 
 	if err != nil {
 		return nil, err
 	}
-	for i := range out {
-		out[i].Provider = providerName
+	for _, c := range out {
+		c.Provider = providerName
 	}
 	return out, nil
 }

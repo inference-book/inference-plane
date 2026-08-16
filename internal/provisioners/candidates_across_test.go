@@ -5,12 +5,8 @@ import (
 	"errors"
 	"testing"
 
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
-
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
 	"github.com/inference-book/inference-plane/internal/provisioners"
-	"github.com/inference-book/inference-plane/internal/provisioners/fabric"
 	"github.com/inference-book/inference-plane/internal/provisioners/local"
 	"github.com/inference-book/inference-plane/internal/provisioners/stores/file"
 )
@@ -21,15 +17,17 @@ import (
 type stubSource struct {
 	provisioners.Provider
 	name  string
-	cands []provisioners.Candidate
+	cands []*provisioners.Candidate
 	err   error
 }
 
 func (s *stubSource) Name() string { return s.name }
 
-func (s *stubSource) Candidates(_ context.Context, _ *provisionerv1.ResourceRequirements) ([]provisioners.Candidate, error) {
+func (s *stubSource) Candidates(_ context.Context, _ *provisionerv1.ResourceRequirements) ([]*provisioners.Candidate, error) {
 	return s.cands, s.err
 }
+
+const answered = provisionerv1.AnswerOutcome_ANSWER_OUTCOME_ANSWERED
 
 func serviceWith(t *testing.T, providers ...provisioners.Provider) *provisioners.Service {
 	t.Helper()
@@ -40,15 +38,15 @@ func serviceWith(t *testing.T, providers ...provisioners.Provider) *provisioners
 	return provisioners.New(providers, store, "test-operator")
 }
 
-func cand(price float64) provisioners.Candidate {
-	return provisioners.Candidate{PriceUSDPerHour: price}
+func cand(price float64) *provisioners.Candidate {
+	return &provisioners.Candidate{PriceUsdPerHour: price}
 }
 
 // A search whose whole premise is that one vendor may not be able to supply
 // what you need must not be defeated by one vendor being unreachable.
 func TestOneProviderFailingDoesNotFailTheRest(t *testing.T) {
 	svc := serviceWith(t,
-		&stubSource{Provider: local.New(), name: "good", cands: []provisioners.Candidate{cand(1.0)}},
+		&stubSource{Provider: local.New(), name: "good", cands: []*provisioners.Candidate{cand(1.0)}},
 		&stubSource{Provider: local.New(), name: "broken", err: errors.New("connection refused")},
 	)
 
@@ -58,13 +56,13 @@ func TestOneProviderFailingDoesNotFailTheRest(t *testing.T) {
 	if len(answers) != 2 {
 		t.Fatalf("got %d answers, want one per provider asked", len(answers))
 	}
-	if answers[0].Err != nil {
-		t.Errorf("the working provider was penalised for its neighbour: %v", answers[0].Err)
+	if answers[0].GetOutcome() == provisionerv1.AnswerOutcome_ANSWER_OUTCOME_FAILED {
+		t.Errorf("the working provider was penalised for its neighbour: %v", answers[0].GetError())
 	}
-	if len(answers[0].Candidates) != 1 {
+	if len(answers[0].GetCandidates()) != 1 {
 		t.Errorf("lost the working provider's candidates: %+v", answers[0])
 	}
-	if answers[1].Err == nil {
+	if answers[1].GetOutcome() != provisionerv1.AnswerOutcome_ANSWER_OUTCOME_FAILED {
 		t.Error("the broken provider reported success")
 	}
 }
@@ -84,8 +82,8 @@ func TestAnswersHoldTheOrderAsked(t *testing.T) {
 
 	want := []string{"ccc", "aaa", "bbb"}
 	for i, w := range want {
-		if answers[i].Provider != w {
-			t.Fatalf("answer order = %v..., want %v", answers[i].Provider, want)
+		if answers[i].GetProvider() != w {
+			t.Fatalf("answer order = %v..., want %v", answers[i].GetProvider(), want)
 		}
 	}
 }
@@ -106,7 +104,7 @@ func TestEmptyProviderListAsksEveryone(t *testing.T) {
 	}
 	var sawCannotAnswer bool
 	for _, a := range answers {
-		if !a.CanAnswer() {
+		if !provisioners.CanAnswer(a) {
 			sawCannotAnswer = true
 		}
 	}
@@ -126,14 +124,16 @@ func TestCannotAnswerIsDistinctFromFailed(t *testing.T) {
 	answers := svc.ListCandidatesAcross(context.Background(),
 		[]string{"broken", "local"}, &provisionerv1.ResourceRequirements{})
 
-	if !answers[0].CanAnswer() {
+	if !provisioners.CanAnswer(answers[0]) {
 		t.Error("a transport failure was reported as a missing capability")
 	}
-	if answers[1].CanAnswer() {
+	if provisioners.CanAnswer(answers[1]) {
 		t.Error("a provider with no capability was reported as merely failing")
 	}
-	if status.Code(answers[1].Err) != codes.Unimplemented {
-		t.Errorf("code = %v, want Unimplemented", status.Code(answers[1].Err))
+	// The outcome is what travels now, so assert on that rather than on a
+	// gRPC code a remote caller would never see.
+	if answers[1].GetOutcome() != provisionerv1.AnswerOutcome_ANSWER_OUTCOME_CANNOT_ANSWER {
+		t.Errorf("outcome = %v, want CANNOT_ANSWER", answers[1].GetOutcome())
 	}
 }
 
@@ -141,11 +141,11 @@ func TestCannotAnswerIsDistinctFromFailed(t *testing.T) {
 // ties hold the order asked so two vendors quoting the same number do not swap
 // places between runs.
 func TestMergeRanksAcrossProvidersAndHoldsTies(t *testing.T) {
-	answers := []provisioners.ProviderAnswer{
-		{Provider: "a", Candidates: []provisioners.Candidate{
-			{Provider: "a", PriceUSDPerHour: 3.0}, {Provider: "a", PriceUSDPerHour: 1.0}}},
-		{Provider: "b", Candidates: []provisioners.Candidate{
-			{Provider: "b", PriceUSDPerHour: 2.0}, {Provider: "b", PriceUSDPerHour: 1.0}}},
+	answers := []*provisioners.ProviderAnswer{
+		&provisioners.ProviderAnswer{Outcome: answered, Provider: "a", Candidates: []*provisioners.Candidate{
+			{Provider: "a", PriceUsdPerHour: 3.0}, {Provider: "a", PriceUsdPerHour: 1.0}}},
+		&provisioners.ProviderAnswer{Outcome: answered, Provider: "b", Candidates: []*provisioners.Candidate{
+			{Provider: "b", PriceUsdPerHour: 2.0}, {Provider: "b", PriceUsdPerHour: 1.0}}},
 	}
 
 	got := provisioners.MergeCandidates(answers)
@@ -155,7 +155,7 @@ func TestMergeRanksAcrossProvidersAndHoldsTies(t *testing.T) {
 		t.Fatalf("got %d candidates, want %d", len(got), len(wantPrices))
 	}
 	for i, w := range wantPrices {
-		if got[i].PriceUSDPerHour != w {
+		if got[i].GetPriceUsdPerHour() != w {
 			t.Fatalf("prices = %v, want %v", pricesOf(got), wantPrices)
 		}
 	}
@@ -164,15 +164,15 @@ func TestMergeRanksAcrossProvidersAndHoldsTies(t *testing.T) {
 	// short-circuits runs of equal keys, so sort.Slice and sort.SliceStable
 	// produce the same order here and at 80 elements too. Stability comes from
 	// the SliceStable call in MergeCandidates, not from this line.
-	if got[0].Provider != "a" {
-		t.Errorf("tie resolved to %q, want the provider asked first", got[0].Provider)
+	if got[0].GetProvider() != "a" {
+		t.Errorf("tie resolved to %q, want the provider asked first", got[0].GetProvider())
 	}
 }
 
-func pricesOf(cs []provisioners.Candidate) []float64 {
+func pricesOf(cs []*provisioners.Candidate) []float64 {
 	out := make([]float64, len(cs))
 	for i, c := range cs {
-		out[i] = c.PriceUSDPerHour
+		out[i] = c.GetPriceUsdPerHour()
 	}
 	return out
 }
@@ -181,35 +181,35 @@ func pricesOf(cs []provisioners.Candidate) []float64 {
 // blank cell reads as neutral, so the vendor publishing least looks no worse
 // than the one publishing most. Naming the uneven facts is the whole job.
 func TestComparabilitySeparatesSharedFactsFromGaps(t *testing.T) {
-	answers := []provisioners.ProviderAnswer{
-		{Provider: "rich", Candidates: []provisioners.Candidate{{
-			Provider: "rich", Region: "eu-1", HostID: "h1", Architecture: "amd64",
-			Fabric: fabric.Result{Source: provisionerv1.FabricSource_FABRIC_SOURCE_MEASURED},
+	answers := []*provisioners.ProviderAnswer{
+		&provisioners.ProviderAnswer{Outcome: answered, Provider: "rich", Candidates: []*provisioners.Candidate{{
+			Provider: "rich", Region: "eu-1", HostId: "h1", Architecture: "amd64",
+			FabricSource: provisionerv1.FabricSource_FABRIC_SOURCE_MEASURED,
 		}}},
-		{Provider: "sparse", Candidates: []provisioners.Candidate{{
+		&provisioners.ProviderAnswer{Outcome: answered, Provider: "sparse", Candidates: []*provisioners.Candidate{{
 			Provider: "sparse", Architecture: "amd64",
-			Fabric: fabric.Result{Source: provisionerv1.FabricSource_FABRIC_SOURCE_DECLARED},
+			FabricSource: provisionerv1.FabricSource_FABRIC_SOURCE_DECLARED,
 		}}},
 	}
 
 	got := provisioners.AnalyzeComparability(answers)
 
-	if len(got.Compared) != 1 || got.Compared[0] != "architecture" {
-		t.Errorf("compared = %v, want just architecture", got.Compared)
+	if len(got.GetCompared()) != 1 || got.GetCompared()[0] != "architecture" {
+		t.Errorf("compared = %v, want just architecture", got.GetCompared())
 	}
 	gaps := map[string]bool{}
-	for _, g := range got.Gaps {
-		gaps[g.Fact] = true
-		if len(g.ReportedBy) != 1 || g.ReportedBy[0] != "rich" {
-			t.Errorf("gap %q reportedBy = %v, want [rich]", g.Fact, g.ReportedBy)
+	for _, g := range got.GetGaps() {
+		gaps[g.GetFact()] = true
+		if len(g.GetReportedBy()) != 1 || g.GetReportedBy()[0] != "rich" {
+			t.Errorf("gap %q reportedBy = %v, want [rich]", g.GetFact(), g.GetReportedBy())
 		}
-		if len(g.MissingFrom) != 1 || g.MissingFrom[0] != "sparse" {
-			t.Errorf("gap %q missingFrom = %v, want [sparse]", g.Fact, g.MissingFrom)
+		if len(g.GetMissingFrom()) != 1 || g.GetMissingFrom()[0] != "sparse" {
+			t.Errorf("gap %q missingFrom = %v, want [sparse]", g.GetFact(), g.GetMissingFrom())
 		}
 	}
 	for _, want := range []string{"region", "host identity", "measured fabric"} {
 		if !gaps[want] {
-			t.Errorf("%q was not reported as a gap; gaps = %v", want, got.Gaps)
+			t.Errorf("%q was not reported as a gap; gaps = %v", want, got.GetGaps())
 		}
 	}
 }
@@ -218,16 +218,16 @@ func TestComparabilitySeparatesSharedFactsFromGaps(t *testing.T) {
 // column is blank on every row, and calling it a gap would bury the facts that
 // genuinely could have been compared and were not.
 func TestComparabilityIgnoresFactsNobodyReports(t *testing.T) {
-	answers := []provisioners.ProviderAnswer{
-		{Provider: "a", Candidates: []provisioners.Candidate{{Provider: "a", Architecture: "amd64"}}},
-		{Provider: "b", Candidates: []provisioners.Candidate{{Provider: "b", Architecture: "arm64"}}},
+	answers := []*provisioners.ProviderAnswer{
+		&provisioners.ProviderAnswer{Outcome: answered, Provider: "a", Candidates: []*provisioners.Candidate{{Provider: "a", Architecture: "amd64"}}},
+		&provisioners.ProviderAnswer{Outcome: answered, Provider: "b", Candidates: []*provisioners.Candidate{{Provider: "b", Architecture: "arm64"}}},
 	}
 
 	got := provisioners.AnalyzeComparability(answers)
 
-	for _, g := range got.Gaps {
-		if g.Fact == "region" || g.Fact == "host identity" {
-			t.Errorf("%q reported as a gap though neither provider publishes it", g.Fact)
+	for _, g := range got.GetGaps() {
+		if g.GetFact() == "region" || g.GetFact() == "host identity" {
+			t.Errorf("%q reported as a gap though neither provider publishes it", g.GetFact())
 		}
 	}
 }
@@ -235,29 +235,29 @@ func TestComparabilityIgnoresFactsNobodyReports(t *testing.T) {
 // Providers that could not answer are absent from the comparison rather than
 // weak in it. Counting them as missing every fact would drown the real gaps.
 func TestComparabilitySkipsProvidersThatDidNotAnswer(t *testing.T) {
-	answers := []provisioners.ProviderAnswer{
-		{Provider: "a", Candidates: []provisioners.Candidate{{Provider: "a", Region: "eu-1", Architecture: "amd64"}}},
-		{Provider: "b", Candidates: []provisioners.Candidate{{Provider: "b", Region: "us-1", Architecture: "arm64"}}},
-		{Provider: "cannot", Err: status.Error(codes.Unimplemented, "no")},
+	answers := []*provisioners.ProviderAnswer{
+		&provisioners.ProviderAnswer{Outcome: answered, Provider: "a", Candidates: []*provisioners.Candidate{{Provider: "a", Region: "eu-1", Architecture: "amd64"}}},
+		&provisioners.ProviderAnswer{Outcome: answered, Provider: "b", Candidates: []*provisioners.Candidate{{Provider: "b", Region: "us-1", Architecture: "arm64"}}},
+		&provisioners.ProviderAnswer{Outcome: provisionerv1.AnswerOutcome_ANSWER_OUTCOME_CANNOT_ANSWER, Provider: "cannot"},
 	}
 
 	got := provisioners.AnalyzeComparability(answers)
 
-	if len(got.Gaps) != 0 {
-		t.Errorf("gaps = %+v, want none: the two answering providers report the same facts", got.Gaps)
+	if len(got.GetGaps()) != 0 {
+		t.Errorf("gaps = %+v, want none: the two answering providers report the same facts", got.GetGaps())
 	}
 }
 
 // With one participant there is no comparison to characterise, and printing a
 // list of "comparable" facts would imply one had happened.
 func TestComparabilityIsEmptyBelowTwoParticipants(t *testing.T) {
-	answers := []provisioners.ProviderAnswer{
-		{Provider: "only", Candidates: []provisioners.Candidate{{Provider: "only", Region: "eu-1"}}},
+	answers := []*provisioners.ProviderAnswer{
+		&provisioners.ProviderAnswer{Outcome: answered, Provider: "only", Candidates: []*provisioners.Candidate{{Provider: "only", Region: "eu-1"}}},
 	}
 
 	got := provisioners.AnalyzeComparability(answers)
 
-	if len(got.Compared) != 0 || len(got.Gaps) != 0 {
+	if len(got.GetCompared()) != 0 || len(got.GetGaps()) != 0 {
 		t.Errorf("got %+v, want an empty report for a single provider", got)
 	}
 }

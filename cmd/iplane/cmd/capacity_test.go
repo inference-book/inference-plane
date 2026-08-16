@@ -7,7 +7,6 @@ import (
 
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
 	"github.com/inference-book/inference-plane/internal/provisioners"
-	"github.com/inference-book/inference-plane/internal/provisioners/fabric"
 	"github.com/inference-book/inference-plane/internal/provisioners/stores/file"
 )
 
@@ -17,13 +16,11 @@ import (
 // rank it against real ones.
 func TestRenderCandidatesNeverPrintsUnknownFabricAsZero(t *testing.T) {
 	var buf bytes.Buffer
-	err := renderCandidates(&buf, answersFor("vast"), []provisioners.Candidate{{
-		HostID: "9871", OfferID: "2204551", SKU: "A100_PCIE", GPUCount: 4,
-		PriceUSDPerHour: 1.44,
-		Fabric: fabric.Result{
-			Scope:  provisionerv1.FabricScope_FABRIC_SCOPE_UNSPECIFIED,
-			Source: provisionerv1.FabricSource_FABRIC_SOURCE_UNKNOWN,
-		},
+	err := renderCandidates(&buf, answersFor("vast"), []*provisioners.Candidate{{
+		HostId: "9871", OfferId: "2204551", Sku: "A100_PCIE", GpuCount: 4,
+		PriceUsdPerHour: 1.44,
+		FabricScope:     provisionerv1.FabricScope_FABRIC_SCOPE_UNSPECIFIED,
+		FabricSource:    provisionerv1.FabricSource_FABRIC_SOURCE_UNKNOWN,
 	}}, "table")
 	if err != nil {
 		t.Fatalf("renderCandidates: %v", err)
@@ -43,17 +40,15 @@ func TestRenderCandidatesNeverPrintsUnknownFabricAsZero(t *testing.T) {
 // survive into the column an operator actually reads.
 func TestRenderCandidatesDistinguishesMeasuredFromDeclared(t *testing.T) {
 	var buf bytes.Buffer
-	err := renderCandidates(&buf, answersFor("vast"), []provisioners.Candidate{
-		{HostID: "1", SKU: "A100_PCIE", Fabric: fabric.Result{
-			Scope:  provisionerv1.FabricScope_FABRIC_SCOPE_INTRA_NODE,
-			Source: provisionerv1.FabricSource_FABRIC_SOURCE_MEASURED,
-			Gbps:   2400,
-		}},
-		{HostID: "2", SKU: "A100_SXM4", Fabric: fabric.Result{
-			Scope:  provisionerv1.FabricScope_FABRIC_SCOPE_INTRA_NODE,
-			Source: provisionerv1.FabricSource_FABRIC_SOURCE_DECLARED,
-			Gbps:   4800,
-		}},
+	err := renderCandidates(&buf, answersFor("vast"), []*provisioners.Candidate{
+		{HostId: "1", Sku: "A100_PCIE",
+			FabricScope:  provisionerv1.FabricScope_FABRIC_SCOPE_INTRA_NODE,
+			FabricSource: provisionerv1.FabricSource_FABRIC_SOURCE_MEASURED,
+			FabricGbps:   2400},
+		{HostId: "2", Sku: "A100_SXM4",
+			FabricScope:  provisionerv1.FabricScope_FABRIC_SCOPE_INTRA_NODE,
+			FabricSource: provisionerv1.FabricSource_FABRIC_SOURCE_DECLARED,
+			FabricGbps:   4800},
 	}, "table")
 	if err != nil {
 		t.Fatalf("renderCandidates: %v", err)
@@ -122,8 +117,8 @@ func TestReadOnlyStoreOpenSucceedsWhileLockHeld(t *testing.T) {
 // read the output and wonder whether something got rented.
 func TestRenderCandidatesSaysNothingWasRented(t *testing.T) {
 	var buf bytes.Buffer
-	err := renderCandidates(&buf, answersFor("vast"), []provisioners.Candidate{
-		{HostID: "1", SKU: "A100_PCIE", PriceUSDPerHour: 1.10},
+	err := renderCandidates(&buf, answersFor("vast"), []*provisioners.Candidate{
+		{HostId: "1", Sku: "A100_PCIE", PriceUsdPerHour: 1.10},
 	}, "table")
 	if err != nil {
 		t.Fatalf("renderCandidates: %v", err)
@@ -136,8 +131,12 @@ func TestRenderCandidatesSaysNothingWasRented(t *testing.T) {
 
 // answersFor builds the single-provider ProviderAnswer slice these rendering
 // tests need, so each one keeps stating only the thing it is about.
-func answersFor(provider string, cands ...provisioners.Candidate) []provisioners.ProviderAnswer {
-	return []provisioners.ProviderAnswer{{Provider: provider, Candidates: cands}}
+func answersFor(provider string, cands ...*provisioners.Candidate) []*provisioners.ProviderAnswer {
+	outcome := provisionerv1.AnswerOutcome_ANSWER_OUTCOME_ANSWERED
+	if len(cands) == 0 {
+		outcome = provisionerv1.AnswerOutcome_ANSWER_OUTCOME_NO_CAPACITY
+	}
+	return []*provisioners.ProviderAnswer{{Provider: provider, Outcome: outcome, Candidates: cands}}
 }
 
 // A typo'd --reclaim must not fall through to "no preference". That would hand
@@ -177,9 +176,9 @@ func TestParseReclaimPolicyAcceptsTheDocumentedForms(t *testing.T) {
 // not the same kind of number as one that cannot.
 func TestRenderCandidatesNamesTheTier(t *testing.T) {
 	var buf bytes.Buffer
-	err := renderCandidates(&buf, answersFor("vast"), []provisioners.Candidate{
-		{Provider: "vast", SKU: "A100_SXM4", PriceUSDPerHour: 0.13, Reclaimable: true},
-		{Provider: "vast", SKU: "A100_SXM4", PriceUSDPerHour: 0.83},
+	err := renderCandidates(&buf, answersFor("vast"), []*provisioners.Candidate{
+		{Provider: "vast", Sku: "A100_SXM4", PriceUsdPerHour: 0.13, Reclaimable: true},
+		{Provider: "vast", Sku: "A100_SXM4", PriceUsdPerHour: 0.83},
 	}, "table")
 	if err != nil {
 		t.Fatalf("renderCandidates: %v", err)

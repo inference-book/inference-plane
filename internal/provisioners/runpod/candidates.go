@@ -71,7 +71,7 @@ type gpuTypesData struct {
 //
 // The earlier note on CandidateSource guessed this would add nothing over the
 // static table. That was wrong, and measurably so.
-func (p *Provider) Candidates(ctx context.Context, reqs *provisionerv1.ResourceRequirements) ([]provisioners.Candidate, error) {
+func (p *Provider) Candidates(ctx context.Context, reqs *provisionerv1.ResourceRequirements) ([]*provisioners.Candidate, error) {
 	if reqs == nil {
 		reqs = &provisionerv1.ResourceRequirements{}
 	}
@@ -104,7 +104,7 @@ func (p *Provider) Candidates(ctx context.Context, reqs *provisionerv1.ResourceR
 		}
 	}
 
-	var out []provisioners.Candidate
+	var out []*provisioners.Candidate
 	for _, g := range data.GPUTypes {
 		if !eligible[g.ID] {
 			continue
@@ -148,16 +148,20 @@ func (p *Provider) Candidates(ctx context.Context, reqs *provisionerv1.ResourceR
 			family = spec.Family
 		}
 
-		out = append(out, provisioners.Candidate{
+		res := fabric.Resolve(fabric.Observation{Family: family})
+		out = append(out, &provisioners.Candidate{
 			// No HostID, no OfferID, and no Region. RunPod rents a GPU type
 			// and picks the datacenter itself, so there is nothing here to
 			// name that would still mean anything an hour later.
-			SKU:             g.ID,
-			PriceUSDPerHour: price,
-			Reclaimable:     reclaimable,
-			GPUCount:        gpuCount,
-			VRAMGbPerGPU:    vramGb,
-			Fabric:          fabric.Resolve(fabric.Observation{Family: family}),
+			Sku:              g.ID,
+			PriceUsdPerHour:  price,
+			Reclaimable:      reclaimable,
+			GpuCount:         int32(gpuCount),
+			VramGbPerGpu:     int32(vramGb),
+			FabricScope:      res.Scope,
+			FabricSource:     res.Source,
+			FabricGbps:       res.Gbps,
+			FabricTechnology: res.Technology,
 			Attrs: map[string]string{
 				"stock_status":    *g.LowestPrice.StockStatus,
 				"secure_cloud":    strconv.FormatBool(g.SecureCloud),
@@ -167,7 +171,7 @@ func (p *Provider) Candidates(ctx context.Context, reqs *provisionerv1.ResourceR
 	}
 
 	sort.SliceStable(out, func(i, j int) bool {
-		return out[i].PriceUSDPerHour < out[j].PriceUSDPerHour
+		return out[i].GetPriceUsdPerHour() < out[j].GetPriceUsdPerHour()
 	})
 	return out, nil
 }

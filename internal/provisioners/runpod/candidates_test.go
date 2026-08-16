@@ -77,8 +77,8 @@ func TestCandidatesSkipUnavailableTypes(t *testing.T) {
 		"NVIDIA H100 NVL":       "stock reported but no price",
 	}
 	for _, c := range got {
-		if why, bad := unavailable[c.SKU]; bad {
-			t.Errorf("offered %q as a candidate (%s): %+v", c.SKU, why, c)
+		if why, bad := unavailable[c.GetSku()]; bad {
+			t.Errorf("offered %q as a candidate (%s): %+v", c.GetSku(), why, c)
 		}
 	}
 	if len(got) == 0 {
@@ -133,11 +133,11 @@ func TestCandidatesFilterThroughTheSameResolverAsSpawn(t *testing.T) {
 	}
 
 	for _, c := range got {
-		if LookupSKU(c.SKU) == nil {
-			t.Errorf("candidate %q is not in our catalog", c.SKU)
+		if LookupSKU(c.GetSku()) == nil {
+			t.Errorf("candidate %q is not in our catalog", c.GetSku())
 		}
-		if c.VRAMGbPerGPU < 80 {
-			t.Errorf("candidate %q has %d GB VRAM, below the stated floor", c.SKU, c.VRAMGbPerGPU)
+		if c.GetVramGbPerGpu() < 80 {
+			t.Errorf("candidate %q has %d GB VRAM, below the stated floor", c.GetSku(), c.GetVramGbPerGpu())
 		}
 	}
 }
@@ -154,9 +154,9 @@ func TestCandidatesLeaveHostOfferAndRegionEmpty(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("got %d candidates, want 1", len(got))
 	}
-	if got[0].HostID != "" || got[0].OfferID != "" || got[0].Region != "" {
+	if got[0].GetHostId() != "" || got[0].GetOfferId() != "" || got[0].GetRegion() != "" {
 		t.Errorf("HostID=%q OfferID=%q Region=%q, want all empty on a provider with none of those concepts",
-			got[0].HostID, got[0].OfferID, got[0].Region)
+			got[0].GetHostId(), got[0].GetOfferId(), got[0].GetRegion())
 	}
 }
 
@@ -171,11 +171,11 @@ func TestCandidatesUseTheLivePriceNotTheCatalog(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("got %d candidates, want 1", len(got))
 	}
-	if got[0].PriceUSDPerHour != 1.39 {
-		t.Errorf("price = %v, want the live 1.39", got[0].PriceUSDPerHour)
+	if got[0].GetPriceUsdPerHour() != 1.39 {
+		t.Errorf("price = %v, want the live 1.39", got[0].GetPriceUsdPerHour())
 	}
 	if catalog := LookupSKU("NVIDIA A100-SXM4-80GB"); catalog != nil &&
-		got[0].PriceUSDPerHour == catalog.PriceUSDPerHour {
+		got[0].GetPriceUsdPerHour() == catalog.PriceUSDPerHour {
 		t.Error("price came from the static catalog; the network call bought us nothing")
 	}
 }
@@ -214,8 +214,8 @@ func TestCandidatesCarryStockStatusAsAProviderAttr(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("got %d candidates, want 1", len(got))
 	}
-	if got[0].Attrs["stock_status"] != "Medium" {
-		t.Errorf("stock_status = %q, want Medium", got[0].Attrs["stock_status"])
+	if got[0].GetAttrs()["stock_status"] != "Medium" {
+		t.Errorf("stock_status = %q, want Medium", got[0].GetAttrs()["stock_status"])
 	}
 }
 
@@ -251,10 +251,10 @@ func TestCandidatesRejectABidThatIsNotADiscount(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("got %d candidates, want only the one with a real discount: %+v", len(got), got)
 	}
-	if got[0].SKU != "NVIDIA A100 80GB PCIe" || got[0].PriceUSDPerHour != 0.40 {
-		t.Errorf("got %s at $%.2f, want the PCIe shape at its 0.40 bid", got[0].SKU, got[0].PriceUSDPerHour)
+	if got[0].GetSku() != "NVIDIA A100 80GB PCIe" || got[0].GetPriceUsdPerHour() != 0.40 {
+		t.Errorf("got %s at $%.2f, want the PCIe shape at its 0.40 bid", got[0].GetSku(), got[0].GetPriceUsdPerHour())
 	}
-	if !got[0].Reclaimable {
+	if !got[0].GetReclaimable() {
 		t.Error("the surviving candidate was not marked reclaimable")
 	}
 }

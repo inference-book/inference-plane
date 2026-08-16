@@ -96,16 +96,16 @@ func runInstanceCreate(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return err
 		}
-		provider = placement.Winner.Provider
+		provider = placement.GetWinner().GetProvider()
 		if createSKU == "" {
 			// The winning SKU supersedes the class shorthand that found it.
 			// Class expands to numeric bounds and the resolver already applied
 			// them; carrying both forward trips the mutually-exclusive check,
 			// and the SKU is the more specific of the two.
-			createSKU = placement.Winner.SKU
+			createSKU = placement.GetWinner().GetSku()
 			createClass = ""
 		}
-		for _, line := range placement.Describe() {
+		for _, line := range provisioners.DescribePlacement(placement) {
 			fmt.Fprintf(cmd.ErrOrStderr(), "placement: %s\n", line)
 		}
 	}

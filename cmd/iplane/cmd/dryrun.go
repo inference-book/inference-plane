@@ -150,9 +150,10 @@ func projectedCost(spec *provisionerv1.Spec, placement *provisioners.Placement) 
 	// candidate that won, which beats every estimate below. Reporting
 	// "(unknown)" right after choosing on price would be absurd.
 	if placement != nil {
-		return fmt.Sprintf("$%.4f/hr", placement.Winner.PriceUSDPerHour),
+		return fmt.Sprintf("$%.4f/hr", placement.GetWinner().GetPriceUsdPerHour()),
 			fmt.Sprintf(" (live quote for %s on %s, cheapest of %d)",
-				placement.Winner.SKU, placement.Winner.Provider, placement.Considered)
+				placement.GetWinner().GetSku(), placement.GetWinner().GetProvider(),
+				placement.GetConsidered())
 	}
 	switch spec.GetProvider() {
 	case provisioners.ProviderLocal:

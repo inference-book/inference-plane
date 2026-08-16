@@ -32,7 +32,7 @@ import (
 // for it since it was written and never called it, and the comment on Spawn
 // claiming Lambda "tells us which regions have capacity" described something
 // that had never happened.
-func (p *Provider) Candidates(ctx context.Context, reqs *provisionerv1.ResourceRequirements) ([]provisioners.Candidate, error) {
+func (p *Provider) Candidates(ctx context.Context, reqs *provisionerv1.ResourceRequirements) ([]*provisioners.Candidate, error) {
 	if reqs == nil {
 		reqs = &provisionerv1.ResourceRequirements{}
 	}
@@ -67,7 +67,7 @@ func (p *Provider) Candidates(ctx context.Context, reqs *provisionerv1.ResourceR
 		}
 	}
 
-	var out []provisioners.Candidate
+	var out []*provisioners.Candidate
 	for name, entry := range resp.Data {
 		if !eligible[name] {
 			continue
@@ -82,7 +82,7 @@ func (p *Provider) Candidates(ctx context.Context, reqs *provisionerv1.ResourceR
 	}
 
 	sort.SliceStable(out, func(i, j int) bool {
-		return out[i].PriceUSDPerHour < out[j].PriceUSDPerHour
+		return out[i].GetPriceUsdPerHour() < out[j].GetPriceUsdPerHour()
 	})
 	return out, nil
 }
@@ -94,7 +94,7 @@ func (p *Provider) Candidates(ctx context.Context, reqs *provisionerv1.ResourceR
 // system RAM and a GPU count but never the card's memory, and a candidate list
 // that dropped VRAM would be missing the first thing anyone sizing a model
 // looks at. An uncatalogued shape therefore reports 0 rather than a guess.
-func typeToCandidate(name string, it *instanceTypeBlock, region string) provisioners.Candidate {
+func typeToCandidate(name string, it *instanceTypeBlock, region string) *provisioners.Candidate {
 	var (
 		family fabric.Family
 		vramGb int
@@ -104,17 +104,21 @@ func typeToCandidate(name string, it *instanceTypeBlock, region string) provisio
 		vramGb = spec.VRAMGb
 	}
 
-	return provisioners.Candidate{
+	res := fabric.Resolve(fabric.Observation{Family: family})
+	return &provisioners.Candidate{
 		// No HostID and no OfferID on purpose. Lambda rents a shape in a
 		// region, not a particular machine, so there is nothing stable to
 		// record about a host and nothing short-lived to name as an offer.
-		SKU:             name,
-		Region:          region,
-		PriceUSDPerHour: float64(it.PriceCentsPerHour) / 100,
-		GPUCount:        it.Specs.GPUs,
-		VRAMGbPerGPU:    vramGb,
-		Architecture:    provisioners.NormalizeArch(it.Architecture),
-		Fabric:          fabric.Resolve(fabric.Observation{Family: family}),
+		Sku:              name,
+		Region:           region,
+		PriceUsdPerHour:  float64(it.PriceCentsPerHour) / 100,
+		GpuCount:         int32(it.Specs.GPUs),
+		VramGbPerGpu:     int32(vramGb),
+		Architecture:     provisioners.NormalizeArch(it.Architecture),
+		FabricScope:      res.Scope,
+		FabricSource:     res.Source,
+		FabricGbps:       res.Gbps,
+		FabricTechnology: res.Technology,
 		Attrs: map[string]string{
 			"vcpus":       strconv.Itoa(it.Specs.VCPUs),
 			"memory_gib":  strconv.Itoa(it.Specs.MemoryGiB),
