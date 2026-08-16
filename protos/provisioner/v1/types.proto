@@ -600,6 +600,15 @@ message Deployment {
   // since restart is rare.
   repeated string unhealthy_instance_ids = 26;
 
+  // Credential the router presents when forwarding to this
+  // deployment's engine. Set for attached engines that sit behind an
+  // authenticating gateway: a hosted OpenAI-compatible API, or an
+  // operator's own vLLM behind an ingress that checks a token.
+  //
+  // Unset for everything iplane provisions itself. A rented pod is
+  // reachable because we rented it, not because we hold a key for it.
+  UpstreamAuth upstream_auth = 30;
+
   // replica_specs records the per-slot ReplicaSpec each slot was
   // originally provisioned from (heterogeneous form) or derived
   // from (homogeneous form: one entry replicated len(instance_ids)
@@ -700,6 +709,35 @@ message VolumeMount {
   string host_path = 2;
   string mount_path = 3;
   string provider = 4;
+}
+
+// UpstreamAuth names a credential without carrying it.
+//
+// value_env holds the NAME of an environment variable, never the secret
+// itself. That distinction is the whole design: this message is
+// persisted to the state file and returned by DescribeDeployment, so a
+// literal token here would be written to disk in plaintext and handed
+// to anyone who can read a deployment. The router resolves the variable
+// at forward time instead, so the secret lives only in the daemon's
+// environment, which is the same place every provider API key already
+// lives (see internal/provisioners/apikey.go).
+//
+// A proper secret store is a later concern. This is deliberately the
+// same shape as the existing provider-key handling rather than a new
+// mechanism nobody has operational experience with.
+message UpstreamAuth {
+  // Header to set on the forwarded request. Usually "Authorization",
+  // but some gateways want their own ("X-Api-Key").
+  string header = 1;
+
+  // Name of the environment variable holding the credential. NOT the
+  // credential.
+  string value_env = 2;
+
+  // Prefix joined to the resolved value, typically "Bearer ". Kept
+  // separate so the env var holds the bare token, which is how vendors
+  // issue them and how operators paste them.
+  string value_prefix = 3;
 }
 
 // Volume is the registry record for a persistent provider volume that
