@@ -1220,28 +1220,7 @@ func (s *Service) CreateDeployment(ctx context.Context, req *provisionerv1.Creat
 			// TERMINATED / FAILED: treat as gone; claim a fresh record.
 		}
 		now := timestamppb.New(s.clock())
-		record = &provisionerv1.Deployment{
-			Id:             dep.GetId(),
-			InstanceId:     dep.GetInstanceId(),
-			Image:          dep.GetImage(),
-			Model:          dep.GetModel(),
-			EngineArgs:     dep.GetEngineArgs(),
-			Env:            dep.GetEnv(),
-			Mounts:         dep.GetMounts(),
-			EnginePort:     dep.GetEnginePort(),
-			State:          provisionerv1.DeploymentState_DEPLOYMENT_STATE_PENDING,
-			CreatedAt:      now,
-			DebugShell:     dep.GetDebugShell(),
-			IdleTtlSeconds: dep.GetIdleTtlSeconds(),
-			NoIdleDestroy:  dep.GetNoIdleDestroy(),
-			// Operator intent, and the record is what every later reader
-			// sees: the deployers get this record and so does the router.
-			// A field left out here is a flag the operator set and nothing
-			// downstream ever learns about.
-			EngineEntrypoint: dep.GetEngineEntrypoint(),
-			UpstreamAuth:     dep.GetUpstreamAuth(),
-			Parallelism:      dep.GetParallelism(),
-		}
+		record = newDeploymentRecord(dep, now)
 		// v0.2 ch7-beat3.1: instance_ids is the canonical multi-
 		// instance list. #83 leaves it empty on Service-driven
 		// creates -- Beat 1+2 deployments are single-instance and
