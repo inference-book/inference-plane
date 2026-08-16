@@ -56,3 +56,6 @@ go.work.sum
 # Local-only docker-compose overrides
 docker-compose.override.yaml
 deploy/docker-compose.override.yaml
+
+# Session handoff notes: local working state, not project docs.
+HANDOFF_*.md
