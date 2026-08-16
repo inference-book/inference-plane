@@ -1556,6 +1556,10 @@ type Deployment struct {
 	// Unset for everything iplane provisions itself. A rented pod is
 	// reachable because we rented it, not because we hold a key for it.
 	UpstreamAuth *UpstreamAuth `protobuf:"bytes,30,opt,name=upstream_auth,json=upstreamAuth,proto3" json:"upstream_auth,omitempty"`
+	// How the engine should split the model across the cards it was
+	// given. Unset means the engine decides, which for a single card is
+	// the only sensible answer.
+	Parallelism *Parallelism `protobuf:"bytes,31,opt,name=parallelism,proto3" json:"parallelism,omitempty"`
 	// replica_specs records the per-slot ReplicaSpec each slot was
 	// originally provisioned from (heterogeneous form) or derived
 	// from (homogeneous form: one entry replicated len(instance_ids)
@@ -1828,6 +1832,13 @@ func (x *Deployment) GetUnhealthyInstanceIds() []string {
 func (x *Deployment) GetUpstreamAuth() *UpstreamAuth {
 	if x != nil {
 		return x.UpstreamAuth
+	}
+	return nil
+}
+
+func (x *Deployment) GetParallelism() *Parallelism {
+	if x != nil {
+		return x.Parallelism
 	}
 	return nil
 }
@@ -2442,6 +2453,78 @@ func (x *Placement) GetComparability() *Comparability {
 	return nil
 }
 
+// Parallelism is how many ways an engine splits a model across the cards
+// it was handed.
+//
+// The control plane does not implement either kind of parallelism and
+// never looks inside the engine, which is the line this project has kept
+// since the caching chapter. What it does is refuse a split the hardware
+// cannot carry, which is a check only it can make: the engine discovers
+// the mismatch when it starts and dies, minutes after the rental began
+// billing, while the control plane knows the card count before renting
+// anything.
+//
+// Both fields are engine-facing rather than provider-facing. They travel
+// to the engine as arguments, so the vocabulary question is which
+// engine's spelling to use, not which vendor's.
+type Parallelism struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Cards a single layer is sharded across. Every card holds a slice of
+	// every layer, so the per-layer exchange runs on the critical path of
+	// every token and wants a fast intra-node link.
+	TensorParallelSize int32 `protobuf:"varint,1,opt,name=tensor_parallel_size,json=tensorParallelSize,proto3" json:"tensor_parallel_size,omitempty"`
+	// Stages the model's layers are split into. Stages talk once per
+	// micro-batch boundary rather than per layer, which is why this is
+	// the split that tolerates a slower link between nodes.
+	PipelineParallelSize int32 `protobuf:"varint,2,opt,name=pipeline_parallel_size,json=pipelineParallelSize,proto3" json:"pipeline_parallel_size,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
+}
+
+func (x *Parallelism) Reset() {
+	*x = Parallelism{}
+	mi := &file_provisioner_v1_types_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Parallelism) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Parallelism) ProtoMessage() {}
+
+func (x *Parallelism) ProtoReflect() protoreflect.Message {
+	mi := &file_provisioner_v1_types_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Parallelism.ProtoReflect.Descriptor instead.
+func (*Parallelism) Descriptor() ([]byte, []int) {
+	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *Parallelism) GetTensorParallelSize() int32 {
+	if x != nil {
+		return x.TensorParallelSize
+	}
+	return 0
+}
+
+func (x *Parallelism) GetPipelineParallelSize() int32 {
+	if x != nil {
+		return x.PipelineParallelSize
+	}
+	return 0
+}
+
 // UpstreamAuth names a credential without carrying it.
 //
 // value_env holds the NAME of an environment variable, never the secret
@@ -2474,7 +2557,7 @@ type UpstreamAuth struct {
 
 func (x *UpstreamAuth) Reset() {
 	*x = UpstreamAuth{}
-	mi := &file_provisioner_v1_types_proto_msgTypes[13]
+	mi := &file_provisioner_v1_types_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2486,7 +2569,7 @@ func (x *UpstreamAuth) String() string {
 func (*UpstreamAuth) ProtoMessage() {}
 
 func (x *UpstreamAuth) ProtoReflect() protoreflect.Message {
-	mi := &file_provisioner_v1_types_proto_msgTypes[13]
+	mi := &file_provisioner_v1_types_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2499,7 +2582,7 @@ func (x *UpstreamAuth) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpstreamAuth.ProtoReflect.Descriptor instead.
 func (*UpstreamAuth) Descriptor() ([]byte, []int) {
-	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{13}
+	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *UpstreamAuth) GetHeader() string {
@@ -2560,7 +2643,7 @@ type Volume struct {
 
 func (x *Volume) Reset() {
 	*x = Volume{}
-	mi := &file_provisioner_v1_types_proto_msgTypes[14]
+	mi := &file_provisioner_v1_types_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2572,7 +2655,7 @@ func (x *Volume) String() string {
 func (*Volume) ProtoMessage() {}
 
 func (x *Volume) ProtoReflect() protoreflect.Message {
-	mi := &file_provisioner_v1_types_proto_msgTypes[14]
+	mi := &file_provisioner_v1_types_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2585,7 +2668,7 @@ func (x *Volume) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Volume.ProtoReflect.Descriptor instead.
 func (*Volume) Descriptor() ([]byte, []int) {
-	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{14}
+	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *Volume) GetId() string {
@@ -2703,7 +2786,7 @@ type ReplicaSpec struct {
 
 func (x *ReplicaSpec) Reset() {
 	*x = ReplicaSpec{}
-	mi := &file_provisioner_v1_types_proto_msgTypes[15]
+	mi := &file_provisioner_v1_types_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2715,7 +2798,7 @@ func (x *ReplicaSpec) String() string {
 func (*ReplicaSpec) ProtoMessage() {}
 
 func (x *ReplicaSpec) ProtoReflect() protoreflect.Message {
-	mi := &file_provisioner_v1_types_proto_msgTypes[15]
+	mi := &file_provisioner_v1_types_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2728,7 +2811,7 @@ func (x *ReplicaSpec) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReplicaSpec.ProtoReflect.Descriptor instead.
 func (*ReplicaSpec) Descriptor() ([]byte, []int) {
-	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{15}
+	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *ReplicaSpec) GetProvider() string {
@@ -2792,7 +2875,7 @@ type InterconnectHealth struct {
 
 func (x *InterconnectHealth) Reset() {
 	*x = InterconnectHealth{}
-	mi := &file_provisioner_v1_types_proto_msgTypes[16]
+	mi := &file_provisioner_v1_types_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2804,7 +2887,7 @@ func (x *InterconnectHealth) String() string {
 func (*InterconnectHealth) ProtoMessage() {}
 
 func (x *InterconnectHealth) ProtoReflect() protoreflect.Message {
-	mi := &file_provisioner_v1_types_proto_msgTypes[16]
+	mi := &file_provisioner_v1_types_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2817,7 +2900,7 @@ func (x *InterconnectHealth) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InterconnectHealth.ProtoReflect.Descriptor instead.
 func (*InterconnectHealth) Descriptor() ([]byte, []int) {
-	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{16}
+	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *InterconnectHealth) GetAvailable() bool {
@@ -2869,7 +2952,7 @@ type EngineNode struct {
 
 func (x *EngineNode) Reset() {
 	*x = EngineNode{}
-	mi := &file_provisioner_v1_types_proto_msgTypes[17]
+	mi := &file_provisioner_v1_types_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2881,7 +2964,7 @@ func (x *EngineNode) String() string {
 func (*EngineNode) ProtoMessage() {}
 
 func (x *EngineNode) ProtoReflect() protoreflect.Message {
-	mi := &file_provisioner_v1_types_proto_msgTypes[17]
+	mi := &file_provisioner_v1_types_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2894,7 +2977,7 @@ func (x *EngineNode) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EngineNode.ProtoReflect.Descriptor instead.
 func (*EngineNode) Descriptor() ([]byte, []int) {
-	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{17}
+	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *EngineNode) GetHostId() string {
@@ -2972,7 +3055,7 @@ type Engine struct {
 
 func (x *Engine) Reset() {
 	*x = Engine{}
-	mi := &file_provisioner_v1_types_proto_msgTypes[18]
+	mi := &file_provisioner_v1_types_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2984,7 +3067,7 @@ func (x *Engine) String() string {
 func (*Engine) ProtoMessage() {}
 
 func (x *Engine) ProtoReflect() protoreflect.Message {
-	mi := &file_provisioner_v1_types_proto_msgTypes[18]
+	mi := &file_provisioner_v1_types_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2997,7 +3080,7 @@ func (x *Engine) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Engine.ProtoReflect.Descriptor instead.
 func (*Engine) Descriptor() ([]byte, []int) {
-	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{18}
+	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *Engine) GetId() string {
@@ -3155,7 +3238,7 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"created_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x1a7\n" +
 	"\tTagsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xa6\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xe5\n" +
 	"\n" +
 	"\n" +
 	"Deployment\x12\x0e\n" +
@@ -3190,7 +3273,8 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"\finstance_ids\x18\x18 \x03(\tR\vinstanceIds\x12)\n" +
 	"\x10engine_endpoints\x18\x19 \x03(\tR\x0fengineEndpoints\x124\n" +
 	"\x16unhealthy_instance_ids\x18\x1a \x03(\tR\x14unhealthyInstanceIds\x12A\n" +
-	"\rupstream_auth\x18\x1e \x01(\v2\x1c.provisioner.v1.UpstreamAuthR\fupstreamAuth\x12@\n" +
+	"\rupstream_auth\x18\x1e \x01(\v2\x1c.provisioner.v1.UpstreamAuthR\fupstreamAuth\x12=\n" +
+	"\vparallelism\x18\x1f \x01(\v2\x1b.provisioner.v1.ParallelismR\vparallelism\x12@\n" +
 	"\rreplica_specs\x18\x1b \x03(\v2\x1b.provisioner.v1.ReplicaSpecR\freplicaSpecs\x123\n" +
 	"\x06mounts\x18\x1c \x03(\v2\x1b.provisioner.v1.VolumeMountR\x06mounts\x12+\n" +
 	"\x11engine_entrypoint\x18\x1d \x03(\tR\x10engineEntrypoint\x1a6\n" +
@@ -3247,7 +3331,10 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"considered\x18\x03 \x01(\x05R\n" +
 	"considered\x128\n" +
 	"\aanswers\x18\x04 \x03(\v2\x1e.provisioner.v1.ProviderAnswerR\aanswers\x12C\n" +
-	"\rcomparability\x18\x05 \x01(\v2\x1d.provisioner.v1.ComparabilityR\rcomparability\"f\n" +
+	"\rcomparability\x18\x05 \x01(\v2\x1d.provisioner.v1.ComparabilityR\rcomparability\"u\n" +
+	"\vParallelism\x120\n" +
+	"\x14tensor_parallel_size\x18\x01 \x01(\x05R\x12tensorParallelSize\x124\n" +
+	"\x16pipeline_parallel_size\x18\x02 \x01(\x05R\x14pipelineParallelSize\"f\n" +
 	"\fUpstreamAuth\x12\x16\n" +
 	"\x06header\x18\x01 \x01(\tR\x06header\x12\x1b\n" +
 	"\tvalue_env\x18\x02 \x01(\tR\bvalueEnv\x12!\n" +
@@ -3359,7 +3446,7 @@ func file_provisioner_v1_types_proto_rawDescGZIP() []byte {
 }
 
 var file_provisioner_v1_types_proto_enumTypes = make([]protoimpl.EnumInfo, 8)
-var file_provisioner_v1_types_proto_msgTypes = make([]protoimpl.MessageInfo, 24)
+var file_provisioner_v1_types_proto_msgTypes = make([]protoimpl.MessageInfo, 25)
 var file_provisioner_v1_types_proto_goTypes = []any{
 	(FabricScope)(0),              // 0: provisioner.v1.FabricScope
 	(FabricSource)(0),             // 1: provisioner.v1.FabricSource
@@ -3382,23 +3469,24 @@ var file_provisioner_v1_types_proto_goTypes = []any{
 	(*FactGap)(nil),               // 18: provisioner.v1.FactGap
 	(*Comparability)(nil),         // 19: provisioner.v1.Comparability
 	(*Placement)(nil),             // 20: provisioner.v1.Placement
-	(*UpstreamAuth)(nil),          // 21: provisioner.v1.UpstreamAuth
-	(*Volume)(nil),                // 22: provisioner.v1.Volume
-	(*ReplicaSpec)(nil),           // 23: provisioner.v1.ReplicaSpec
-	(*InterconnectHealth)(nil),    // 24: provisioner.v1.InterconnectHealth
-	(*EngineNode)(nil),            // 25: provisioner.v1.EngineNode
-	(*Engine)(nil),                // 26: provisioner.v1.Engine
-	nil,                           // 27: provisioner.v1.Spec.TagsEntry
-	nil,                           // 28: provisioner.v1.Instance.MetadataEntry
-	nil,                           // 29: provisioner.v1.InstanceRef.TagsEntry
-	nil,                           // 30: provisioner.v1.Deployment.EnvEntry
-	nil,                           // 31: provisioner.v1.Candidate.AttrsEntry
-	(*timestamppb.Timestamp)(nil), // 32: google.protobuf.Timestamp
-	(*structpb.Value)(nil),        // 33: google.protobuf.Value
+	(*Parallelism)(nil),           // 21: provisioner.v1.Parallelism
+	(*UpstreamAuth)(nil),          // 22: provisioner.v1.UpstreamAuth
+	(*Volume)(nil),                // 23: provisioner.v1.Volume
+	(*ReplicaSpec)(nil),           // 24: provisioner.v1.ReplicaSpec
+	(*InterconnectHealth)(nil),    // 25: provisioner.v1.InterconnectHealth
+	(*EngineNode)(nil),            // 26: provisioner.v1.EngineNode
+	(*Engine)(nil),                // 27: provisioner.v1.Engine
+	nil,                           // 28: provisioner.v1.Spec.TagsEntry
+	nil,                           // 29: provisioner.v1.Instance.MetadataEntry
+	nil,                           // 30: provisioner.v1.InstanceRef.TagsEntry
+	nil,                           // 31: provisioner.v1.Deployment.EnvEntry
+	nil,                           // 32: provisioner.v1.Candidate.AttrsEntry
+	(*timestamppb.Timestamp)(nil), // 33: google.protobuf.Timestamp
+	(*structpb.Value)(nil),        // 34: google.protobuf.Value
 }
 var file_provisioner_v1_types_proto_depIdxs = []int32{
 	9,  // 0: provisioner.v1.Spec.requirements:type_name -> provisioner.v1.ResourceRequirements
-	27, // 1: provisioner.v1.Spec.tags:type_name -> provisioner.v1.Spec.TagsEntry
+	28, // 1: provisioner.v1.Spec.tags:type_name -> provisioner.v1.Spec.TagsEntry
 	0,  // 2: provisioner.v1.ResourceRequirements.fabric_scope:type_name -> provisioner.v1.FabricScope
 	2,  // 3: provisioner.v1.ResourceRequirements.reclaim_policy:type_name -> provisioner.v1.ReclaimPolicy
 	0,  // 4: provisioner.v1.Hardware.fabric_scope:type_name -> provisioner.v1.FabricScope
@@ -3406,47 +3494,48 @@ var file_provisioner_v1_types_proto_depIdxs = []int32{
 	8,  // 6: provisioner.v1.Instance.spec:type_name -> provisioner.v1.Spec
 	10, // 7: provisioner.v1.Instance.hardware:type_name -> provisioner.v1.Hardware
 	3,  // 8: provisioner.v1.Instance.state:type_name -> provisioner.v1.InstanceState
-	32, // 9: provisioner.v1.Instance.created_at:type_name -> google.protobuf.Timestamp
-	32, // 10: provisioner.v1.Instance.activated_at:type_name -> google.protobuf.Timestamp
-	32, // 11: provisioner.v1.Instance.terminated_at:type_name -> google.protobuf.Timestamp
+	33, // 9: provisioner.v1.Instance.created_at:type_name -> google.protobuf.Timestamp
+	33, // 10: provisioner.v1.Instance.activated_at:type_name -> google.protobuf.Timestamp
+	33, // 11: provisioner.v1.Instance.terminated_at:type_name -> google.protobuf.Timestamp
 	11, // 12: provisioner.v1.Instance.ssh:type_name -> provisioner.v1.SshTarget
-	28, // 13: provisioner.v1.Instance.metadata:type_name -> provisioner.v1.Instance.MetadataEntry
-	29, // 14: provisioner.v1.InstanceRef.tags:type_name -> provisioner.v1.InstanceRef.TagsEntry
-	32, // 15: provisioner.v1.InstanceRef.created_at:type_name -> google.protobuf.Timestamp
-	30, // 16: provisioner.v1.Deployment.env:type_name -> provisioner.v1.Deployment.EnvEntry
+	29, // 13: provisioner.v1.Instance.metadata:type_name -> provisioner.v1.Instance.MetadataEntry
+	30, // 14: provisioner.v1.InstanceRef.tags:type_name -> provisioner.v1.InstanceRef.TagsEntry
+	33, // 15: provisioner.v1.InstanceRef.created_at:type_name -> google.protobuf.Timestamp
+	31, // 16: provisioner.v1.Deployment.env:type_name -> provisioner.v1.Deployment.EnvEntry
 	6,  // 17: provisioner.v1.Deployment.state:type_name -> provisioner.v1.DeploymentState
-	32, // 18: provisioner.v1.Deployment.created_at:type_name -> google.protobuf.Timestamp
-	32, // 19: provisioner.v1.Deployment.started_at:type_name -> google.protobuf.Timestamp
-	32, // 20: provisioner.v1.Deployment.ready_at:type_name -> google.protobuf.Timestamp
-	32, // 21: provisioner.v1.Deployment.terminated_at:type_name -> google.protobuf.Timestamp
-	32, // 22: provisioner.v1.Deployment.last_activity_at:type_name -> google.protobuf.Timestamp
-	21, // 23: provisioner.v1.Deployment.upstream_auth:type_name -> provisioner.v1.UpstreamAuth
-	23, // 24: provisioner.v1.Deployment.replica_specs:type_name -> provisioner.v1.ReplicaSpec
-	15, // 25: provisioner.v1.Deployment.mounts:type_name -> provisioner.v1.VolumeMount
-	0,  // 26: provisioner.v1.Candidate.fabric_scope:type_name -> provisioner.v1.FabricScope
-	1,  // 27: provisioner.v1.Candidate.fabric_source:type_name -> provisioner.v1.FabricSource
-	31, // 28: provisioner.v1.Candidate.attrs:type_name -> provisioner.v1.Candidate.AttrsEntry
-	4,  // 29: provisioner.v1.ProviderAnswer.outcome:type_name -> provisioner.v1.AnswerOutcome
-	16, // 30: provisioner.v1.ProviderAnswer.candidates:type_name -> provisioner.v1.Candidate
-	18, // 31: provisioner.v1.Comparability.gaps:type_name -> provisioner.v1.FactGap
-	16, // 32: provisioner.v1.Placement.winner:type_name -> provisioner.v1.Candidate
-	16, // 33: provisioner.v1.Placement.runners:type_name -> provisioner.v1.Candidate
-	17, // 34: provisioner.v1.Placement.answers:type_name -> provisioner.v1.ProviderAnswer
-	19, // 35: provisioner.v1.Placement.comparability:type_name -> provisioner.v1.Comparability
-	32, // 36: provisioner.v1.Volume.created_at:type_name -> google.protobuf.Timestamp
-	9,  // 37: provisioner.v1.ReplicaSpec.requirements:type_name -> provisioner.v1.ResourceRequirements
-	24, // 38: provisioner.v1.EngineNode.interconnect:type_name -> provisioner.v1.InterconnectHealth
-	7,  // 39: provisioner.v1.Engine.state:type_name -> provisioner.v1.EngineState
-	25, // 40: provisioner.v1.Engine.span:type_name -> provisioner.v1.EngineNode
-	32, // 41: provisioner.v1.Engine.registered_at:type_name -> google.protobuf.Timestamp
-	32, // 42: provisioner.v1.Engine.last_seen_at:type_name -> google.protobuf.Timestamp
-	32, // 43: provisioner.v1.Engine.lease_expires_at:type_name -> google.protobuf.Timestamp
-	33, // 44: provisioner.v1.Instance.MetadataEntry.value:type_name -> google.protobuf.Value
-	45, // [45:45] is the sub-list for method output_type
-	45, // [45:45] is the sub-list for method input_type
-	45, // [45:45] is the sub-list for extension type_name
-	45, // [45:45] is the sub-list for extension extendee
-	0,  // [0:45] is the sub-list for field type_name
+	33, // 18: provisioner.v1.Deployment.created_at:type_name -> google.protobuf.Timestamp
+	33, // 19: provisioner.v1.Deployment.started_at:type_name -> google.protobuf.Timestamp
+	33, // 20: provisioner.v1.Deployment.ready_at:type_name -> google.protobuf.Timestamp
+	33, // 21: provisioner.v1.Deployment.terminated_at:type_name -> google.protobuf.Timestamp
+	33, // 22: provisioner.v1.Deployment.last_activity_at:type_name -> google.protobuf.Timestamp
+	22, // 23: provisioner.v1.Deployment.upstream_auth:type_name -> provisioner.v1.UpstreamAuth
+	21, // 24: provisioner.v1.Deployment.parallelism:type_name -> provisioner.v1.Parallelism
+	24, // 25: provisioner.v1.Deployment.replica_specs:type_name -> provisioner.v1.ReplicaSpec
+	15, // 26: provisioner.v1.Deployment.mounts:type_name -> provisioner.v1.VolumeMount
+	0,  // 27: provisioner.v1.Candidate.fabric_scope:type_name -> provisioner.v1.FabricScope
+	1,  // 28: provisioner.v1.Candidate.fabric_source:type_name -> provisioner.v1.FabricSource
+	32, // 29: provisioner.v1.Candidate.attrs:type_name -> provisioner.v1.Candidate.AttrsEntry
+	4,  // 30: provisioner.v1.ProviderAnswer.outcome:type_name -> provisioner.v1.AnswerOutcome
+	16, // 31: provisioner.v1.ProviderAnswer.candidates:type_name -> provisioner.v1.Candidate
+	18, // 32: provisioner.v1.Comparability.gaps:type_name -> provisioner.v1.FactGap
+	16, // 33: provisioner.v1.Placement.winner:type_name -> provisioner.v1.Candidate
+	16, // 34: provisioner.v1.Placement.runners:type_name -> provisioner.v1.Candidate
+	17, // 35: provisioner.v1.Placement.answers:type_name -> provisioner.v1.ProviderAnswer
+	19, // 36: provisioner.v1.Placement.comparability:type_name -> provisioner.v1.Comparability
+	33, // 37: provisioner.v1.Volume.created_at:type_name -> google.protobuf.Timestamp
+	9,  // 38: provisioner.v1.ReplicaSpec.requirements:type_name -> provisioner.v1.ResourceRequirements
+	25, // 39: provisioner.v1.EngineNode.interconnect:type_name -> provisioner.v1.InterconnectHealth
+	7,  // 40: provisioner.v1.Engine.state:type_name -> provisioner.v1.EngineState
+	26, // 41: provisioner.v1.Engine.span:type_name -> provisioner.v1.EngineNode
+	33, // 42: provisioner.v1.Engine.registered_at:type_name -> google.protobuf.Timestamp
+	33, // 43: provisioner.v1.Engine.last_seen_at:type_name -> google.protobuf.Timestamp
+	33, // 44: provisioner.v1.Engine.lease_expires_at:type_name -> google.protobuf.Timestamp
+	34, // 45: provisioner.v1.Instance.MetadataEntry.value:type_name -> google.protobuf.Value
+	46, // [46:46] is the sub-list for method output_type
+	46, // [46:46] is the sub-list for method input_type
+	46, // [46:46] is the sub-list for extension type_name
+	46, // [46:46] is the sub-list for extension extendee
+	0,  // [0:46] is the sub-list for field type_name
 }
 
 func init() { file_provisioner_v1_types_proto_init() }
@@ -3460,7 +3549,7 @@ func file_provisioner_v1_types_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_provisioner_v1_types_proto_rawDesc), len(file_provisioner_v1_types_proto_rawDesc)),
 			NumEnums:      8,
-			NumMessages:   24,
+			NumMessages:   25,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

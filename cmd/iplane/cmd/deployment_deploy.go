@@ -44,6 +44,8 @@ var (
 	deployMinRAM          int32
 	deployMinDisk         int32
 	deployAuthEnv         string
+	deployTP              int32
+	deployPP              int32
 	deployAuthHeader      string
 	deployAuthPrefix      string
 	deployGPUCount        int32
@@ -197,6 +199,12 @@ func runDeploymentDeploy(cmd *cobra.Command, args []string) error {
 	// Only the NAME of the variable travels. The credential is read by the
 	// daemon at forward time, so it never reaches the state file or a
 	// DescribeDeployment response.
+	if deployTP > 0 || deployPP > 0 {
+		dep.Parallelism = &provisionerv1.Parallelism{
+			TensorParallelSize:   deployTP,
+			PipelineParallelSize: deployPP,
+		}
+	}
 	if deployAuthEnv != "" {
 		dep.UpstreamAuth = &provisionerv1.UpstreamAuth{
 			Header:      deployAuthHeader,
@@ -306,6 +314,8 @@ func init() {
 	f.StringVar(&deploySKU, "sku", "", `exact provider sku for auto-provisioning (bypasses the resolver)`)
 	f.Int32Var(&deployMinVRAM, "min-vram-gb", 0, `minimum VRAM per GPU for auto-provisioning, in GB`)
 	f.Int32Var(&deployMinRAM, "min-ram-gb", 0, `minimum system RAM for auto-provisioning, in GB`)
+	f.Int32Var(&deployTP, "tp", 0, `tensor-parallel size: cards one layer is sharded across. Must fit --gpu-count`)
+	f.Int32Var(&deployPP, "pp", 0, `pipeline-parallel size: stages the layers are split into. Must fit --gpu-count alongside --tp`)
 	f.StringVar(&deployAuthEnv, "upstream-auth-env", "", `name of the env var holding the credential the router presents to an attached engine (hosted APIs behind a gateway)`)
 	f.StringVar(&deployAuthHeader, "upstream-auth-header", "", `header to carry the credential (default Authorization)`)
 	f.StringVar(&deployAuthPrefix, "upstream-auth-prefix", "", `prefix joined to the credential (default "Bearer " when the header is Authorization)`)
