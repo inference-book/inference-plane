@@ -38,20 +38,39 @@ hasn't touched them since the common ancestor. Edit
 
 ## When a chapter is done
 
-Cut the release.
+Every chapter gets its own immutable tag. A release branch is retired
+only once its **last** chapter is done, and most versions cover several
+(v0.2 covers Ch 7-10, v0.3 covers Ch 11-12). Those are two different
+events and step 5 below is the one that distinguishes them. Freezing
+`release/v0.3` after Ch 11 would strand Ch 12 with no moving snapshot.
 
 1. Verify `pinned-versions.env` on the release branch carries the
    correct `CP_VERSION` / `CP_BRANCH`.
-2. Tag the release branch tip: `git tag vX.Y.0 release/vX.Y`.
-3. Push the tag: `git push origin vX.Y.0`. This fires
+2. Tag the release branch tip twice, with the version and with the
+   chapter: `git tag vX.Y.Z release/vX.Y && git tag chNN-final
+   release/vX.Y`. The version tag is the reader's checkout pointer and
+   the chapter tag is what `capabilities.yaml` and the chapter's
+   Capability Snapshot section both name. The first chapter of a version
+   takes `vX.Y.0`, each later chapter the next patch number: Ch 7 is
+   `v0.2.0`, Ch 8 `v0.2.1`, Ch 10 `v0.2.4`, Ch 11 `v0.3.0`.
+3. Push both tags. The version tag fires
    `.github/workflows/release.yml`, which cross-compiles
    `iplane-linux-{amd64,arm64}`, verifies the version stamp, and attaches
    the binaries plus `checksums.txt` to a GitHub Release.
-4. Stop forward-merging `main` into the now-cut release branch. The
-   branch is a maintained errata channel, not a moving snapshot, from
-   this point on.
-5. The next chapter's release branch (`release/v(X.Y+1)`) is cut from
-   `main` at this point and starts moving with the next chapter's work.
+4. Backfill the `chNN-final` entry in `capabilities.yaml` to `main`, so
+   the next chapter's entry is written on top of it rather than beside
+   it. The entry has to be committed on the release branch *before*
+   tagging, since the tag has to carry it; `main` gets it afterwards as
+   its own PR.
+5. If this was **not** the version's last chapter, keep forward-merging
+   `main` into the release branch. Only when the last chapter of the
+   version is done does the branch stop moving and become a maintained
+   errata channel, and only then is `release/v(X.Y+1)` cut from `main`.
+
+Consult the chapter-range table at the top to decide which case step 5
+is. Chapter tags are immutable in both cases: a chapter tag cut
+mid-version keeps pointing at the commit it was cut at, even though the
+branch under it moves on.
 
 **Why the release carries binaries.** The engine agent runs inside an
 engine container on a rented box and gets there by being fetched from a
