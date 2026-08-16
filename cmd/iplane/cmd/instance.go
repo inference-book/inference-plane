@@ -48,6 +48,7 @@ type provisionerClient interface {
 	GetInstanceSSHKey(context.Context, *provisionerv1.GetInstanceSSHKeyRequest) (*provisionerv1.GetInstanceSSHKeyResponse, error)
 	ListCandidates(context.Context, *provisionerv1.ListCandidatesRequest) (*provisionerv1.ListCandidatesResponse, error)
 	SelectPlacement(context.Context, *provisionerv1.SelectPlacementRequest) (*provisionerv1.SelectPlacementResponse, error)
+	ListVolumes(context.Context, *provisionerv1.ListVolumesRequest) (*provisionerv1.ListVolumesResponse, error)
 }
 
 // connectProvisionerClient adapts the generated connect-rpc client to
@@ -118,6 +119,14 @@ func (a *connectProvisionerClient) ListCandidates(ctx context.Context, req *prov
 
 func (a *connectProvisionerClient) SelectPlacement(ctx context.Context, req *provisionerv1.SelectPlacementRequest) (*provisionerv1.SelectPlacementResponse, error) {
 	resp, err := a.c.SelectPlacement(ctx, connect.NewRequest(req))
+	if err != nil {
+		return nil, err
+	}
+	return resp.Msg, nil
+}
+
+func (a *connectProvisionerClient) ListVolumes(ctx context.Context, req *provisionerv1.ListVolumesRequest) (*provisionerv1.ListVolumesResponse, error) {
+	resp, err := a.c.ListVolumes(ctx, connect.NewRequest(req))
 	if err != nil {
 		return nil, err
 	}

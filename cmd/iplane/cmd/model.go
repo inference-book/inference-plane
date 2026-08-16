@@ -8,6 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
 	"github.com/inference-book/inference-plane/internal/provisioners"
 	"github.com/inference-book/inference-plane/internal/provisioners/stores/file"
 )
@@ -90,14 +91,19 @@ var modelLsCmd = &cobra.Command{
 	Short: "List pinned cache volumes and the models staged on them",
 	Args:  cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		svc, err := buildPinService()
+		// The read verb, so it goes through the client rather than the
+		// pin path. Reading is not pinning, and refusing to list because a
+		// daemon is running was telling operators to stop their control
+		// plane to see what was staged (#307).
+		client, err := buildCapacityClient()
 		if err != nil {
 			return err
 		}
-		vols, err := svc.ListVolumes(cmd.Context(), lsProvider)
+		resp, err := client.ListVolumes(cmd.Context(), &provisionerv1.ListVolumesRequest{Provider: lsProvider})
 		if err != nil {
 			return err
 		}
+		vols := resp.GetVolumes()
 		if len(vols) == 0 {
 			fmt.Println("no pinned volumes")
 			return nil
@@ -137,10 +143,18 @@ var modelUnpinCmd = &cobra.Command{
 	},
 }
 
-// buildPinService opens the state store in-process and builds a Service
-// for the pin verbs. Mirrors buildDeploymentClient's in-process branch;
-// there is no --service-url path yet, so a running daemon's lock is a
-// hard stop (pin before serve).
+// buildPinService opens the state store in-process and takes the lifetime
+// lock, for the two verbs that write.
+//
+// No --service-url path, and the omission is deliberate rather than pending.
+// Pinning stages weights onto a volume by spinning a pod and blocking until
+// the download completes, which on a 70B is minutes; an RPC held open that
+// long meets the same write-timeout problem a cold deploy already has (see
+// CLAUDE.md on the three timeouts). Remote pin stays deferred rather than
+// arriving as a side effect of fixing a list command.
+//
+// `model ls` used to come through here and no longer does. It reads, so it
+// takes no lock and can reach a daemon (#307).
 func buildPinService() (*provisioners.Service, error) {
 	dir, err := resolveDeploymentStateDir()
 	if err != nil {
@@ -154,7 +168,7 @@ func buildPinService() (*provisioners.Service, error) {
 		var held *file.ErrLockHeld
 		if errors.As(err, &held) {
 			if held.HolderPID != 0 {
-				return nil, fmt.Errorf("iplane serve is running at PID %d (state %s); stop it and pin before serving", held.HolderPID, held.Path)
+				return nil, fmt.Errorf("iplane serve is running at PID %d (state %s); pinning stages weights and needs the state lock, so stop the daemon to pin. `iplane model ls` reads and works either way", held.HolderPID, held.Path)
 			}
 			return nil, fmt.Errorf("state directory %q is locked; stop the holder and pin before serving", held.Path)
 		}
@@ -166,6 +180,12 @@ func buildPinService() (*provisioners.Service, error) {
 func init() {
 	rootCmd.AddCommand(modelCmd)
 	modelCmd.AddCommand(modelPinCmd, modelLsCmd, modelUnpinCmd)
+
+	// Bound to the same variable the instance group uses, so one exported
+	// IPLANE_SERVICE_URL means the same thing everywhere. Only `ls` acts on
+	// it; pin and unpin write and stay in-process, and say so when refused.
+	modelCmd.PersistentFlags().StringVar(&instanceServiceURL, "service-url", os.Getenv("IPLANE_SERVICE_URL"),
+		`for 'model ls', read the registry from a running iplane serve (default $IPLANE_SERVICE_URL)`)
 
 	modelPinCmd.Flags().StringVar(&pinProvider, "provider", defaultProvider(provisioners.ProviderRunPod), "provider to stage the volume on")
 	modelPinCmd.Flags().StringVar(&pinRegion, "region", "", "datacenter/region for the volume (required)")

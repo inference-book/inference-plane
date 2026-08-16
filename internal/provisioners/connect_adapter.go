@@ -103,6 +103,15 @@ func (a *ConnectProvisionerAdapter) SelectPlacement(ctx context.Context, req *co
 	return connect.NewResponse(resp), nil
 }
 
+// ListVolumes satisfies the Connect handler for the pin registry.
+func (a *ConnectProvisionerAdapter) ListVolumes(ctx context.Context, req *connect.Request[provisionerv1.ListVolumesRequest]) (*connect.Response[provisionerv1.ListVolumesResponse], error) {
+	resp, err := a.svc.ListVolumes(ctx, req.Msg)
+	if err != nil {
+		return nil, statusToConnectErr(err)
+	}
+	return connect.NewResponse(resp), nil
+}
+
 // ConnectDeploymentAdapter wraps a gRPC DeploymentServiceServer
 // implementation (typically *Service) and exposes the
 // provisionerv1connect.DeploymentServiceHandler interface. Mirrors

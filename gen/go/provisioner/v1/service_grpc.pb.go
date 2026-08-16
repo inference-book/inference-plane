@@ -27,6 +27,7 @@ const (
 	ProvisionerService_GetInstanceSSHKey_FullMethodName    = "/provisioner.v1.ProvisionerService/GetInstanceSSHKey"
 	ProvisionerService_ListCandidates_FullMethodName       = "/provisioner.v1.ProvisionerService/ListCandidates"
 	ProvisionerService_SelectPlacement_FullMethodName      = "/provisioner.v1.ProvisionerService/SelectPlacement"
+	ProvisionerService_ListVolumes_FullMethodName          = "/provisioner.v1.ProvisionerService/ListVolumes"
 )
 
 // ProvisionerServiceClient is the client API for ProvisionerService service.
@@ -127,6 +128,21 @@ type ProvisionerServiceClient interface {
 	// so "cheapest across every configured provider" would quietly mean
 	// "cheapest across whatever this laptop can reach".
 	SelectPlacement(ctx context.Context, in *SelectPlacementRequest, opts ...grpc.CallOption) (*SelectPlacementResponse, error)
+	// ListVolumes returns the warm-cache pin registry: which volumes exist
+	// and which models are staged on each.
+	//
+	// An RPC because the daemon owns this state. Reading the file behind
+	// its back works, since writes land through an atomic rename and a
+	// reader can only be stale rather than torn, but stale is the wrong
+	// answer to give about a registry the daemon is actively writing.
+	//
+	// Only the read verb gets one. Pinning stages weights onto a volume by
+	// spinning a pod and blocking until the download finishes, which on a
+	// 70B is minutes, and an RPC held open that long runs into the same
+	// write-timeout problem a cold deploy already has. Remote pin stays
+	// deferred rather than arriving as a side effect of fixing a list
+	// command (#307).
+	ListVolumes(ctx context.Context, in *ListVolumesRequest, opts ...grpc.CallOption) (*ListVolumesResponse, error)
 }
 
 type provisionerServiceClient struct {
@@ -211,6 +227,16 @@ func (c *provisionerServiceClient) SelectPlacement(ctx context.Context, in *Sele
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(SelectPlacementResponse)
 	err := c.cc.Invoke(ctx, ProvisionerService_SelectPlacement_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *provisionerServiceClient) ListVolumes(ctx context.Context, in *ListVolumesRequest, opts ...grpc.CallOption) (*ListVolumesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListVolumesResponse)
+	err := c.cc.Invoke(ctx, ProvisionerService_ListVolumes_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -315,6 +341,21 @@ type ProvisionerServiceServer interface {
 	// so "cheapest across every configured provider" would quietly mean
 	// "cheapest across whatever this laptop can reach".
 	SelectPlacement(context.Context, *SelectPlacementRequest) (*SelectPlacementResponse, error)
+	// ListVolumes returns the warm-cache pin registry: which volumes exist
+	// and which models are staged on each.
+	//
+	// An RPC because the daemon owns this state. Reading the file behind
+	// its back works, since writes land through an atomic rename and a
+	// reader can only be stale rather than torn, but stale is the wrong
+	// answer to give about a registry the daemon is actively writing.
+	//
+	// Only the read verb gets one. Pinning stages weights onto a volume by
+	// spinning a pod and blocking until the download finishes, which on a
+	// 70B is minutes, and an RPC held open that long runs into the same
+	// write-timeout problem a cold deploy already has. Remote pin stays
+	// deferred rather than arriving as a side effect of fixing a list
+	// command (#307).
+	ListVolumes(context.Context, *ListVolumesRequest) (*ListVolumesResponse, error)
 }
 
 // UnimplementedProvisionerServiceServer should be embedded to have
@@ -347,6 +388,9 @@ func (UnimplementedProvisionerServiceServer) ListCandidates(context.Context, *Li
 }
 func (UnimplementedProvisionerServiceServer) SelectPlacement(context.Context, *SelectPlacementRequest) (*SelectPlacementResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method SelectPlacement not implemented")
+}
+func (UnimplementedProvisionerServiceServer) ListVolumes(context.Context, *ListVolumesRequest) (*ListVolumesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListVolumes not implemented")
 }
 func (UnimplementedProvisionerServiceServer) testEmbeddedByValue() {}
 
@@ -512,6 +556,24 @@ func _ProvisionerService_SelectPlacement_Handler(srv interface{}, ctx context.Co
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ProvisionerService_ListVolumes_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListVolumesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ProvisionerServiceServer).ListVolumes(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ProvisionerService_ListVolumes_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ProvisionerServiceServer).ListVolumes(ctx, req.(*ListVolumesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ProvisionerService_ServiceDesc is the grpc.ServiceDesc for ProvisionerService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -550,6 +612,10 @@ var ProvisionerService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "SelectPlacement",
 			Handler:    _ProvisionerService_SelectPlacement_Handler,
+		},
+		{
+			MethodName: "ListVolumes",
+			Handler:    _ProvisionerService_ListVolumes_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

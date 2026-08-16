@@ -61,6 +61,9 @@ const (
 	// ProvisionerServiceSelectPlacementProcedure is the fully-qualified name of the
 	// ProvisionerService's SelectPlacement RPC.
 	ProvisionerServiceSelectPlacementProcedure = "/provisioner.v1.ProvisionerService/SelectPlacement"
+	// ProvisionerServiceListVolumesProcedure is the fully-qualified name of the ProvisionerService's
+	// ListVolumes RPC.
+	ProvisionerServiceListVolumesProcedure = "/provisioner.v1.ProvisionerService/ListVolumes"
 	// DeploymentServiceCreateDeploymentProcedure is the fully-qualified name of the DeploymentService's
 	// CreateDeployment RPC.
 	DeploymentServiceCreateDeploymentProcedure = "/provisioner.v1.DeploymentService/CreateDeployment"
@@ -173,6 +176,21 @@ type ProvisionerServiceClient interface {
 	// so "cheapest across every configured provider" would quietly mean
 	// "cheapest across whatever this laptop can reach".
 	SelectPlacement(context.Context, *connect.Request[v1.SelectPlacementRequest]) (*connect.Response[v1.SelectPlacementResponse], error)
+	// ListVolumes returns the warm-cache pin registry: which volumes exist
+	// and which models are staged on each.
+	//
+	// An RPC because the daemon owns this state. Reading the file behind
+	// its back works, since writes land through an atomic rename and a
+	// reader can only be stale rather than torn, but stale is the wrong
+	// answer to give about a registry the daemon is actively writing.
+	//
+	// Only the read verb gets one. Pinning stages weights onto a volume by
+	// spinning a pod and blocking until the download finishes, which on a
+	// 70B is minutes, and an RPC held open that long runs into the same
+	// write-timeout problem a cold deploy already has. Remote pin stays
+	// deferred rather than arriving as a side effect of fixing a list
+	// command (#307).
+	ListVolumes(context.Context, *connect.Request[v1.ListVolumesRequest]) (*connect.Response[v1.ListVolumesResponse], error)
 }
 
 // NewProvisionerServiceClient constructs a client for the provisioner.v1.ProvisionerService
@@ -234,6 +252,12 @@ func NewProvisionerServiceClient(httpClient connect.HTTPClient, baseURL string, 
 			connect.WithSchema(provisionerServiceMethods.ByName("SelectPlacement")),
 			connect.WithClientOptions(opts...),
 		),
+		listVolumes: connect.NewClient[v1.ListVolumesRequest, v1.ListVolumesResponse](
+			httpClient,
+			baseURL+ProvisionerServiceListVolumesProcedure,
+			connect.WithSchema(provisionerServiceMethods.ByName("ListVolumes")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -247,6 +271,7 @@ type provisionerServiceClient struct {
 	getInstanceSSHKey    *connect.Client[v1.GetInstanceSSHKeyRequest, v1.GetInstanceSSHKeyResponse]
 	listCandidates       *connect.Client[v1.ListCandidatesRequest, v1.ListCandidatesResponse]
 	selectPlacement      *connect.Client[v1.SelectPlacementRequest, v1.SelectPlacementResponse]
+	listVolumes          *connect.Client[v1.ListVolumesRequest, v1.ListVolumesResponse]
 }
 
 // CreateInstance calls provisioner.v1.ProvisionerService.CreateInstance.
@@ -287,6 +312,11 @@ func (c *provisionerServiceClient) ListCandidates(ctx context.Context, req *conn
 // SelectPlacement calls provisioner.v1.ProvisionerService.SelectPlacement.
 func (c *provisionerServiceClient) SelectPlacement(ctx context.Context, req *connect.Request[v1.SelectPlacementRequest]) (*connect.Response[v1.SelectPlacementResponse], error) {
 	return c.selectPlacement.CallUnary(ctx, req)
+}
+
+// ListVolumes calls provisioner.v1.ProvisionerService.ListVolumes.
+func (c *provisionerServiceClient) ListVolumes(ctx context.Context, req *connect.Request[v1.ListVolumesRequest]) (*connect.Response[v1.ListVolumesResponse], error) {
+	return c.listVolumes.CallUnary(ctx, req)
 }
 
 // ProvisionerServiceHandler is an implementation of the provisioner.v1.ProvisionerService service.
@@ -366,6 +396,21 @@ type ProvisionerServiceHandler interface {
 	// so "cheapest across every configured provider" would quietly mean
 	// "cheapest across whatever this laptop can reach".
 	SelectPlacement(context.Context, *connect.Request[v1.SelectPlacementRequest]) (*connect.Response[v1.SelectPlacementResponse], error)
+	// ListVolumes returns the warm-cache pin registry: which volumes exist
+	// and which models are staged on each.
+	//
+	// An RPC because the daemon owns this state. Reading the file behind
+	// its back works, since writes land through an atomic rename and a
+	// reader can only be stale rather than torn, but stale is the wrong
+	// answer to give about a registry the daemon is actively writing.
+	//
+	// Only the read verb gets one. Pinning stages weights onto a volume by
+	// spinning a pod and blocking until the download finishes, which on a
+	// 70B is minutes, and an RPC held open that long runs into the same
+	// write-timeout problem a cold deploy already has. Remote pin stays
+	// deferred rather than arriving as a side effect of fixing a list
+	// command (#307).
+	ListVolumes(context.Context, *connect.Request[v1.ListVolumesRequest]) (*connect.Response[v1.ListVolumesResponse], error)
 }
 
 // NewProvisionerServiceHandler builds an HTTP handler from the service implementation. It returns
@@ -423,6 +468,12 @@ func NewProvisionerServiceHandler(svc ProvisionerServiceHandler, opts ...connect
 		connect.WithSchema(provisionerServiceMethods.ByName("SelectPlacement")),
 		connect.WithHandlerOptions(opts...),
 	)
+	provisionerServiceListVolumesHandler := connect.NewUnaryHandler(
+		ProvisionerServiceListVolumesProcedure,
+		svc.ListVolumes,
+		connect.WithSchema(provisionerServiceMethods.ByName("ListVolumes")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/provisioner.v1.ProvisionerService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case ProvisionerServiceCreateInstanceProcedure:
@@ -441,6 +492,8 @@ func NewProvisionerServiceHandler(svc ProvisionerServiceHandler, opts ...connect
 			provisionerServiceListCandidatesHandler.ServeHTTP(w, r)
 		case ProvisionerServiceSelectPlacementProcedure:
 			provisionerServiceSelectPlacementHandler.ServeHTTP(w, r)
+		case ProvisionerServiceListVolumesProcedure:
+			provisionerServiceListVolumesHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -480,6 +533,10 @@ func (UnimplementedProvisionerServiceHandler) ListCandidates(context.Context, *c
 
 func (UnimplementedProvisionerServiceHandler) SelectPlacement(context.Context, *connect.Request[v1.SelectPlacementRequest]) (*connect.Response[v1.SelectPlacementResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("provisioner.v1.ProvisionerService.SelectPlacement is not implemented"))
+}
+
+func (UnimplementedProvisionerServiceHandler) ListVolumes(context.Context, *connect.Request[v1.ListVolumesRequest]) (*connect.Response[v1.ListVolumesResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("provisioner.v1.ProvisionerService.ListVolumes is not implemented"))
 }
 
 // DeploymentServiceClient is a client for the provisioner.v1.DeploymentService service.
