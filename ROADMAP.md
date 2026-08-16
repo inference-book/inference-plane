@@ -186,6 +186,33 @@ These are not features of any single version but design properties that should b
 
 ---
 
+## Build only what can be tried on real hardware
+
+A capability iplane cannot exercise against a real provider does not go in, and
+the reason is the book rather than the code. Every chapter closes on something
+a reader can run. A control-plane feature that can only ever be demonstrated
+against a mock is a claim the book makes and cannot support, and a reader who
+tries it on a rented box and finds nothing happens has been taught something
+false.
+
+Mocks are fine as scaffolding for a capability that IS exercisable: `mock-engine`
+keeps the routing and fleet demos free, and the real thing has been run. The
+test is whether a real provider can be made to produce the behaviour at all, not
+whether every demo spends money.
+
+Two named consequences, both currently blocked on the market rather than on
+effort:
+
+- **Multi-node pools as one deployment member (issue 212).** No commodity vendor
+  sells a cross-node pool through an API, so a pool could be modelled and never
+  rented. Ch 10's span column stays degenerate and Ch 11 opens on exactly this
+  gap, which is the honest position: the requirement is expressible and gets
+  refused. Revisit when a vendor sells one.
+- **Reclaim notice (issue 289).** No vendor publishes an impending-reclaim
+  signal, and a reclaim cannot be induced on demand, so an implementation could
+  not be validated against the event it exists to catch. The re-placement half
+  it feeds shipped as issue 290 and is exercisable.
+
 ## Explicitly out of scope
 
 Recorded so we (and readers) know we considered them and chose not to build them:
