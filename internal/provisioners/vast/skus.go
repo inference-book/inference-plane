@@ -34,7 +34,6 @@ type SKUSpec struct {
 	DisplayName        string  // human-readable name; matches the gpu_name returned by list/get
 	VRAMGb             int     // GPU memory per card
 	DefaultSystemRAMGb int     // system RAM for a typical single-GPU host with this SKU
-	DefaultDiskGb      int     // typical disk allocation default for this tier
 	PriceUSDPerHour    float64 // marketplace floor at cataloging; for ordering, not authoritative
 
 	// WireName is the gpu_name Vast actually filters on, when it differs from
@@ -87,37 +86,37 @@ type SKUSpec struct {
 // against that offer id.
 var skus = []SKUSpec{
 	// Small (>=24 GB VRAM): consumer + entry datacenter.
-	{GpuName: "RTX_3090", DisplayName: "RTX 3090", VRAMGb: 24, DefaultSystemRAMGb: 32, DefaultDiskGb: 20, PriceUSDPerHour: 0.20, Family: fabric.FamilyRTX3090},
-	{GpuName: "RTX_4090", DisplayName: "RTX 4090", VRAMGb: 24, DefaultSystemRAMGb: 32, DefaultDiskGb: 20, PriceUSDPerHour: 0.30, Family: fabric.FamilyRTX4090},
-	{GpuName: "RTX_A5000", DisplayName: "RTX A5000", VRAMGb: 24, DefaultSystemRAMGb: 32, DefaultDiskGb: 20, PriceUSDPerHour: 0.28, Family: fabric.FamilyA5000},
-	{GpuName: "L4", DisplayName: "L4", VRAMGb: 24, DefaultSystemRAMGb: 32, DefaultDiskGb: 20, PriceUSDPerHour: 0.40, Family: fabric.FamilyL4},
-	{GpuName: "RTX_5090", DisplayName: "RTX 5090", VRAMGb: 32, DefaultSystemRAMGb: 32, DefaultDiskGb: 20, PriceUSDPerHour: 0.55, Family: fabric.FamilyRTX5090},
+	{GpuName: "RTX_3090", DisplayName: "RTX 3090", VRAMGb: 24, DefaultSystemRAMGb: 32, PriceUSDPerHour: 0.20, Family: fabric.FamilyRTX3090},
+	{GpuName: "RTX_4090", DisplayName: "RTX 4090", VRAMGb: 24, DefaultSystemRAMGb: 32, PriceUSDPerHour: 0.30, Family: fabric.FamilyRTX4090},
+	{GpuName: "RTX_A5000", DisplayName: "RTX A5000", VRAMGb: 24, DefaultSystemRAMGb: 32, PriceUSDPerHour: 0.28, Family: fabric.FamilyA5000},
+	{GpuName: "L4", DisplayName: "L4", VRAMGb: 24, DefaultSystemRAMGb: 32, PriceUSDPerHour: 0.40, Family: fabric.FamilyL4},
+	{GpuName: "RTX_5090", DisplayName: "RTX 5090", VRAMGb: 32, DefaultSystemRAMGb: 32, PriceUSDPerHour: 0.55, Family: fabric.FamilyRTX5090},
 
 	// Medium (>=40 GB VRAM): workstation / mid-datacenter.
-	{GpuName: "A40", DisplayName: "A40", VRAMGb: 48, DefaultSystemRAMGb: 48, DefaultDiskGb: 40, PriceUSDPerHour: 0.40, Family: fabric.FamilyA40},
-	{GpuName: "L40", DisplayName: "L40", VRAMGb: 48, DefaultSystemRAMGb: 48, DefaultDiskGb: 40, PriceUSDPerHour: 0.65, Family: fabric.FamilyL40},
-	{GpuName: "L40S", DisplayName: "L40S", VRAMGb: 48, DefaultSystemRAMGb: 48, DefaultDiskGb: 40, PriceUSDPerHour: 0.75, Family: fabric.FamilyL40S},
-	{GpuName: "RTX_A6000", DisplayName: "RTX A6000", VRAMGb: 48, DefaultSystemRAMGb: 48, DefaultDiskGb: 40, PriceUSDPerHour: 0.70, Family: fabric.FamilyA6000},
-	{GpuName: "RTX_6000Ada", DisplayName: "RTX 6000 Ada", VRAMGb: 48, DefaultSystemRAMGb: 64, DefaultDiskGb: 40, PriceUSDPerHour: 0.90, Family: fabric.FamilyRTX6000Ada},
+	{GpuName: "A40", DisplayName: "A40", VRAMGb: 48, DefaultSystemRAMGb: 48, PriceUSDPerHour: 0.40, Family: fabric.FamilyA40},
+	{GpuName: "L40", DisplayName: "L40", VRAMGb: 48, DefaultSystemRAMGb: 48, PriceUSDPerHour: 0.65, Family: fabric.FamilyL40},
+	{GpuName: "L40S", DisplayName: "L40S", VRAMGb: 48, DefaultSystemRAMGb: 48, PriceUSDPerHour: 0.75, Family: fabric.FamilyL40S},
+	{GpuName: "RTX_A6000", DisplayName: "RTX A6000", VRAMGb: 48, DefaultSystemRAMGb: 48, PriceUSDPerHour: 0.70, Family: fabric.FamilyA6000},
+	{GpuName: "RTX_6000Ada", DisplayName: "RTX 6000 Ada", VRAMGb: 48, DefaultSystemRAMGb: 64, PriceUSDPerHour: 0.90, Family: fabric.FamilyRTX6000Ada},
 
 	// A100 40 GB. Same wire gpu_name as the 80 GB rows below, distinguished by
 	// the VRAM band. Cheaper, and at the time of cataloging (2026-08) the 40 GB
 	// tier carried most of the healthy multi-GPU A100 capacity on the
 	// marketplace while the 80 GB NVLink tier was nearly all broken or
 	// low-reliability, so this is the tier a 4-GPU A100 request usually wants.
-	{GpuName: "A100_PCIE_40GB", WireName: "A100_PCIE", DisplayName: "A100 PCIE", VRAMGb: 40, VRAMMaxGb: 40, DefaultSystemRAMGb: 96, DefaultDiskGb: 60, PriceUSDPerHour: 0.80, Family: fabric.FamilyA100PCIe},
-	{GpuName: "A100_SXM4_40GB", WireName: "A100_SXM4", DisplayName: "A100 SXM4", VRAMGb: 40, VRAMMaxGb: 40, DefaultSystemRAMGb: 96, DefaultDiskGb: 60, PriceUSDPerHour: 0.90, Family: fabric.FamilyA100SXM},
+	{GpuName: "A100_PCIE_40GB", WireName: "A100_PCIE", DisplayName: "A100 PCIE", VRAMGb: 40, VRAMMaxGb: 40, DefaultSystemRAMGb: 96, PriceUSDPerHour: 0.80, Family: fabric.FamilyA100PCIe},
+	{GpuName: "A100_SXM4_40GB", WireName: "A100_SXM4", DisplayName: "A100 SXM4", VRAMGb: 40, VRAMMaxGb: 40, DefaultSystemRAMGb: 96, PriceUSDPerHour: 0.90, Family: fabric.FamilyA100SXM},
 
 	// Large (>=80 GB VRAM): 70B-class inference territory.
-	{GpuName: "A100_PCIE", DisplayName: "A100 PCIE", VRAMGb: 80, DefaultSystemRAMGb: 128, DefaultDiskGb: 60, PriceUSDPerHour: 1.20, Family: fabric.FamilyA100PCIe},
-	{GpuName: "A100_SXM4", DisplayName: "A100 SXM4", VRAMGb: 80, DefaultSystemRAMGb: 128, DefaultDiskGb: 60, PriceUSDPerHour: 1.30, Family: fabric.FamilyA100SXM},
-	{GpuName: "H100_PCIE", DisplayName: "H100 PCIE", VRAMGb: 80, DefaultSystemRAMGb: 128, DefaultDiskGb: 60, PriceUSDPerHour: 1.80, Family: fabric.FamilyH100PCIe},
-	{GpuName: "H100_SXM", DisplayName: "H100 SXM", VRAMGb: 80, DefaultSystemRAMGb: 192, DefaultDiskGb: 60, PriceUSDPerHour: 2.00, Family: fabric.FamilyH100SXM},
+	{GpuName: "A100_PCIE", DisplayName: "A100 PCIE", VRAMGb: 80, DefaultSystemRAMGb: 128, PriceUSDPerHour: 1.20, Family: fabric.FamilyA100PCIe},
+	{GpuName: "A100_SXM4", DisplayName: "A100 SXM4", VRAMGb: 80, DefaultSystemRAMGb: 128, PriceUSDPerHour: 1.30, Family: fabric.FamilyA100SXM},
+	{GpuName: "H100_PCIE", DisplayName: "H100 PCIE", VRAMGb: 80, DefaultSystemRAMGb: 128, PriceUSDPerHour: 1.80, Family: fabric.FamilyH100PCIe},
+	{GpuName: "H100_SXM", DisplayName: "H100 SXM", VRAMGb: 80, DefaultSystemRAMGb: 192, PriceUSDPerHour: 2.00, Family: fabric.FamilyH100SXM},
 
 	// XL (>=94 GB VRAM): frontier / multi-tenant.
-	{GpuName: "H100_NVL", DisplayName: "H100 NVL", VRAMGb: 94, DefaultSystemRAMGb: 192, DefaultDiskGb: 100, PriceUSDPerHour: 2.30, Family: fabric.FamilyH100NVL},
-	{GpuName: "H200", DisplayName: "H200", VRAMGb: 141, DefaultSystemRAMGb: 256, DefaultDiskGb: 100, PriceUSDPerHour: 3.20, Family: fabric.FamilyH200SXM},
-	{GpuName: "B200", DisplayName: "B200", VRAMGb: 192, DefaultSystemRAMGb: 256, DefaultDiskGb: 100, PriceUSDPerHour: 4.80, Family: fabric.FamilyB200},
+	{GpuName: "H100_NVL", DisplayName: "H100 NVL", VRAMGb: 94, DefaultSystemRAMGb: 192, PriceUSDPerHour: 2.30, Family: fabric.FamilyH100NVL},
+	{GpuName: "H200", DisplayName: "H200", VRAMGb: 141, DefaultSystemRAMGb: 256, PriceUSDPerHour: 3.20, Family: fabric.FamilyH200SXM},
+	{GpuName: "B200", DisplayName: "B200", VRAMGb: 192, DefaultSystemRAMGb: 256, PriceUSDPerHour: 4.80, Family: fabric.FamilyB200},
 }
 
 // MaxSKUsPerRequest caps the SKUs the resolver will try when no
@@ -139,8 +138,8 @@ const MaxSKUsPerRequest = skucatalog.MaxResults
 // filtering on the estimate can only wrongly exclude, which is the same
 // reasoning that removed the disk filter.
 //
-// DefaultDiskGb is not a fact
-// a catalog row bounds, so it must never filter (#281). WireName and VRAMMaxGb
+// There is no disk figure on SKUSpec at all, because disk is not a fact a
+// catalog row bounds and must never filter (#281, #285). WireName and VRAMMaxGb
 // are offer-level concerns: they disambiguate two physical cards sold under
 // one gpu_name, which is settled by the VRAM floor and ceiling findOffer
 // pushes into the search, not by which catalog rows are candidates.

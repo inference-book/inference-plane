@@ -31,7 +31,6 @@ type SKUSpec struct {
 	GpuTypeID          string  // RunPod's literal gpuTypeId string
 	VRAMGb             int     // GPU memory per card
 	DefaultSystemRAMGb int     // system RAM for a typical single-GPU pod with this SKU
-	DefaultDiskGb      int     // typical container-disk default for this tier
 	PriceUSDPerHour    float64 // cheapest cloud tier price; for ordering, not authoritative
 
 	// Family maps this SKU onto the cross-provider fabric catalog.
@@ -64,31 +63,31 @@ type SKUSpec struct {
 // list in the problems field, which is enough to update the catalog.
 var skus = []SKUSpec{
 	// Small (>=24 GB VRAM): consumer + entry datacenter.
-	{GpuTypeID: "NVIDIA GeForce RTX 4090", VRAMGb: 24, DefaultSystemRAMGb: 16, DefaultDiskGb: 20, PriceUSDPerHour: 0.39, Family: fabric.FamilyRTX4090},
-	{GpuTypeID: "NVIDIA RTX A5000", VRAMGb: 24, DefaultSystemRAMGb: 24, DefaultDiskGb: 20, PriceUSDPerHour: 0.36, Family: fabric.FamilyA5000},
-	{GpuTypeID: "NVIDIA L4", VRAMGb: 24, DefaultSystemRAMGb: 24, DefaultDiskGb: 20, PriceUSDPerHour: 0.43, Family: fabric.FamilyL4},
+	{GpuTypeID: "NVIDIA GeForce RTX 4090", VRAMGb: 24, DefaultSystemRAMGb: 16, PriceUSDPerHour: 0.39, Family: fabric.FamilyRTX4090},
+	{GpuTypeID: "NVIDIA RTX A5000", VRAMGb: 24, DefaultSystemRAMGb: 24, PriceUSDPerHour: 0.36, Family: fabric.FamilyA5000},
+	{GpuTypeID: "NVIDIA L4", VRAMGb: 24, DefaultSystemRAMGb: 24, PriceUSDPerHour: 0.43, Family: fabric.FamilyL4},
 	// "NVIDIA A30" was retired from RunPod's REST enum (confirmed 2026-07-27:
 	// a create with it in gpuTypeIds 400s with the full enum, A30 absent).
 	// Any min_vram_gb<=24 request included it in the top-5 and failed whole.
-	{GpuTypeID: "NVIDIA GeForce RTX 5090", VRAMGb: 32, DefaultSystemRAMGb: 24, DefaultDiskGb: 20, PriceUSDPerHour: 0.69, Family: fabric.FamilyRTX5090},
+	{GpuTypeID: "NVIDIA GeForce RTX 5090", VRAMGb: 32, DefaultSystemRAMGb: 24, PriceUSDPerHour: 0.69, Family: fabric.FamilyRTX5090},
 
 	// Medium (>=40 GB VRAM): workstation / mid-datacenter.
-	{GpuTypeID: "NVIDIA A40", VRAMGb: 48, DefaultSystemRAMGb: 32, DefaultDiskGb: 40, PriceUSDPerHour: 0.39, Family: fabric.FamilyA40},
-	{GpuTypeID: "NVIDIA L40", VRAMGb: 48, DefaultSystemRAMGb: 32, DefaultDiskGb: 40, PriceUSDPerHour: 0.69, Family: fabric.FamilyL40},
-	{GpuTypeID: "NVIDIA L40S", VRAMGb: 48, DefaultSystemRAMGb: 32, DefaultDiskGb: 40, PriceUSDPerHour: 0.79, Family: fabric.FamilyL40S},
-	{GpuTypeID: "NVIDIA RTX A6000", VRAMGb: 48, DefaultSystemRAMGb: 32, DefaultDiskGb: 40, PriceUSDPerHour: 0.79, Family: fabric.FamilyA6000},
-	{GpuTypeID: "NVIDIA RTX 6000 Ada Generation", VRAMGb: 48, DefaultSystemRAMGb: 48, DefaultDiskGb: 40, PriceUSDPerHour: 0.99, Family: fabric.FamilyRTX6000Ada},
+	{GpuTypeID: "NVIDIA A40", VRAMGb: 48, DefaultSystemRAMGb: 32, PriceUSDPerHour: 0.39, Family: fabric.FamilyA40},
+	{GpuTypeID: "NVIDIA L40", VRAMGb: 48, DefaultSystemRAMGb: 32, PriceUSDPerHour: 0.69, Family: fabric.FamilyL40},
+	{GpuTypeID: "NVIDIA L40S", VRAMGb: 48, DefaultSystemRAMGb: 32, PriceUSDPerHour: 0.79, Family: fabric.FamilyL40S},
+	{GpuTypeID: "NVIDIA RTX A6000", VRAMGb: 48, DefaultSystemRAMGb: 32, PriceUSDPerHour: 0.79, Family: fabric.FamilyA6000},
+	{GpuTypeID: "NVIDIA RTX 6000 Ada Generation", VRAMGb: 48, DefaultSystemRAMGb: 48, PriceUSDPerHour: 0.99, Family: fabric.FamilyRTX6000Ada},
 
 	// Large (>=80 GB VRAM): 70B-class inference territory.
-	{GpuTypeID: "NVIDIA A100 80GB PCIe", VRAMGb: 80, DefaultSystemRAMGb: 96, DefaultDiskGb: 60, PriceUSDPerHour: 1.69, Family: fabric.FamilyA100PCIe},
-	{GpuTypeID: "NVIDIA A100-SXM4-80GB", VRAMGb: 80, DefaultSystemRAMGb: 96, DefaultDiskGb: 60, PriceUSDPerHour: 1.79, Family: fabric.FamilyA100SXM},
-	{GpuTypeID: "NVIDIA H100 PCIe", VRAMGb: 80, DefaultSystemRAMGb: 128, DefaultDiskGb: 60, PriceUSDPerHour: 2.39, Family: fabric.FamilyH100PCIe},
-	{GpuTypeID: "NVIDIA H100 80GB HBM3", VRAMGb: 80, DefaultSystemRAMGb: 128, DefaultDiskGb: 60, PriceUSDPerHour: 2.49, Family: fabric.FamilyH100SXM},
+	{GpuTypeID: "NVIDIA A100 80GB PCIe", VRAMGb: 80, DefaultSystemRAMGb: 96, PriceUSDPerHour: 1.69, Family: fabric.FamilyA100PCIe},
+	{GpuTypeID: "NVIDIA A100-SXM4-80GB", VRAMGb: 80, DefaultSystemRAMGb: 96, PriceUSDPerHour: 1.79, Family: fabric.FamilyA100SXM},
+	{GpuTypeID: "NVIDIA H100 PCIe", VRAMGb: 80, DefaultSystemRAMGb: 128, PriceUSDPerHour: 2.39, Family: fabric.FamilyH100PCIe},
+	{GpuTypeID: "NVIDIA H100 80GB HBM3", VRAMGb: 80, DefaultSystemRAMGb: 128, PriceUSDPerHour: 2.49, Family: fabric.FamilyH100SXM},
 
 	// XL (>=94 GB VRAM): frontier / 400B-class multi-host.
-	{GpuTypeID: "NVIDIA H100 NVL", VRAMGb: 94, DefaultSystemRAMGb: 128, DefaultDiskGb: 100, PriceUSDPerHour: 2.99, Family: fabric.FamilyH100NVL},
-	{GpuTypeID: "NVIDIA H200", VRAMGb: 141, DefaultSystemRAMGb: 192, DefaultDiskGb: 100, PriceUSDPerHour: 3.99, Family: fabric.FamilyH200SXM},
-	{GpuTypeID: "NVIDIA B200", VRAMGb: 192, DefaultSystemRAMGb: 256, DefaultDiskGb: 100, PriceUSDPerHour: 5.99, Family: fabric.FamilyB200},
+	{GpuTypeID: "NVIDIA H100 NVL", VRAMGb: 94, DefaultSystemRAMGb: 128, PriceUSDPerHour: 2.99, Family: fabric.FamilyH100NVL},
+	{GpuTypeID: "NVIDIA H200", VRAMGb: 141, DefaultSystemRAMGb: 192, PriceUSDPerHour: 3.99, Family: fabric.FamilyH200SXM},
+	{GpuTypeID: "NVIDIA B200", VRAMGb: 192, DefaultSystemRAMGb: 256, PriceUSDPerHour: 5.99, Family: fabric.FamilyB200},
 }
 
 // Class-to-constraint-defaults lives in the service layer
@@ -118,9 +117,9 @@ var skus = []SKUSpec{
 const MaxSKUsPerRequest = skucatalog.MaxResults
 
 // catalogEntries projects the RunPod catalog onto the shared resolver's fact
-// set. DefaultDiskGb is deliberately absent: disk is an independent create
-// param sized from min_disk_gb by the deployer, so it is not a fact a catalog
-// row bounds and must never filter (#281).
+// set. There is no disk figure here, and there is none on SKUSpec either:
+// disk is an independent create param sized from min_disk_gb by the deployer,
+// so it is not a fact a catalog row bounds and must never filter (#281, #285).
 //
 // System RAM DOES cross over, because RunPod is the one provider that can
 // neither let an operator select it nor report it per candidate. It comes with
