@@ -675,3 +675,8 @@ func failedf(emit func(provisioners.DeployStateUpdate), phase string, err error)
 
 // Compile-time check: *Provider satisfies the Deployer capability.
 var _ provisioners.Deployer = (*Provider)(nil)
+
+// AttachesMounts implements provisioners.MountAttacher. RunPod maps a
+// mount's volume_id onto networkVolumeId at rent time, which is what
+// makes `iplane model pin` pay off on this provider.
+func (p *Provider) AttachesMounts() bool { return true }

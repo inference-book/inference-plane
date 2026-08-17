@@ -81,6 +81,18 @@ Machine-scoped, not datacenter-scoped like RunPod's (`POST /api/v0/volumes/`
 returns `Invalid machine id`), so `iplane model pin` does not port over as-is.
 Issue #254.
 
+The deployer does not read `Deployment.mounts` and does not pretend to. It
+declares nothing for `provisioners.MountAttacher`, which is how
+`CreateDeployment` knows to refuse a mount aimed here rather than accept one
+and drop it. That drop was the real bug: the deploy downloaded the model and
+was still labelled `storage_tier=warm`, because the label is derived from the
+mount being requested rather than from it being attached.
+
+If Vast ever does learn to attach one, the seam is the `env` map `rentEngine`
+already uses to pass docker run options (`-p 8000:8000` is set that way), so a
+`host_path` bind would ride the same channel and sidestep machine-scoping
+entirely. Unverified on a real rental, which is why it is not here.
+
 ## Agent delivery
 
 The cheapest of the three paths, and the last to get one. RunPod needs an
