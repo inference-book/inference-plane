@@ -11,6 +11,7 @@ import (
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
 	"github.com/inference-book/inference-plane/internal/provisioners"
 	"github.com/inference-book/inference-plane/internal/provisioners/fabric"
+	"github.com/inference-book/inference-plane/internal/provisioners/skucatalog"
 )
 
 // Candidates satisfies provisioners.CandidateSource.
@@ -96,12 +97,14 @@ func (p *Provider) Candidates(ctx context.Context, reqs *provisionerv1.ResourceR
 // looks at. An uncatalogued shape therefore reports 0 rather than a guess.
 func typeToCandidate(name string, it *instanceTypeBlock, region string) *provisioners.Candidate {
 	var (
-		family fabric.Family
-		vramGb int
+		family     fabric.Family
+		vramGb     int
+		exactBytes int64
 	)
 	if spec := LookupSKU(name); spec != nil {
 		family = spec.Family
 		vramGb = spec.VRAMGb
+		exactBytes = skucatalog.ExactVRAMBytes(spec.VRAMGb)
 	}
 
 	res := fabric.Resolve(fabric.Observation{Family: family})
@@ -114,6 +117,7 @@ func typeToCandidate(name string, it *instanceTypeBlock, region string) *provisi
 		PriceUsdPerHour:  float64(it.PriceCentsPerHour) / 100,
 		GpuCount:         int32(it.Specs.GPUs),
 		VramGbPerGpu:     int32(vramGb),
+		VramBytesPerGpu:  exactBytes,
 		Architecture:     provisioners.NormalizeArch(it.Architecture),
 		FabricScope:      res.Scope,
 		FabricSource:     res.Source,

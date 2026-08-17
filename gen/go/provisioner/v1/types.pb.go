@@ -1993,7 +1993,17 @@ type Candidate struct {
 	// a way nobody can see.
 	PriceUsdPerHour float64 `protobuf:"fixed64,6,opt,name=price_usd_per_hour,json=priceUsdPerHour,proto3" json:"price_usd_per_hour,omitempty"`
 	GpuCount        int32   `protobuf:"varint,7,opt,name=gpu_count,json=gpuCount,proto3" json:"gpu_count,omitempty"`
-	VramGbPerGpu    int32   `protobuf:"varint,8,opt,name=vram_gb_per_gpu,json=vramGbPerGpu,proto3" json:"vram_gb_per_gpu,omitempty"`
+	// vram_gb_per_gpu is the ADVERTISED per-card memory, as the provider
+	// reports it or the catalog labels it. It is a filter input, not a
+	// measurement, and it is deliberately tolerant: the three adapters
+	// disagree by a gigabyte on the same physical card, because a
+	// marketplace of self-reporting hosts needs a floor generous enough
+	// not to reject machines that are fine (#283).
+	//
+	// Do not size a model against it. Tolerance and accounting want
+	// opposite error directions, and this field is tuned for the first.
+	// Use vram_bytes_per_gpu.
+	VramGbPerGpu int32 `protobuf:"varint,8,opt,name=vram_gb_per_gpu,json=vramGbPerGpu,proto3" json:"vram_gb_per_gpu,omitempty"`
 	// architecture is the host CPU architecture, normalized ("amd64",
 	// "arm64"), empty where unreported. Typed rather than a provider
 	// attr because it decides whether a deploy works at all: an arm64
@@ -2022,9 +2032,19 @@ type Candidate struct {
 	// compared against another vendor's record and must never feed a
 	// ranking. A fact that matters on a second provider gets promoted to
 	// a typed field and normalized.
-	Attrs         map[string]string `protobuf:"bytes,15,rep,name=attrs,proto3" json:"attrs,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Attrs map[string]string `protobuf:"bytes,15,rep,name=attrs,proto3" json:"attrs,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	// vram_bytes_per_gpu is what the card actually holds, for accounting
+	// rather than filtering. Resolved from the catalog rather than from a
+	// vendor's self-report, because the catalog knows an "A100 80GB" is
+	// 80 GiB and the vendor reports whatever its API rounds to.
+	//
+	// Zero means no exact figure is recorded for this SKU, which is
+	// unknown and not zero. A budget must decline to conclude rather than
+	// compute against it, since a card of zero bytes fits nothing and
+	// would refuse every deploy on an uncatalogued part (#323).
+	VramBytesPerGpu int64 `protobuf:"varint,16,opt,name=vram_bytes_per_gpu,json=vramBytesPerGpu,proto3" json:"vram_bytes_per_gpu,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *Candidate) Reset() {
@@ -2160,6 +2180,13 @@ func (x *Candidate) GetAttrs() map[string]string {
 		return x.Attrs
 	}
 	return nil
+}
+
+func (x *Candidate) GetVramBytesPerGpu() int64 {
+	if x != nil {
+		return x.VramBytesPerGpu
+	}
+	return 0
 }
 
 // ProviderAnswer is one provider's response, kept whole rather than
@@ -3496,7 +3523,7 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"\thost_path\x18\x02 \x01(\tR\bhostPath\x12\x1d\n" +
 	"\n" +
 	"mount_path\x18\x03 \x01(\tR\tmountPath\x12\x1a\n" +
-	"\bprovider\x18\x04 \x01(\tR\bprovider\"\x83\x05\n" +
+	"\bprovider\x18\x04 \x01(\tR\bprovider\"\xb0\x05\n" +
 	"\tCandidate\x12\x1a\n" +
 	"\bprovider\x18\x01 \x01(\tR\bprovider\x12\x17\n" +
 	"\ahost_id\x18\x02 \x01(\tR\x06hostId\x12\x19\n" +
@@ -3514,7 +3541,8 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"\vfabric_gbps\x18\r \x01(\x05R\n" +
 	"fabricGbps\x12+\n" +
 	"\x11fabric_technology\x18\x0e \x01(\tR\x10fabricTechnology\x12:\n" +
-	"\x05attrs\x18\x0f \x03(\v2$.provisioner.v1.Candidate.AttrsEntryR\x05attrs\x1a8\n" +
+	"\x05attrs\x18\x0f \x03(\v2$.provisioner.v1.Candidate.AttrsEntryR\x05attrs\x12+\n" +
+	"\x12vram_bytes_per_gpu\x18\x10 \x01(\x03R\x0fvramBytesPerGpu\x1a8\n" +
 	"\n" +
 	"AttrsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
