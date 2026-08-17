@@ -18,6 +18,190 @@
 
 snapshots:
 
+  # The last tag on the v0.3 line, so release/v0.3 stops moving after this and
+  # becomes a maintenance branch. Cut at the release-branch tip after a
+  # forward-merge of main, which is where everything Chapter 12 describes lives.
+  - tag: ch12-final
+    alias: v0.3.1
+    chapter: 12
+    chapter_title: 70B Deployment
+    branch: release/v0.3
+    date: 2026-08-17
+
+    summary: |
+      The capstone adds no new control-plane surface, and that was the
+      constraint it was written under. What it added instead is arithmetic
+      the control plane had been leaving to the operator, and three places
+      where the system had been quietly answering a question nobody asked.
+      A model's shape now crosses the wire, so the daemon reads a gated
+      repository with the credential it already holds rather than a laptop
+      failing to. The four-term VRAM budget moved out of the chapter's prose
+      and into a command that reports every candidate card count and names
+      the term that overran, because a verdict without its terms tells an
+      operator they were wrong without telling them what to give up. A deploy
+      reads back the engine arguments it is already forwarding and refuses a
+      plan the cards cannot hold, which closes a gap where a model sized at
+      one context could be deployed at another and discovered at load. Three
+      corrections came out of the paid run rather than out of review. A card
+      advertised as 80GB holds 80 GiB, and reading the label as decimal took
+      seven percent off every card before the arithmetic began. Billing ran
+      from the moment the engine answered rather than from the moment the
+      machine was rented, so the entire cold start, which is the largest
+      single item in a 72B deployment's cost, was free as far as the metrics
+      were concerned. And a warm-cache mount was accepted, ignored, and then
+      reported as attached. What is absent here is absent because the market
+      is shaped that way or because the work belongs to a later line, not
+      because it was hard.
+
+    capabilities:
+      - name: VRAM budget as an operator command
+        status: shipped
+        notes: |
+          `iplane model budget` reports the four claims on a card per
+          candidate card count, with a verdict of fits, tight or
+          overcommitted, and names the term carrying most of the working
+          set. Exit status gates a deploy. Tight counts as not fitting,
+          since it is the verdict that starts and then dies under load.
+        prs: [322]
+        related_issues: [193, 320]
+      - name: Model shape read over the wire
+        status: shipped
+        notes: |
+          `DescribeModel` and `iplane model describe`. The hub read happens
+          where the credential lives, so a gated repository resolves through
+          the daemon rather than failing in the caller's process.
+        prs: [321]
+        related_issues: [193]
+      - name: Exact per-card capacity separate from the advertised figure
+        status: shipped
+        notes: |
+          The advertised number keeps its filtering tolerance and says so;
+          a second field carries what the card holds, resolved from the
+          catalog by allow-list rather than by arithmetic, because only some
+          vendor labels are binary counts.
+        prs: [328]
+        related_issues: [323]
+      - name: Deploy refuses a plan the cards cannot hold
+        status: shipped
+        notes: |
+          CreateDeployment parses the engine arguments it already forwards,
+          rebuilds the same plan the budget command uses, and refuses an
+          overcommitted shape before any provider call. Parsing rather than
+          typed flags, so the engine stays opaque.
+        prs: [329]
+        related_issues: [326]
+      - name: Cold start decomposed into watchable phases
+        status: shipped
+        notes: |
+          Scheduling, image pull and engine init, monotonic and keyed on the
+          provider's own status rather than on elapsed time, with the
+          provider's progress message carried through. A timeout names the
+          rung it died on.
+        prs: [330]
+        related_issues: [259]
+      - name: Shared engine-readiness loop
+        status: shipped
+        notes: |
+          The two HTTP providers share one loop; what a tick can observe
+          stays per-adapter. Extracted because the terminal-failure guard
+          reached one copy and not the other.
+        prs: [334]
+        related_issues: [268]
+      - name: Cost measured per instance from the rental
+        status: shipped
+        notes: |
+          Uptime is one series per rented instance counted from when the
+          contract was created, and a per-instance rate carries the price
+          the vendor quoted, so spend is a join rather than a projection
+          against a catalog. Billing from engine-ready made the cold start
+          free; the capstone run measured the difference as $0.18 against
+          $1.89.
+        prs: [332, 336]
+        related_issues: [163, 335]
+      - name: Warm-cache mount refused where it cannot attach
+        status: shipped
+        notes: |
+          A deploy path that does not declare it attaches mounts is treated
+          as unable to, and the deploy is refused rather than silently
+          downloading. Fail-closed, because the previous behaviour reported
+          a cold download as warm.
+        prs: [331]
+        related_issues: [254]
+      - name: Tensor and pipeline parallel deploy flags
+        status: shipped
+        notes: |
+          Deliberately excluded from ch11-final and carried here, since the
+          chapter that describes them is this one.
+        prs: [313]
+        related_issues: []
+      - name: Warm cache on a machine-scoped marketplace
+        status: deferred
+        moved_to: v1.0
+        notes: |
+          Not an engineering gap. A volume on this marketplace belongs to a
+          machine rather than a region, so a pin is a bet on re-renting one
+          specific physical box. Object-store staging is the general answer
+          and needs a client we do not have.
+        related_issues: [254, 292]
+      - name: Scale-to-zero with a fast wake path
+        status: deferred
+        moved_to: v1.0
+        notes: |
+          The feature the capstone's own cost analysis wants most, and the
+          one the weight-download time makes hardest: a wake path that takes
+          fifteen minutes is not a wake path.
+        related_issues: [297]
+      - name: Failed-node attribution at placement time
+        status: deferred
+        moved_to: v1.0
+        notes: |
+          The capstone run priced this deferral. A host whose container
+          runtime could not start a GPU container stayed the cheapest offer
+          in the next search, and routing around it took a manual quality
+          floor and cost twice as much.
+        related_issues: [214]
+
+    cli_surface:
+      - iplane model budget <model> --quantization --max-model-len --max-batch --vram-gb
+      - iplane model budget --tp N | --max-cards N | --output json
+      - iplane model describe <model>
+      - iplane deployment deploy --tp N --pp N
+      - iplane capacity --all --gpu-count N --min-vram-gb N --min-disk-gb N
+
+    known_limitations:
+      - id: engine-args-are-still-strings
+        notes: |
+          The deploy check parses the engine arguments it recognises. An
+          engine spelling a flag differently is forwarded unread, and the
+          check skips rather than guessing.
+      - id: budget-assumes-uniform-cards
+        notes: |
+          The budget divides across a card count of one size. A
+          heterogeneous pool is expressible in the fleet and not in the
+          budget.
+      - id: activation-term-is-approximate
+        notes: |
+          The weight and cache terms are exact for a given plan. The
+          activation term is a coarse approximation with a stated basis and
+          the overhead band is a flat fraction, so a plan that clears only
+          into the overhead band is reported as tight rather than as fitting.
+
+    patterns_introduced:
+      - name: bounded-bill
+        notes: |
+          Rented capacity has a computable worst case because it bills per
+          hour at a rate agreed in advance. A per-token bill is bounded only
+          by traffic, which is the one input the operator does not control.
+      - name: constraints-interact
+        notes: |
+          Each earlier chapter optimised one variable while the others were
+          held still by assumption. Together the honest output is a pair of
+          options and a decision about money rather than a configuration.
+      - name: budget-as-constraint
+        notes: |
+          A plan that cannot be priced is not a plan, and a budget is a
+          constraint rather than a footnote only if it can refuse something.
+
   # v0.2.3 was an interim release that published the agent binary, so this tag
   # aliases v0.2.4.
   # Cut at the last Chapter 11 commit rather than at main's tip. The --tp/--pp
