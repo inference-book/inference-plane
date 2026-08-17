@@ -937,6 +937,56 @@ message UpstreamAuth {
 // A volume is datacenter-locked, so serving a model in two regions needs
 // it staged on one volume per region -- replication is per-region, not a
 // property of a single record.
+// ModelArchitecture is the part of a model fixed at training time: what
+// the VRAM budget reads to work out whether the model fits the cards
+// before any of them are rented.
+//
+// Every field is published by the model rather than chosen by the
+// operator, which is the line separating this message from the deploy-
+// time knobs (precision, context length, batch, parallelism) that live
+// elsewhere. Absent means unknown and never zero. A budget computed from
+// a zero layer count reports no KV cache at all, which is a budget that
+// says yes to everything.
+message ModelArchitecture {
+  // Total parameter count, from the hub's tensor accounting rather than
+  // from the model's name. A name is a label the uploader chose.
+  int64 params = 1;
+  // Transformer blocks (num_hidden_layers).
+  int32 layers = 2;
+  // Key-value heads (num_key_value_heads). Grouped-query attention
+  // shares one KV head across a group of query heads, so the cache
+  // scales with this count rather than with the attention-head count.
+  // A model without GQA publishes no separate figure, and absent there
+  // means "as many as there are attention heads".
+  int32 kv_heads = 3;
+  // Dimension of a single attention head. Optional in a published
+  // config and derivable, since hidden_size is by construction this
+  // times the attention-head count.
+  int32 head_dim = 4;
+  // Model dimension (hidden_size). Read only by the activation
+  // estimate, which is the budget's coarsest term.
+  int32 hidden_size = 5;
+}
+
+// DescribeModelRequest asks what a model spec resolves to.
+//
+// This is a read behind the wire contract rather than a local one,
+// because answering it needs the hub credential, and that lives in the
+// daemon's environment. A CLI host without HF_TOKEN answering from its
+// own process would report a gated model as unreadable while the daemon
+// could read it perfectly well -- the shape of the bug that shipped
+// twice already, in the capacity search and in the pin registry.
+message DescribeModelRequest {
+  // Operator-supplied spec, `<org>/<name>` with an optional
+  // `:<revision>` suffix.
+  string model_spec = 1;
+}
+
+// DescribeModelResponse carries what the hub published about a model.
+message DescribeModelResponse {
+  ModelArchitecture architecture = 1;
+}
+
 message Volume {
   // id is the provider-issued volume handle (a RunPod networkVolumeId).
   string id = 1;

@@ -68,6 +68,11 @@ type modelInfo struct {
 	ID       string `json:"id"`
 	Gated    bool   `json:"gated"`
 	Disabled bool   `json:"disabled"`
+
+	// Safetensors is HF's tensor accounting, present only on
+	// repositories that publish weights in that format. Read by
+	// Architecture for the parameter count; validation ignores it.
+	Safetensors *safetensorsInfo `json:"safetensors"`
 }
 
 // Resolve validates the spec against HF's model-info endpoint. On
