@@ -63,6 +63,9 @@ func renderModelArchitecture(w interface{ Write([]byte) (int, error) }, spec str
 	fmt.Fprintf(tw, "  kv heads\t%d\n", a.GetKvHeads())
 	fmt.Fprintf(tw, "  head dim\t%d\n", a.GetHeadDim())
 	fmt.Fprintf(tw, "  hidden size\t%d\n", a.GetHiddenSize())
+	if n := a.GetMaxPositionEmbeddings(); n > 0 {
+		fmt.Fprintf(tw, "  context window\t%d tokens\n", n)
+	}
 
 	// The weight ladder. Each step down roughly halves the term, and
 	// seeing the three side by side is the whole quantization decision.

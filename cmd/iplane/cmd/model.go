@@ -11,6 +11,7 @@ import (
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
 	"github.com/inference-book/inference-plane/internal/provisioners"
 	"github.com/inference-book/inference-plane/internal/provisioners/stores/file"
+	"github.com/inference-book/inference-plane/internal/vrambudget"
 )
 
 // The `iplane model` verb group manages the warm-cache pin registry:
@@ -179,7 +180,7 @@ func buildPinService() (*provisioners.Service, error) {
 
 func init() {
 	rootCmd.AddCommand(modelCmd)
-	modelCmd.AddCommand(modelPinCmd, modelLsCmd, modelUnpinCmd, modelDescribeCmd)
+	modelCmd.AddCommand(modelPinCmd, modelLsCmd, modelUnpinCmd, modelDescribeCmd, modelBudgetCmd)
 
 	// Bound to the same variable the instance group uses, so one exported
 	// IPLANE_SERVICE_URL means the same thing everywhere. The read verbs
@@ -197,4 +198,23 @@ func init() {
 	modelLsCmd.Flags().StringVar(&lsProvider, "provider", "", "filter to one provider (default: all)")
 
 	modelUnpinCmd.Flags().StringVar(&unpinModel, "model", "", "remove just this model (default: destroy the whole volume)")
+
+	// --max-model-len and --gpu-memory-utilization are spelled the way
+	// vLLM spells them. An operator moving between the pre-flight and the
+	// engine it is a pre-flight for should not have to translate.
+	modelBudgetCmd.Flags().StringVar(&budgetQuantization, "quantization", string(vrambudget.PrecisionFP16),
+		"weight precision: fp16, bf16, fp8, int8, awq, gptq")
+	modelBudgetCmd.Flags().StringVar(&budgetKVQuantization, "kv-cache-quantization", "",
+		"KV cache precision (default: same as --quantization)")
+	modelBudgetCmd.Flags().Int32Var(&budgetMaxModelLen, "max-model-len", 0,
+		"context length in tokens (default: the model's max_position_embeddings)")
+	modelBudgetCmd.Flags().Int32Var(&budgetMaxBatch, "max-batch", 1, "concurrent sequences")
+	modelBudgetCmd.Flags().Int32Var(&budgetTP, "tp", 0,
+		"report this tensor-parallel width only (default: every candidate up to --max-cards)")
+	modelBudgetCmd.Flags().Float64Var(&budgetVRAMGB, "vram-gb", 0, "card memory in GB (required)")
+	modelBudgetCmd.Flags().Float64Var(&budgetUtilization, "gpu-memory-utilization", vrambudget.DefaultUtilization,
+		"fraction of the card the engine may claim")
+	modelBudgetCmd.Flags().Int32Var(&budgetMaxCards, "max-cards", 8, "widest card count to consider")
+	modelBudgetCmd.Flags().StringVar(&budgetRevision, "revision", "main", "hub revision")
+	modelBudgetCmd.Flags().StringVar(&budgetOutput, "output", outputTable, "output format: table or json")
 }

@@ -2644,9 +2644,14 @@ type ModelArchitecture struct {
 	HeadDim int32 `protobuf:"varint,4,opt,name=head_dim,json=headDim,proto3" json:"head_dim,omitempty"`
 	// Model dimension (hidden_size). Read only by the activation
 	// estimate, which is the budget's coarsest term.
-	HiddenSize    int32 `protobuf:"varint,5,opt,name=hidden_size,json=hiddenSize,proto3" json:"hidden_size,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	HiddenSize int32 `protobuf:"varint,5,opt,name=hidden_size,json=hiddenSize,proto3" json:"hidden_size,omitempty"`
+	// Longest context the model was trained to address
+	// (max_position_embeddings). No budget term reads it. It is where a
+	// context length comes from when the operator does not choose one, so
+	// absent means the caller has to be asked rather than guessed at.
+	MaxPositionEmbeddings int32 `protobuf:"varint,6,opt,name=max_position_embeddings,json=maxPositionEmbeddings,proto3" json:"max_position_embeddings,omitempty"`
+	unknownFields         protoimpl.UnknownFields
+	sizeCache             protoimpl.SizeCache
 }
 
 func (x *ModelArchitecture) Reset() {
@@ -2710,6 +2715,13 @@ func (x *ModelArchitecture) GetHeadDim() int32 {
 func (x *ModelArchitecture) GetHiddenSize() int32 {
 	if x != nil {
 		return x.HiddenSize
+	}
+	return 0
+}
+
+func (x *ModelArchitecture) GetMaxPositionEmbeddings() int32 {
+	if x != nil {
+		return x.MaxPositionEmbeddings
 	}
 	return 0
 }
@@ -3536,14 +3548,15 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"\fUpstreamAuth\x12\x16\n" +
 	"\x06header\x18\x01 \x01(\tR\x06header\x12\x1b\n" +
 	"\tvalue_env\x18\x02 \x01(\tR\bvalueEnv\x12!\n" +
-	"\fvalue_prefix\x18\x03 \x01(\tR\vvaluePrefix\"\x9a\x01\n" +
+	"\fvalue_prefix\x18\x03 \x01(\tR\vvaluePrefix\"\xd2\x01\n" +
 	"\x11ModelArchitecture\x12\x16\n" +
 	"\x06params\x18\x01 \x01(\x03R\x06params\x12\x16\n" +
 	"\x06layers\x18\x02 \x01(\x05R\x06layers\x12\x19\n" +
 	"\bkv_heads\x18\x03 \x01(\x05R\akvHeads\x12\x19\n" +
 	"\bhead_dim\x18\x04 \x01(\x05R\aheadDim\x12\x1f\n" +
 	"\vhidden_size\x18\x05 \x01(\x05R\n" +
-	"hiddenSize\"5\n" +
+	"hiddenSize\x126\n" +
+	"\x17max_position_embeddings\x18\x06 \x01(\x05R\x15maxPositionEmbeddings\"5\n" +
 	"\x14DescribeModelRequest\x12\x1d\n" +
 	"\n" +
 	"model_spec\x18\x01 \x01(\tR\tmodelSpec\"^\n" +
