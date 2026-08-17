@@ -51,12 +51,12 @@ type Shutdown func(ctx context.Context) error
 // W3C Trace Context + Baggage propagators are registered globally so
 // outbound HTTP calls (vLLM, future backends) carry trace IDs through
 // headers, enabling end-to-end traces across services.
-func Init(ctx context.Context, cfg config.TelemetryConfig, dep config.DeploymentConfig) (Shutdown, error) {
+func Init(ctx context.Context, cfg config.TelemetryConfig) (Shutdown, error) {
 	if cfg.ServiceName == "" {
 		return nil, errors.New("telemetry: service_name is required")
 	}
 
-	res, err := buildResource(ctx, cfg, dep)
+	res, err := buildResource(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("telemetry: resource: %w", err)
 	}
@@ -94,29 +94,16 @@ func Init(ctx context.Context, cfg config.TelemetryConfig, dep config.Deployment
 // fields (provider, gpu_type, billing_mode, instance_id) are
 // intentionally optional; an unlabeled deployment still emits useful
 // telemetry, just without the per-provider cost breakdown.
-func buildResource(ctx context.Context, cfg config.TelemetryConfig, dep config.DeploymentConfig) (*resource.Resource, error) {
+func buildResource(ctx context.Context, cfg config.TelemetryConfig) (*resource.Resource, error) {
 	attrs := []attribute.KeyValue{
 		semconv.ServiceName(cfg.ServiceName),
 		semconv.DeploymentEnvironmentName(cfg.Environment),
 	}
-	if dep.Provider != "" {
-		attrs = append(attrs, attribute.String(AttrDeploymentProvider, dep.Provider))
-	}
-	if dep.GPUType != "" {
-		attrs = append(attrs, attribute.String(AttrDeploymentGPUType, dep.GPUType))
-	}
-	if dep.BillingMode != "" {
-		attrs = append(attrs, attribute.String(AttrDeploymentBillingMode, dep.BillingMode))
-	}
-	if dep.InstanceID != "" {
-		attrs = append(attrs, attribute.String(AttrDeploymentInstanceID, dep.InstanceID))
-	}
-
 	return resource.New(ctx,
 		resource.WithAttributes(attrs...),
-		resource.WithFromEnv(),     // honor OTEL_RESOURCE_ATTRIBUTES
-		resource.WithProcess(),     // process.pid, process.executable.name
-		resource.WithHost(),        // host.name, host.id
+		resource.WithFromEnv(), // honor OTEL_RESOURCE_ATTRIBUTES
+		resource.WithProcess(), // process.pid, process.executable.name
+		resource.WithHost(),    // host.name, host.id
 	)
 }
 

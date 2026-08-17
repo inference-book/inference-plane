@@ -13,6 +13,7 @@ import (
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
 	"github.com/inference-book/inference-plane/internal/engineagent"
 	"github.com/inference-book/inference-plane/internal/provisioners"
+	"github.com/inference-book/inference-plane/internal/provisioners/enginewait"
 	"github.com/inference-book/inference-plane/internal/sshkeys"
 )
 
@@ -106,8 +107,8 @@ func (p *Provider) Deploy(ctx context.Context, dep *provisionerv1.Deployment, in
 
 	emit(provisioners.DeployStateUpdate{
 		State:           provisionerv1.DeploymentState_DEPLOYMENT_STATE_CONFIGURING,
-		Phase:           "vast:starting",
-		ProgressMessage: "instance rented; waiting for the engine to answer /health",
+		Phase:           phaseScheduling,
+		ProgressMessage: "instance rented; waiting for the host to create the container",
 		ContainerID:     contractID,
 	})
 
@@ -273,74 +274,72 @@ func (p *Provider) waitForEngineReady(ctx context.Context, contractID int, engin
 	if timeout <= 0 {
 		timeout = defaultEngineReadyTimeout
 	}
-	interval := p.sshReadyInterval
-	if interval <= 0 {
-		interval = 5 * time.Second
-	}
 	client := &http.Client{Timeout: 5 * time.Second}
+	id := strconv.Itoa(contractID)
 
-	waitCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	started := time.Now()
-	var last string
-
-	for {
-		var endpoint, note string
-		api, derr := p.describeContract(waitCtx, contractID)
-		if derr != nil {
-			// Not fatal on its own. Vast's control API goes slow in bursts and
-			// recovers; a `context deadline exceeded (awaiting headers)` here
-			// was observed resolving itself mid-deploy, so it is reported as
-			// progress rather than treated as a dead host.
-			note = fmt.Sprintf("describe contract %d: %v", contractID, derr)
-		} else {
-			endpoint, note = endpointFromInstance(api, enginePort)
-		}
-		// Give up as soon as the provider says the container will not run.
-		// Polling past this point cannot succeed and bills the whole
-		// engine-ready timeout for the privilege.
-		//
-		// Routed through the shared capability rather than calling the local
-		// policy with the record just fetched, which costs one extra GET per
-		// tick. That is the deliberate price of the behaviour living in one
-		// place: when this loop is hoisted, every provider inherits the guard
-		// instead of each adapter re-deciding what a missing sensor means.
-		if dead, why := provisioners.TerminalFailure(waitCtx, p, strconv.Itoa(contractID)); dead {
-			return "", fmt.Errorf("contract %d will not start: %s", contractID, why)
-		}
-		last = note
-		if endpoint != "" {
-			req, err := http.NewRequestWithContext(waitCtx, http.MethodGet, endpoint+"/health", nil)
-			if err == nil {
-				resp, derr := client.Do(req)
-				if derr == nil {
-					code := resp.StatusCode
-					_ = resp.Body.Close()
-					if code >= 200 && code < 300 {
-						return endpoint, nil
-					}
-					last = fmt.Sprintf("%s/health -> %d", endpoint, code)
-				} else {
-					last = fmt.Sprintf("%s/health -> %v", endpoint, derr)
+	return enginewait.Wait(ctx, enginewait.Config{
+		Timeout:     timeout,
+		Interval:    p.sshReadyInterval,
+		ContainerID: id,
+		Ladder: enginewait.Ladder{
+			Ordinal:     enginePhaseOrdinal,
+			Description: enginePhaseDescription,
+		},
+		Observe: func(ctx context.Context, _ string) enginewait.Observation {
+			api, derr := p.describeContract(ctx, contractID)
+			if derr != nil {
+				// Not fatal on its own. Vast's control API goes slow in
+				// bursts and recovers; a `context deadline exceeded
+				// (awaiting headers)` here was observed resolving itself
+				// mid-deploy, so it is reported as progress rather than
+				// treated as a dead host.
+				return enginewait.Observation{
+					Phase:  phaseScheduling,
+					Detail: fmt.Sprintf("describe contract %d: %v", contractID, derr),
 				}
 			}
-		}
-		emit(provisioners.DeployStateUpdate{
-			State:           provisionerv1.DeploymentState_DEPLOYMENT_STATE_CONFIGURING,
-			Phase:           "vast:engine-ready",
-			ProgressMessage: fmt.Sprintf("%s (%s elapsed)", last, time.Since(started).Round(time.Second)),
-			ContainerID:     strconv.Itoa(contractID),
-		})
-
-		select {
-		case <-waitCtx.Done():
-			if ctx.Err() != nil {
-				return "", fmt.Errorf("caller stopped waiting for the engine on contract %d; last: %s", contractID, last)
+			// Give up as soon as the provider says the container will not
+			// run. Polling past this point cannot succeed and bills the
+			// rest of the engine-ready timeout for the privilege.
+			//
+			// Routed through the shared capability rather than the local
+			// policy with the record just fetched, which costs one extra
+			// GET per tick. That is the deliberate price of the behaviour
+			// living in one place, and it is what this hoist makes
+			// reachable by every provider that implements it (#268).
+			if dead, why := provisioners.TerminalFailure(ctx, p, id); dead {
+				return enginewait.Observation{
+					Fatal: fmt.Errorf("contract %d will not start: %s", contractID, why),
+				}
 			}
-			return "", fmt.Errorf("engine on contract %d did not answer /health within %s; last: %s", contractID, timeout, last)
-		case <-time.After(interval):
-		}
-	}
+			endpoint, _ := endpointFromInstance(api, enginePort)
+			// The record the loop already fetches carries the host's
+			// account of the pull. Reading it here is what turns one
+			// opaque wait into a phase an operator can watch (#259).
+			return enginewait.Observation{
+				Endpoint: endpoint,
+				Phase:    classifyEnginePhase(api.ActualStatus, endpoint != ""),
+				Detail:   pullProgress(api.StatusMsg),
+			}
+		},
+		Probe: func(ctx context.Context, endpoint string) (bool, string) {
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint+"/health", nil)
+			if err != nil {
+				return false, err.Error()
+			}
+			resp, derr := client.Do(req)
+			if derr != nil {
+				return false, fmt.Sprintf("%s/health -> %v", endpoint, derr)
+			}
+			code := resp.StatusCode
+			_ = resp.Body.Close()
+			if code >= 200 && code < 300 {
+				return true, ""
+			}
+			return false, fmt.Sprintf("%s/health -> %d", endpoint, code)
+		},
+		Emit: emit,
+	})
 }
 
 // engineEndpoint returns the externally reachable base URL for the engine,

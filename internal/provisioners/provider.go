@@ -199,6 +199,64 @@ func TerminalFailure(ctx context.Context, p Provider, providerID string) (bool, 
 	return fr.TerminalFailure(ctx, providerID)
 }
 
+// MountAttacher is an optional Deployer capability: this deploy path can
+// attach a VolumeMount to the container it starts.
+//
+// Declared rather than assumed, and absent means cannot. A deploy path
+// that quietly ignores a mount is worse than one that refuses it: the
+// operator gets a cold download they thought they had pre-staged, and
+// the deploy is still labelled storage_tier=warm because that label is
+// derived from the mount being requested rather than from it being
+// attached. On a 70B that is the difference between the cold-start
+// figure a chapter reports and the one it measured (#254).
+//
+// The fail-closed default is the point. A new image-native adapter that
+// forgets to handle mounts refuses them and gets found immediately,
+// rather than shipping a silent cold fallback that only shows up in a
+// cost number nobody can reconcile. Providers with no Deployer of their
+// own run through the sshdocker executor, which binds host paths, so
+// they do not need to declare anything.
+type MountAttacher interface {
+	// AttachesMounts reports whether this deploy path honours
+	// Deployment.mounts. Returning false is a legitimate answer for a
+	// provider whose primitive has no equivalent.
+	AttachesMounts() bool
+}
+
+// CardCapacityReporter is an optional Provider capability: what one card
+// of a named SKU actually holds, in bytes.
+//
+// It exists because the pre-rent budget check has to run synchronously
+// inside CreateDeployment, before placement, and placement is the only
+// other place a resolved Candidate carrying the figure exists. A catalog
+// lookup is a map read with no network behind it, so asking every deploy
+// costs nothing.
+//
+// Answering from the adapter rather than from a shared table because
+// each provider's catalog is its own: the same physical card is
+// "NVIDIA A100-SXM4-80GB", "A100_SXM4" and "gpu_1x_a100_sxm4" across the
+// three, and only the adapter can turn its own token into a row.
+//
+// 0 means the provider has no exact figure for that SKU, which is
+// unknown and not zero. A caller must decline to conclude rather than
+// treat it as a card that holds nothing (#323).
+type CardCapacityReporter interface {
+	CardCapacityBytes(sku string) int64
+}
+
+// CardCapacityBytes asks a provider what one card of a SKU holds,
+// returning 0 for providers that cannot say.
+//
+// The type-assertion dance lives here so every caller treats a provider
+// without the capability the same way, matching TerminalFailure.
+func CardCapacityBytes(p Provider, sku string) int64 {
+	cr, ok := p.(CardCapacityReporter)
+	if !ok || sku == "" {
+		return 0
+	}
+	return cr.CardCapacityBytes(sku)
+}
+
 // VolumeManager is an optional Provider capability for providers that
 // offer persistent volumes a model can be pre-staged onto (RunPod
 // network volumes today), so warm-cache deploys mount weights instead of

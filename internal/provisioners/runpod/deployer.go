@@ -15,6 +15,7 @@ import (
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
 	"github.com/inference-book/inference-plane/internal/engineagent"
 	"github.com/inference-book/inference-plane/internal/provisioners"
+	"github.com/inference-book/inference-plane/internal/provisioners/enginewait"
 	"github.com/inference-book/inference-plane/internal/sshkeys"
 )
 
@@ -375,11 +376,6 @@ func (p *Provider) waitForEngineReady(ctx context.Context, podID string, engineP
 	if timeout <= 0 {
 		timeout = 5 * time.Minute
 	}
-	interval := p.sshReadyInterval
-	if interval <= 0 {
-		interval = 5 * time.Second
-	}
-	deadline := time.Now().Add(timeout)
 
 	endpoint := proxyEndpointForPod(podID, enginePort)
 	if p.proxyBaseURL != "" {
@@ -388,89 +384,65 @@ func (p *Provider) waitForEngineReady(ctx context.Context, podID string, engineP
 		endpoint = fmt.Sprintf("%s/%s-%d", strings.TrimRight(p.proxyBaseURL, "/"), podID, enginePort)
 	}
 
-	// HTTP-poll the engine's /health. Each tick re-emits a
-	// progress_message that carries elapsed-time + last HTTP status (or
-	// dial error) -- the only signal the operator gets during the cold
-	// image pull + model load window. WatchDeployment fires on
-	// progress_message changes so the CLI streams these to stdout.
-	//
 	// Phase attribution: the proxy /health probe is a single black-box
 	// signal (502 while booting -> 200 when serving) that collapses
 	// RunPod-side scheduling, the multi-GB image pull, and the engine's
 	// model download + startup into one opaque wait. To split them, each
-	// tick also reads RunPod's pod status (GET /pods/{id}) until the
-	// container has started: `machine` populated means RunPod found a
-	// host (scheduling done, now pulling the image); `lastStartedAt`
-	// populated means the container process is up (image pull done, now
-	// downloading the model + loading weights). Those map to the
-	// runpod:image-pull and engine:init phases the deployment dashboard
-	// breaks the cold start down by. The status read degrades to "keep
-	// the last known phase" on any error -- it refines observability, it
-	// never gates readiness (that's still /health alone).
-	healthURL := endpoint + "/health"
+	// tick also reads RunPod's pod status until the container has
+	// started: `machine` populated means RunPod found a host (scheduling
+	// done, now pulling the image); `lastStartedAt` populated means the
+	// container process is up (image pull done, now downloading the model
+	// + loading weights). The status read degrades to "keep the last
+	// known phase" on any error -- it refines observability, it never
+	// gates readiness (that's still /health alone).
 	started := time.Now()
-	phase := phaseScheduling
-	first := true
 	tracePhases := phaseTraceEnabled()
-	for {
-		if !first {
-			select {
-			case <-ctx.Done():
-				return endpoint, ctx.Err()
-			case <-time.After(interval):
-			}
-		}
-		first = false
-		if time.Now().After(deadline) {
-			return endpoint, fmt.Errorf("engine /health not reachable within %s", timeout)
-		}
-		elapsed := time.Since(started).Round(time.Second)
-		ok, statusText, err := httpProbeHealth(ctx, healthURL)
-		if ok {
-			return endpoint, nil
-		}
 
-		// Refine the phase from RunPod pod status, but only until the
-		// container has started -- past that point /health is the only
-		// remaining signal and further status reads add nothing. Phases
-		// only advance (monotonic), so a flaky status read never regresses
-		// the operator's view.
-		//
-		// Under EnvPhaseTrace we keep probing past engine-init purely to
-		// record the raw signal timeline (issue 208). That is trace-only:
-		// `phase` still advances by the same monotonic rule either way.
-		if enginePhaseOrdinal(phase) < enginePhaseOrdinal(phaseEngineInit) || tracePhases {
-			if refined, sig, gotStatus := p.probeEnginePhase(ctx, podID); gotStatus {
-				if enginePhaseOrdinal(refined) > enginePhaseOrdinal(phase) {
-					phase = refined
-				}
-				if tracePhases {
-					fmt.Fprintf(os.Stderr,
-						"iplane-phase-trace\tpod=%s\telapsed=%s\tphase=%s\tderived=%s\tmachine=%t\tcontainerStarted=%t\tcreatedAt=%s\tlastStartedAt=%s\tdesiredStatus=%s\thealth=%s\n",
-						podID, elapsed, phase, refined, sig.machinePresent, sig.containerStarted,
-						emptyDash(sig.createdAt), emptyDash(sig.lastStartedAt),
-						emptyDash(sig.desiredStatus), emptyDash(statusText))
-				}
+	return enginewait.Wait(ctx, enginewait.Config{
+		Timeout:     timeout,
+		Interval:    p.sshReadyInterval,
+		ContainerID: podID,
+		Endpoint:    endpoint,
+		Ladder: enginewait.Ladder{
+			Ordinal:     enginePhaseOrdinal,
+			Description: enginePhaseDescription,
+		},
+		Observe: func(ctx context.Context, phase string) enginewait.Observation {
+			// Refine only until the container has started; past that
+			// point /health is the only remaining signal and further
+			// status reads add nothing. Under EnvPhaseTrace we keep
+			// probing purely to record the raw signal timeline (#208).
+			if enginePhaseOrdinal(phase) >= enginePhaseOrdinal(phaseEngineInit) && !tracePhases {
+				return enginewait.Observation{Endpoint: endpoint, Phase: phase}
 			}
-		}
-
-		var detail string
-		switch {
-		case err != nil:
-			detail = fmt.Sprintf("dial error: %v", err)
-		case statusText != "":
-			detail = "HTTP " + statusText
-		default:
-			detail = "no response"
-		}
-		msg := fmt.Sprintf("%s (%s elapsed) -- %s", enginePhaseDescription(phase), elapsed, detail)
-		emit(provisioners.DeployStateUpdate{
-			State:           provisionerv1.DeploymentState_DEPLOYMENT_STATE_CONFIGURING,
-			Phase:           phase,
-			ProgressMessage: msg,
-			ContainerID:     podID,
-		})
-	}
+			refined, sig, gotStatus := p.probeEnginePhase(ctx, podID)
+			if !gotStatus {
+				return enginewait.Observation{Endpoint: endpoint, Phase: phase}
+			}
+			if tracePhases {
+				fmt.Fprintf(os.Stderr,
+					"iplane-phase-trace\tpod=%s\telapsed=%s\tphase=%s\tderived=%s\tmachine=%t\tcontainerStarted=%t\tcreatedAt=%s\tlastStartedAt=%s\tdesiredStatus=%s\n",
+					podID, time.Since(started).Round(time.Second), phase, refined,
+					sig.machinePresent, sig.containerStarted, emptyDash(sig.createdAt),
+					emptyDash(sig.lastStartedAt), emptyDash(sig.desiredStatus))
+			}
+			return enginewait.Observation{Endpoint: endpoint, Phase: refined}
+		},
+		Probe: func(ctx context.Context, endpoint string) (bool, string) {
+			ok, statusText, err := httpProbeHealth(ctx, endpoint+"/health")
+			switch {
+			case ok:
+				return true, ""
+			case err != nil:
+				return false, fmt.Sprintf("dial error: %v", err)
+			case statusText != "":
+				return false, "HTTP " + statusText
+			default:
+				return false, ""
+			}
+		},
+		Emit: emit,
+	})
 }
 
 // Engine-readiness phase strings. The deployer emits these on the
@@ -675,3 +647,8 @@ func failedf(emit func(provisioners.DeployStateUpdate), phase string, err error)
 
 // Compile-time check: *Provider satisfies the Deployer capability.
 var _ provisioners.Deployer = (*Provider)(nil)
+
+// AttachesMounts implements provisioners.MountAttacher. RunPod maps a
+// mount's volume_id onto networkVolumeId at rent time, which is what
+// makes `iplane model pin` pay off on this provider.
+func (p *Provider) AttachesMounts() bool { return true }

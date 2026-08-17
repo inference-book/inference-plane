@@ -32,6 +32,12 @@ func TestRecordCarriesOperatorIntent(t *testing.T) {
 	)
 
 	_, err = svc.CreateDeployment(context.Background(), &provisionerv1.CreateDeploymentRequest{
+		// Wait so the fan-out finishes before the test does. Without it
+		// the provisioning goroutine writes to t.TempDir() after cleanup
+		// has started, and the failure surfaces as an unrelated-looking
+		// "directory not empty". Free here: an external deploy provisions
+		// nothing, so there is nothing to wait for.
+		Wait: true,
 		Deployment: &provisionerv1.Deployment{
 			Id:               "intent",
 			Image:            "vllm/vllm-openai:v0.7.0",

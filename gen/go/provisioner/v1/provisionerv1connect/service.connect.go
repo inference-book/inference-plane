@@ -64,6 +64,9 @@ const (
 	// ProvisionerServiceListVolumesProcedure is the fully-qualified name of the ProvisionerService's
 	// ListVolumes RPC.
 	ProvisionerServiceListVolumesProcedure = "/provisioner.v1.ProvisionerService/ListVolumes"
+	// ProvisionerServiceDescribeModelProcedure is the fully-qualified name of the ProvisionerService's
+	// DescribeModel RPC.
+	ProvisionerServiceDescribeModelProcedure = "/provisioner.v1.ProvisionerService/DescribeModel"
 	// DeploymentServiceCreateDeploymentProcedure is the fully-qualified name of the DeploymentService's
 	// CreateDeployment RPC.
 	DeploymentServiceCreateDeploymentProcedure = "/provisioner.v1.DeploymentService/CreateDeployment"
@@ -191,6 +194,21 @@ type ProvisionerServiceClient interface {
 	// deferred rather than arriving as a side effect of fixing a list
 	// command (#307).
 	ListVolumes(context.Context, *connect.Request[v1.ListVolumesRequest]) (*connect.Response[v1.ListVolumesResponse], error)
+	// DescribeModel reports what a model spec resolves to: the shape fixed
+	// at training time, which is what a VRAM budget is computed from.
+	//
+	// An RPC for the same reason the capacity search is one. Reading a
+	// gated model's config needs the hub credential, and that lives in the
+	// daemon's environment, so a CLI host answering from its own process
+	// would report a gated model as unreadable while the daemon reads it
+	// fine. The test is where the inputs live, not whether the call
+	// writes.
+	//
+	// Unimplemented when the configured model store cannot answer. A
+	// pass-through store has no hub to ask, and saying so is different
+	// from returning a model with no layers, which is a budget that says
+	// yes to everything.
+	DescribeModel(context.Context, *connect.Request[v1.DescribeModelRequest]) (*connect.Response[v1.DescribeModelResponse], error)
 }
 
 // NewProvisionerServiceClient constructs a client for the provisioner.v1.ProvisionerService
@@ -258,6 +276,12 @@ func NewProvisionerServiceClient(httpClient connect.HTTPClient, baseURL string, 
 			connect.WithSchema(provisionerServiceMethods.ByName("ListVolumes")),
 			connect.WithClientOptions(opts...),
 		),
+		describeModel: connect.NewClient[v1.DescribeModelRequest, v1.DescribeModelResponse](
+			httpClient,
+			baseURL+ProvisionerServiceDescribeModelProcedure,
+			connect.WithSchema(provisionerServiceMethods.ByName("DescribeModel")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -272,6 +296,7 @@ type provisionerServiceClient struct {
 	listCandidates       *connect.Client[v1.ListCandidatesRequest, v1.ListCandidatesResponse]
 	selectPlacement      *connect.Client[v1.SelectPlacementRequest, v1.SelectPlacementResponse]
 	listVolumes          *connect.Client[v1.ListVolumesRequest, v1.ListVolumesResponse]
+	describeModel        *connect.Client[v1.DescribeModelRequest, v1.DescribeModelResponse]
 }
 
 // CreateInstance calls provisioner.v1.ProvisionerService.CreateInstance.
@@ -317,6 +342,11 @@ func (c *provisionerServiceClient) SelectPlacement(ctx context.Context, req *con
 // ListVolumes calls provisioner.v1.ProvisionerService.ListVolumes.
 func (c *provisionerServiceClient) ListVolumes(ctx context.Context, req *connect.Request[v1.ListVolumesRequest]) (*connect.Response[v1.ListVolumesResponse], error) {
 	return c.listVolumes.CallUnary(ctx, req)
+}
+
+// DescribeModel calls provisioner.v1.ProvisionerService.DescribeModel.
+func (c *provisionerServiceClient) DescribeModel(ctx context.Context, req *connect.Request[v1.DescribeModelRequest]) (*connect.Response[v1.DescribeModelResponse], error) {
+	return c.describeModel.CallUnary(ctx, req)
 }
 
 // ProvisionerServiceHandler is an implementation of the provisioner.v1.ProvisionerService service.
@@ -411,6 +441,21 @@ type ProvisionerServiceHandler interface {
 	// deferred rather than arriving as a side effect of fixing a list
 	// command (#307).
 	ListVolumes(context.Context, *connect.Request[v1.ListVolumesRequest]) (*connect.Response[v1.ListVolumesResponse], error)
+	// DescribeModel reports what a model spec resolves to: the shape fixed
+	// at training time, which is what a VRAM budget is computed from.
+	//
+	// An RPC for the same reason the capacity search is one. Reading a
+	// gated model's config needs the hub credential, and that lives in the
+	// daemon's environment, so a CLI host answering from its own process
+	// would report a gated model as unreadable while the daemon reads it
+	// fine. The test is where the inputs live, not whether the call
+	// writes.
+	//
+	// Unimplemented when the configured model store cannot answer. A
+	// pass-through store has no hub to ask, and saying so is different
+	// from returning a model with no layers, which is a budget that says
+	// yes to everything.
+	DescribeModel(context.Context, *connect.Request[v1.DescribeModelRequest]) (*connect.Response[v1.DescribeModelResponse], error)
 }
 
 // NewProvisionerServiceHandler builds an HTTP handler from the service implementation. It returns
@@ -474,6 +519,12 @@ func NewProvisionerServiceHandler(svc ProvisionerServiceHandler, opts ...connect
 		connect.WithSchema(provisionerServiceMethods.ByName("ListVolumes")),
 		connect.WithHandlerOptions(opts...),
 	)
+	provisionerServiceDescribeModelHandler := connect.NewUnaryHandler(
+		ProvisionerServiceDescribeModelProcedure,
+		svc.DescribeModel,
+		connect.WithSchema(provisionerServiceMethods.ByName("DescribeModel")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/provisioner.v1.ProvisionerService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case ProvisionerServiceCreateInstanceProcedure:
@@ -494,6 +545,8 @@ func NewProvisionerServiceHandler(svc ProvisionerServiceHandler, opts ...connect
 			provisionerServiceSelectPlacementHandler.ServeHTTP(w, r)
 		case ProvisionerServiceListVolumesProcedure:
 			provisionerServiceListVolumesHandler.ServeHTTP(w, r)
+		case ProvisionerServiceDescribeModelProcedure:
+			provisionerServiceDescribeModelHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -537,6 +590,10 @@ func (UnimplementedProvisionerServiceHandler) SelectPlacement(context.Context, *
 
 func (UnimplementedProvisionerServiceHandler) ListVolumes(context.Context, *connect.Request[v1.ListVolumesRequest]) (*connect.Response[v1.ListVolumesResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("provisioner.v1.ProvisionerService.ListVolumes is not implemented"))
+}
+
+func (UnimplementedProvisionerServiceHandler) DescribeModel(context.Context, *connect.Request[v1.DescribeModelRequest]) (*connect.Response[v1.DescribeModelResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("provisioner.v1.ProvisionerService.DescribeModel is not implemented"))
 }
 
 // DeploymentServiceClient is a client for the provisioner.v1.DeploymentService service.

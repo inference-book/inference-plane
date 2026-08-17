@@ -38,11 +38,15 @@ metrics:
 
   - key: instance_uptime_seconds
     value: instance.uptime.seconds.total
-    description: Counter of wall-clock seconds since the control plane started. Base for billed-time cost calculations.
+    description: Counter of billed seconds per rented instance, measured from when the provider said it was active. One series per instance, labeled by instance_id / provider / gpu_type / billing_mode. Was previously the daemon's own uptime under one asserted label set, which described the control plane rather than anything being paid for.
+
+  - key: instance_rate
+    value: instance.rate.usd_per_second
+    description: Gauge of the per-second price of one rented instance, from the rate the provider quoted at spawn. Joins instance.uptime on instance_id to give spend, which is the figure a cost argument is actually made from. Distinct from gpu.effective_rate, which prices the catalog rather than the fleet.
 
   - key: inference_active_seconds
     value: inference.active.seconds.total
-    description: Counter of seconds spent actively serving inference. Combined with instance.uptime gives utilization.
+    description: Counter of seconds spent actively serving inference, labeled by the instance that served them. Divided by instance.uptime it gives utilization, and the gap between the two is what idle capacity costs.
 
   - key: gpu_effective_rate
     value: gpu.effective_rate.usd_per_second
@@ -143,3 +147,5 @@ labels:
     value: class
   - key: storage_tier
     value: storage_tier
+  - key: instance_id
+    value: instance_id

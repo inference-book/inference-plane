@@ -258,3 +258,25 @@ func TestCandidatesRejectABidThatIsNotADiscount(t *testing.T) {
 		t.Error("the surviving candidate was not marked reclaimable")
 	}
 }
+
+// The exact figure is the same literal all three adapters assert for an
+// A100 80GB, so drift shows up here rather than as a silent disagreement
+// between vendors about one physical card (#323).
+func TestCandidatesCarryExactCardCapacity(t *testing.T) {
+	p := candidateProvider(t, nil)
+
+	got, err := p.Candidates(context.Background(), &provisionerv1.ResourceRequirements{Sku: "NVIDIA A100-SXM4-80GB"})
+	if err != nil {
+		t.Fatalf("Candidates: %v", err)
+	}
+	if len(got) == 0 {
+		t.Fatal("no candidates")
+	}
+	c := got[0]
+	if c.GetVramGbPerGpu() != 80 {
+		t.Errorf("advertised VRAM = %d, want the API's 80", c.GetVramGbPerGpu())
+	}
+	if want := int64(85_899_345_920); c.GetVramBytesPerGpu() != want {
+		t.Errorf("exact VRAM = %d, want %d (80 GiB)", c.GetVramBytesPerGpu(), want)
+	}
+}

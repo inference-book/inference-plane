@@ -17,6 +17,7 @@ package modelstores
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
@@ -52,6 +53,18 @@ type ModelStore interface {
 type ArchitectureSource interface {
 	Architecture(ctx context.Context, req *provisionerv1.DescribeModelRequest) (*provisionerv1.DescribeModelResponse, error)
 }
+
+// ErrNoArchitectureSource means the store cannot report a shape at all,
+// as opposed to being unable to report this model's.
+//
+// A type assertion carries that distinction for a plain store, and stops
+// carrying it as soon as a decorator is in the way: a wrapper has to
+// satisfy the interface in order to forward it, so it satisfies the
+// interface even when the store it wraps cannot answer. The sentinel is
+// how the wrapper says "not me, and not the thing behind me either", and
+// it is what keeps the capability-absent case reporting as Unimplemented
+// rather than collapsing into a bad-spec error (#324).
+var ErrNoArchitectureSource = errors.New("model store cannot report a model's architecture")
 
 // Resolved is what the Service uses to populate the deployment's
 // engine-facing fields. v0.1 only fills EngineModelArg and (optionally)

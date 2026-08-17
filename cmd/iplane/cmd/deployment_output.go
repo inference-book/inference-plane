@@ -9,6 +9,8 @@ import (
 	"time"
 
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
+	"github.com/inference-book/inference-plane/internal/provisioners"
+	"github.com/inference-book/inference-plane/internal/vrambudget"
 )
 
 // renderDeployment writes one Deployment using --output format.
@@ -142,24 +144,23 @@ func deploymentStateLabel(s provisionerv1.DeploymentState) string {
 	return name
 }
 
-
 // dryRunDeploy is the deploy-verb dry-run path. Mirrors the Service's
 // validation + idempotency lookup but stops at "would deploy" without
 // touching SSH or docker on the target instance.
 //
 // Three terminal cases:
 //
-//   1. Deployment id already exists with matching (image, model) and
-//      a live state (PENDING / STARTING / CONFIGURING / RUNNING):
-//      print "would no-op" and exit. The Service's idempotency
-//      contract returns the existing record without instance calls.
+//  1. Deployment id already exists with matching (image, model) and
+//     a live state (PENDING / STARTING / CONFIGURING / RUNNING):
+//     print "would no-op" and exit. The Service's idempotency
+//     contract returns the existing record without instance calls.
 //
-//   2. Deployment id already exists with drifting (image, model) or
-//      a recyclable state (TERMINATED / FAILED): print "would
-//      replace" -- the executor will stop+rm the existing container
-//      before pulling and running the new one.
+//  2. Deployment id already exists with drifting (image, model) or
+//     a recyclable state (TERMINATED / FAILED): print "would
+//     replace" -- the executor will stop+rm the existing container
+//     before pulling and running the new one.
 //
-//   3. No record (or NotFound): print "would deploy" fresh.
+//  3. No record (or NotFound): print "would deploy" fresh.
 //
 // In all cases the instance is looked up so we can surface its
 // provider + SSH endpoint to the operator; an instance that doesn't
@@ -208,6 +209,18 @@ func dryRunDeploy(ctx context.Context, w io.Writer, client deploymentClient, dep
 	if len(dep.GetEngineArgs()) > 0 {
 		fmt.Fprintf(w, "[dry-run]   engine args: %v\n", dep.GetEngineArgs())
 	}
+	// The plan the pre-flight will size against, read back out of those
+	// args. Printed because the parsing is otherwise invisible: an
+	// operator whose flag spelling we do not recognise would see the
+	// check silently skip and read that as a pass (#326).
+	if plan, usable := provisioners.EnginePlan(dep.GetEngineArgs(), dep.GetParallelism()); usable {
+		fmt.Fprintf(w, "[dry-run]   plan read:   weights %s, cache %s, %d tokens x %d sequences across %d card(s)\n",
+			plan.Weights, cacheLabel(plan), plan.MaxModelLen, plan.MaxBatch, max(plan.TPSize, 1))
+		fmt.Fprintf(w, "[dry-run]   size it with: iplane model budget %s --quantization %s --max-model-len %d --max-batch %d --vram-gb <card>\n",
+			dep.GetModel(), plan.Weights, plan.MaxModelLen, plan.MaxBatch)
+	} else {
+		fmt.Fprintln(w, "[dry-run]   plan read:   no context length in the engine args, so the VRAM pre-flight will not run")
+	}
 	if len(dep.GetEnv()) > 0 {
 		fmt.Fprintf(w, "[dry-run]   env:         %d vars\n", len(dep.GetEnv()))
 	}
@@ -241,4 +254,13 @@ func dryRunDeploymentDestroy(ctx context.Context, w io.Writer, client deployment
 	}
 	fmt.Fprintln(w, "[dry-run] no SSH or docker calls made, no state file changes.")
 	return nil
+}
+
+// cacheLabel renders the cache precision, resolving the "same as the
+// weights" case the budget spells as an empty value.
+func cacheLabel(p vrambudget.Plan) vrambudget.Precision {
+	if p.KVCache == "" {
+		return p.Weights
+	}
+	return p.KVCache
 }

@@ -8,6 +8,7 @@ import (
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
 	"github.com/inference-book/inference-plane/internal/provisioners"
 	"github.com/inference-book/inference-plane/internal/provisioners/fabric"
+	"github.com/inference-book/inference-plane/internal/provisioners/skucatalog"
 )
 
 // candidateOfferLimit is how many offers per SKU the read-only listing asks
@@ -79,9 +80,15 @@ func (p *Provider) Candidates(ctx context.Context, reqs *provisionerv1.ResourceR
 // not the same string for variant SKUs and the token is what an operator would
 // pass back to --gpu-sku.
 func offerToCandidate(sku string, o *offerSummary, reclaim provisionerv1.ReclaimPolicy) *provisioners.Candidate {
+	// exactBytes comes off the catalog row, never off the offer. The
+	// host's self-reported gpu_ram is what the advertised figure below is
+	// built from and it is tolerant on purpose; capacity wants the other
+	// error direction (#323).
+	var exactBytes int64
 	obs := fabric.Observation{}
 	if spec := LookupSKU(sku); spec != nil {
 		obs.Family = spec.Family
+		exactBytes = skucatalog.ExactVRAMBytes(spec.VRAMGb)
 	}
 	if o.BwNvlink != nil {
 		obs.HasMeasurement = true
@@ -108,6 +115,7 @@ func offerToCandidate(sku string, o *offerSummary, reclaim provisionerv1.Reclaim
 		Reclaimable:      reclaimable,
 		GpuCount:         int32(o.NumGPUs),
 		VramGbPerGpu:     int32(o.GpuRAM / 1000),
+		VramBytesPerGpu:  exactBytes,
 		Architecture:     provisioners.NormalizeArch(o.CPUArch),
 		FabricScope:      res.Scope,
 		FabricSource:     res.Source,

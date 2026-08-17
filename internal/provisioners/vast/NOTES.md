@@ -56,11 +56,49 @@ on boards that are physically always NVLinked. A bridge-capable card reading
 zero therefore resolves to `FABRIC_SOURCE_UNKNOWN`, not `NONE`. Settling it
 needs an on-box reading (`internal/engineagent`'s interconnect sensor).
 
+## Cold-start phases
+
+`actual_status` walks `created -> loading -> running`, and that is the whole
+basis of the phase ladder in `phase.go`: `vast:scheduling -> vast:image-pull ->
+engine:init`. The engine rung is deliberately unprefixed so a dashboard slicing
+`iplane.deployment.phase.duration` puts it next to RunPod's.
+
+`status_msg` carries docker's layer progress verbatim, and it is the reason the
+progress line is worth reading. `Retrying` is the phrase that separates a pull
+that is slow from one that will never finish, and both look identical from the
+outside otherwise. Only progress-shaped messages are surfaced as progress; a
+terminal one belongs to `TerminalFailure` (see `failure.go`), and repeating it
+here would tell an operator to keep waiting for a dead container.
+
+The ladder is monotonic because a phase change opens and closes a bucket in the
+phase histogram, and Vast's status lags the docker daemon it reports on. A rung
+that rewound would record two short image-pulls where there was one long one.
+Issue #259.
+
+The loop itself is `internal/provisioners/enginewait` now (#268). What stays
+here is the `Observe` callback, because what a tick can see is provider-shaped:
+Vast discovers its endpoint by polling and reads the phase off the record it
+already fetched, where RunPod knows its endpoint up front and has to ask a
+second API. `Config.Endpoint` is left empty here for exactly that reason, which
+is what makes the loop observe before it probes.
+
 ## Volumes
 
 Machine-scoped, not datacenter-scoped like RunPod's (`POST /api/v0/volumes/`
 returns `Invalid machine id`), so `iplane model pin` does not port over as-is.
 Issue #254.
+
+The deployer does not read `Deployment.mounts` and does not pretend to. It
+declares nothing for `provisioners.MountAttacher`, which is how
+`CreateDeployment` knows to refuse a mount aimed here rather than accept one
+and drop it. That drop was the real bug: the deploy downloaded the model and
+was still labelled `storage_tier=warm`, because the label is derived from the
+mount being requested rather than from it being attached.
+
+If Vast ever does learn to attach one, the seam is the `env` map `rentEngine`
+already uses to pass docker run options (`-p 8000:8000` is set that way), so a
+`host_path` bind would ride the same channel and sidestep machine-scoping
+entirely. Unverified on a real rental, which is why it is not here.
 
 ## Agent delivery
 

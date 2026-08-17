@@ -122,6 +122,22 @@ service ProvisionerService {
   // command (#307).
   rpc ListVolumes(ListVolumesRequest) returns (ListVolumesResponse);
 
+  // DescribeModel reports what a model spec resolves to: the shape fixed
+  // at training time, which is what a VRAM budget is computed from.
+  //
+  // An RPC for the same reason the capacity search is one. Reading a
+  // gated model's config needs the hub credential, and that lives in the
+  // daemon's environment, so a CLI host answering from its own process
+  // would report a gated model as unreadable while the daemon reads it
+  // fine. The test is where the inputs live, not whether the call
+  // writes.
+  //
+  // Unimplemented when the configured model store cannot answer. A
+  // pass-through store has no hub to ask, and saying so is different
+  // from returning a model with no layers, which is a budget that says
+  // yes to everything.
+  rpc DescribeModel(DescribeModelRequest) returns (DescribeModelResponse);
+
 }
 
 // Source selects whether the service consults local state, the provider,

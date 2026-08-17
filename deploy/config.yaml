@@ -29,15 +29,6 @@ telemetry:
   environment: "dev"
   sample_ratio: 1.0               # sample 100% in dev; lower in prod
 
-deployment:
-  # These default values describe the lab GPU instance. Override per
-  # instance via CP_PROVIDER / CP_GPU_TYPE / CP_BILLING_MODE / CP_INSTANCE_ID
-  # so cost metrics carry the right labels for each deployment.
-  provider: "runpod"
-  gpu_type: "a10g"
-  billing_mode: "metered_per_second"
-  instance_id: ""                 # set per-instance via env override
-
 router:
   # v0.2 ch8 per-request replica selection:
   #   round_robin     (default) -- the Ch 7 load balancer; spreads turns

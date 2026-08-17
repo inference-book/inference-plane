@@ -118,6 +118,7 @@ const DescribeTimeout = 5 * time.Second
 type Router struct {
 	client     provisionerv1connect.DeploymentServiceClient
 	recorder   *metrics.Recorder
+	cost       *metrics.CostRecorder
 	tracer     trace.Tracer
 	propagator propagation.TextMapPropagator
 
@@ -566,7 +567,15 @@ func (r *Router) handleWithObservability(w http.ResponseWriter, req *http.Reques
 	// requests are still flowing. Best-effort -- a touch failure
 	// is logged but never blocks the proxy or fails the request.
 	r.touchActivity(ctx, dep.GetId())
+
+	// Bracket the proxy alone rather than the whole handler. The outer
+	// timer above covers queueing and the early returns, which is the
+	// right window for a latency metric and the wrong one for cost: an
+	// unforwardable request burns no card time. Attributed to the
+	// replica because that is the instance being paid for (#163).
+	engineStart := time.Now()
 	r.proxyTo(tcw, req, dep, replicaEndpoint, stripDeployPrefix)
+	r.cost.RecordActive(ctx, dep.GetModel(), dep.GetId(), replicaID, time.Since(engineStart).Seconds())
 }
 
 // touchActivity fires a TouchDeployment RPC against the control
@@ -870,4 +879,17 @@ func applyUpstreamAuth(h http.Header, auth *provisionerv1.UpstreamAuth) {
 		return
 	}
 	h.Set(auth.GetHeader(), auth.GetValuePrefix()+secret)
+}
+
+// WithCostRecorder attaches the cost recorder so served time is
+// attributed to the replica that served it.
+//
+// Optional, and nil is a working configuration: RecordActive is
+// nil-safe, and a router in a test has no fleet to bill. The router is
+// given the recorder rather than the state it would need to label
+// richly, because it holds the instance id for free and anything more
+// would be a control-plane hop per request. The uptime and rate series
+// carry the same id and attach the rest.
+func WithCostRecorder(c *metrics.CostRecorder) Option {
+	return func(r *Router) { r.cost = c }
 }

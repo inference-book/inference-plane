@@ -67,7 +67,7 @@ services:
   #
   # Config: viper auto-discovers /etc/iplane/config.yaml; env vars
   # use the IPLANE_ prefix with dotted keys flattened to underscores
-  # (so `deployment.provider` -> IPLANE_DEPLOYMENT_PROVIDER).
+  # (so `router.routing_policy` -> IPLANE_ROUTER_ROUTING_POLICY).
   controlplane:
     # Gated behind the `fullstack` profile so the default `docker compose
     # up -d` brings up infra only (obs services). The dev loop is then
@@ -102,10 +102,6 @@ services:
       # iplane reads.
       IPLANE_TELEMETRY_OTLP_ENDPOINT: otel-collector:4317
       # Per-instance labels for cost metrics. Override via .env.local.
-      IPLANE_DEPLOYMENT_PROVIDER: ${IPLANE_DEPLOYMENT_PROVIDER:-runpod}
-      IPLANE_DEPLOYMENT_GPU_TYPE: ${IPLANE_DEPLOYMENT_GPU_TYPE:-a10g}
-      IPLANE_DEPLOYMENT_BILLING_MODE: ${IPLANE_DEPLOYMENT_BILLING_MODE:-metered_per_second}
-      IPLANE_DEPLOYMENT_INSTANCE_ID: ${IPLANE_DEPLOYMENT_INSTANCE_ID:-}
       # Provider API keys + HF token, propagated from the operator's
       # shell (or .env.local via `docker compose --env-file`). Unset
       # keys arrive as empty strings; buildLocalService skips the
