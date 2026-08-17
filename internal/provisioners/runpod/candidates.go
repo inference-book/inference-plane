@@ -10,6 +10,7 @@ import (
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
 	"github.com/inference-book/inference-plane/internal/provisioners"
 	"github.com/inference-book/inference-plane/internal/provisioners/fabric"
+	"github.com/inference-book/inference-plane/internal/provisioners/skucatalog"
 )
 
 // gpuTypesQuery asks for every GPU type plus what it would cost and whether
@@ -140,12 +141,17 @@ func (p *Provider) Candidates(ctx context.Context, reqs *provisionerv1.ResourceR
 			price, reclaimable = *g.LowestPrice.MinimumBidPrice, true
 		}
 
+		// vramGb stays the live API figure, which is what an operator
+		// filters on. exactBytes comes off the catalog row instead,
+		// because the two want opposite error directions (#323).
 		var (
-			family fabric.Family
-			vramGb = g.MemoryInGb
+			family     fabric.Family
+			vramGb     = g.MemoryInGb
+			exactBytes int64
 		)
 		if spec := LookupSKU(g.ID); spec != nil {
 			family = spec.Family
+			exactBytes = skucatalog.ExactVRAMBytes(spec.VRAMGb)
 		}
 
 		res := fabric.Resolve(fabric.Observation{Family: family})
@@ -158,6 +164,7 @@ func (p *Provider) Candidates(ctx context.Context, reqs *provisionerv1.ResourceR
 			Reclaimable:      reclaimable,
 			GpuCount:         int32(gpuCount),
 			VramGbPerGpu:     int32(vramGb),
+			VramBytesPerGpu:  exactBytes,
 			FabricScope:      res.Scope,
 			FabricSource:     res.Source,
 			FabricGbps:       res.Gbps,

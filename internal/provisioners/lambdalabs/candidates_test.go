@@ -226,3 +226,23 @@ func TestCandidatesRefuseToSubstituteOnDemandForReclaimable(t *testing.T) {
 		t.Errorf("got %d candidate(s) for a reclaimable request; Lambda has no such tier and must not quote on-demand instead: %+v", len(got), got)
 	}
 }
+
+// Third of the cross-adapter agreement on one physical card (#323).
+func TestCandidatesCarryExactCardCapacity(t *testing.T) {
+	p := candidateProvider(t)
+
+	got, err := p.Candidates(context.Background(), &provisionerv1.ResourceRequirements{Sku: "gpu_1x_a100_sxm4"})
+	if err != nil {
+		t.Fatalf("Candidates: %v", err)
+	}
+	if len(got) == 0 {
+		t.Fatal("no candidates")
+	}
+	c := got[0]
+	if c.GetVramGbPerGpu() != 80 {
+		t.Errorf("advertised VRAM = %d, want the catalog's 80", c.GetVramGbPerGpu())
+	}
+	if want := int64(85_899_345_920); c.GetVramBytesPerGpu() != want {
+		t.Errorf("exact VRAM = %d, want %d (80 GiB)", c.GetVramBytesPerGpu(), want)
+	}
+}

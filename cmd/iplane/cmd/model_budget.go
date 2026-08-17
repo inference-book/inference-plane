@@ -140,7 +140,12 @@ func budgetOptionsFromFlags() (budgetOpts, error) {
 	}
 
 	o.plan = vrambudget.Plan{Weights: weights, KVCache: cache, MaxModelLen: budgetMaxModelLen, MaxBatch: budgetMaxBatch}
-	o.cardBytes = int64(budgetVRAMGB * float64(vrambudget.GB))
+	// The label is a binary count, so "80 GB" is 80 GiB and holds 85.9
+	// decimal GB. Reading a vendor's label as decimal removed seven
+	// percent of every card before the arithmetic started, which is
+	// enough to refuse a shape that fits (#323). The header prints both
+	// figures rather than quietly reinterpreting the number typed.
+	o.cardBytes = int64(budgetVRAMGB * float64(vrambudget.GiB))
 	o.cardGB = budgetVRAMGB
 	o.utilization = budgetUtilization
 	o.maxCards = budgetMaxCards
@@ -237,8 +242,9 @@ func writeBudgetTable(w io.Writer, spec string, a *provisionerv1.ModelArchitectu
 		spec, formatParamsShort(a.GetParams()), a.GetLayers(), a.GetKvHeads(), a.GetHeadDim())
 	fmt.Fprintf(w, "plan   weights %s, cache %s, %d tokens x %d sequences\n",
 		o.plan.Weights, o.plan.KVCache, o.plan.MaxModelLen, o.plan.MaxBatch)
-	fmt.Fprintf(w, "card   %g GB at %.2f utilization = %s usable\n\n",
-		o.cardGB, o.utilization, formatGB(vrambudget.UsableBytes(o.cardBytes, o.utilization)))
+	fmt.Fprintf(w, "card   %g GB (%g GiB = %s) at %.2f utilization = %s usable\n\n",
+		o.cardGB, o.cardGB, formatGB(o.cardBytes),
+		o.utilization, formatGB(vrambudget.UsableBytes(o.cardBytes, o.utilization)))
 
 	// AlignRight so the columns compare down the page rather than across
 	// it, which is what a reader scanning for the term that overran does.

@@ -211,7 +211,8 @@ func init() {
 	modelBudgetCmd.Flags().Int32Var(&budgetMaxBatch, "max-batch", 1, "concurrent sequences")
 	modelBudgetCmd.Flags().Int32Var(&budgetTP, "tp", 0,
 		"report this tensor-parallel width only (default: every candidate up to --max-cards)")
-	modelBudgetCmd.Flags().Float64Var(&budgetVRAMGB, "vram-gb", 0, "card memory in GB (required)")
+	modelBudgetCmd.Flags().Float64Var(&budgetVRAMGB, "vram-gb", 0,
+		"card memory as the vendor labels it, so 80 for an 80GB card (required); read as GiB, which is what the card holds")
 	modelBudgetCmd.Flags().Float64Var(&budgetUtilization, "gpu-memory-utilization", vrambudget.DefaultUtilization,
 		"fraction of the card the engine may claim")
 	modelBudgetCmd.Flags().Int32Var(&budgetMaxCards, "max-cards", 8, "widest card count to consider")

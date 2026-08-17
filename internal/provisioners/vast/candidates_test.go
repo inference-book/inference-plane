@@ -220,3 +220,43 @@ func TestCandidatesPriceTheRequestedTier(t *testing.T) {
 			reclaimable[0].GetPriceUsdPerHour(), reclaimable[0].GetReclaimable())
 	}
 }
+
+// TestCandidatesSeparateAdvertisedVRAMFromExactCapacity is one third of a
+// cross-adapter agreement: all three adapters assert the same literal for
+// the same physical card, so an adapter that drifts fails here rather
+// than quietly disagreeing with its siblings (#323).
+func TestCandidatesSeparateAdvertisedVRAMFromExactCapacity(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v0/bundles/", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, bundlesResponse{Offers: []offerSummary{
+			{ID: 111, MachineID: 6566, GpuName: "A100 SXM4", NumGPUs: 4, GpuRAM: 81920, DphTotal: 1.30},
+		}})
+	})
+	p, _ := newTestProvider(t, mux)
+
+	got, err := p.Candidates(context.Background(), &provisionerv1.ResourceRequirements{MinVramGb: 80})
+	if err != nil {
+		t.Fatalf("Candidates: %v", err)
+	}
+	if len(got) == 0 {
+		t.Fatal("no candidates")
+	}
+	c := got[0]
+
+	// The advertised figure stays the host's own rounding. It is a filter
+	// input and it is tolerant on purpose (#283); making it exact would
+	// re-break the machines that fix stopped rejecting.
+	if c.GetVramGbPerGpu() != 81 {
+		t.Errorf("advertised VRAM = %d, want 81 from the host's 81920 MB", c.GetVramGbPerGpu())
+	}
+	// The exact figure comes off the catalog and is the same card the
+	// other two adapters describe, whatever each reports as advertised.
+	if want := int64(85_899_345_920); c.GetVramBytesPerGpu() != want {
+		t.Errorf("exact VRAM = %d, want %d (80 GiB)", c.GetVramBytesPerGpu(), want)
+	}
+	// Asserting they differ, because a test that only read the new field
+	// would pass if somebody made them the same number.
+	if c.GetVramBytesPerGpu() == int64(c.GetVramGbPerGpu())*1_000_000_000 {
+		t.Error("exact capacity is just the advertised figure in decimal bytes; the two have collapsed")
+	}
+}

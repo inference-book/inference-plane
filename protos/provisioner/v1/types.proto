@@ -758,6 +758,17 @@ message Candidate {
   double price_usd_per_hour = 6;
 
   int32 gpu_count = 7;
+
+  // vram_gb_per_gpu is the ADVERTISED per-card memory, as the provider
+  // reports it or the catalog labels it. It is a filter input, not a
+  // measurement, and it is deliberately tolerant: the three adapters
+  // disagree by a gigabyte on the same physical card, because a
+  // marketplace of self-reporting hosts needs a floor generous enough
+  // not to reject machines that are fine (#283).
+  //
+  // Do not size a model against it. Tolerance and accounting want
+  // opposite error directions, and this field is tuned for the first.
+  // Use vram_bytes_per_gpu.
   int32 vram_gb_per_gpu = 8;
 
   // architecture is the host CPU architecture, normalized ("amd64",
@@ -792,6 +803,17 @@ message Candidate {
   // ranking. A fact that matters on a second provider gets promoted to
   // a typed field and normalized.
   map<string, string> attrs = 15;
+
+  // vram_bytes_per_gpu is what the card actually holds, for accounting
+  // rather than filtering. Resolved from the catalog rather than from a
+  // vendor's self-report, because the catalog knows an "A100 80GB" is
+  // 80 GiB and the vendor reports whatever its API rounds to.
+  //
+  // Zero means no exact figure is recorded for this SKU, which is
+  // unknown and not zero. A budget must decline to conclude rather than
+  // compute against it, since a card of zero bytes fits nothing and
+  // would refuse every deploy on an uncatalogued part (#323).
+  int64 vram_bytes_per_gpu = 16;
 }
 
 // AnswerOutcome is what one provider did when asked for capacity.

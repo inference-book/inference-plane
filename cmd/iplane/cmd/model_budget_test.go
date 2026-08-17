@@ -111,7 +111,12 @@ func TestModelBudgetPrintsTheChaptersWorkedExample(t *testing.T) {
 	want := strings.Join([]string{
 		"meta-llama/Llama-3.3-70B-Instruct  70.6B params  80 layers  8 kv-heads  head-dim 128",
 		"plan   weights fp8, cache fp8, 32768 tokens x 16 sequences",
-		"card   80 GB at 0.90 utilization = 72.0 GB usable",
+		// 85.9 GB rather than 80: the vendor's "80GB" label is a binary
+		// count and the card holds 80 GiB. Reading it as decimal took
+		// seven percent off every card before the arithmetic began
+		// (#323). The verdicts below did not move, which is why the
+		// chapter's conclusions survive the correction.
+		"card   80 GB (80 GiB = 85.9 GB) at 0.90 utilization = 77.3 GB usable",
 		"",
 		"   cards   weights     cache   activation   overhead      total   verdict",
 		// 194.8 rather than the 194.7 the ticket's listing prints: the
@@ -354,5 +359,21 @@ func TestModelBudgetRefusesTwoRevisionsThatDisagree(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "abc123") || !strings.Contains(err.Error(), "def456") {
 		t.Errorf("error does not show both revisions: %v", err)
+	}
+}
+
+func TestModelBudgetReadsTheCardLabelAsBinary(t *testing.T) {
+	// A vendor's "80GB" is 80 GiB, which is 85.9 decimal GB. Reading the
+	// label as decimal understated every card by seven percent, and the
+	// error runs in the direction that refuses a shape which fits.
+	out, _, err := runBudget(t, llama70B, "meta-llama/Llama-3.3-70B-Instruct", "--vram-gb", "80")
+	if err != nil && !strings.Contains(out, "cards") {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "80 GiB = 85.9 GB") {
+		t.Errorf("the card line does not show what the label was read as:\n%s", out)
+	}
+	if !strings.Contains(out, "77.3 GB usable") {
+		t.Errorf("usable memory is not 0.9 of 85.9 GB:\n%s", out)
 	}
 }
