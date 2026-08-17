@@ -2471,7 +2471,7 @@ const file_provisioner_v1_service_proto_rawDesc = "" +
 	"\x06Source\x12\x16\n" +
 	"\x12SOURCE_UNSPECIFIED\x10\x00\x12\x10\n" +
 	"\fSOURCE_LOCAL\x10\x01\x12\x11\n" +
-	"\rSOURCE_REMOTE\x10\x022\x98\a\n" +
+	"\rSOURCE_REMOTE\x10\x022\xf6\a\n" +
 	"\x12ProvisionerService\x12_\n" +
 	"\x0eCreateInstance\x12%.provisioner.v1.CreateInstanceRequest\x1a&.provisioner.v1.CreateInstanceResponse\x12b\n" +
 	"\x0fDestroyInstance\x12&.provisioner.v1.DestroyInstanceRequest\x1a'.provisioner.v1.DestroyInstanceResponse\x12e\n" +
@@ -2481,7 +2481,8 @@ const file_provisioner_v1_service_proto_rawDesc = "" +
 	"\x11GetInstanceSSHKey\x12(.provisioner.v1.GetInstanceSSHKeyRequest\x1a).provisioner.v1.GetInstanceSSHKeyResponse\x12_\n" +
 	"\x0eListCandidates\x12%.provisioner.v1.ListCandidatesRequest\x1a&.provisioner.v1.ListCandidatesResponse\x12b\n" +
 	"\x0fSelectPlacement\x12&.provisioner.v1.SelectPlacementRequest\x1a'.provisioner.v1.SelectPlacementResponse\x12V\n" +
-	"\vListVolumes\x12\".provisioner.v1.ListVolumesRequest\x1a#.provisioner.v1.ListVolumesResponse2\xd1\x06\n" +
+	"\vListVolumes\x12\".provisioner.v1.ListVolumesRequest\x1a#.provisioner.v1.ListVolumesResponse\x12\\\n" +
+	"\rDescribeModel\x12$.provisioner.v1.DescribeModelRequest\x1a%.provisioner.v1.DescribeModelResponse2\xd1\x06\n" +
 	"\x11DeploymentService\x12e\n" +
 	"\x10CreateDeployment\x12'.provisioner.v1.CreateDeploymentRequest\x1a(.provisioner.v1.CreateDeploymentResponse\x12k\n" +
 	"\x12DescribeDeployment\x12).provisioner.v1.DescribeDeploymentRequest\x1a*.provisioner.v1.DescribeDeploymentResponse\x12b\n" +
@@ -2567,6 +2568,8 @@ var file_provisioner_v1_service_proto_goTypes = []any{
 	(*Comparability)(nil),                // 52: provisioner.v1.Comparability
 	(*Placement)(nil),                    // 53: provisioner.v1.Placement
 	(*Volume)(nil),                       // 54: provisioner.v1.Volume
+	(*DescribeModelRequest)(nil),         // 55: provisioner.v1.DescribeModelRequest
+	(*DescribeModelResponse)(nil),        // 56: provisioner.v1.DescribeModelResponse
 }
 var file_provisioner_v1_service_proto_depIdxs = []int32{
 	41, // 0: provisioner.v1.CreateInstanceRequest.spec:type_name -> provisioner.v1.Spec
@@ -2612,39 +2615,41 @@ var file_provisioner_v1_service_proto_depIdxs = []int32{
 	35, // 40: provisioner.v1.ProvisionerService.ListCandidates:input_type -> provisioner.v1.ListCandidatesRequest
 	37, // 41: provisioner.v1.ProvisionerService.SelectPlacement:input_type -> provisioner.v1.SelectPlacementRequest
 	39, // 42: provisioner.v1.ProvisionerService.ListVolumes:input_type -> provisioner.v1.ListVolumesRequest
-	17, // 43: provisioner.v1.DeploymentService.CreateDeployment:input_type -> provisioner.v1.CreateDeploymentRequest
-	19, // 44: provisioner.v1.DeploymentService.DescribeDeployment:input_type -> provisioner.v1.DescribeDeploymentRequest
-	21, // 45: provisioner.v1.DeploymentService.ListDeployments:input_type -> provisioner.v1.ListDeploymentsRequest
-	23, // 46: provisioner.v1.DeploymentService.DestroyDeployment:input_type -> provisioner.v1.DestroyDeploymentRequest
-	25, // 47: provisioner.v1.DeploymentService.WatchDeployment:input_type -> provisioner.v1.WatchDeploymentRequest
-	27, // 48: provisioner.v1.DeploymentService.TouchDeployment:input_type -> provisioner.v1.TouchDeploymentRequest
-	15, // 49: provisioner.v1.DeploymentService.ScaleDeployment:input_type -> provisioner.v1.ScaleDeploymentRequest
-	13, // 50: provisioner.v1.DeploymentService.MigrateDeployment:input_type -> provisioner.v1.MigrateDeploymentRequest
-	29, // 51: provisioner.v1.EngineRegistryService.RegisterEngine:input_type -> provisioner.v1.RegisterEngineRequest
-	31, // 52: provisioner.v1.EngineRegistryService.ListEngines:input_type -> provisioner.v1.ListEnginesRequest
-	33, // 53: provisioner.v1.EngineRegistryService.DrainEngine:input_type -> provisioner.v1.DrainEngineRequest
-	2,  // 54: provisioner.v1.ProvisionerService.CreateInstance:output_type -> provisioner.v1.CreateInstanceResponse
-	4,  // 55: provisioner.v1.ProvisionerService.DestroyInstance:output_type -> provisioner.v1.DestroyInstanceResponse
-	6,  // 56: provisioner.v1.ProvisionerService.DescribeInstance:output_type -> provisioner.v1.DescribeInstanceResponse
-	8,  // 57: provisioner.v1.ProvisionerService.ListInstances:output_type -> provisioner.v1.ListInstancesResponse
-	10, // 58: provisioner.v1.ProvisionerService.WaitForInstanceReady:output_type -> provisioner.v1.WaitForInstanceReadyResponse
-	12, // 59: provisioner.v1.ProvisionerService.GetInstanceSSHKey:output_type -> provisioner.v1.GetInstanceSSHKeyResponse
-	36, // 60: provisioner.v1.ProvisionerService.ListCandidates:output_type -> provisioner.v1.ListCandidatesResponse
-	38, // 61: provisioner.v1.ProvisionerService.SelectPlacement:output_type -> provisioner.v1.SelectPlacementResponse
-	40, // 62: provisioner.v1.ProvisionerService.ListVolumes:output_type -> provisioner.v1.ListVolumesResponse
-	18, // 63: provisioner.v1.DeploymentService.CreateDeployment:output_type -> provisioner.v1.CreateDeploymentResponse
-	20, // 64: provisioner.v1.DeploymentService.DescribeDeployment:output_type -> provisioner.v1.DescribeDeploymentResponse
-	22, // 65: provisioner.v1.DeploymentService.ListDeployments:output_type -> provisioner.v1.ListDeploymentsResponse
-	24, // 66: provisioner.v1.DeploymentService.DestroyDeployment:output_type -> provisioner.v1.DestroyDeploymentResponse
-	26, // 67: provisioner.v1.DeploymentService.WatchDeployment:output_type -> provisioner.v1.DeploymentStateChangedEvent
-	28, // 68: provisioner.v1.DeploymentService.TouchDeployment:output_type -> provisioner.v1.TouchDeploymentResponse
-	16, // 69: provisioner.v1.DeploymentService.ScaleDeployment:output_type -> provisioner.v1.ScaleDeploymentResponse
-	14, // 70: provisioner.v1.DeploymentService.MigrateDeployment:output_type -> provisioner.v1.MigrateDeploymentResponse
-	30, // 71: provisioner.v1.EngineRegistryService.RegisterEngine:output_type -> provisioner.v1.RegisterEngineResponse
-	32, // 72: provisioner.v1.EngineRegistryService.ListEngines:output_type -> provisioner.v1.ListEnginesResponse
-	34, // 73: provisioner.v1.EngineRegistryService.DrainEngine:output_type -> provisioner.v1.DrainEngineResponse
-	54, // [54:74] is the sub-list for method output_type
-	34, // [34:54] is the sub-list for method input_type
+	55, // 43: provisioner.v1.ProvisionerService.DescribeModel:input_type -> provisioner.v1.DescribeModelRequest
+	17, // 44: provisioner.v1.DeploymentService.CreateDeployment:input_type -> provisioner.v1.CreateDeploymentRequest
+	19, // 45: provisioner.v1.DeploymentService.DescribeDeployment:input_type -> provisioner.v1.DescribeDeploymentRequest
+	21, // 46: provisioner.v1.DeploymentService.ListDeployments:input_type -> provisioner.v1.ListDeploymentsRequest
+	23, // 47: provisioner.v1.DeploymentService.DestroyDeployment:input_type -> provisioner.v1.DestroyDeploymentRequest
+	25, // 48: provisioner.v1.DeploymentService.WatchDeployment:input_type -> provisioner.v1.WatchDeploymentRequest
+	27, // 49: provisioner.v1.DeploymentService.TouchDeployment:input_type -> provisioner.v1.TouchDeploymentRequest
+	15, // 50: provisioner.v1.DeploymentService.ScaleDeployment:input_type -> provisioner.v1.ScaleDeploymentRequest
+	13, // 51: provisioner.v1.DeploymentService.MigrateDeployment:input_type -> provisioner.v1.MigrateDeploymentRequest
+	29, // 52: provisioner.v1.EngineRegistryService.RegisterEngine:input_type -> provisioner.v1.RegisterEngineRequest
+	31, // 53: provisioner.v1.EngineRegistryService.ListEngines:input_type -> provisioner.v1.ListEnginesRequest
+	33, // 54: provisioner.v1.EngineRegistryService.DrainEngine:input_type -> provisioner.v1.DrainEngineRequest
+	2,  // 55: provisioner.v1.ProvisionerService.CreateInstance:output_type -> provisioner.v1.CreateInstanceResponse
+	4,  // 56: provisioner.v1.ProvisionerService.DestroyInstance:output_type -> provisioner.v1.DestroyInstanceResponse
+	6,  // 57: provisioner.v1.ProvisionerService.DescribeInstance:output_type -> provisioner.v1.DescribeInstanceResponse
+	8,  // 58: provisioner.v1.ProvisionerService.ListInstances:output_type -> provisioner.v1.ListInstancesResponse
+	10, // 59: provisioner.v1.ProvisionerService.WaitForInstanceReady:output_type -> provisioner.v1.WaitForInstanceReadyResponse
+	12, // 60: provisioner.v1.ProvisionerService.GetInstanceSSHKey:output_type -> provisioner.v1.GetInstanceSSHKeyResponse
+	36, // 61: provisioner.v1.ProvisionerService.ListCandidates:output_type -> provisioner.v1.ListCandidatesResponse
+	38, // 62: provisioner.v1.ProvisionerService.SelectPlacement:output_type -> provisioner.v1.SelectPlacementResponse
+	40, // 63: provisioner.v1.ProvisionerService.ListVolumes:output_type -> provisioner.v1.ListVolumesResponse
+	56, // 64: provisioner.v1.ProvisionerService.DescribeModel:output_type -> provisioner.v1.DescribeModelResponse
+	18, // 65: provisioner.v1.DeploymentService.CreateDeployment:output_type -> provisioner.v1.CreateDeploymentResponse
+	20, // 66: provisioner.v1.DeploymentService.DescribeDeployment:output_type -> provisioner.v1.DescribeDeploymentResponse
+	22, // 67: provisioner.v1.DeploymentService.ListDeployments:output_type -> provisioner.v1.ListDeploymentsResponse
+	24, // 68: provisioner.v1.DeploymentService.DestroyDeployment:output_type -> provisioner.v1.DestroyDeploymentResponse
+	26, // 69: provisioner.v1.DeploymentService.WatchDeployment:output_type -> provisioner.v1.DeploymentStateChangedEvent
+	28, // 70: provisioner.v1.DeploymentService.TouchDeployment:output_type -> provisioner.v1.TouchDeploymentResponse
+	16, // 71: provisioner.v1.DeploymentService.ScaleDeployment:output_type -> provisioner.v1.ScaleDeploymentResponse
+	14, // 72: provisioner.v1.DeploymentService.MigrateDeployment:output_type -> provisioner.v1.MigrateDeploymentResponse
+	30, // 73: provisioner.v1.EngineRegistryService.RegisterEngine:output_type -> provisioner.v1.RegisterEngineResponse
+	32, // 74: provisioner.v1.EngineRegistryService.ListEngines:output_type -> provisioner.v1.ListEnginesResponse
+	34, // 75: provisioner.v1.EngineRegistryService.DrainEngine:output_type -> provisioner.v1.DrainEngineResponse
+	55, // [55:76] is the sub-list for method output_type
+	34, // [34:55] is the sub-list for method input_type
 	34, // [34:34] is the sub-list for extension type_name
 	34, // [34:34] is the sub-list for extension extendee
 	0,  // [0:34] is the sub-list for field type_name

@@ -112,6 +112,14 @@ func (a *ConnectProvisionerAdapter) ListVolumes(ctx context.Context, req *connec
 	return connect.NewResponse(resp), nil
 }
 
+func (a *ConnectProvisionerAdapter) DescribeModel(ctx context.Context, req *connect.Request[provisionerv1.DescribeModelRequest]) (*connect.Response[provisionerv1.DescribeModelResponse], error) {
+	resp, err := a.svc.DescribeModel(ctx, req.Msg)
+	if err != nil {
+		return nil, statusToConnectErr(err)
+	}
+	return connect.NewResponse(resp), nil
+}
+
 // ConnectDeploymentAdapter wraps a gRPC DeploymentServiceServer
 // implementation (typically *Service) and exposes the
 // provisionerv1connect.DeploymentServiceHandler interface. Mirrors

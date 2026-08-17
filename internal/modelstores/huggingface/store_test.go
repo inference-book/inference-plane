@@ -177,3 +177,53 @@ func TestResolve_BadSpecShape_NoNetworkCall(t *testing.T) {
 		}
 	}
 }
+
+func TestResolve_GatedFieldIsAStringOnGatedModels(t *testing.T) {
+	// HF sends `false` for an ungated repository and the string "auto" or
+	// "manual" for a gated one, naming how access is granted. Every
+	// fixture in this file used the boolean, which is why decoding the
+	// string was broken for as long as it was: a gated model came back as
+	// "200 but body unparseable" rather than as a gated model, and the
+	// check that exists to give an actionable answer gave the worst one.
+	for _, mode := range []string{`"auto"`, `"manual"`, `false`, `true`} {
+		t.Run(mode, func(t *testing.T) {
+			f := newFixture(t, func(_ string) (int, string) {
+				return 200, `{"id":"meta-llama/Llama-3.3-70B-Instruct","gated":` + mode + `,"disabled":false}`
+			})
+			if _, err := f.store("").Resolve(context.Background(), "meta-llama/Llama-3.3-70B-Instruct"); err != nil {
+				t.Errorf("gated %s: %v", mode, err)
+			}
+		})
+	}
+}
+
+func TestResolve_GatedFieldOfAnUnexpectedTypeIsReported(t *testing.T) {
+	f := newFixture(t, func(_ string) (int, string) {
+		return 200, `{"id":"x/y","gated":42}`
+	})
+	_, err := f.store("").Resolve(context.Background(), "x/y")
+	if err == nil {
+		t.Fatal("want an error for a gated field that is neither bool nor string")
+	}
+	if !strings.Contains(err.Error(), "gated") {
+		t.Errorf("error does not name the field: %v", err)
+	}
+}
+
+func TestResolve_401NamesBothGatedAndMissing(t *testing.T) {
+	// huggingface.co answers 401 for a gated model and for one that does
+	// not exist, because distinguishing them for an anonymous caller
+	// would leak the existence of private repositories. Naming only the
+	// gated case sends an operator off to accept a license for a model
+	// they misspelled.
+	f := newFixture(t, func(_ string) (int, string) { return 401, `{"error":"Unauthorized"}` })
+	_, err := f.store("").Resolve(context.Background(), "typo/mispelled-model")
+	if err == nil {
+		t.Fatal("want an error for 401")
+	}
+	for _, want := range []string{"gated", "does not exist", "HF_TOKEN"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("401 error %q does not mention %q", err, want)
+		}
+	}
+}

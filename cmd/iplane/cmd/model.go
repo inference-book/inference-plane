@@ -179,13 +179,14 @@ func buildPinService() (*provisioners.Service, error) {
 
 func init() {
 	rootCmd.AddCommand(modelCmd)
-	modelCmd.AddCommand(modelPinCmd, modelLsCmd, modelUnpinCmd)
+	modelCmd.AddCommand(modelPinCmd, modelLsCmd, modelUnpinCmd, modelDescribeCmd)
 
 	// Bound to the same variable the instance group uses, so one exported
-	// IPLANE_SERVICE_URL means the same thing everywhere. Only `ls` acts on
-	// it; pin and unpin write and stay in-process, and say so when refused.
+	// IPLANE_SERVICE_URL means the same thing everywhere. The read verbs
+	// act on it; pin and unpin write and stay in-process, and say so when
+	// refused.
 	modelCmd.PersistentFlags().StringVar(&instanceServiceURL, "service-url", os.Getenv("IPLANE_SERVICE_URL"),
-		`for 'model ls', read the registry from a running iplane serve (default $IPLANE_SERVICE_URL)`)
+		`for the read verbs ('ls', 'describe'), read from a running iplane serve (default $IPLANE_SERVICE_URL)`)
 
 	modelPinCmd.Flags().StringVar(&pinProvider, "provider", defaultProvider(provisioners.ProviderRunPod), "provider to stage the volume on")
 	modelPinCmd.Flags().StringVar(&pinRegion, "region", "", "datacenter/region for the volume (required)")
