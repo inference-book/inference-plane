@@ -245,3 +245,15 @@ func stampFabric(hw *provisionerv1.Hardware, gpuName string, bwNvlink *float64) 
 	}
 	fabric.Stamp(hw, obs)
 }
+
+// CardCapacityBytes reports what one card of this SKU holds, or 0 when
+// the catalog has no exact figure for it. Implements the optional
+// provisioners.CardCapacityReporter capability, so a deploy can size a
+// model against the card before renting it (#323).
+func (p *Provider) CardCapacityBytes(sku string) int64 {
+	spec := LookupSKU(sku)
+	if spec == nil {
+		return 0
+	}
+	return skucatalog.ExactVRAMBytes(spec.VRAMGb)
+}

@@ -1121,6 +1121,14 @@ func (s *Service) CreateDeployment(ctx context.Context, req *provisionerv1.Creat
 	}
 	dep.EngineArgs = append(dep.GetEngineArgs(), parArgs...)
 
+	// Ch 12: read the plan back out of the arguments the engine is about
+	// to be given, and refuse one the cards cannot hold. After the
+	// parallelism args are appended, so the split the engine will
+	// actually run is the split the budget sizes against.
+	if err := s.budgetCheck(ctx, req); err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+
 	// Stamp the ModelStore's mounts onto the deployment so the deploy
 	// path can attach them. Empty for the default HF-passthrough store;
 	// a warm-cache store (volumecache) fills them so the engine loads

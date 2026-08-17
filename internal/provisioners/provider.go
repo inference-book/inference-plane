@@ -199,6 +199,40 @@ func TerminalFailure(ctx context.Context, p Provider, providerID string) (bool, 
 	return fr.TerminalFailure(ctx, providerID)
 }
 
+// CardCapacityReporter is an optional Provider capability: what one card
+// of a named SKU actually holds, in bytes.
+//
+// It exists because the pre-rent budget check has to run synchronously
+// inside CreateDeployment, before placement, and placement is the only
+// other place a resolved Candidate carrying the figure exists. A catalog
+// lookup is a map read with no network behind it, so asking every deploy
+// costs nothing.
+//
+// Answering from the adapter rather than from a shared table because
+// each provider's catalog is its own: the same physical card is
+// "NVIDIA A100-SXM4-80GB", "A100_SXM4" and "gpu_1x_a100_sxm4" across the
+// three, and only the adapter can turn its own token into a row.
+//
+// 0 means the provider has no exact figure for that SKU, which is
+// unknown and not zero. A caller must decline to conclude rather than
+// treat it as a card that holds nothing (#323).
+type CardCapacityReporter interface {
+	CardCapacityBytes(sku string) int64
+}
+
+// CardCapacityBytes asks a provider what one card of a SKU holds,
+// returning 0 for providers that cannot say.
+//
+// The type-assertion dance lives here so every caller treats a provider
+// without the capability the same way, matching TerminalFailure.
+func CardCapacityBytes(p Provider, sku string) int64 {
+	cr, ok := p.(CardCapacityReporter)
+	if !ok || sku == "" {
+		return 0
+	}
+	return cr.CardCapacityBytes(sku)
+}
+
 // VolumeManager is an optional Provider capability for providers that
 // offer persistent volumes a model can be pre-staged onto (RunPod
 // network volumes today), so warm-cache deploys mount weights instead of
