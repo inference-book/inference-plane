@@ -75,6 +75,13 @@ phase histogram, and Vast's status lags the docker daemon it reports on. A rung
 that rewound would record two short image-pulls where there was one long one.
 Issue #259.
 
+The loop itself is `internal/provisioners/enginewait` now (#268). What stays
+here is the `Observe` callback, because what a tick can see is provider-shaped:
+Vast discovers its endpoint by polling and reads the phase off the record it
+already fetched, where RunPod knows its endpoint up front and has to ask a
+second API. `Config.Endpoint` is left empty here for exactly that reason, which
+is what makes the loop observe before it probes.
+
 ## Volumes
 
 Machine-scoped, not datacenter-scoped like RunPod's (`POST /api/v0/volumes/`
