@@ -93,10 +93,6 @@ func bindServeFlags(c *cobra.Command) {
 	c.Flags().String("otlp-endpoint", "localhost:4317", "OpenTelemetry collector endpoint")
 	c.Flags().String("service-name", "inference-plane", "OTel service name")
 	c.Flags().String("environment", "dev", "OTel deployment.environment")
-	c.Flags().String("provider", "", "deployment provider label")
-	c.Flags().String("gpu-type", "", "deployment gpu_type label")
-	c.Flags().String("billing-mode", "", "deployment billing_mode label")
-	c.Flags().String("instance-id", "", "deployment instance_id label")
 	c.Flags().String("routing-policy", "round_robin", "per-request replica selection: round_robin | prefix_affinity")
 
 	// Bind kebab-case flags onto dotted viper keys matching the YAML.
@@ -109,10 +105,6 @@ func bindServeFlags(c *cobra.Command) {
 		"otlp-endpoint":  "telemetry.otlp_endpoint",
 		"service-name":   "telemetry.service_name",
 		"environment":    "telemetry.environment",
-		"provider":       "deployment.provider",
-		"gpu-type":       "deployment.gpu_type",
-		"billing-mode":   "deployment.billing_mode",
-		"instance-id":    "deployment.instance_id",
 		"routing-policy": "router.routing_policy",
 	} {
 		_ = viper.BindPFlag(key, c.Flags().Lookup(flagName))
@@ -231,7 +223,7 @@ func runServe(parent context.Context) error {
 		return fmt.Errorf("config load: %w", err)
 	}
 
-	shutdownTel, err := telemetry.Init(parent, cfg.Telemetry, cfg.Deployment)
+	shutdownTel, err := telemetry.Init(parent, cfg.Telemetry)
 	if err != nil {
 		return fmt.Errorf("telemetry init: %w", err)
 	}
@@ -264,15 +256,6 @@ func runServe(parent context.Context) error {
 			return fmt.Errorf("providers.yaml: %w", err)
 		}
 		costProviders = provs
-	}
-	costRecorder, err := metrics.NewCostRecorder(metrics.Deployment{
-		Provider:    cfg.Deployment.Provider,
-		GPUType:     cfg.Deployment.GPUType,
-		BillingMode: cfg.Deployment.BillingMode,
-		InstanceID:  cfg.Deployment.InstanceID,
-	}, costProviders)
-	if err != nil {
-		return fmt.Errorf("cost recorder: %w", err)
 	}
 
 	// Daemon state-of-record. Open the state store, acquire the
@@ -312,6 +295,15 @@ func runServe(parent context.Context) error {
 		return fmt.Errorf("build provisioner service: %w", err)
 	}
 	logger.Info("daemon state-of-record initialized", "state_dir", stateDir)
+
+	// Built after the Service because the Service is its fleet source.
+	// Cost is measured from the instances iplane rented, so the recorder
+	// needs something that can enumerate them; it used to be handed a
+	// tuple the operator asserted in their shell (#163).
+	costRecorder, err := metrics.NewCostRecorder(provisionerSvc, costProviders)
+	if err != nil {
+		return fmt.Errorf("cost recorder: %w", err)
+	}
 
 	// v0.2 ch7-beat1.7: launch the idle-TTL reaper goroutine. Sweeps
 	// every 30s, destroys deployments whose idle TTL has elapsed
@@ -370,7 +362,7 @@ func runServe(parent context.Context) error {
 		"lease", engines.DefaultLease,
 		"renew_interval", engineRegistry.RenewInterval())
 
-	grpcSrv, grpcLis, err := startGRPCServer(be, recorder, costRecorder, logger)
+	grpcSrv, grpcLis, err := startGRPCServer(be, recorder, logger)
 	if err != nil {
 		return fmt.Errorf("gRPC server: %w", err)
 	}
@@ -406,6 +398,7 @@ func runServe(parent context.Context) error {
 	default:
 		return fmt.Errorf("router.routing_policy: unknown value %q (want round_robin | prefix_affinity)", cfg.Router.RoutingPolicy)
 	}
+	routerOpts = append(routerOpts, router.WithCostRecorder(costRecorder))
 	deploymentRouter := router.New(
 		provisionerv1connect.NewDeploymentServiceClient(http.DefaultClient, daemonBaseURL),
 		recorder,
@@ -472,7 +465,7 @@ func runServe(parent context.Context) error {
 		"grpc", grpcAddr,
 		"backend.engine", cfg.Backend.Engine,
 		"backend.url", cfg.Backend.URL,
-		"deployment.provider", cfg.Deployment.Provider)
+	)
 
 	err = skhttp.ListenAndServeGraceful(httpSrv,
 		skhttp.WithDrainTimeout(time.Duration(cfg.Server.ShutdownSec)*time.Second),
@@ -501,13 +494,13 @@ func runServe(parent context.Context) error {
 // listener and serves in a goroutine. The HTTP layer in
 // internal/web/server dials this listener for both gateway and
 // connect handlers.
-func startGRPCServer(be backends.Backend, rec *metrics.Recorder, cost *metrics.CostRecorder, logger *slog.Logger) (*grpc.Server, net.Listener, error) {
+func startGRPCServer(be backends.Backend, rec *metrics.Recorder, logger *slog.Logger) (*grpc.Server, net.Listener, error) {
 	lis, err := net.Listen("tcp", grpcAddr)
 	if err != nil {
 		return nil, nil, err
 	}
 	srv := grpc.NewServer()
-	inferencev1.RegisterInferenceServiceServer(srv, services.NewInferenceServer(be, rec, cost))
+	inferencev1.RegisterInferenceServiceServer(srv, services.NewInferenceServer(be, rec))
 	inferencev1.RegisterHealthServiceServer(srv, services.NewHealthServer(be, rec))
 	go func() {
 		if err := srv.Serve(lis); err != nil && !errors.Is(err, grpc.ErrServerStopped) {

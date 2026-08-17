@@ -27,10 +27,13 @@ const MetricDeploymentTeardownDuration = "iplane.deployment.teardown.duration"
 // MetricGPUEffectiveRate -- Gauge of per-second cost rate for each provider/gpu_type/billing_mode combination loaded from providers.yaml. One series per provider for the cross-provider cost-projection panel.
 const MetricGPUEffectiveRate = "gpu.effective_rate.usd_per_second"
 
-// MetricInferenceActiveSeconds -- Counter of seconds spent actively serving inference. Combined with instance.uptime gives utilization.
+// MetricInferenceActiveSeconds -- Counter of seconds spent actively serving inference, labeled by the instance that served them. Divided by instance.uptime it gives utilization, and the gap between the two is what idle capacity costs.
 const MetricInferenceActiveSeconds = "inference.active.seconds.total"
 
-// MetricInstanceUptimeSeconds -- Counter of wall-clock seconds since the control plane started. Base for billed-time cost calculations.
+// MetricInstanceRate -- Gauge of the per-second price of one rented instance, from the rate the provider quoted at spawn. Joins instance.uptime on instance_id to give spend, which is the figure a cost argument is actually made from. Distinct from gpu.effective_rate, which prices the catalog rather than the fleet.
+const MetricInstanceRate = "instance.rate.usd_per_second"
+
+// MetricInstanceUptimeSeconds -- Counter of billed seconds per rented instance, measured from when the provider said it was active. One series per instance, labeled by instance_id / provider / gpu_type / billing_mode. Was previously the daemon's own uptime under one asserted label set, which described the control plane rather than anything being paid for.
 const MetricInstanceUptimeSeconds = "instance.uptime.seconds.total"
 
 // MetricQueueDepth -- Gauge of current items waiting in the router's per-(deploy, tenant, lane) sub-queue. Updated synchronously on push/pop. Operator-facing signal for fair-share visibility (v0.2 ch7-beat2.6).
@@ -87,6 +90,7 @@ const (
 	LabelClass = "class"
 	LabelDeployID = "deploy_id"
 	LabelGPUType = "gpu_type"
+	LabelInstanceID = "instance_id"
 	LabelModel = "model"
 	LabelOutcome = "outcome"
 	LabelPhase = "phase"

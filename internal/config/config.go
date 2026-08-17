@@ -16,7 +16,6 @@ type Config struct {
 	Server     ServerConfig     `yaml:"server"`
 	Backend    BackendConfig    `yaml:"backend"`
 	Telemetry  TelemetryConfig  `yaml:"telemetry"`
-	Deployment DeploymentConfig `yaml:"deployment"`
 	Router     RouterConfig     `yaml:"router"`
 	ModelCache ModelCacheConfig `yaml:"model_cache"`
 }
@@ -144,20 +143,7 @@ type TelemetryConfig struct {
 	SampleRatio  float64 `yaml:"sample_ratio"`  // trace head sampling
 }
 
-// DeploymentConfig describes which provider/gpu_type/billing_mode
-// this control plane instance is running on. Drives the labels on
-// cost metrics so the actual-spend panel is anchored to reality.
-type DeploymentConfig struct {
-	Provider    string `yaml:"provider"`
-	GPUType     string `yaml:"gpu_type"`
-	BillingMode string `yaml:"billing_mode"`
-	InstanceID  string `yaml:"instance_id"`
-}
-
-// Validate enforces the minimum a useful deployment needs. The
-// deployment-identity labels are intentionally optional -- a deployment
-// without them emits unlabeled cost metrics, which is a degraded
-// experience but not a failure mode.
+// Validate enforces the minimum a useful deployment needs.
 func Validate(cfg *Config) error {
 	if cfg.Server.Addr == "" {
 		return errors.New("config: server.addr is required")

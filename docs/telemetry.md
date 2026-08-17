@@ -156,13 +156,30 @@ directly via the provider proxy URL. So the counters never increment,
 and panels querying them always read zero.
 
 The cost-projection panel was particularly misleading:
-`instance_uptime_seconds_total` measures the **controlplane process's**
+`instance_uptime_seconds_total` measured the **controlplane process's**
 wall-clock uptime (not any provisioned GPU instance's), so
 "Spend so far = uptime × static rate" climbed monotonically from
 `make up` onward regardless of what was deployed. Worse: the
 docker-compose controlplane and the demo's `iplane serve` are
 SEPARATE processes with SEPARATE state files, so the controlplane
 emitting metrics had no visibility into the demo's deploys anyway.
+
+**Fixed in v0.3 (#163).** The uptime counter now emits one series per
+rented instance, measured from when the provider said the instance was
+active, and `instance.rate.usd_per_second` carries the price that
+provider quoted at spawn. Both are labeled `instance_id`, so spend is a
+join rather than a projection against a static rate:
+
+```promql
+sum(instance_uptime_seconds_total * on(instance_id) instance_rate_usd_per_second)
+```
+
+`inference.active.seconds.total` is emitted at the router, labeled with
+the replica that served the request. Divided by that instance's uptime
+it gives utilization, and the gap between the two is what idle rented
+capacity costs. The daemon no longer asserts any of these labels from
+its own configuration; the four `IPLANE_DEPLOYMENT_*` env vars that used
+to supply them are gone.
 
 Both pieces (the controlplane↔demo state split AND the request-path
 self-metrics) come back when v0.2 introduces a request queue / cost-

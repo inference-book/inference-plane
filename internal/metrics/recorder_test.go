@@ -20,7 +20,7 @@ func TestRecorder_NilSafe(t *testing.T) {
 // TestCostRecorder_NilSafe verifies the same property for cost.
 func TestCostRecorder_NilSafe(t *testing.T) {
 	var cr *CostRecorder
-	cr.RecordActive(context.Background(), "qwen", 1.5)
+	cr.RecordActive(context.Background(), "qwen", "dep-1", "i-1", 1.5)
 }
 
 // TestRecorder_ZeroAndNegativeTokens makes sure RecordTokens silently
