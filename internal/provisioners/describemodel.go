@@ -2,6 +2,7 @@ package provisioners
 
 import (
 	"context"
+	"errors"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -35,13 +36,20 @@ func (s *Service) DescribeModel(ctx context.Context, req *provisionerv1.Describe
 	// which computes a KV cache of zero and therefore fits anything.
 	src, ok := s.modelStore.(modelstores.ArchitectureSource)
 	if !ok {
-		return nil, status.Errorf(codes.Unimplemented,
-			"the configured model store cannot report a model's architecture; "+
-				"model validation is off or the store is a pass-through, so there is no hub to ask")
+		return nil, status.Error(codes.Unimplemented, noArchitectureSourceMsg)
 	}
 
 	resp, err := src.Architecture(ctx, req)
 	if err != nil {
+		// A decorator satisfies the interface in order to forward it, so
+		// past one the assertion above stops distinguishing "cannot
+		// report a shape" from "cannot report this model's". The
+		// sentinel restores that, and it has to be checked here because
+		// the two codes send an operator to different places: one to
+		// their store configuration, the other to their model spec.
+		if errors.Is(err, modelstores.ErrNoArchitectureSource) {
+			return nil, status.Error(codes.Unimplemented, noArchitectureSourceMsg)
+		}
 		// InvalidArgument rather than Internal: every failure the store
 		// returns here is about the spec or about what the hub publishes
 		// for it, and both are the caller's to fix.
@@ -49,3 +57,10 @@ func (s *Service) DescribeModel(ctx context.Context, req *provisionerv1.Describe
 	}
 	return resp, nil
 }
+
+// noArchitectureSourceMsg is shared by the two paths that reach the same
+// conclusion, so an operator sees one message whether the store declined
+// the assertion or a decorator reported the store behind it could not
+// answer.
+const noArchitectureSourceMsg = "the configured model store cannot report a model's architecture; " +
+	"model validation is off or the store is a pass-through, so there is no hub to ask"

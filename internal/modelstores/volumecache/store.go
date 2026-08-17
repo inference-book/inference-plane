@@ -20,9 +20,11 @@ package volumecache
 
 import (
 	"context"
+	"fmt"
 	"maps"
 	"path"
 
+	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
 	"github.com/inference-book/inference-plane/internal/modelstores"
 )
 
@@ -71,4 +73,30 @@ func (s *Store) Resolve(ctx context.Context, spec string) (modelstores.Resolved,
 	return resolved, nil
 }
 
-var _ modelstores.ModelStore = (*Store)(nil)
+// Architecture forwards to the base store unchanged. Where a model's
+// weights are staged says nothing about the model's shape, so a warm
+// cache has nothing to add to the answer.
+//
+// Forwarding is manual because this is a decorator rather than an
+// embedding, and that is the trap worth naming: satisfying ModelStore is
+// enough to compile and enough to pass this package's own tests, while
+// silently dropping every optional capability the base could answer. It
+// dropped this one for a release. A daemon with the warm cache enabled
+// reported a hub-backed store as unable to describe a model, which is
+// the Chapter 9 configuration disabling the Chapter 12 pre-flight (#324).
+//
+// A base that genuinely cannot answer gets ErrNoArchitectureSource
+// rather than an invented reply, so "no hub behind this" still reads as
+// capability-absent at the RPC surface.
+func (s *Store) Architecture(ctx context.Context, req *provisionerv1.DescribeModelRequest) (*provisionerv1.DescribeModelResponse, error) {
+	src, ok := s.base.(modelstores.ArchitectureSource)
+	if !ok {
+		return nil, fmt.Errorf("%w: the warm cache wraps a store that has no hub to ask", modelstores.ErrNoArchitectureSource)
+	}
+	return src.Architecture(ctx, req)
+}
+
+var (
+	_ modelstores.ModelStore         = (*Store)(nil)
+	_ modelstores.ArchitectureSource = (*Store)(nil)
+)

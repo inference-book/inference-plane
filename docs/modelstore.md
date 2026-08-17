@@ -65,16 +65,24 @@ with a hub to ask. `DescribeModel` asserts and returns
 is silent.** `volumecache.Store` wraps a base store and satisfies
 `ModelStore`, so it compiles and passes its own tests while dropping
 anything the base could answer beyond `Resolve`. A daemon with
-`model_cache` enabled therefore reports a capability the configured
-store genuinely has as absent.
+`model_cache` enabled then reports a capability the configured store
+genuinely has as absent.
 
-This is not hypothetical; it shipped that way (issue 324). It is also
-the shape of failure worth watching for, because nothing catches it:
-the type assertion is the only enforcement, it happens at runtime, and
-every test that builds a service with a bare store passes. A new
-optional capability needs three things, not one: the interface, the
-implementation, and a forwarding method on every decorator, plus a
-test that builds the store the way `serve` builds it.
+It shipped that way once (issue 324, fixed). Nothing catches it: the
+type assertion is the only enforcement, it happens at runtime, and every
+test that builds a service with a bare store passes. So a new optional
+capability needs four things rather than one. The interface, the
+implementation, a forwarding method on every decorator, and a test that
+builds the store the way `serve` builds it.
+
+Forwarding creates a second problem the sentinel solves. A wrapper has
+to satisfy the interface in order to forward it, so past a decorator the
+type assertion no longer separates "cannot report a shape" from "cannot
+report this model's". `modelstores.ErrNoArchitectureSource` carries that
+distinction, and `DescribeModel` maps it back to `Unimplemented`. The
+two codes send an operator to different places, one to their store
+configuration and the other to their model spec, so collapsing them
+costs a debugging session.
 
 ## Two impls
 

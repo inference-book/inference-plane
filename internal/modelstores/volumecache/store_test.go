@@ -5,7 +5,9 @@ import (
 	"errors"
 	"testing"
 
+	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
 	"github.com/inference-book/inference-plane/internal/modelstores"
+	"google.golang.org/protobuf/proto"
 )
 
 // baseStub is a controllable base ModelStore so the tests can assert the
@@ -64,5 +66,61 @@ func TestResolve_DoesNotMutateBaseEnvMap(t *testing.T) {
 	}
 	if _, leaked := baseEnv["HF_HOME"]; leaked {
 		t.Error("wrapper wrote HF_HOME into the base's env map; must copy, not mutate")
+	}
+}
+
+// archBase is a base store that also answers the optional architecture
+// capability, standing in for huggingface.Store.
+type archBase struct {
+	baseStub
+	arch *provisionerv1.ModelArchitecture
+	saw  string
+}
+
+func (a *archBase) Architecture(_ context.Context, req *provisionerv1.DescribeModelRequest) (*provisionerv1.DescribeModelResponse, error) {
+	a.saw = req.GetModelSpec()
+	return &provisionerv1.DescribeModelResponse{Architecture: a.arch}, nil
+}
+
+func TestArchitecture_SurvivesTheWrapper(t *testing.T) {
+	// The wrapper adds a mount, and a mount says nothing about a model's
+	// shape. Dropping the capability made a warm-cache daemon report a
+	// hub-backed store as unable to describe a model, which turned Ch 9's
+	// configuration into a switch that disables Ch 12's pre-flight (#324).
+	want := &provisionerv1.ModelArchitecture{Params: 32_760_000_000, Layers: 64, KvHeads: 8, HeadDim: 128, HiddenSize: 5120}
+	base := &archBase{arch: want}
+	s := New(base, modelstores.Mount{VolumeID: "vol-1", MountPath: "/models"})
+
+	src, ok := interface{}(s).(modelstores.ArchitectureSource)
+	if !ok {
+		t.Fatal("the wrapper does not satisfy ArchitectureSource, so DescribeModel cannot reach the base")
+	}
+	got, err := src.Architecture(context.Background(), &provisionerv1.DescribeModelRequest{ModelSpec: "Qwen/Qwen2.5-32B"})
+	if err != nil {
+		t.Fatalf("Architecture: %v", err)
+	}
+	if !proto.Equal(got.GetArchitecture(), want) {
+		t.Errorf("Architecture = %+v, want the base's answer unchanged %+v", got.GetArchitecture(), want)
+	}
+	// Forwarded whole. A wrapper that rewrote the spec would send the hub
+	// looking for a model nobody asked about.
+	if base.saw != "Qwen/Qwen2.5-32B" {
+		t.Errorf("base saw spec %q, want it forwarded unchanged", base.saw)
+	}
+}
+
+func TestArchitecture_SaysSoWhenTheBaseCannotAnswer(t *testing.T) {
+	// Satisfying the interface is what lets the wrapper forward, so the
+	// wrapper satisfies it even over a base that has no hub. The sentinel
+	// is what keeps that case reporting as capability-absent instead of
+	// as a bad model spec.
+	s := New(baseStub{}, modelstores.Mount{VolumeID: "vol-1", MountPath: "/models"})
+
+	_, err := s.Architecture(context.Background(), &provisionerv1.DescribeModelRequest{ModelSpec: "a/b"})
+	if err == nil {
+		t.Fatal("want a refusal when the base cannot report a shape")
+	}
+	if !errors.Is(err, modelstores.ErrNoArchitectureSource) {
+		t.Errorf("error does not carry ErrNoArchitectureSource, so the RPC will call it a bad spec: %v", err)
 	}
 }
