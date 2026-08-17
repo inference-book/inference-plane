@@ -28,6 +28,7 @@ const (
 	ProvisionerService_ListCandidates_FullMethodName       = "/provisioner.v1.ProvisionerService/ListCandidates"
 	ProvisionerService_SelectPlacement_FullMethodName      = "/provisioner.v1.ProvisionerService/SelectPlacement"
 	ProvisionerService_ListVolumes_FullMethodName          = "/provisioner.v1.ProvisionerService/ListVolumes"
+	ProvisionerService_DescribeModel_FullMethodName        = "/provisioner.v1.ProvisionerService/DescribeModel"
 )
 
 // ProvisionerServiceClient is the client API for ProvisionerService service.
@@ -143,6 +144,21 @@ type ProvisionerServiceClient interface {
 	// deferred rather than arriving as a side effect of fixing a list
 	// command (#307).
 	ListVolumes(ctx context.Context, in *ListVolumesRequest, opts ...grpc.CallOption) (*ListVolumesResponse, error)
+	// DescribeModel reports what a model spec resolves to: the shape fixed
+	// at training time, which is what a VRAM budget is computed from.
+	//
+	// An RPC for the same reason the capacity search is one. Reading a
+	// gated model's config needs the hub credential, and that lives in the
+	// daemon's environment, so a CLI host answering from its own process
+	// would report a gated model as unreadable while the daemon reads it
+	// fine. The test is where the inputs live, not whether the call
+	// writes.
+	//
+	// Unimplemented when the configured model store cannot answer. A
+	// pass-through store has no hub to ask, and saying so is different
+	// from returning a model with no layers, which is a budget that says
+	// yes to everything.
+	DescribeModel(ctx context.Context, in *DescribeModelRequest, opts ...grpc.CallOption) (*DescribeModelResponse, error)
 }
 
 type provisionerServiceClient struct {
@@ -237,6 +253,16 @@ func (c *provisionerServiceClient) ListVolumes(ctx context.Context, in *ListVolu
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ListVolumesResponse)
 	err := c.cc.Invoke(ctx, ProvisionerService_ListVolumes_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *provisionerServiceClient) DescribeModel(ctx context.Context, in *DescribeModelRequest, opts ...grpc.CallOption) (*DescribeModelResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DescribeModelResponse)
+	err := c.cc.Invoke(ctx, ProvisionerService_DescribeModel_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -356,6 +382,21 @@ type ProvisionerServiceServer interface {
 	// deferred rather than arriving as a side effect of fixing a list
 	// command (#307).
 	ListVolumes(context.Context, *ListVolumesRequest) (*ListVolumesResponse, error)
+	// DescribeModel reports what a model spec resolves to: the shape fixed
+	// at training time, which is what a VRAM budget is computed from.
+	//
+	// An RPC for the same reason the capacity search is one. Reading a
+	// gated model's config needs the hub credential, and that lives in the
+	// daemon's environment, so a CLI host answering from its own process
+	// would report a gated model as unreadable while the daemon reads it
+	// fine. The test is where the inputs live, not whether the call
+	// writes.
+	//
+	// Unimplemented when the configured model store cannot answer. A
+	// pass-through store has no hub to ask, and saying so is different
+	// from returning a model with no layers, which is a budget that says
+	// yes to everything.
+	DescribeModel(context.Context, *DescribeModelRequest) (*DescribeModelResponse, error)
 }
 
 // UnimplementedProvisionerServiceServer should be embedded to have
@@ -391,6 +432,9 @@ func (UnimplementedProvisionerServiceServer) SelectPlacement(context.Context, *S
 }
 func (UnimplementedProvisionerServiceServer) ListVolumes(context.Context, *ListVolumesRequest) (*ListVolumesResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListVolumes not implemented")
+}
+func (UnimplementedProvisionerServiceServer) DescribeModel(context.Context, *DescribeModelRequest) (*DescribeModelResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DescribeModel not implemented")
 }
 func (UnimplementedProvisionerServiceServer) testEmbeddedByValue() {}
 
@@ -574,6 +618,24 @@ func _ProvisionerService_ListVolumes_Handler(srv interface{}, ctx context.Contex
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ProvisionerService_DescribeModel_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DescribeModelRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ProvisionerServiceServer).DescribeModel(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ProvisionerService_DescribeModel_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ProvisionerServiceServer).DescribeModel(ctx, req.(*DescribeModelRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ProvisionerService_ServiceDesc is the grpc.ServiceDesc for ProvisionerService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -616,6 +678,10 @@ var ProvisionerService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListVolumes",
 			Handler:    _ProvisionerService_ListVolumes_Handler,
+		},
+		{
+			MethodName: "DescribeModel",
+			Handler:    _ProvisionerService_DescribeModel_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

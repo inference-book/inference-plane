@@ -65,14 +65,48 @@ func New(token string) *Store {
 // safetensors metadata, etc.) but we don't need any of it for
 // validation -- existence + access is enough.
 type modelInfo struct {
-	ID       string `json:"id"`
-	Gated    bool   `json:"gated"`
-	Disabled bool   `json:"disabled"`
+	ID       string    `json:"id"`
+	Gated    gatedFlag `json:"gated"`
+	Disabled bool      `json:"disabled"`
 
 	// Safetensors is HF's tensor accounting, present only on
 	// repositories that publish weights in that format. Read by
 	// Architecture for the parameter count; validation ignores it.
 	Safetensors *safetensorsInfo `json:"safetensors"`
+}
+
+// gatedFlag decodes HF's `gated` field, which is not a boolean on the
+// wire even though it reads like one.
+//
+// An ungated repository sends `false`. A gated one sends the string
+// "auto" or "manual", naming how access is granted rather than whether
+// it is needed. Decoding it as a Go bool fails the whole response, so
+// every gated model came back as "HF returned 200 but body unparseable"
+// rather than as a gated model, and the pre-flight check that exists to
+// give an actionable answer gave the least actionable one there is.
+//
+// Found by pointing the new describe verb at Llama-3.3-70B, which is
+// both gated and the obvious candidate for a 70B deployment. The
+// existing tests all fixture `"gated": false`, which is the one shape
+// that works.
+type gatedFlag bool
+
+func (g *gatedFlag) UnmarshalJSON(b []byte) error {
+	var asBool bool
+	if err := json.Unmarshal(b, &asBool); err == nil {
+		*g = gatedFlag(asBool)
+		return nil
+	}
+	var asString string
+	if err := json.Unmarshal(b, &asString); err != nil {
+		return fmt.Errorf("gated: want a bool or a string, got %s", snippet(b))
+	}
+	// Any named gating mode means gated. Matching the known strings
+	// exactly would turn a mode HF adds later into a parse failure, and
+	// failing the whole lookup over a field nothing reads is how this
+	// broke the first time.
+	*g = gatedFlag(asString != "" && asString != "false")
+	return nil
 }
 
 // Resolve validates the spec against HF's model-info endpoint. On
@@ -143,8 +177,14 @@ func (s *Store) fetchModelInfo(ctx context.Context, id string) (*modelInfo, erro
 		}
 		return &info, nil
 	case http.StatusUnauthorized:
-		// HF treats missing-token-on-gated-model as 401.
-		return nil, fmt.Errorf("model %q is gated on huggingface.co; set HF_TOKEN with read access and retry", id)
+		// HF answers 401 for a gated model AND for one that does not
+		// exist, because telling an anonymous caller which is which would
+		// leak the existence of private repositories. So this cannot be
+		// narrowed to "gated" without being wrong for every typo, and
+		// naming only the gated case sends an operator to go and accept a
+		// license for a model they misspelled.
+		return nil, fmt.Errorf("model %q is gated, or does not exist; huggingface.co answers 401 for both when no token is sent. "+
+			"set HF_TOKEN with read access and retry, and check the spelling if that does not help", id)
 	case http.StatusForbidden:
 		// Token present but lacks access (operator hasn't accepted the
 		// model's license, or the token's scope excludes this org).

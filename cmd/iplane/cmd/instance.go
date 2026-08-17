@@ -49,6 +49,7 @@ type provisionerClient interface {
 	ListCandidates(context.Context, *provisionerv1.ListCandidatesRequest) (*provisionerv1.ListCandidatesResponse, error)
 	SelectPlacement(context.Context, *provisionerv1.SelectPlacementRequest) (*provisionerv1.SelectPlacementResponse, error)
 	ListVolumes(context.Context, *provisionerv1.ListVolumesRequest) (*provisionerv1.ListVolumesResponse, error)
+	DescribeModel(context.Context, *provisionerv1.DescribeModelRequest) (*provisionerv1.DescribeModelResponse, error)
 }
 
 // connectProvisionerClient adapts the generated connect-rpc client to
@@ -127,6 +128,14 @@ func (a *connectProvisionerClient) SelectPlacement(ctx context.Context, req *pro
 
 func (a *connectProvisionerClient) ListVolumes(ctx context.Context, req *provisionerv1.ListVolumesRequest) (*provisionerv1.ListVolumesResponse, error) {
 	resp, err := a.c.ListVolumes(ctx, connect.NewRequest(req))
+	if err != nil {
+		return nil, err
+	}
+	return resp.Msg, nil
+}
+
+func (a *connectProvisionerClient) DescribeModel(ctx context.Context, req *provisionerv1.DescribeModelRequest) (*provisionerv1.DescribeModelResponse, error) {
+	resp, err := a.c.DescribeModel(ctx, connect.NewRequest(req))
 	if err != nil {
 		return nil, err
 	}
