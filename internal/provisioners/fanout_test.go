@@ -35,6 +35,14 @@ func fanOutMultiReplicaSvc(t *testing.T, deployFn func(inst *provisionerv1.Insta
 // Deploy emits a per-replica endpoint derived from the instance id
 // (so each slot's engine_endpoints[i] is distinguishable). Optional
 // deployFn override per-call lets tests program failures.
+// AttachesMounts implements provisioners.MountAttacher. This double
+// stands in for an image-native provider that honours mounts, which is
+// what the warm-cache tests below are about. Declaring it is required
+// rather than optional: a Deployer that stays silent is treated as
+// unable to attach, so that a real adapter which forgets refuses the
+// mount instead of running cold and reporting warm (#254).
+func (m *fanOutMockProvider) AttachesMounts() bool { return true }
+
 type fanOutMockProvider struct {
 	name      string
 	deployFn  func(inst *provisionerv1.Instance, emit func(provisioners.DeployStateUpdate)) error

@@ -370,6 +370,9 @@ func (s *Service) createMultiReplicaDeployment(ctx context.Context, req *provisi
 	if err := checkMountProviders(dep.GetMounts(), placements...); err != nil {
 		return nil, err
 	}
+	if err := s.checkMountsAttachable(dep.GetMounts(), placements...); err != nil {
+		return nil, err
+	}
 	var record *provisionerv1.Deployment
 	var alreadyExisted bool
 	err := s.store.Update(func(f *State) error {

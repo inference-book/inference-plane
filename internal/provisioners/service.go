@@ -1030,6 +1030,59 @@ func checkMountProviders(mounts []*provisionerv1.VolumeMount, placements ...stri
 	return nil
 }
 
+// checkMountsAttachable rejects a deployment whose mounts land on a
+// deploy path that cannot attach them.
+//
+// The sibling of checkMountProviders, and the same argument one step
+// further along. That one refuses a mount the target provider could
+// never resolve; this refuses one it would accept and then ignore.
+// Vast did exactly that: its deployer never read Deployment.mounts, so
+// a configured warm cache produced a cold download reported as warm,
+// because storage_tier is derived from the mount being asked for rather
+// than from it being attached (#254).
+//
+// Fail-closed. A provider with its own Deployer has to say it attaches
+// mounts; silence means it does not. Providers without one run through
+// the sshdocker executor, which binds host paths, so they pass.
+func (s *Service) checkMountsAttachable(mounts []*provisionerv1.VolumeMount, placements ...string) error {
+	if len(mounts) == 0 {
+		return nil
+	}
+	for _, name := range placements {
+		if name == "" || name == ProviderExternal {
+			continue
+		}
+		if s.deployPathAttachesMounts(name) {
+			continue
+		}
+		return status.Errorf(codes.FailedPrecondition,
+			"provider %s cannot attach a volume mount, so this deployment would download the model instead of loading it from the cache. "+
+				"Remove the model_cache mount to deploy cold deliberately, or place the deployment on a provider that attaches one",
+			name)
+	}
+	return nil
+}
+
+// deployPathAttachesMounts reports whether deploys onto this provider
+// honour Deployment.mounts.
+//
+// An unknown provider answers true so this guard never turns into a
+// second, worse way to fail a deploy: the provider lookup that actually
+// matters happens later and says something useful about the name.
+func (s *Service) deployPathAttachesMounts(providerName string) bool {
+	provider, ok := s.providers[providerName]
+	if !ok {
+		return true
+	}
+	d, imageNative := provider.(Deployer)
+	if !imageNative {
+		// The sshdocker executor path, which binds host paths.
+		return true
+	}
+	ma, declares := d.(MountAttacher)
+	return declares && ma.AttachesMounts()
+}
+
 func (s *Service) CreateDeployment(ctx context.Context, req *provisionerv1.CreateDeploymentRequest) (*provisionerv1.CreateDeploymentResponse, error) {
 	dep := req.GetDeployment()
 	if dep == nil {
@@ -1181,6 +1234,9 @@ func (s *Service) CreateDeployment(ctx context.Context, req *provisionerv1.Creat
 	// provider doesn't match where this deployment landed, rather than
 	// silently attaching nothing and running cold.
 	if err := checkMountProviders(dep.GetMounts(), inst.GetProvider()); err != nil {
+		return nil, err
+	}
+	if err := s.checkMountsAttachable(dep.GetMounts(), inst.GetProvider()); err != nil {
 		return nil, err
 	}
 	// Persist the (possibly freshly-synthesized) instance_id back onto

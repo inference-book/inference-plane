@@ -274,3 +274,21 @@ func splitHostPort(t *testing.T, url string) (string, string) {
 	}
 	return trimmed[:i], trimmed[i+1:]
 }
+
+// Vast must not claim to attach mounts, because its deploy path does not
+// read Deployment.mounts at all. Before #254 the claim was implicit:
+// nothing asked, so a configured warm cache was accepted and dropped,
+// the model downloaded, and the deploy still reported
+// storage_tier=warm.
+//
+// Delete this test when Vast learns to attach one. The seam is the env
+// map rentEngine already uses to pass docker run options ("-p 8000:8000"
+// is set that way), so a host_path bind would ride the same channel.
+// Volumes proper stay out of reach while they are machine-scoped, which
+// is the rest of #254.
+func TestVastDoesNotClaimToAttachMounts(t *testing.T) {
+	var p provisioners.Provider = &Provider{}
+	if ma, ok := p.(provisioners.MountAttacher); ok && ma.AttachesMounts() {
+		t.Error("vast declares it attaches mounts, but its deployer never reads dep.GetMounts()")
+	}
+}
