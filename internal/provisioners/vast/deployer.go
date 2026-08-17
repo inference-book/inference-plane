@@ -13,6 +13,7 @@ import (
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
 	"github.com/inference-book/inference-plane/internal/engineagent"
 	"github.com/inference-book/inference-plane/internal/provisioners"
+	"github.com/inference-book/inference-plane/internal/provisioners/enginewait"
 	"github.com/inference-book/inference-plane/internal/sshkeys"
 )
 
@@ -273,97 +274,72 @@ func (p *Provider) waitForEngineReady(ctx context.Context, contractID int, engin
 	if timeout <= 0 {
 		timeout = defaultEngineReadyTimeout
 	}
-	interval := p.sshReadyInterval
-	if interval <= 0 {
-		interval = 5 * time.Second
-	}
 	client := &http.Client{Timeout: 5 * time.Second}
+	id := strconv.Itoa(contractID)
 
-	waitCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	started := time.Now()
-	var last string
-	// The highest rung reached so far. Phase changes open and close buckets
-	// in the deploy phase histogram, so a rung that rewinds on a flaky status
-	// read would record two short image-pulls where there was one long one.
-	best := ""
-
-	for {
-		var endpoint, note string
-		var hostStatus, hostMsg string
-		api, derr := p.describeContract(waitCtx, contractID)
-		if derr != nil {
-			// Not fatal on its own. Vast's control API goes slow in bursts and
-			// recovers; a `context deadline exceeded (awaiting headers)` here
-			// was observed resolving itself mid-deploy, so it is reported as
-			// progress rather than treated as a dead host.
-			note = fmt.Sprintf("describe contract %d: %v", contractID, derr)
-		} else {
-			endpoint, note = endpointFromInstance(api, enginePort)
+	return enginewait.Wait(ctx, enginewait.Config{
+		Timeout:     timeout,
+		Interval:    p.sshReadyInterval,
+		ContainerID: id,
+		Ladder: enginewait.Ladder{
+			Ordinal:     enginePhaseOrdinal,
+			Description: enginePhaseDescription,
+		},
+		Observe: func(ctx context.Context, _ string) enginewait.Observation {
+			api, derr := p.describeContract(ctx, contractID)
+			if derr != nil {
+				// Not fatal on its own. Vast's control API goes slow in
+				// bursts and recovers; a `context deadline exceeded
+				// (awaiting headers)` here was observed resolving itself
+				// mid-deploy, so it is reported as progress rather than
+				// treated as a dead host.
+				return enginewait.Observation{
+					Phase:  phaseScheduling,
+					Detail: fmt.Sprintf("describe contract %d: %v", contractID, derr),
+				}
+			}
+			// Give up as soon as the provider says the container will not
+			// run. Polling past this point cannot succeed and bills the
+			// rest of the engine-ready timeout for the privilege.
+			//
+			// Routed through the shared capability rather than the local
+			// policy with the record just fetched, which costs one extra
+			// GET per tick. That is the deliberate price of the behaviour
+			// living in one place, and it is what this hoist makes
+			// reachable by every provider that implements it (#268).
+			if dead, why := provisioners.TerminalFailure(ctx, p, id); dead {
+				return enginewait.Observation{
+					Fatal: fmt.Errorf("contract %d will not start: %s", contractID, why),
+				}
+			}
+			endpoint, _ := endpointFromInstance(api, enginePort)
 			// The record the loop already fetches carries the host's
 			// account of the pull. Reading it here is what turns one
 			// opaque wait into a phase an operator can watch (#259).
-			hostStatus, hostMsg = api.ActualStatus, pullProgress(api.StatusMsg)
-			if endpoint == "" {
-				// Before there is an endpoint the note is a generic
-				// "waiting for ...", which the rung's own description
-				// now says better. Once there is one the note carries
-				// the health probe's answer, which nothing else does.
-				note = ""
+			return enginewait.Observation{
+				Endpoint: endpoint,
+				Phase:    classifyEnginePhase(api.ActualStatus, endpoint != ""),
+				Detail:   pullProgress(api.StatusMsg),
 			}
-		}
-		// Give up as soon as the provider says the container will not run.
-		// Polling past this point cannot succeed and bills the whole
-		// engine-ready timeout for the privilege.
-		//
-		// Routed through the shared capability rather than calling the local
-		// policy with the record just fetched, which costs one extra GET per
-		// tick. That is the deliberate price of the behaviour living in one
-		// place: when this loop is hoisted, every provider inherits the guard
-		// instead of each adapter re-deciding what a missing sensor means.
-		if dead, why := provisioners.TerminalFailure(waitCtx, p, strconv.Itoa(contractID)); dead {
-			return "", fmt.Errorf("contract %d will not start: %s", contractID, why)
-		}
-		last = note
-		if endpoint != "" {
-			req, err := http.NewRequestWithContext(waitCtx, http.MethodGet, endpoint+"/health", nil)
-			if err == nil {
-				resp, derr := client.Do(req)
-				if derr == nil {
-					code := resp.StatusCode
-					_ = resp.Body.Close()
-					if code >= 200 && code < 300 {
-						return endpoint, nil
-					}
-					last = fmt.Sprintf("%s/health -> %d", endpoint, code)
-				} else {
-					last = fmt.Sprintf("%s/health -> %v", endpoint, derr)
-				}
+		},
+		Probe: func(ctx context.Context, endpoint string) (bool, string) {
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint+"/health", nil)
+			if err != nil {
+				return false, err.Error()
 			}
-		}
-		phase := classifyEnginePhase(hostStatus, endpoint != "")
-		if enginePhaseOrdinal(phase) < enginePhaseOrdinal(best) {
-			phase = best
-		}
-		best = phase
-
-		emit(provisioners.DeployStateUpdate{
-			State: provisionerv1.DeploymentState_DEPLOYMENT_STATE_CONFIGURING,
-			Phase: phase,
-			ProgressMessage: fmt.Sprintf("%s (%s elapsed)",
-				phaseProgress(phase, hostMsg, last), time.Since(started).Round(time.Second)),
-			ContainerID: strconv.Itoa(contractID),
-		})
-
-		select {
-		case <-waitCtx.Done():
-			if ctx.Err() != nil {
-				return "", fmt.Errorf("caller stopped waiting for the engine on contract %d during %s; last: %s", contractID, best, last)
+			resp, derr := client.Do(req)
+			if derr != nil {
+				return false, fmt.Sprintf("%s/health -> %v", endpoint, derr)
 			}
-			return "", fmt.Errorf("engine on contract %d did not answer /health within %s, still at %s; last: %s", contractID, timeout, best, last)
-		case <-time.After(interval):
-		}
-	}
+			code := resp.StatusCode
+			_ = resp.Body.Close()
+			if code >= 200 && code < 300 {
+				return true, ""
+			}
+			return false, fmt.Sprintf("%s/health -> %d", endpoint, code)
+		},
+		Emit: emit,
+	})
 }
 
 // engineEndpoint returns the externally reachable base URL for the engine,

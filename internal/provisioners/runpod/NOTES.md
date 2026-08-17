@@ -76,3 +76,18 @@ Getting that scaling wrong was #283: a four-card request asking for 200 GB was
 judged against one card's 96, which rejected every A100 and H100 and landed on
 a B200 whose single-card 256 was the only figure that cleared the bar. Asking
 for the 384 that four cards actually carry matched nothing at all.
+
+## The readiness loop lives elsewhere
+
+`waitForEngineReady` is a wiring of `internal/provisioners/enginewait` (#268).
+RunPod's half is the `Observe` callback plus `Config.Endpoint`, which is seeded
+because the proxy URL is known the moment the pod id exists. That seeding is
+load-bearing rather than cosmetic: it lets the loop probe `/health` before
+asking the pods API anything, so a pod that is already serving costs zero status
+reads. Three deployer tests assert exactly that by failing on an unexpected
+`GET /pods/{id}`.
+
+The phase ladder (`runpod:scheduling` -> `runpod:image-pull` -> `engine:init`)
+and its derivation from pod status stay here, because they are claims about what
+RunPod's API reports. Vast has its own, and the two deliberately share only the
+`engine:init` rung so a dashboard can put them side by side.
