@@ -106,8 +106,8 @@ func (p *Provider) Deploy(ctx context.Context, dep *provisionerv1.Deployment, in
 
 	emit(provisioners.DeployStateUpdate{
 		State:           provisionerv1.DeploymentState_DEPLOYMENT_STATE_CONFIGURING,
-		Phase:           "vast:starting",
-		ProgressMessage: "instance rented; waiting for the engine to answer /health",
+		Phase:           phaseScheduling,
+		ProgressMessage: "instance rented; waiting for the host to create the container",
 		ContainerID:     contractID,
 	})
 
@@ -283,9 +283,14 @@ func (p *Provider) waitForEngineReady(ctx context.Context, contractID int, engin
 	defer cancel()
 	started := time.Now()
 	var last string
+	// The highest rung reached so far. Phase changes open and close buckets
+	// in the deploy phase histogram, so a rung that rewinds on a flaky status
+	// read would record two short image-pulls where there was one long one.
+	best := ""
 
 	for {
 		var endpoint, note string
+		var hostStatus, hostMsg string
 		api, derr := p.describeContract(waitCtx, contractID)
 		if derr != nil {
 			// Not fatal on its own. Vast's control API goes slow in bursts and
@@ -295,6 +300,17 @@ func (p *Provider) waitForEngineReady(ctx context.Context, contractID int, engin
 			note = fmt.Sprintf("describe contract %d: %v", contractID, derr)
 		} else {
 			endpoint, note = endpointFromInstance(api, enginePort)
+			// The record the loop already fetches carries the host's
+			// account of the pull. Reading it here is what turns one
+			// opaque wait into a phase an operator can watch (#259).
+			hostStatus, hostMsg = api.ActualStatus, pullProgress(api.StatusMsg)
+			if endpoint == "" {
+				// Before there is an endpoint the note is a generic
+				// "waiting for ...", which the rung's own description
+				// now says better. Once there is one the note carries
+				// the health probe's answer, which nothing else does.
+				note = ""
+			}
 		}
 		// Give up as soon as the provider says the container will not run.
 		// Polling past this point cannot succeed and bills the whole
@@ -325,19 +341,26 @@ func (p *Provider) waitForEngineReady(ctx context.Context, contractID int, engin
 				}
 			}
 		}
+		phase := classifyEnginePhase(hostStatus, endpoint != "")
+		if enginePhaseOrdinal(phase) < enginePhaseOrdinal(best) {
+			phase = best
+		}
+		best = phase
+
 		emit(provisioners.DeployStateUpdate{
-			State:           provisionerv1.DeploymentState_DEPLOYMENT_STATE_CONFIGURING,
-			Phase:           "vast:engine-ready",
-			ProgressMessage: fmt.Sprintf("%s (%s elapsed)", last, time.Since(started).Round(time.Second)),
-			ContainerID:     strconv.Itoa(contractID),
+			State: provisionerv1.DeploymentState_DEPLOYMENT_STATE_CONFIGURING,
+			Phase: phase,
+			ProgressMessage: fmt.Sprintf("%s (%s elapsed)",
+				phaseProgress(phase, hostMsg, last), time.Since(started).Round(time.Second)),
+			ContainerID: strconv.Itoa(contractID),
 		})
 
 		select {
 		case <-waitCtx.Done():
 			if ctx.Err() != nil {
-				return "", fmt.Errorf("caller stopped waiting for the engine on contract %d; last: %s", contractID, last)
+				return "", fmt.Errorf("caller stopped waiting for the engine on contract %d during %s; last: %s", contractID, best, last)
 			}
-			return "", fmt.Errorf("engine on contract %d did not answer /health within %s; last: %s", contractID, timeout, last)
+			return "", fmt.Errorf("engine on contract %d did not answer /health within %s, still at %s; last: %s", contractID, timeout, best, last)
 		case <-time.After(interval):
 		}
 	}
