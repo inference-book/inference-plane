@@ -11,8 +11,10 @@ import (
 
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
 	"github.com/inference-book/inference-plane/internal/modelstores"
+	"github.com/inference-book/inference-plane/internal/modelstores/volumecache"
 	"github.com/inference-book/inference-plane/internal/provisioners"
 	"github.com/inference-book/inference-plane/internal/provisioners/stores/file"
+	"google.golang.org/protobuf/proto"
 )
 
 // archStore is a model store that also answers the optional
@@ -142,5 +144,48 @@ func TestDescribeModel_TakesNoStateLock(t *testing.T) {
 
 	if _, err := svc.DescribeModel(context.Background(), &provisionerv1.DescribeModelRequest{ModelSpec: "a/b"}); err != nil {
 		t.Errorf("DescribeModel refused while the state lock was held: %v", err)
+	}
+}
+
+func TestDescribeModel_AnswersThroughTheWarmCacheDecorator(t *testing.T) {
+	// The store `serve` builds is not the store the other tests build. A
+	// daemon with model_cache set wraps the hub store in volumecache, and
+	// the wrapper used to satisfy ModelStore without forwarding the
+	// architecture capability, so this verb reported Unimplemented for a
+	// store that could answer perfectly well (#324).
+	//
+	// Asserting through the wrapper rather than on it, because the defect
+	// was invisible to every test that built a service the short way.
+	want := &provisionerv1.ModelArchitecture{Params: 32_760_000_000, Layers: 64, KvHeads: 8, HeadDim: 128, HiddenSize: 5120}
+	wrapped := volumecache.New(
+		&archStore{arch: want},
+		modelstores.Mount{VolumeID: "vol-1", MountPath: "/models", Provider: "runpod"},
+	)
+	svc := newSvcWithModelStore(t, wrapped)
+
+	got, err := svc.DescribeModel(context.Background(), &provisionerv1.DescribeModelRequest{ModelSpec: "Qwen/Qwen2.5-32B"})
+	if err != nil {
+		t.Fatalf("DescribeModel through the warm cache: %v", err)
+	}
+	if !proto.Equal(got.GetArchitecture(), want) {
+		t.Errorf("Architecture = %+v, want %+v", got.GetArchitecture(), want)
+	}
+}
+
+func TestDescribeModel_DecoratorOverAPassthroughIsStillUnimplemented(t *testing.T) {
+	// The wrapper satisfies the capability in order to forward it, which
+	// would make every warm-cache daemon claim it can describe a model
+	// regardless of what it wraps. A pass-through base still cannot, and
+	// the operator needs to be sent to their store configuration rather
+	// than to their model spec.
+	wrapped := volumecache.New(
+		modelstores.Passthrough{},
+		modelstores.Mount{VolumeID: "vol-1", MountPath: "/models", Provider: "runpod"},
+	)
+	svc := newSvcWithModelStore(t, wrapped)
+
+	_, err := svc.DescribeModel(context.Background(), &provisionerv1.DescribeModelRequest{ModelSpec: "a/b"})
+	if got := codeOf(t, err); got != codes.Unimplemented {
+		t.Errorf("code = %v, want Unimplemented for a wrapper over a store with no hub", got)
 	}
 }

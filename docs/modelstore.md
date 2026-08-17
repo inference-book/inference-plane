@@ -42,6 +42,48 @@ time, merges `EnvOverrides` into `dep.Env`, then proceeds with
 provisioning. A Resolve error surfaces as `codes.InvalidArgument` —
 no pod is created.
 
+## Optional capabilities (v0.3, Ch 12)
+
+`Resolve` is the whole required interface. Anything a store *may* be
+able to answer is an optional capability, asserted at the call site,
+the way `provisioners` treats `FailureReporter` / `KeyRegistrar` /
+`VolumeManager`:
+
+```go
+// internal/modelstores/modelstore.go
+type ArchitectureSource interface {
+    Architecture(ctx context.Context, req *provisionerv1.DescribeModelRequest) (*provisionerv1.DescribeModelResponse, error)
+}
+```
+
+Only `huggingface.Store` implements it, because it is the only store
+with a hub to ask. `DescribeModel` asserts and returns
+`codes.Unimplemented` when the assertion fails, which is what
+`iplane model describe` and `iplane model budget` answer through.
+
+**A decorator has to forward every capability by hand, and the failure
+is silent.** `volumecache.Store` wraps a base store and satisfies
+`ModelStore`, so it compiles and passes its own tests while dropping
+anything the base could answer beyond `Resolve`. A daemon with
+`model_cache` enabled then reports a capability the configured store
+genuinely has as absent.
+
+It shipped that way once (issue 324, fixed). Nothing catches it: the
+type assertion is the only enforcement, it happens at runtime, and every
+test that builds a service with a bare store passes. So a new optional
+capability needs four things rather than one. The interface, the
+implementation, a forwarding method on every decorator, and a test that
+builds the store the way `serve` builds it.
+
+Forwarding creates a second problem the sentinel solves. A wrapper has
+to satisfy the interface in order to forward it, so past a decorator the
+type assertion no longer separates "cannot report a shape" from "cannot
+report this model's". `modelstores.ErrNoArchitectureSource` carries that
+distinction, and `DescribeModel` maps it back to `Unimplemented`. The
+two codes send an operator to different places, one to their store
+configuration and the other to their model spec, so collapsing them
+costs a debugging session.
+
 ## Two impls
 
 | Impl | When | Behavior |
