@@ -23,6 +23,11 @@ type modelConfig struct {
 	HiddenSize    int32 `json:"hidden_size"`
 	HeadDim       int32 `json:"head_dim"`
 
+	// MaxPositionEmbeddings is the trained context window. It bears on no
+	// budget term; it is read so a caller choosing a context length has
+	// the model's own answer available instead of a house number.
+	MaxPositionEmbeddings int32 `json:"max_position_embeddings"`
+
 	// TextConfig is where multimodal models put the language model's
 	// shape. A vision-language model's top-level config describes the
 	// wrapper, and reading the wrapper's (absent) layer count as the
@@ -89,11 +94,12 @@ func (s *Store) Architecture(ctx context.Context, req *provisionerv1.DescribeMod
 	}
 
 	arch := &provisionerv1.ModelArchitecture{
-		Params:     info.Safetensors.Total,
-		Layers:     cfg.Layers,
-		KvHeads:    cfg.KVHeads,
-		HeadDim:    cfg.HeadDim,
-		HiddenSize: cfg.HiddenSize,
+		Params:                info.Safetensors.Total,
+		Layers:                cfg.Layers,
+		KvHeads:               cfg.KVHeads,
+		HeadDim:               cfg.HeadDim,
+		HiddenSize:            cfg.HiddenSize,
+		MaxPositionEmbeddings: cfg.MaxPositionEmbeddings,
 	}
 
 	// A model without grouped-query attention states no separate KV head

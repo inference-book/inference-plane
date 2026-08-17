@@ -966,6 +966,11 @@ message ModelArchitecture {
   // Model dimension (hidden_size). Read only by the activation
   // estimate, which is the budget's coarsest term.
   int32 hidden_size = 5;
+  // Longest context the model was trained to address
+  // (max_position_embeddings). No budget term reads it. It is where a
+  // context length comes from when the operator does not choose one, so
+  // absent means the caller has to be asked rather than guessed at.
+  int32 max_position_embeddings = 6;
 }
 
 // DescribeModelRequest asks what a model spec resolves to.

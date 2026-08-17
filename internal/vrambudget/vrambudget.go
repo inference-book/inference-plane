@@ -389,41 +389,82 @@ const GiB int64 = 1 << 30
 // keeps growing. Counting a saving that would not happen is the failure
 // this rules out.
 func MinCards(a *Arch, p Plan, cardBytes int64, utilization float64, maxCards int32) (int32, Budget, error) {
-	if err := ValidateArch(a); err != nil {
+	candidates, err := Sweep(a, p, cardBytes, utilization, maxCards)
+	if err != nil {
 		return 0, Budget{}, err
 	}
-	if cardBytes <= 0 {
-		return 0, Budget{}, fmt.Errorf("card memory must be positive, got %d", cardBytes)
-	}
-	if maxCards < 1 {
-		maxCards = 8
-	}
-	usable := UsableBytes(cardBytes, utilization)
 
-	widest := int32(1)
-	for n := int32(1); n <= maxCards; n *= 2 {
-		if n > 1 && a.GetKvHeads()%n != 0 {
+	var widest Candidate
+	for _, c := range candidates {
+		if c.SkipReason != "" {
 			continue
 		}
-		widest = n
-		try := p
-		try.TPSize = n
-		b, err := Compute(a, try)
-		if err != nil {
-			return 0, Budget{}, err
+		if c.Verdict == Fits {
+			return c.Cards, c.Budget, nil
 		}
-		if b.Against(usable) == Fits {
-			return n, b, nil
-		}
+		widest = c
 	}
 
 	// Report against the widest shape actually considered, not against
 	// maxCards, since a card count the KV heads do not divide was never
 	// a candidate and quoting its budget would describe a shape this
 	// function refused to plan.
-	try := p
-	try.TPSize = widest
-	b, _ := Compute(a, try)
-	return 0, b, fmt.Errorf("does not fit on %d card(s) of %d GB at this context and precision: needs %.1f GB per card, %.1f GB usable",
-		widest, cardBytes/GB, float64(b.TotalBytes())/float64(GB), float64(usable)/float64(GB))
+	usable := UsableBytes(cardBytes, utilization)
+	return 0, widest.Budget, fmt.Errorf("does not fit on %d card(s) of %d GB at this context and precision: needs %.1f GB per card, %.1f GB usable",
+		widest.Cards, cardBytes/GB, float64(widest.Budget.TotalBytes())/float64(GB), float64(usable)/float64(GB))
+}
+
+// Candidate is one card count a sweep looked at.
+//
+// A count either got a budget and a verdict, or it was refused before
+// any arithmetic ran and SkipReason says why. The two are exclusive:
+// when SkipReason is set, Budget and Verdict are zero and mean nothing.
+type Candidate struct {
+	Cards      int32
+	Budget     Budget
+	Verdict    Verdict
+	SkipReason string
+}
+
+// Sweep reports every card count up to maxCards, in ascending order,
+// including the counts the shard rule refuses.
+//
+// MinCards answers the operator's question and throws the rest away.
+// Anything explaining the answer needs what it discarded: the counts that
+// overran, by how much and in which term, and the counts that were never
+// candidates at all. A gap in the sequence reads as an oversight, so a
+// refused count is reported with its reason rather than omitted.
+//
+// The candidate rule is MinCards' and is documented there.
+func Sweep(a *Arch, p Plan, cardBytes int64, utilization float64, maxCards int32) ([]Candidate, error) {
+	if err := ValidateArch(a); err != nil {
+		return nil, err
+	}
+	if cardBytes <= 0 {
+		return nil, fmt.Errorf("card memory must be positive, got %d", cardBytes)
+	}
+	if maxCards < 1 {
+		maxCards = 8
+	}
+	usable := UsableBytes(cardBytes, utilization)
+
+	var out []Candidate
+	for n := int32(1); n <= maxCards; n *= 2 {
+		if n > 1 && a.GetKvHeads()%n != 0 {
+			out = append(out, Candidate{
+				Cards: n,
+				SkipReason: fmt.Sprintf("%d kv heads do not divide by %d, so an engine would replicate the cache across cards rather than shard it",
+					a.GetKvHeads(), n),
+			})
+			continue
+		}
+		try := p
+		try.TPSize = n
+		b, err := Compute(a, try)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, Candidate{Cards: n, Budget: b, Verdict: b.Against(usable)})
+	}
+	return out, nil
 }

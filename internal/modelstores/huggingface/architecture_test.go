@@ -304,3 +304,58 @@ func TestArchitectureFeedsAUsableBudget(t *testing.T) {
 		t.Errorf("verdict = %v, want overcommitted", v)
 	}
 }
+
+func TestArchitectureReadsTheTrainedContextWindow(t *testing.T) {
+	// No budget term reads this. It is read so that a caller choosing a
+	// context length can start from the model's own answer, because the
+	// alternative default is a house number that is wrong for every
+	// model whose window is not the one somebody picked.
+	f := newArchFixture(t)
+	f.infoBody = anchorInfo
+	f.configBody = `{"num_hidden_layers":64,"num_attention_heads":40,"num_key_value_heads":8,
+		"hidden_size":5120,"head_dim":128,"max_position_embeddings":131072}`
+
+	got, err := f.store("").Architecture(context.Background(), &provisionerv1.DescribeModelRequest{ModelSpec: "Qwen/Qwen2.5-32B"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := got.GetArchitecture().GetMaxPositionEmbeddings(); n != 131_072 {
+		t.Errorf("max position embeddings = %d, want 131072", n)
+	}
+}
+
+func TestArchitectureStillAnswersWithoutAContextWindow(t *testing.T) {
+	// The window is not one of the things a budget cannot proceed
+	// without, so requiring it would refuse models the arithmetic can
+	// price perfectly well. Absent has to mean "ask the operator", not
+	// "this model is unreadable".
+	f := newArchFixture(t)
+	f.infoBody, f.configBody = anchorInfo, anchorConfig
+
+	got, err := f.store("").Architecture(context.Background(), &provisionerv1.DescribeModelRequest{ModelSpec: "Qwen/Qwen2.5-32B"})
+	if err != nil {
+		t.Fatalf("a config without max_position_embeddings was refused: %v", err)
+	}
+	if n := got.GetArchitecture().GetMaxPositionEmbeddings(); n != 0 {
+		t.Errorf("max position embeddings = %d, want 0 for a config that does not publish it", n)
+	}
+}
+
+func TestArchitectureTakesTheContextWindowFromTheLanguageModel(t *testing.T) {
+	// A multimodal wrapper carries its own window, and it is not the one
+	// the KV cache is sized against. Taking the wrapper's would quote a
+	// context the language model cannot actually serve.
+	f := newArchFixture(t)
+	f.infoBody = anchorInfo
+	f.configBody = `{"architectures":["Qwen2VLForConditionalGeneration"],"max_position_embeddings":4096,
+		"text_config":{"num_hidden_layers":80,"num_attention_heads":64,"num_key_value_heads":8,
+		"hidden_size":8192,"head_dim":128,"max_position_embeddings":32768}}`
+
+	got, err := f.store("").Architecture(context.Background(), &provisionerv1.DescribeModelRequest{ModelSpec: "Qwen/Qwen2-VL-72B"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := got.GetArchitecture().GetMaxPositionEmbeddings(); n != 32_768 {
+		t.Errorf("max position embeddings = %d, want the text_config's 32768", n)
+	}
+}

@@ -408,3 +408,109 @@ func TestVerdictStringsAreOperatorFacing(t *testing.T) {
 		}
 	}
 }
+
+func TestSweepReportsEveryCandidateInOrder(t *testing.T) {
+	// A caller explaining an answer needs the counts that failed, not
+	// only the one that worked. The anchor's 8 KV heads shard across the
+	// whole power-of-two ladder, so nothing here is refused and the
+	// sequence has to arrive whole.
+	p := Plan{Weights: PrecisionFP16, MaxModelLen: 131_072, MaxBatch: 1}
+	got, err := Sweep(anchor, p, 80*GB, DefaultUtilization, 8)
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	want := []int32{1, 2, 4, 8}
+	if len(got) != len(want) {
+		t.Fatalf("Sweep returned %d candidates, want %d: %+v", len(got), len(want), got)
+	}
+	for i, c := range got {
+		if c.Cards != want[i] {
+			t.Errorf("candidate %d is %d cards, want %d", i, c.Cards, want[i])
+		}
+		if c.SkipReason != "" {
+			t.Errorf("%d cards was refused (%s); 8 kv heads shard across it", c.Cards, c.SkipReason)
+		}
+		if c.Budget.Cards != c.Cards {
+			t.Errorf("candidate %d carries a budget for %d cards", c.Cards, c.Budget.Cards)
+		}
+	}
+	if got[0].Verdict != Overcommitted {
+		t.Errorf("one card = %v, want overcommitted at 128k", got[0].Verdict)
+	}
+	if got[1].Verdict != Fits {
+		t.Errorf("two cards = %v, want fits", got[1].Verdict)
+	}
+}
+
+func TestSweepNamesTheCountsItRefusesRatherThanOmittingThem(t *testing.T) {
+	// A missing row reads as an oversight. The reason a count is not a
+	// candidate is the same reason the operator should stop asking for
+	// it, so dropping the row silently loses the lesson along with the
+	// number.
+	narrow := proto.Clone(anchor).(*Arch)
+	narrow.KvHeads = 2
+	p := Plan{Weights: PrecisionFP16, MaxModelLen: 131_072, MaxBatch: 8}
+	got, err := Sweep(narrow, p, 80*GB, DefaultUtilization, 8)
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if len(got) != 4 {
+		t.Fatalf("Sweep returned %d rows, want 4 (1, 2, 4, 8): %+v", len(got), got)
+	}
+	for _, c := range got[:2] {
+		if c.SkipReason != "" {
+			t.Errorf("%d cards refused, but 2 kv heads shard across it", c.Cards)
+		}
+	}
+	for _, c := range got[2:] {
+		if c.SkipReason == "" {
+			t.Fatalf("%d cards was planned, but 2 kv heads do not divide by it", c.Cards)
+		}
+		if !strings.Contains(c.SkipReason, "replicate") {
+			t.Errorf("%d cards: reason %q does not say what the engine would do instead", c.Cards, c.SkipReason)
+		}
+		if c.Budget != (Budget{}) {
+			t.Errorf("%d cards was refused but carries a budget: %+v", c.Cards, c.Budget)
+		}
+	}
+}
+
+func TestMinCardsAnswersWithTheFirstShapeSweepAccepts(t *testing.T) {
+	// The two are one calculation seen at two altitudes. Letting them
+	// drift would put a command's table and its headline in
+	// disagreement, which is worse than either being wrong alone.
+	plans := []Plan{
+		{Weights: PrecisionFP16, MaxModelLen: 131_072, MaxBatch: 1},
+		{Weights: PrecisionAWQ, MaxModelLen: 4096, MaxBatch: 1},
+		{Weights: PrecisionFP8, KVCache: PrecisionFP16, MaxModelLen: 32_768, MaxBatch: 16},
+	}
+	for _, p := range plans {
+		candidates, err := Sweep(anchor, p, 80*GB, DefaultUtilization, 8)
+		if err != nil {
+			t.Fatalf("Sweep: %v", err)
+		}
+		var wantCards int32
+		var wantBudget Budget
+		for _, c := range candidates {
+			if c.SkipReason == "" && c.Verdict == Fits {
+				wantCards, wantBudget = c.Cards, c.Budget
+				break
+			}
+		}
+
+		n, b, err := MinCards(anchor, p, 80*GB, DefaultUtilization, 8)
+		if wantCards == 0 {
+			if err == nil {
+				t.Errorf("%+v: MinCards returned %d cards, but Sweep accepted none", p, n)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("%+v: MinCards refused, but Sweep accepted %d cards: %v", p, wantCards, err)
+			continue
+		}
+		if n != wantCards || b != wantBudget {
+			t.Errorf("%+v: MinCards = %d cards %+v, Sweep's first fit = %d cards %+v", p, n, b, wantCards, wantBudget)
+		}
+	}
+}
