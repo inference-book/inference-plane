@@ -351,7 +351,7 @@ func initUpTelemetry(cmd *cobra.Command, endpoint string, noTelemetry bool) (*me
 		Environment:  "dev",
 		SampleRatio:  1.0, // short-lived CLI runs; capture everything
 	}
-	sh, err := telemetry.Init(cmd.Context(), telCfg, config.DeploymentConfig{})
+	sh, err := telemetry.Init(cmd.Context(), telCfg)
 	if err != nil {
 		fmt.Fprintf(cmd.ErrOrStderr(), "  (telemetry init failed: %v; proceeding without)\n", err)
 		return nil, nil

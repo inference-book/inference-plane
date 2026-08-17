@@ -15,14 +15,36 @@ import (
 	"github.com/inference-book/inference-plane/internal/telemetry"
 )
 
-// Deployment carries the labels that identify which provider /
-// gpu_type / billing_mode the running control plane is on. Sourced
-// from config.DeploymentConfig.
-type Deployment struct {
-	Provider    string
-	GPUType     string
-	BillingMode string
-	InstanceID  string
+// BillingInstance is one rented thing, reduced to what a cost figure
+// needs.
+//
+// Since is when the provider said it was active and the meter started,
+// which is not when the record was created: a record exists while the
+// provider is still deciding, and that time is not billed. Until is set
+// only once it stops, so a zero Until means still running rather than
+// ran for no time.
+//
+// A zero RateUSDPerHour means the provider reported no price, which is
+// unknown and not free. The rate gauge omits that instance rather than
+// publishing a zero somebody would sum into a total.
+type BillingInstance struct {
+	ID             string
+	Provider       string
+	GPUSKU         string
+	BillingMode    string
+	RateUSDPerHour float64
+	Since          time.Time
+	Until          time.Time
+}
+
+// FleetSource reports the instances currently billing.
+//
+// Narrow on purpose. The cost recorder needs identity and price, and
+// giving a metrics package the state store would invert the dependency
+// the rest of the daemon is built on. The control plane implements this
+// over its own records; nothing else here knows what a provider is.
+type FleetSource interface {
+	BillingInstances() []BillingInstance
 }
 
 // Provider is one row from providers.yaml after rate normalization.
@@ -52,9 +74,8 @@ type Provider struct {
 //     the panel multiplies observed active-seconds against each
 //     provider's rate to project monthly cost on each provider.
 type CostRecorder struct {
-	deployment    Deployment
+	fleet         FleetSource
 	providers     []Provider
-	startTime     time.Time
 	activeSeconds metric.Float64Counter
 }
 
@@ -62,18 +83,17 @@ type CostRecorder struct {
 // callbacks (uptime, rates) capture this CostRecorder by closure --
 // each scrape interval the SDK invokes them and they emit their
 // current observations.
-func NewCostRecorder(dep Deployment, providers []Provider) (*CostRecorder, error) {
+func NewCostRecorder(fleet FleetSource, providers []Provider) (*CostRecorder, error) {
 	meter := otel.Meter("inference-plane/cost")
 	cr := &CostRecorder{
-		deployment: dep,
-		providers:  providers,
-		startTime:  time.Now(),
+		fleet:     fleet,
+		providers: providers,
 	}
 
 	if _, err := meter.Int64ObservableCounter(
 		telemetry.MetricInstanceUptimeSeconds,
 		metric.WithUnit("s"),
-		metric.WithDescription("Wall-clock seconds since this control plane started. Base for billed-time cost in metered mode."),
+		metric.WithDescription("Billed seconds per rented instance, measured from when the provider said it was active."),
 		metric.WithInt64Callback(cr.observeUptime),
 	); err != nil {
 		return nil, fmt.Errorf("cost: uptime counter: %w", err)
@@ -90,6 +110,15 @@ func NewCostRecorder(dep Deployment, providers []Provider) (*CostRecorder, error
 	cr.activeSeconds = active
 
 	if _, err := meter.Float64ObservableGauge(
+		telemetry.MetricInstanceRate,
+		metric.WithUnit("USD/s"),
+		metric.WithDescription("Per-second price of one rented instance, as the provider quoted it at spawn. Joins the uptime counter on instance_id to give spend."),
+		metric.WithFloat64Callback(cr.observeInstanceRates),
+	); err != nil {
+		return nil, fmt.Errorf("cost: instance rate gauge: %w", err)
+	}
+
+	if _, err := meter.Float64ObservableGauge(
 		telemetry.MetricGPUEffectiveRate,
 		metric.WithUnit("USD/s"),
 		metric.WithDescription("Per-second cost rate per provider/gpu_type/billing_mode (loaded from providers.yaml). Powers the cross-provider snapshot panel."),
@@ -102,32 +131,106 @@ func NewCostRecorder(dep Deployment, providers []Provider) (*CostRecorder, error
 }
 
 // RecordActive adds elapsed inference time to the active-seconds
-// counter. Called from the service layer once the backend.Generate
-// call returns (success or failure -- failure still counted because
-// the GPU did burn time even if the request errored).
-func (cr *CostRecorder) RecordActive(ctx context.Context, model string, durationSec float64) {
+// counter, attributed to the instance that served it. Counted on
+// failure too, because the card burned the time either way.
+//
+// Labelled with the instance id and nothing about the instance. The
+// caller is the router, which holds the id for free and would have to
+// fetch anything else through the control plane on a path where a
+// synchronous hop per request has already cost a 25s p95 once. What
+// the instance is gets attached by the uptime and rate series, which
+// carry the same id and are emitted where that knowledge lives.
+//
+// An empty instance id is tolerated rather than dropped: legacy
+// single-instance deployments carry none, and losing their inference
+// time would understate utilization on exactly the oldest deployments.
+func (cr *CostRecorder) RecordActive(ctx context.Context, model, deploymentID, instanceID string, durationSec float64) {
 	if cr == nil || durationSec <= 0 {
 		return
 	}
 	cr.activeSeconds.Add(ctx, durationSec, metric.WithAttributes(
 		attribute.String(telemetry.LabelModel, model),
-		attribute.String(telemetry.LabelProvider, cr.deployment.Provider),
-		attribute.String(telemetry.LabelGPUType, cr.deployment.GPUType),
-		attribute.String(telemetry.LabelBillingMode, cr.deployment.BillingMode),
+		attribute.String(telemetry.LabelDeployID, deploymentID),
+		attribute.String(telemetry.LabelInstanceID, instanceID),
 	))
 }
 
-// observeUptime is the callback for the uptime observable counter.
-// Returns wall-clock seconds since CostRecorder construction. Same
-// deployment labels as RecordActive so the two metrics join on
-// {provider, gpu_type, billing_mode} for utilization PromQL.
+// observeUptime emits one series per instance that is or was billing,
+// measured from when the provider said it was active.
+//
+// This used to report seconds since the recorder was constructed, under
+// one label set asserted by the operator's shell at daemon startup. For
+// a v0.1 control plane managing a single deployment that described
+// something real. It has described nothing since: one daemon runs many
+// deployments, a heterogeneous fleet spans providers within a single
+// deployment, and the control plane is not itself a workload (#163).
 func (cr *CostRecorder) observeUptime(_ context.Context, observer metric.Int64Observer) error {
-	observer.Observe(int64(time.Since(cr.startTime).Seconds()), metric.WithAttributes(
-		attribute.String(telemetry.LabelProvider, cr.deployment.Provider),
-		attribute.String(telemetry.LabelGPUType, cr.deployment.GPUType),
-		attribute.String(telemetry.LabelBillingMode, cr.deployment.BillingMode),
-	))
+	for _, inst := range cr.billing() {
+		observer.Observe(int64(inst.billedSeconds(time.Now())), metric.WithAttributes(instanceAttrs(inst)...))
+	}
 	return nil
+}
+
+// observeInstanceRates emits what each live instance costs per second.
+//
+// Separate from observeRates, which prices the catalog. This one prices
+// the fleet, and the two answer different questions: what could we rent,
+// versus what are we renting. Multiplying this by the uptime series on
+// instance_id is how a deployment's spend is derived, which is the
+// figure a cost argument is made from.
+//
+// An instance whose provider reported no rate is omitted. Emitting zero
+// would be indistinguishable from free, and it would sum into a total
+// that quietly understates the bill.
+func (cr *CostRecorder) observeInstanceRates(_ context.Context, observer metric.Float64Observer) error {
+	for _, inst := range cr.billing() {
+		if inst.RateUSDPerHour <= 0 {
+			continue
+		}
+		observer.Observe(inst.RateUSDPerHour/secondsPerHour, metric.WithAttributes(instanceAttrs(inst)...))
+	}
+	return nil
+}
+
+// billing asks the fleet source what is running, tolerating its absence
+// so a recorder built without one (tests, a daemon with no state) simply
+// reports no instances.
+func (cr *CostRecorder) billing() []BillingInstance {
+	if cr.fleet == nil {
+		return nil
+	}
+	return cr.fleet.BillingInstances()
+}
+
+// instanceAttrs is the label set shared by the uptime counter and the
+// rate gauge. Shared deliberately: the two are meant to be joined, and a
+// join only works when both sides carry the same keys.
+func instanceAttrs(inst BillingInstance) []attribute.KeyValue {
+	return []attribute.KeyValue{
+		attribute.String(telemetry.LabelInstanceID, inst.ID),
+		attribute.String(telemetry.LabelProvider, inst.Provider),
+		attribute.String(telemetry.LabelGPUType, inst.GPUSKU),
+		attribute.String(telemetry.LabelBillingMode, inst.BillingMode),
+	}
+}
+
+// billedSeconds is how long this instance has been on the meter.
+//
+// Ends at Until when it has stopped, so a terminated instance holds its
+// final figure instead of climbing forever. A record with no Since has
+// not started billing and reports zero.
+func (b BillingInstance) billedSeconds(now time.Time) float64 {
+	if b.Since.IsZero() {
+		return 0
+	}
+	end := now
+	if !b.Until.IsZero() {
+		end = b.Until
+	}
+	if end.Before(b.Since) {
+		return 0
+	}
+	return end.Sub(b.Since).Seconds()
 }
 
 // observeRates is the callback for the per-provider rate observable
@@ -217,6 +320,10 @@ type providerDef struct {
 
 	Notes string `yaml:"notes,omitempty"`
 }
+
+// secondsPerHour converts a provider's quoted hourly rate into the
+// per-second unit both cost gauges publish.
+const secondsPerHour = 3600.0
 
 // hoursPerMonth is the conventional approximation: 365 * 24 / 12.
 // Matches the chapter's break-even calculations and the web calculators.

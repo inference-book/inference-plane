@@ -44,14 +44,18 @@ type InferenceServer struct {
 	inferencev1.UnimplementedInferenceServiceServer
 	backend backends.Backend
 	metrics *metrics.Recorder
-	cost    *metrics.CostRecorder
 }
 
 // NewInferenceServer constructs an InferenceServer over the given backend.
-// metrics and cost may be nil (no-op recordings) for tests that don't
+// metrics may be nil (no-op recordings) for tests that don't
 // initialize the OTel SDK.
-func NewInferenceServer(b backends.Backend, m *metrics.Recorder, cost *metrics.CostRecorder) *InferenceServer {
-	return &InferenceServer{backend: b, metrics: m, cost: cost}
+// Cost is deliberately not recorded here. This path serves whatever
+// backend the daemon was configured with, which is a mock or an
+// operator-supplied URL rather than an instance iplane rented, so there
+// is nothing to attribute a bill to. Cost is recorded at the router,
+// which knows which replica served the request (#163).
+func NewInferenceServer(b backends.Backend, m *metrics.Recorder) *InferenceServer {
+	return &InferenceServer{backend: b, metrics: m}
 }
 
 // compile-time check that InferenceServer satisfies the gRPC interface.
@@ -62,7 +66,6 @@ var _ inferencev1.InferenceServiceServer = (*InferenceServer)(nil)
 func (s *InferenceServer) Complete(ctx context.Context, in *inferencev1.CompleteRequest) (*inferencev1.CompleteResponse, error) {
 	// Metric record deferred so every exit path (validation failure,
 	// backend error, success) emits the same counter+histogram pair.
-	// Cost records the same duration into inference.active.seconds.total.
 	start := time.Now()
 	status_ := "success"
 	model := "unknown"
@@ -70,7 +73,6 @@ func (s *InferenceServer) Complete(ctx context.Context, in *inferencev1.Complete
 	defer func() {
 		dur := time.Since(start).Seconds()
 		s.metrics.RecordRequest(ctx, model, status_, dur)
-		s.cost.RecordActive(ctx, model, dur)
 		if status_ == "success" && completionTokens > 0 {
 			s.metrics.RecordTokens(ctx, model, int64(completionTokens))
 		}
@@ -145,7 +147,6 @@ func (s *InferenceServer) ChatComplete(ctx context.Context, in *inferencev1.Chat
 	defer func() {
 		dur := time.Since(start).Seconds()
 		s.metrics.RecordRequest(ctx, model, status_, dur)
-		s.cost.RecordActive(ctx, model, dur)
 		if status_ == "success" && completionTokens > 0 {
 			s.metrics.RecordTokens(ctx, model, int64(completionTokens))
 		}
