@@ -137,6 +137,14 @@ reclaimable search across all providers is in practice a Vast search.
 `min_bid` is a floor rather than a price. We quote it, which is the cheapest a
 rental could settle at and not necessarily what one does settle at.
 
+**We quote it and we do not rent at it.** `reclaim_policy` reaches the offer
+search and stops there: the rent body sends no bid price, so every rental this
+adapter makes is on-demand. That is the deferral #289 covers and Chapter 11
+transcribes, not an oversight, and it is why the cost metric reports
+`metered_per_second` for Vast rentals rather than guessing at a tier. Anyone
+adding a bid to the rent path needs a pre-emption story first, and should expect
+to persist the granted tier at the same time (#333).
+
 ## cpu_ram belongs in the query, not the catalog
 
 Vast reports `cpu_ram` per offer, so a `min_ram_gb` floor is pushed

@@ -16,12 +16,17 @@ import (
 // the second; local hardware is already bought; an operator's own engine
 // costs iplane nothing because iplane did not rent it.
 //
-// What this deliberately cannot express is reclaimable versus on-demand.
-// Candidate.reclaimable is the granted signal and it dies in the
-// candidate list, and Spec.requirements.reclaim_policy records what was
-// asked for rather than what was given. On Vast the two tiers differ by
-// roughly six times, so this label is wrong by that much on a bid
-// rental, and closing it means persisting the granted flag.
+// Metered is correct for every paid rental today, including on Vast,
+// because no rental is reclaimable. reclaim_policy constrains selection
+// and nothing more: it is read only in the three candidates.go files,
+// RunPod's create request carries an Interruptible field that is never
+// assigned, and Vast's rent body sends no bid price. The proto comment
+// on ReclaimPolicy says the same thing from the other side.
+//
+// So this needs revisiting the day a rental can actually be reclaimable,
+// and not before. On Vast the two tiers differ by roughly six times, so
+// a granted-tier signal will matter then; persisting one now would store
+// a flag that is permanently false (#333).
 const (
 	billingMetered = "metered_per_second"
 	billingOwned   = "owned"
