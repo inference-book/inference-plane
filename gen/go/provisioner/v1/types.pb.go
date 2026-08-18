@@ -2719,8 +2719,32 @@ type ModelArchitecture struct {
 	// 7168 model dimension, and reading its experts at full width computes
 	// an expert parameter share twice the size of the whole model.
 	RoutedExpertHiddenSize int32 `protobuf:"varint,12,opt,name=routed_expert_hidden_size,json=routedExpertHiddenSize,proto3" json:"routed_expert_hidden_size,omitempty"`
-	unknownFields          protoimpl.UnknownFields
-	sizeCache              protoimpl.SizeCache
+	// Width of the compressed key-value latent, for models that cache one
+	// instead of caching a key and a value per attention head
+	// (kv_lora_rank). Absent means the model caches per head, which is what
+	// kv_heads and head_dim above describe.
+	//
+	// The two are alternatives rather than a pair, and which one a model
+	// uses moves the cache cost by more than an order of magnitude. A model
+	// publishing this caches kv_lora_rank + qk_rope_head_dim elements per
+	// token per layer, once, rather than two tensors of kv_heads * head_dim.
+	KvLoraRank int32 `protobuf:"varint,13,opt,name=kv_lora_rank,json=kvLoraRank,proto3" json:"kv_lora_rank,omitempty"`
+	// Width of the position-carrying part of the key, held uncompressed
+	// beside the latent (qk_rope_head_dim). Read only alongside
+	// kv_lora_rank, being the other half of what a latent cache stores per
+	// token.
+	QkRopeHeadDim int32 `protobuf:"varint,14,opt,name=qk_rope_head_dim,json=qkRopeHeadDim,proto3" json:"qk_rope_head_dim,omitempty"`
+	// Layers whose cache grows with the sequence, where that is fewer than
+	// all of them. Absent means all of them, which covers every model that
+	// is not a hybrid.
+	//
+	// Hybrid models alternate ordinary attention with linear-attention
+	// layers whose state is a fixed size however long the sequence gets.
+	// Kimi K3 has 24 attention layers among 93, so counting all 93 prices
+	// its cache at nearly four times what it costs.
+	FullAttentionLayers int32 `protobuf:"varint,15,opt,name=full_attention_layers,json=fullAttentionLayers,proto3" json:"full_attention_layers,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
 }
 
 func (x *ModelArchitecture) Reset() {
@@ -2833,6 +2857,27 @@ func (x *ModelArchitecture) GetDenseLayers() int32 {
 func (x *ModelArchitecture) GetRoutedExpertHiddenSize() int32 {
 	if x != nil {
 		return x.RoutedExpertHiddenSize
+	}
+	return 0
+}
+
+func (x *ModelArchitecture) GetKvLoraRank() int32 {
+	if x != nil {
+		return x.KvLoraRank
+	}
+	return 0
+}
+
+func (x *ModelArchitecture) GetQkRopeHeadDim() int32 {
+	if x != nil {
+		return x.QkRopeHeadDim
+	}
+	return 0
+}
+
+func (x *ModelArchitecture) GetFullAttentionLayers() int32 {
+	if x != nil {
+		return x.FullAttentionLayers
 	}
 	return 0
 }
@@ -3660,7 +3705,7 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"\fUpstreamAuth\x12\x16\n" +
 	"\x06header\x18\x01 \x01(\tR\x06header\x12\x1b\n" +
 	"\tvalue_env\x18\x02 \x01(\tR\bvalueEnv\x12!\n" +
-	"\fvalue_prefix\x18\x03 \x01(\tR\vvaluePrefix\"\xdb\x03\n" +
+	"\fvalue_prefix\x18\x03 \x01(\tR\vvaluePrefix\"\xda\x04\n" +
 	"\x11ModelArchitecture\x12\x16\n" +
 	"\x06params\x18\x01 \x01(\x03R\x06params\x12\x16\n" +
 	"\x06layers\x18\x02 \x01(\x05R\x06layers\x12\x19\n" +
@@ -3676,7 +3721,11 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"\x0eshared_experts\x18\n" +
 	" \x01(\x05R\rsharedExperts\x12!\n" +
 	"\fdense_layers\x18\v \x01(\x05R\vdenseLayers\x129\n" +
-	"\x19routed_expert_hidden_size\x18\f \x01(\x05R\x16routedExpertHiddenSize\"5\n" +
+	"\x19routed_expert_hidden_size\x18\f \x01(\x05R\x16routedExpertHiddenSize\x12 \n" +
+	"\fkv_lora_rank\x18\r \x01(\x05R\n" +
+	"kvLoraRank\x12'\n" +
+	"\x10qk_rope_head_dim\x18\x0e \x01(\x05R\rqkRopeHeadDim\x122\n" +
+	"\x15full_attention_layers\x18\x0f \x01(\x05R\x13fullAttentionLayers\"5\n" +
 	"\x14DescribeModelRequest\x12\x1d\n" +
 	"\n" +
 	"model_spec\x18\x01 \x01(\tR\tmodelSpec\"^\n" +

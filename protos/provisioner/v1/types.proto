@@ -1041,6 +1041,33 @@ message ModelArchitecture {
   // 7168 model dimension, and reading its experts at full width computes
   // an expert parameter share twice the size of the whole model.
   int32 routed_expert_hidden_size = 12;
+
+  // Width of the compressed key-value latent, for models that cache one
+  // instead of caching a key and a value per attention head
+  // (kv_lora_rank). Absent means the model caches per head, which is what
+  // kv_heads and head_dim above describe.
+  //
+  // The two are alternatives rather than a pair, and which one a model
+  // uses moves the cache cost by more than an order of magnitude. A model
+  // publishing this caches kv_lora_rank + qk_rope_head_dim elements per
+  // token per layer, once, rather than two tensors of kv_heads * head_dim.
+  int32 kv_lora_rank = 13;
+
+  // Width of the position-carrying part of the key, held uncompressed
+  // beside the latent (qk_rope_head_dim). Read only alongside
+  // kv_lora_rank, being the other half of what a latent cache stores per
+  // token.
+  int32 qk_rope_head_dim = 14;
+
+  // Layers whose cache grows with the sequence, where that is fewer than
+  // all of them. Absent means all of them, which covers every model that
+  // is not a hybrid.
+  //
+  // Hybrid models alternate ordinary attention with linear-attention
+  // layers whose state is a fixed size however long the sequence gets.
+  // Kimi K3 has 24 attention layers among 93, so counting all 93 prices
+  // its cache at nearly four times what it costs.
+  int32 full_attention_layers = 15;
 }
 
 // DescribeModelRequest asks what a model spec resolves to.

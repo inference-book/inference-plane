@@ -616,6 +616,7 @@ func TestArchitectureReportsThePartFourTargets(t *testing.T) {
 				HiddenSize: 6144, MaxPositionEmbeddings: 1048576,
 				NumExperts: 256, NumExpertsPerTok: 8, MoeIntermediateSize: 2048,
 				SharedExperts: 1, DenseLayers: 3, RoutedExpertHiddenSize: 6144,
+				KvLoraRank: 512, QkRopeHeadDim: 64,
 			},
 		},
 		{
@@ -623,10 +624,11 @@ func TestArchitectureReportsThePartFourTargets(t *testing.T) {
 			fixture: "kimi-k3.json",
 			info:    `{"id":"moonshotai/Kimi-K3","safetensors":{"total":2779931837184}}`,
 			want: &provisionerv1.ModelArchitecture{
-				Params: 2779931837184, Layers: 93, KvHeads: 96, HeadDim: 74,
+				Params: 2779931837184, Layers: 93, KvHeads: 96,
 				HiddenSize: 7168, MaxPositionEmbeddings: 1048576,
 				NumExperts: 896, NumExpertsPerTok: 16, MoeIntermediateSize: 3072,
 				SharedExperts: 2, DenseLayers: 1, RoutedExpertHiddenSize: 3584,
+				KvLoraRank: 512, QkRopeHeadDim: 64, FullAttentionLayers: 24,
 			},
 		},
 	} {
@@ -690,5 +692,77 @@ func TestArchitectureLeavesTheExpertWidthUnsetOnADenseModel(t *testing.T) {
 	}
 	if n := got.GetArchitecture().GetRoutedExpertHiddenSize(); n != 0 {
 		t.Errorf("routed expert hidden size = %d on a dense model, want 0", n)
+	}
+}
+
+// How a model caches decides the shape of the cache term, so the fields
+// that say so have to survive the read.
+func TestArchitectureReadsTheCacheShape(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		fixture        string
+		latent, rope   int32
+		fullAttnLayers int32
+	}{
+		{"DeepSeek V3 caches a latent on every layer", "deepseek-v3.json", 512, 64, 0},
+		{"GLM 5.2 caches a latent on every layer", "glm-5.2.json", 512, 64, 0},
+		{"Kimi K3 caches a latent on 24 layers of 93", "kimi-k3.json", 512, 64, 24},
+		{"Qwen2.5 caches per head", "qwen2.5-32b.json", 0, 0, 0},
+		{"Mixtral caches per head", "mixtral.json", 0, 0, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newArchFixture(t)
+			f.infoBody = `{"id":"org/model","safetensors":{"total":1000000000}}`
+			f.configBody = loadTestdataConfig(t, tc.fixture)
+
+			got, err := f.store("").Architecture(context.Background(), &provisionerv1.DescribeModelRequest{ModelSpec: "org/model"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			a := got.GetArchitecture()
+			if a.GetKvLoraRank() != tc.latent {
+				t.Errorf("kv lora rank = %d, want %d", a.GetKvLoraRank(), tc.latent)
+			}
+			if a.GetQkRopeHeadDim() != tc.rope {
+				t.Errorf("qk rope head dim = %d, want %d", a.GetQkRopeHeadDim(), tc.rope)
+			}
+			if a.GetFullAttentionLayers() != tc.fullAttnLayers {
+				t.Errorf("full attention layers = %d, want %d", a.GetFullAttentionLayers(), tc.fullAttnLayers)
+			}
+		})
+	}
+}
+
+// The head-dimension derivation is arithmetic that always produces a
+// number, and on a latent-cache model the number describes nothing the
+// engine allocates. Kimi K3 came out at 74, which is neither of the head
+// dimensions it publishes.
+func TestArchitectureDoesNotInventAHeadDimensionForALatentCache(t *testing.T) {
+	f := newArchFixture(t)
+	f.infoBody = `{"id":"moonshotai/Kimi-K3","safetensors":{"total":2779931837184}}`
+	f.configBody = loadTestdataConfig(t, "kimi-k3.json")
+
+	got, err := f.store("").Architecture(context.Background(), &provisionerv1.DescribeModelRequest{ModelSpec: "moonshotai/Kimi-K3"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := got.GetArchitecture().GetHeadDim(); n != 0 {
+		t.Errorf("head dim = %d, want 0; the model publishes none and has no per-head cache to size", n)
+	}
+}
+
+// A model that publishes a head dimension keeps it, latent cache or not.
+// Only the invention is dropped.
+func TestArchitectureKeepsAPublishedHeadDimensionOnALatentCache(t *testing.T) {
+	f := newArchFixture(t)
+	f.infoBody = `{"id":"zai-org/GLM-5.2","safetensors":{"total":753329940480}}`
+	f.configBody = loadTestdataConfig(t, "glm-5.2.json")
+
+	got, err := f.store("").Architecture(context.Background(), &provisionerv1.DescribeModelRequest{ModelSpec: "zai-org/GLM-5.2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := got.GetArchitecture().GetHeadDim(); n != 192 {
+		t.Errorf("head dim = %d, want the published 192", n)
 	}
 }

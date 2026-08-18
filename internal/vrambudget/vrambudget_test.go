@@ -687,3 +687,154 @@ func TestMXFP4ReproducesThePublishedCheckpointFootprints(t *testing.T) {
 		})
 	}
 }
+
+// deepSeekV3 is the anchor for the compressed-cache arithmetic, because
+// its per-token cache cost is a published figure rather than something
+// this package gets to decide: 61 layers of a 512-wide latent plus a
+// 64-wide uncompressed remainder.
+var deepSeekV3 = &Arch{
+	Params: 671_026_419_200, Layers: 61, HiddenSize: 7168,
+	KvLoraRank: 512, QkRopeHeadDim: 64,
+}
+
+// The number DeepSeek-V3 is published against. Getting this right is the
+// difference between a cache term that is exact and one that was over by
+// a factor of forty.
+func TestLatentCacheMatchesThePublishedPerTokenCost(t *testing.T) {
+	if got := KVBytesPerToken(deepSeekV3, PrecisionBF16); got != 70_272 {
+		t.Errorf("per token = %d bytes, want 70272", got)
+	}
+}
+
+// The old term reads a key and a value for every head at every layer.
+// Applied to a latent-cache model it computes a cache the engine never
+// allocates, and the gap is the whole of #362.
+func TestLatentCacheIsNotTheHeadCountArithmetic(t *testing.T) {
+	glm := &Arch{
+		Params: 753_329_940_480, Layers: 78, HiddenSize: 6144,
+		KvHeads: 64, HeadDim: 192, KvLoraRank: 512, QkRopeHeadDim: 64,
+	}
+	latent := KVBytesPerToken(glm, PrecisionBF16)
+	perHead := 2 * int64(glm.GetLayers()) * int64(glm.GetKvHeads()) * int64(glm.GetHeadDim()) * 2
+
+	if latent != 89_856 {
+		t.Errorf("per token = %d, want 89856 (78 layers x 576 x 2)", latent)
+	}
+	if ratio := perHead / latent; ratio < 40 {
+		t.Errorf("per-head arithmetic is only %dx the real cost; the bug was ~43x", ratio)
+	}
+}
+
+// A hybrid pays cache only on the layers that have a growing one. The
+// rest hold a fixed-size state, so counting all 93 of K3's layers prices
+// its cache at nearly four times what it costs.
+func TestHybridCachesOnlyOnItsAttentionLayers(t *testing.T) {
+	k3 := &Arch{
+		Params: 2_779_931_837_184, Layers: 93, HiddenSize: 7168,
+		KvLoraRank: 512, QkRopeHeadDim: 64, FullAttentionLayers: 24,
+	}
+	if n := CachingLayers(k3); n != 24 {
+		t.Fatalf("caching layers = %d, want 24", n)
+	}
+	if got := KVBytesPerToken(k3, PrecisionBF16); got != 27_648 {
+		t.Errorf("per token = %d, want 27648 (24 layers x 576 x 2)", got)
+	}
+}
+
+// Absent means every layer, so a model that is not a hybrid is unaffected
+// and a list naming all the layers says nothing a missing list does not.
+func TestCachingLayersIsEveryLayerUnlessTheModelSaysOtherwise(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		full, want int32
+	}{
+		{"no hybrid split published", 0, 61},
+		{"a split naming every layer", 61, 61},
+		{"a real split", 24, 24},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := &Arch{Layers: 61, KvLoraRank: 512, QkRopeHeadDim: 64, FullAttentionLayers: tc.full}
+			if got := CachingLayers(a); got != tc.want {
+				t.Errorf("caching layers = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+// Adding cards buys weight headroom and no cache headroom, because every
+// rank reconstructs its heads from the whole latent and so holds the
+// whole latent. Dividing it would promise a saving the engine does not
+// deliver.
+func TestLatentCacheIsReplicatedRatherThanShardedAcrossCards(t *testing.T) {
+	plan := Plan{Weights: PrecisionFP8, MaxModelLen: 32768, MaxBatch: 8}
+	one, err := Compute(deepSeekV3, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.TPSize = 8
+	eight, err := Compute(deepSeekV3, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if eight.KVBytes != one.KVBytes {
+		t.Errorf("cache per card went from %d to %d across eight cards; a latent is replicated", one.KVBytes, eight.KVBytes)
+	}
+	if eight.WeightBytes*8 != one.WeightBytes {
+		t.Errorf("weights did not shard: %d across eight cards against %d on one", eight.WeightBytes, one.WeightBytes)
+	}
+}
+
+// The per-head cache still shards, which is the behaviour every dense
+// model in the existing tests depends on.
+func TestPerHeadCacheStillShardsAcrossCards(t *testing.T) {
+	dense := &Arch{Params: 70_600_000_000, Layers: 80, KvHeads: 8, HeadDim: 128, HiddenSize: 8192}
+	plan := Plan{Weights: PrecisionFP8, MaxModelLen: 32768, MaxBatch: 8}
+	one, err := Compute(dense, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.TPSize = 8
+	eight, err := Compute(dense, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if eight.KVBytes*8 != one.KVBytes {
+		t.Errorf("cache per card = %d across eight, want an eighth of %d", eight.KVBytes, one.KVBytes)
+	}
+}
+
+// The shard-divisibility refusal describes how a per-head cache shards.
+// A latent cache does not shard on any card count, so refusing one for
+// head-divisibility withholds a shape for a saving that was never on
+// offer.
+func TestSweepDoesNotApplyTheShardRuleToALatentCache(t *testing.T) {
+	odd := &Arch{Params: 671_026_419_200, Layers: 61, HiddenSize: 7168, KvLoraRank: 512, QkRopeHeadDim: 64, KvHeads: 3}
+	got, err := Sweep(odd, Plan{Weights: PrecisionFP8, MaxModelLen: 8192, MaxBatch: 1}, 80*GB, 0.9, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range got {
+		if c.SkipReason != "" {
+			t.Errorf("%d cards refused on a latent cache: %s", c.Cards, c.SkipReason)
+		}
+	}
+}
+
+// Which fields a model has to publish depends on how it caches. A latent
+// model has no per-head key and value, so requiring a head count off it
+// would reject a model this package can price exactly.
+func TestValidateArchAsksForTheFieldsTheCacheShapeActuallyUses(t *testing.T) {
+	t.Run("latent model needs no per-head figures", func(t *testing.T) {
+		if err := ValidateArch(&Arch{Params: 1, Layers: 1, KvLoraRank: 512, QkRopeHeadDim: 64}); err != nil {
+			t.Errorf("rejected: %v", err)
+		}
+	})
+	t.Run("per-head model still needs them", func(t *testing.T) {
+		if err := ValidateArch(&Arch{Params: 1, Layers: 1, KvHeads: 8}); err == nil {
+			t.Error("accepted a per-head model with no head dimension")
+		}
+		if err := ValidateArch(&Arch{Params: 1, Layers: 1, HeadDim: 128}); err == nil {
+			t.Error("accepted a per-head model with no kv-head count")
+		}
+	})
+}

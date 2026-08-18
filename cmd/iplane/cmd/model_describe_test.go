@@ -27,6 +27,8 @@ var glm52 = &provisionerv1.ModelArchitecture{
 	MoeIntermediateSize:   2048,
 	SharedExperts:         1,
 	DenseLayers:           3,
+	KvLoraRank:            512,
+	QkRopeHeadDim:         64,
 }
 
 // runDescribe drives the real command over the real wire, matching how
@@ -105,8 +107,7 @@ func TestModelDescribeReportsTheExpertShape(t *testing.T) {
 
   parameters      753.33 B
   layers          78
-  kv heads        64
-  head dim        192
+  kv latent       512 + 64 per token per layer
   hidden size     6144
   context window  1048576 tokens
 
@@ -116,8 +117,8 @@ func TestModelDescribeReportsTheExpertShape(t *testing.T) {
   active per step  51.20 B of 753.33 B (15x smaller)
 
   weights   1506.7 GB fp16   753.3 GB fp8   452.0 GB 4-bit
-  kv cache  3744.0 KiB per token at fp16, 1872.0 KiB at fp8
-            8k: 31.4 GB   32k: 125.6 GB   128k: 502.5 GB   (one sequence)
+  kv cache  87.8 KiB per token at fp16, 43.9 KiB at fp8
+            8k: 0.7 GB   32k: 2.9 GB   128k: 11.8 GB   (one sequence)
 `
 	if got != want {
 		t.Errorf("sparse output\n got:\n%s\nwant:\n%s", got, want)
@@ -148,6 +149,38 @@ func TestModelDescribeOmitsTheExpertFactsAModelDoesNotPublish(t *testing.T) {
 	for _, unwanted := range []string{"active per token", "shared", "expert width", "dense layers"} {
 		if bytes.Contains([]byte(got), []byte(unwanted)) {
 			t.Errorf("printed %q for a config that does not state it:\n%s", unwanted, got)
+		}
+	}
+}
+
+// A hybrid says how many of its layers pay a growing cache, because the
+// figure below the fold depends on it and 24 of 93 is not a detail a
+// reader can infer from anything else on the page.
+func TestModelDescribeNamesTheLayersThatActuallyCache(t *testing.T) {
+	k3 := &provisionerv1.ModelArchitecture{
+		Params: 2_779_931_837_184, Layers: 93, KvHeads: 96, HiddenSize: 7168,
+		MaxPositionEmbeddings: 1_048_576,
+		NumExperts:            896, NumExpertsPerTok: 16, MoeIntermediateSize: 3072,
+		SharedExperts: 2, DenseLayers: 1, RoutedExpertHiddenSize: 3584,
+		KvLoraRank: 512, QkRopeHeadDim: 64, FullAttentionLayers: 24,
+	}
+
+	got, err := runDescribe(t, k3, "moonshotai/Kimi-K3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"kv latent       512 + 64 per token per layer",
+		"caching layers  24 of 93 (the rest are linear attention)",
+		"kv cache  27.0 KiB per token at fp16",
+	} {
+		if !bytes.Contains([]byte(got), []byte(want)) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	for _, unwanted := range []string{"kv heads", "head dim"} {
+		if bytes.Contains([]byte(got), []byte(unwanted)) {
+			t.Errorf("printed %q for a model with no per-head cache:\n%s", unwanted, got)
 		}
 	}
 }
