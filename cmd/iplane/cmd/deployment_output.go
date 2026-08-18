@@ -209,6 +209,26 @@ func dryRunDeploy(ctx context.Context, w io.Writer, client deploymentClient, dep
 	if len(dep.GetEngineArgs()) > 0 {
 		fmt.Fprintf(w, "[dry-run]   engine args: %v\n", dep.GetEngineArgs())
 	}
+	// The split, translated. The daemon appends these during
+	// CreateDeployment, so they are not on the record yet and the operator
+	// would otherwise see none of it. It matters most for --ep, which is
+	// not a flag any engine takes: asking to spread experts eight ways
+	// becomes a data-parallel width and a boolean, and an operator who
+	// cannot see that cannot check it (#342).
+	//
+	// Card count is deliberately not known here. The server holds the
+	// replica specs, so this preview shows the translation and catches a
+	// split that is arithmetically impossible, and leaves the does-it-fit
+	// refusal to the daemon.
+	if par := dep.GetParallelism(); par != nil {
+		parArgs, err := provisioners.ValidateParallelism(par, 0, false)
+		switch {
+		case err != nil:
+			fmt.Fprintf(w, "[dry-run]   split:       WOULD BE REFUSED: %v\n", err)
+		case len(parArgs) > 0:
+			fmt.Fprintf(w, "[dry-run]   split adds:  %v\n", parArgs)
+		}
+	}
 	// The plan the pre-flight will size against, read back out of those
 	// args. Printed because the parsing is otherwise invisible: an
 	// operator whose flag spelling we do not recognise would see the
