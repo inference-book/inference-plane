@@ -396,16 +396,7 @@ func sessionID(idx int) string { return fmt.Sprintf("s-%04d", idx) }
 // model tokens closely enough for the demo's purpose (sizing the shared
 // prefix), without pulling in a tokenizer dependency.
 func synthSystemPrompt(tokens int) string {
-	if tokens <= 0 {
-		return "You are a helpful assistant."
-	}
-	base := []string{"You", "are", "a", "helpful", "assistant", "with", "deep",
-		"knowledge", "of", "distributed", "systems", "inference", "and", "operations"}
-	words := make([]string, tokens)
-	for i := range words {
-		words[i] = base[i%len(base)]
-	}
-	return strings.Join(words, " ")
+	return synthPrompt(tokens)
 }
 
 // synthUserTurn returns a deterministic user message for the given turn

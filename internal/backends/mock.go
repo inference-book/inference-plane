@@ -7,6 +7,7 @@ import (
 	"fmt"
 	mathrand "math/rand/v2"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -37,7 +38,20 @@ type LatencyCluster struct {
 
 type MockBackend struct {
 	name string
-	rng  *mathrand.Rand
+
+	// rngMu guards rng. math/rand/v2.Rand is not safe for concurrent
+	// use, and every request the mock engine serves runs on its own
+	// goroutine, so every sample below was a data race. It went unseen
+	// because the mock's own tests were sequential and the binary is
+	// never run under the race detector; the first concurrent in-process
+	// Generate found it immediately.
+	//
+	// A shared source under a lock rather than one per caller, because
+	// the seed is fixed on purpose: two runs of a demo sample the same
+	// latencies, and per-goroutine sources would make that depend on how
+	// requests happened to be scheduled.
+	rngMu sync.Mutex
+	rng   *mathrand.Rand
 
 	// Latency mixture. Defaults are tuned for the bimodal LLM
 	// latency shape Chapter 6.6.4 describes -- a fast cluster (cached
@@ -53,6 +67,11 @@ type MockBackend struct {
 	// give a plausible mix.
 	minOutputTokens int
 	maxOutputTokens int
+
+	// kv is the admission gate, nil unless WithKVBudget is set. A mock
+	// without one admits everything, which is what every demo built
+	// before capacity was a question expects.
+	kv *kvBudget
 
 	// Health failure injection. Each Health() call returns a fake
 	// error with this probability. Useful for exercising the
@@ -95,6 +114,24 @@ func WithOutputTokens(min, max int) MockOption {
 // WithHealthFailRate injects synthetic health failures at the given
 // probability (0.0 to 1.0). Useful for exercising the backend health
 // gauge in dashboards.
+// WithKVBudget caps how many tokens the engine holds across all
+// in-flight sequences, so admission depends on how long the sequences
+// are rather than only on how many there are.
+//
+// A sequence occupies its prompt plus the output it is allowed to
+// generate, for as long as it is being served. That is the reservation a
+// real engine makes: it cannot know how many tokens a reply will run to,
+// so it holds room for the maximum the request permits.
+//
+// Zero or less disables the gate.
+func WithKVBudget(tokens int) MockOption {
+	return func(m *MockBackend) {
+		if tokens > 0 {
+			m.kv = newKVBudget(tokens)
+		}
+	}
+}
+
 func WithHealthFailRate(p float64) MockOption {
 	return func(m *MockBackend) { m.healthFailRate = p }
 }
@@ -142,6 +179,18 @@ func (m *MockBackend) Name() string { return m.name }
 // shaped to match the request: Text for prompt-style requests, Message
 // for chat-style.
 func (m *MockBackend) Generate(ctx context.Context, req GenerateRequest) (GenerateResponse, error) {
+	// Admission first, and held for the whole of the generation. A
+	// sequence occupies cache from the moment it is scheduled until it
+	// finishes, so releasing before the sleep would model a pool that
+	// costs nothing to occupy.
+	if m.kv != nil {
+		cost := approximateTokens(req) + m.reservedOutput(req)
+		if err := m.kv.acquire(ctx, cost); err != nil {
+			return GenerateResponse{}, err
+		}
+		defer m.kv.release(cost)
+	}
+
 	delay := m.sampleLatency()
 
 	select {
@@ -151,7 +200,7 @@ func (m *MockBackend) Generate(ctx context.Context, req GenerateRequest) (Genera
 	}
 
 	// Sample output token count, clamped to MaxTokens if specified.
-	tokens := m.minOutputTokens + m.rng.IntN(m.maxOutputTokens-m.minOutputTokens+1)
+	tokens := m.minOutputTokens + m.randIntN(m.maxOutputTokens-m.minOutputTokens+1)
 	finishReason := "stop"
 	if req.MaxTokens > 0 && tokens >= req.MaxTokens {
 		tokens = req.MaxTokens
@@ -193,11 +242,54 @@ func (m *MockBackend) Generate(ctx context.Context, req GenerateRequest) (Genera
 	return resp, nil
 }
 
+// reservedOutput is the output room a request reserves.
+//
+// The caller's own maximum where it names one, since that is the ceiling
+// the engine has to hold room for, and the backend's upper bound
+// otherwise. Reserving the sampled length instead would be the engine
+// knowing in advance how long the reply runs, which is exactly what it
+// cannot know.
+func (m *MockBackend) reservedOutput(req GenerateRequest) int {
+	if req.MaxTokens > 0 {
+		return req.MaxTokens
+	}
+	return m.maxOutputTokens
+}
+
+// The three sampling helpers exist so that every read of rng goes
+// through the lock. Wrapping the source rather than locking at each call
+// site, because a call site added later would otherwise be a race that
+// compiles and passes.
+
+func (m *MockBackend) randFloat() float64 {
+	m.rngMu.Lock()
+	defer m.rngMu.Unlock()
+	return m.rng.Float64()
+}
+
+func (m *MockBackend) randIntN(n int) int {
+	if n <= 0 {
+		return 0
+	}
+	m.rngMu.Lock()
+	defer m.rngMu.Unlock()
+	return m.rng.IntN(n)
+}
+
+func (m *MockBackend) randInt64N(n int64) int64 {
+	if n <= 0 {
+		return 0
+	}
+	m.rngMu.Lock()
+	defer m.rngMu.Unlock()
+	return m.rng.Int64N(n)
+}
+
 // Health reports the synthetic health of the mock backend. Returns nil
 // most of the time; with WithHealthFailRate set, fails proportionally
 // so dashboard health transitions can be exercised.
 func (m *MockBackend) Health(ctx context.Context) error {
-	if m.healthFailRate > 0 && m.rng.Float64() < m.healthFailRate {
+	if m.healthFailRate > 0 && m.randFloat() < m.healthFailRate {
 		return fmt.Errorf("mock: synthetic health failure (rate=%.2f)", m.healthFailRate)
 	}
 	return nil
@@ -218,7 +310,7 @@ func (m *MockBackend) sampleLatency() time.Duration {
 		// blow up on a misconfigured mixture.
 		return m.clusters[0].Min
 	}
-	pick := m.rng.Float64() * total
+	pick := m.randFloat() * total
 	cluster := m.clusters[len(m.clusters)-1]
 	for _, c := range m.clusters {
 		pick -= c.Weight
@@ -231,7 +323,7 @@ func (m *MockBackend) sampleLatency() time.Duration {
 		return cluster.Min
 	}
 	jitter := cluster.Max - cluster.Min
-	return cluster.Min + time.Duration(m.rng.Int64N(int64(jitter)+1))
+	return cluster.Min + time.Duration(m.randInt64N(int64(jitter)+1))
 }
 
 // approximateTokens estimates token count using the rough rule of thumb
