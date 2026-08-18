@@ -766,3 +766,57 @@ func TestArchitectureKeepsAPublishedHeadDimensionOnALatentCache(t *testing.T) {
 		t.Errorf("head dim = %d, want the published 192", n)
 	}
 }
+
+// GLM-5.2's real published shape, trimmed to the fields this reads.
+// num_hidden_layers is 78 and the checkpoint carries layer indices 0..78,
+// because num_nextn_predict_layers adds one expert-carrying block past the
+// stated count. The parameter total is HF's safetensors accounting and it
+// includes that block.
+const glm52Info = `{"id":"zai-org/GLM-5.2","safetensors":{"total":753329940480}}`
+const glm52Config = `{"num_hidden_layers":78,"num_attention_heads":64,"num_key_value_heads":64,` +
+	`"head_dim":192,"hidden_size":6144,"max_position_embeddings":1048576,` +
+	`"n_routed_experts":256,"num_experts_per_tok":8,"n_shared_experts":1,` +
+	`"moe_intermediate_size":2048,"first_k_dense_replace":3,` +
+	`"num_nextn_predict_layers":1,"kv_lora_rank":512,"qk_rope_head_dim":64}`
+
+// TestArchitectureReadsTheMultiTokenPredictionLayers is the fix for #350.
+// Reading num_hidden_layers alone left the MTP block's 256 unpicked experts
+// in the activated figure, reporting GLM-5.2 at 51.2B active against a
+// checkpoint that says 41.8B.
+func TestArchitectureReadsTheMultiTokenPredictionLayers(t *testing.T) {
+	f := newArchFixture(t)
+	f.infoBody, f.configBody = glm52Info, glm52Config
+
+	got, err := f.store("").Architecture(context.Background(), &provisionerv1.DescribeModelRequest{ModelSpec: "zai-org/GLM-5.2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	arch := got.GetArchitecture()
+	if arch.GetMtpLayers() != 1 {
+		t.Errorf("MtpLayers = %d, want 1", arch.GetMtpLayers())
+	}
+	// The published layer count is left as published. The extra block is
+	// carried separately rather than folded in, so a reader of Layers still
+	// sees what config.json says.
+	if arch.GetLayers() != 78 {
+		t.Errorf("Layers = %d, want the published 78", arch.GetLayers())
+	}
+	if arch.GetNumExperts() != 256 || arch.GetNumExpertsPerTok() != 8 {
+		t.Errorf("expert shape = %d routed / %d active, want 256 / 8", arch.GetNumExperts(), arch.GetNumExpertsPerTok())
+	}
+}
+
+// TestArchitectureLeavesMTPLayersAtZeroWhenAbsent covers Kimi K3 and every
+// dense model, neither of which publishes the field.
+func TestArchitectureLeavesMTPLayersAtZeroWhenAbsent(t *testing.T) {
+	f := newArchFixture(t)
+	f.infoBody, f.configBody = anchorInfo, anchorConfig
+
+	got, err := f.store("").Architecture(context.Background(), &provisionerv1.DescribeModelRequest{ModelSpec: "Qwen/Qwen2.5-32B"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := got.GetArchitecture().GetMtpLayers(); n != 0 {
+		t.Errorf("MtpLayers = %d, want 0 when the config omits it", n)
+	}
+}

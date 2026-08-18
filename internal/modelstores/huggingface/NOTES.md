@@ -81,3 +81,25 @@ for every gated model.
 `internal/vrambudget` and nothing else, through the `Arch` type alias.
 The arithmetic and its calibration are in
 [../../vrambudget/NOTES.md](../../vrambudget/NOTES.md).
+
+## `num_nextn_predict_layers` is a layer the layer count omits
+
+Read it. A model publishing a non-zero value ships an extra
+expert-carrying block past `num_hidden_layers`, and the parameter total
+from the safetensors accounting includes it. GLM-5.2 publishes 78 layers
+and ships indices 0 through 78.
+
+It is carried as `mtp_layers` rather than folded into `layers`, so a
+reader of the published layer count still sees what the config says, and
+the budget adds it where it needs an expert-layer count (see
+`internal/vrambudget/NOTES.md`).
+
+Values seen in the wild: DeepSeek-V3, GLM-4.5 and GLM-5.2 publish 1; Kimi
+K2 and K3 publish 0; dense models omit the field.
+
+## `quantization_config` marks a checkpoint whose parameter count is packed
+
+Present on every quantized repo checked and absent on the base one, so it
+is a reliable signal. The counts it changes are documented in #382. This
+package does not act on it yet.
+

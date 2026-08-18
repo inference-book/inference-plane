@@ -2766,8 +2766,23 @@ type ModelArchitecture struct {
 	// Kimi K3 has 24 attention layers among 93, so counting all 93 prices
 	// its cache at nearly four times what it costs.
 	FullAttentionLayers int32 `protobuf:"varint,15,opt,name=full_attention_layers,json=fullAttentionLayers,proto3" json:"full_attention_layers,omitempty"`
-	unknownFields       protoimpl.UnknownFields
-	sizeCache           protoimpl.SizeCache
+	// Expert-carrying layers the checkpoint holds beyond num_hidden_layers,
+	// used for multi-token prediction (num_nextn_predict_layers).
+	//
+	// These are real layers with a real expert stack, and the published
+	// parameter total counts them, but the layer count does not. Sizing the
+	// routed-expert share from num_hidden_layers alone therefore leaves one
+	// layer's worth of unpicked experts sitting in the activated figure:
+	// GLM-5.2 reads 51.2B active where the checkpoint says 41.8B, an
+	// overstatement of a quarter.
+	//
+	// Zero for a model with no such layer, which is most of them. The
+	// formula this corrects was validated against Kimi K3, whose count is
+	// zero, which is exactly why the error survived: DeepSeek-V3, GLM-4.5
+	// and GLM-5.2 all publish one.
+	MtpLayers     int32 `protobuf:"varint,16,opt,name=mtp_layers,json=mtpLayers,proto3" json:"mtp_layers,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ModelArchitecture) Reset() {
@@ -2901,6 +2916,13 @@ func (x *ModelArchitecture) GetQkRopeHeadDim() int32 {
 func (x *ModelArchitecture) GetFullAttentionLayers() int32 {
 	if x != nil {
 		return x.FullAttentionLayers
+	}
+	return 0
+}
+
+func (x *ModelArchitecture) GetMtpLayers() int32 {
+	if x != nil {
+		return x.MtpLayers
 	}
 	return 0
 }
@@ -3729,7 +3751,7 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"\fUpstreamAuth\x12\x16\n" +
 	"\x06header\x18\x01 \x01(\tR\x06header\x12\x1b\n" +
 	"\tvalue_env\x18\x02 \x01(\tR\bvalueEnv\x12!\n" +
-	"\fvalue_prefix\x18\x03 \x01(\tR\vvaluePrefix\"\xda\x04\n" +
+	"\fvalue_prefix\x18\x03 \x01(\tR\vvaluePrefix\"\xf9\x04\n" +
 	"\x11ModelArchitecture\x12\x16\n" +
 	"\x06params\x18\x01 \x01(\x03R\x06params\x12\x16\n" +
 	"\x06layers\x18\x02 \x01(\x05R\x06layers\x12\x19\n" +
@@ -3749,7 +3771,9 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"\fkv_lora_rank\x18\r \x01(\x05R\n" +
 	"kvLoraRank\x12'\n" +
 	"\x10qk_rope_head_dim\x18\x0e \x01(\x05R\rqkRopeHeadDim\x122\n" +
-	"\x15full_attention_layers\x18\x0f \x01(\x05R\x13fullAttentionLayers\"5\n" +
+	"\x15full_attention_layers\x18\x0f \x01(\x05R\x13fullAttentionLayers\x12\x1d\n" +
+	"\n" +
+	"mtp_layers\x18\x10 \x01(\x05R\tmtpLayers\"5\n" +
 	"\x14DescribeModelRequest\x12\x1d\n" +
 	"\n" +
 	"model_spec\x18\x01 \x01(\tR\tmodelSpec\"^\n" +
