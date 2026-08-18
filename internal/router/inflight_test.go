@@ -17,7 +17,7 @@ import (
 
 // TestRouter_DecisionCounter_Picked: one successful round-trip emits
 // exactly one decision observation with outcome="picked" and a
-// non-empty replica_id matching the chosen replica.
+// non-empty instance_id matching the chosen replica.
 func TestRouter_DecisionCounter_Picked(t *testing.T) {
 	reader, recorder := setupMetricsCapture(t)
 
@@ -58,8 +58,8 @@ func TestRouter_DecisionCounter_Picked(t *testing.T) {
 	if got := attrValue(dps[0].Attributes, "outcome"); got != "picked" {
 		t.Errorf("outcome = %q, want picked", got)
 	}
-	if got := attrValue(dps[0].Attributes, "replica_id"); got != "a" {
-		t.Errorf("replica_id = %q, want a", got)
+	if got := attrValue(dps[0].Attributes, "instance_id"); got != "a" {
+		t.Errorf("instance_id = %q, want a", got)
 	}
 	if dps[0].Value != 1 {
 		t.Errorf("value = %d, want 1", dps[0].Value)
@@ -68,7 +68,7 @@ func TestRouter_DecisionCounter_Picked(t *testing.T) {
 
 // TestRouter_DecisionCounter_NoReplicas: a deployment whose replicas
 // are all quarantined returns 503 and emits a decision with
-// outcome="no_replicas" + empty replica_id.
+// outcome="no_replicas" + empty instance_id.
 func TestRouter_DecisionCounter_NoReplicas(t *testing.T) {
 	reader, recorder := setupMetricsCapture(t)
 
@@ -104,8 +104,8 @@ func TestRouter_DecisionCounter_NoReplicas(t *testing.T) {
 	if got := attrValue(dps[0].Attributes, "outcome"); got != "no_replicas" {
 		t.Errorf("outcome = %q, want no_replicas", got)
 	}
-	if got := attrValue(dps[0].Attributes, "replica_id"); got != "" {
-		t.Errorf("replica_id = %q, want empty", got)
+	if got := attrValue(dps[0].Attributes, "instance_id"); got != "" {
+		t.Errorf("instance_id = %q, want empty", got)
 	}
 }
 
@@ -156,8 +156,8 @@ func TestRouter_InFlightGauge_TracksRequest(t *testing.T) {
 	if gauges[0].Value != 0 {
 		t.Errorf("expected gauge to return to 0 after request completed, got %d", gauges[0].Value)
 	}
-	if got := attrValue(gauges[0].Attributes, "replica_id"); got != "a" {
-		t.Errorf("replica_id label = %q, want a", got)
+	if got := attrValue(gauges[0].Attributes, "instance_id"); got != "a" {
+		t.Errorf("instance_id label = %q, want a", got)
 	}
 	if got := attrValue(gauges[0].Attributes, "deploy_id"); got != "d" {
 		t.Errorf("deploy_id label = %q, want d", got)
@@ -230,7 +230,7 @@ func TestRouter_InFlightCounter_OscillatesUnderConcurrency(t *testing.T) {
 }
 
 // TestRouter_InFlight_DoesNotTrackOnNoReplicas: the no_replicas path
-// returns 503 before pickReplica produces a replica_id, so neither
+// returns 503 before pickReplica produces an instance_id, so neither
 // the gauge nor the trackInFlight counter should advance.
 func TestRouter_InFlight_DoesNotTrackOnNoReplicas(t *testing.T) {
 	reader, recorder := setupMetricsCapture(t)

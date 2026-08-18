@@ -74,7 +74,7 @@ const (
 	AttrRouterStatus    = "iplane.router.status"     // status label string (success | engine_error | ...)
 	AttrRouterTenantID  = "iplane.router.tenant_id"  // operator-asserted tenant; "default" when unannotated
 	AttrRouterPriority  = "iplane.router.priority"   // effective lane: "interactive" | "batch"
-	AttrRouterReplicaID = "iplane.router.replica_id" // instance_id of the replica this request was routed to (v0.2 ch7-beat3.3); empty when no replica was healthy (returns 503)
+	AttrRouterReplicaID = "iplane.router.replica_id" // instance_id of the replica this request was routed to (v0.2 ch7-beat3.3); empty when no replica was healthy (returns 503). Keeps the replica_id spelling on purpose: the metric label collapsed onto instance_id so cost per token could divide two series without rewriting a label (#346), and a span attribute is not part of that join
 	AttrQueueWaitMs     = "iplane.queue.wait_ms"     // ms spent waiting in the router queue before dispatch (v0.2 ch7-beat2.7); only set when the request was actually queued (direct-forward path leaves it unset)
 )
 
@@ -542,7 +542,7 @@ func (r *Router) handleWithObservability(w http.ResponseWriter, req *http.Reques
 		// v0.2 ch7-beat3.6 (#88): emit the no_replicas decision so
 		// operators see "router rejected before reaching the engine"
 		// distinct from inference.requests.total's downstream-status
-		// breakdown. replica_id label is empty here since no replica
+		// breakdown. instance_id label is empty here since no replica
 		// was chosen.
 		r.recorder.RecordRouterDecision(ctx, dep.GetId(), "", "no_replicas")
 		tcw.Header().Set("Retry-After", "5")

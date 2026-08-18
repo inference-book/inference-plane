@@ -145,7 +145,7 @@ func NewRecorder() (*Recorder, error) {
 	// now"; no callback / async observation needed.
 	replicaInFlight, err := meter.Int64Gauge(
 		telemetry.MetricReplicaInFlight,
-		metric.WithDescription("Current in-flight requests per (deploy_id, replica_id)."),
+		metric.WithDescription("Current in-flight requests per (deploy_id, instance_id)."),
 		metric.WithUnit("{request}"),
 	)
 	if err != nil {
@@ -154,7 +154,7 @@ func NewRecorder() (*Recorder, error) {
 
 	routerDecisions, err := meter.Int64Counter(
 		telemetry.MetricRouterDecisionsTotal,
-		metric.WithDescription("Routing decisions at the router, labeled by deploy_id / replica_id / outcome."),
+		metric.WithDescription("Routing decisions at the router, labeled by deploy_id / instance_id / outcome."),
 		metric.WithUnit("{decision}"),
 	)
 	if err != nil {
@@ -310,7 +310,7 @@ func (r *Recorder) RecordRouterRequest(ctx context.Context, deployID, model, ten
 		attribute.String(telemetry.LabelModel, model),
 		attribute.String(telemetry.LabelTenantID, tenantID),
 		attribute.String(telemetry.LabelPriority, priority),
-		attribute.String(telemetry.LabelReplicaID, replicaID),
+		attribute.String(telemetry.LabelInstanceID, replicaID),
 		attribute.String(telemetry.LabelStatus, status),
 	)
 	r.requests.Add(ctx, 1, attrs)
@@ -349,7 +349,7 @@ func (r *Recorder) RecordRouterTokens(ctx context.Context, deployID, model, tena
 		attribute.String(telemetry.LabelModel, model),
 		attribute.String(telemetry.LabelTenantID, tenantID),
 		attribute.String(telemetry.LabelPriority, priority),
-		attribute.String(telemetry.LabelReplicaID, replicaID),
+		attribute.String(telemetry.LabelInstanceID, replicaID),
 	))
 }
 
@@ -415,7 +415,7 @@ func (r *Recorder) RecordReplicaInFlight(ctx context.Context, deployID, replicaI
 	}
 	r.replicaInFlight.Record(ctx, current, metric.WithAttributes(
 		attribute.String(telemetry.LabelDeployID, deployID),
-		attribute.String(telemetry.LabelReplicaID, replicaID),
+		attribute.String(telemetry.LabelInstanceID, replicaID),
 	))
 }
 
@@ -439,7 +439,7 @@ func (r *Recorder) RecordRouterDecision(ctx context.Context, deployID, replicaID
 	}
 	r.routerDecisions.Add(ctx, 1, metric.WithAttributes(
 		attribute.String(telemetry.LabelDeployID, deployID),
-		attribute.String(telemetry.LabelReplicaID, replicaID),
+		attribute.String(telemetry.LabelInstanceID, replicaID),
 		attribute.String(telemetry.LabelOutcome, outcome),
 	))
 }

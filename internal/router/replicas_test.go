@@ -266,7 +266,7 @@ func TestRouter_AllReplicasUnhealthy_503(t *testing.T) {
 
 // TestRouter_ReplicaID_OnSpanAndMetric: a request that picks
 // replica "a" sees iplane.router.replica_id="a" on the span AND
-// replica_id="a" on the metric. Chapter narrative: per-request
+// instance_id="a" on the metric. Chapter narrative: per-request
 // trace + metric pair lets operators debug "this slow request
 // hit replica X."
 func TestRouter_ReplicaID_OnSpanAndMetric(t *testing.T) {
@@ -312,7 +312,7 @@ func TestRouter_ReplicaID_OnSpanAndMetric(t *testing.T) {
 	if len(reqs) != 1 {
 		t.Fatalf("expected 1 request observation, got %d", len(reqs))
 	}
-	if got := attrValue(reqs[0].Attributes, "replica_id"); got != "a" {
-		t.Errorf("metric replica_id = %q, want a", got)
+	if got := attrValue(reqs[0].Attributes, "instance_id"); got != "a" {
+		t.Errorf("metric instance_id = %q, want a", got)
 	}
 }
