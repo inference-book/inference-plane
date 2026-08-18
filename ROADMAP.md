@@ -117,7 +117,7 @@ Per the cadence note above: if the manual path and the iplane move don't each fi
 | Chapter | Feature                          | Notes                                                                                              |
 |---------|----------------------------------|----------------------------------------------------------------------------------------------------|
 | Ch 11   | Cross-provider capacity          | **Largely shipped 2026-08-15/16.** Reframed 2026-08 from "backend router" to hardware acquisition: Ch 10 rents one connected pool from one vendor, Ch 11 is what happens when one vendor cannot supply it. **Shipped:** read-only candidate inspection as an optional `CandidateSource` provider capability, implemented by all three paid adapters (#260); cross-provider resolution ranking the union with an explicit account of what could and could not be compared (#280); price as a placement input via `instance create auto`, carrying its runners-up and the facts it did not weigh (#194); reclaimable capacity as a vendor-neutral `ReclaimPolicy` requirement rather than one marketplace's noun (#288); `deployment migrate`, growing onto the destination before draining the source (#290); outbound auth so a hosted OpenAI-compatible API is routable, with the credential named rather than stored (#182 auth half); and `examples/10-cross-provider/` (#291). The shared SKU resolver hoist (#266) was the prerequisite for all of it. **Still open:** reclaim notice and automatic re-placement (#289, blocked on no vendor publishing a signal we can validate against), object-store staging so a warm cache survives a move (#292, blocked on a dependency choice), per-token cost for hosted endpoints (#302). **Not this chapter:** workload- or quality-aware routing between models, which asks the control plane to reason about model semantics and is now an advanced-book topic. |
-| Ch 12   | TP/PP-aware deploy + VRAM pre-flight | `iplane deploy --tp 4 --pp 2` shipped, with `ValidateParallelism` refusing a split the cards cannot carry. **VRAM budget shipped 2026-08-17** in three parts: `internal/vrambudget` as pure arithmetic over a model's shape (#317), the hub read behind the `DescribeModel` wire contract (#318), and `iplane model budget` as the operator surface (#320). The capstone's Act 2 alternates it with `iplane capacity`: one says what the model needs, the other says who has it, and wiring them together automatically would collapse the loop the chapter teaches. The pre-rent refusal landed the same day (#326): the deploy reads its plan back out of the engine args already being forwarded and refuses an overcommitted shape before renting, which closes the remainder of #193. Two supporting fixes went with it. `Candidate` now carries an exact per-card capacity separate from the tolerant advertised figure the three adapters disagree on (#323), since a budget and a filter want opposite error directions. And a decorator that dropped the architecture capability, making the read unreachable on any warm-cache daemon, is fixed (#324). Act 3's cold start became narratable the same day (#259): Vast collapsed every pre-serving state into "waiting for port 8000 to be mapped", and the readiness loop now derives `vast:scheduling -> vast:image-pull -> engine:init` from the contract record it was already fetching, surfacing docker's own pull progress including the retry signal that separates a slow pull from a dead one. The warm-cache question closed as a decision rather than a build (#254): Vast volumes are machine-scoped, so pinning there is a bet on re-renting one physical box, and the honest fix was to stop a deploy silently dropping a mount it could not attach (`provisioners.MountAttacher`, fail-closed). Cost attribution landed last (#163): `CostRecorder` stamped one operator-asserted `{provider, gpu_type, billing_mode}` tuple on every emission and measured uptime from daemon start, so a heterogeneous fleet reported both halves under whichever provider the shell had named. Uptime now emits per rented instance from its `activated_at`, `instance.rate.usd_per_second` carries the provider's own quote, and spend is a join on `instance_id` rather than a projection against a catalog whose vocabulary matches no adapter's SKU string. **Chapter complete, including the run.** One real paid 72B on Vast, 2026-08-17: four A100_SXM4, fp16, tensor-parallel across four cards, cold start 15m04s split roughly 30s scheduling / 30s image pull / 14m weights and sharding, serving a real completion, at $6.8287/hr. It found one more bug on the way, which is what a paid run is for: cost billed from `activated_at` reported $0.18 against an actual $1.89, because on an image-native provider that timestamp lands only once the engine answers and the whole cold start reads as free (#335, fixed). The first attempt landed on a host whose container runtime could not start, and the terminal-failure guard ended it in 23 seconds rather than the 60-minute budget. #268 shipped alongside them: `internal/provisioners/enginewait` owns the poll loop RunPod and Vast each ran, which matters less for the line count than for the terminal-failure guard that had been added to one copy and never reached the other. sshdocker stays out on purpose, since it probes over SSH with a caller-owned deadline and shares the name of the problem rather than the loop. |
+| Ch 12   | TP/PP-aware deploy + VRAM pre-flight | `iplane deploy --tp 4 --pp 2` shipped, with `ValidateParallelism` refusing a split the cards cannot carry. **VRAM budget shipped 2026-08-17** in three parts: `internal/vrambudget` as pure arithmetic over a model's shape (#317), the hub read behind the `DescribeModel` wire contract (#318), and `iplane model budget` as the operator surface (#320). The capstone's Act 2 alternates it with `iplane capacity`: one says what the model needs, the other says who has it, and wiring them together automatically would collapse the loop the chapter teaches. The pre-rent refusal landed the same day (#326): the deploy reads its plan back out of the engine args already being forwarded and refuses an overcommitted shape before renting, which closes the remainder of #193. Two supporting fixes went with it. `Candidate` now carries an exact per-card capacity separate from the tolerant advertised figure the three adapters disagree on (#323), since a budget and a filter want opposite error directions. And a decorator that dropped the architecture capability, making the read unreachable on any warm-cache daemon, is fixed (#324). Act 3's cold start became narratable the same day (#259): Vast collapsed every pre-serving state into "waiting for port 8000 to be mapped", and the readiness loop now derives `vast:scheduling -> vast:image-pull -> engine:init` from the contract record it was already fetching, surfacing docker's own pull progress including the retry signal that separates a slow pull from a dead one. The warm-cache question closed as a decision rather than a build (#254): Vast volumes are machine-scoped, so pinning there is a bet on re-renting one physical box, and the honest fix was to stop a deploy silently dropping a mount it could not attach (`provisioners.MountAttacher`, fail-closed). Cost attribution landed last (#163): `CostRecorder` stamped one operator-asserted `{provider, gpu_type, billing_mode}` tuple on every emission and measured uptime from daemon start, so a heterogeneous fleet reported both halves under whichever provider the shell had named. Uptime now emits per rented instance from its `created_at`, `instance.rate.usd_per_second` carries the provider's own quote, and spend is a join on `instance_id` rather than a projection against a catalog whose vocabulary matches no adapter's SKU string. **Chapter complete, including the run.** One real paid 72B on Vast, 2026-08-17: four A100_SXM4, fp16, tensor-parallel across four cards, cold start 15m04s split roughly 30s scheduling / 30s image pull / 14m weights and sharding, serving a real completion, at $6.8287/hr. It found one more bug on the way, which is what a paid run is for: cost billed from `activated_at` reported $0.18 against an actual $1.89, because on an image-native provider that timestamp lands only once the engine answers and the whole cold start reads as free (#335, fixed). The first attempt landed on a host whose container runtime could not start, and the terminal-failure guard ended it in 23 seconds rather than the 60-minute budget. #268 shipped alongside them: `internal/provisioners/enginewait` owns the poll loop RunPod and Vast each ran, which matters less for the line count than for the terminal-failure guard that had been added to one copy and never reached the other. sshdocker stays out on purpose, since it probes over SSH with a caller-owned deadline and shares the name of the problem rather than the loop. |
 | All     | Vast.ai + AWS adapters           | Provider mix becomes real; cost-aware routing has providers to choose between. Cross-provider warm-cache design + the per-provider volume-create matrix (Lambda filesystem-create is API-blocked; AWS/GCP are the clean home) is in [docs/design/0004-cross-provider-warm-cache.md](docs/design/0004-cross-provider-warm-cache.md). |
 | All     | `S3Store` / `GCSStore`           | Object-storage backends for fleet provisioning at scale. The robust cross-provider warm-cache path (see 0004); also engine-image cold-start / streaming in [docs/design/0005-engine-image-coldstart.md](docs/design/0005-engine-image-coldstart.md). |
 
@@ -133,6 +133,65 @@ Per the cadence note above: if the manual path and the iplane move don't each fi
 - Routing policy expression: declarative YAML, embedded DSL, or Go plug-in. Affects how Ch 11 teaches it.
 - Reconcile semantics across providers when a provider API is temporarily unreachable.
 - Secret store backend: file-based (`~/.iplane/secrets.json`), OS keychain, HashiCorp Vault adapter, or all three.
+
+---
+
+## v0.4 — Frontier MoE (active, see epic #361)
+
+**Chapters:** Part IV. **Branch:** not yet cut.
+
+Part IV was restructured 2026-08-18 around a single capstone approached
+from the large end: take the biggest open-weight model that exists, work
+backwards through the vendors, hardware, engines, quantization and staging
+needed to make it serve, then measure what it costs per session as
+concurrency rises. Plan docs are `../book/part4_outline.md`,
+`part4_roadmap.md` and `part4_tickets.md`; the ticket breakdown is epic
+#361.
+
+**#338 owns reconciling the version-to-part mapping**, here and in
+RELEASE.md, both of which still map v1.0 to Ch 13-16. The v1.0 section
+below is stale pending that ticket and is deliberately not edited here.
+
+### Phase 1 — MoE awareness and the measurement harness (no hardware)
+
+**Group A shipped 2026-08-18.** `ModelArchitecture` gained the expert
+shape, read through the four spellings real model families actually use,
+since reading only the canonical name reported GLM-5.2 as dense and Kimi
+K3 as activating no experts (#339). `vrambudget` separates what a model
+holds from what it reads per decode step, by subtracting the unpicked
+experts rather than summing the read pieces; the routed-expert formula
+reproduces K3's published eight-bit tensor count to the parameter (#340).
+`iplane model budget --sessions-at` inverts `Compute` to answer how many
+concurrent sessions fit, which is the KV wall computed before renting
+(#341).
+
+One defect surfaced mid-stack and was fixed inside it (#362): the cache
+term assumed a key and a value per attention head, and both target models
+cache a compressed latent instead, so the figure was 40x over on GLM-5.2
+and 95x on Kimi K3. A single 128k GLM-5.2 sequence was reported at 502.5
+GB against a real 11.8.
+
+**Group B is half shipped.** `iplane load --sweep` walks a closed-loop
+concurrency ladder with explicit steady-state detection rather than a
+fixed warm-up sleep, and measures inter-token latency, which nothing did
+before (#344). `--prompt-tokens` sets context length from a public-domain
+corpus and `mock-engine --kv-budget-tokens` gives the mock a ceiling that
+falls as context rises, so the wall is demonstrable GPU-free (#345).
+Method is in [docs/load-measurement.md](docs/load-measurement.md).
+
+**Still open in Phase 1:** cost per token as a derived series (#346, the
+one that turns the curve into the book's economic result), sweep output
+as a committed data artifact (#347), the cost-versus-concurrency Grafana
+panel (#348), `--ep` (#342) and the expert-divisibility check (#343).
+
+### What has not been tested against hardware
+
+Everything above is arithmetic and a mock. Two claims in particular are
+predictions rather than measurements, and the GLM run (#358) is the first
+thing that tests them: that a compressed latent is replicated across
+tensor-parallel ranks rather than sharded, and the modelled concurrency
+ceiling generally. `model budget --sessions-at` and `load --sweep` have
+never been pointed at each other on a real engine.
 
 ---
 

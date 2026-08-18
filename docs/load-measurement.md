@@ -1,0 +1,129 @@
+# Measuring an engine with `iplane load`
+
+Two questions, two loop shapes, and using the wrong one produces a number
+that looks fine and means nothing.
+
+## Open loop: does this deployment survive a known arrival rate
+
+`iplane load --rps 5 --duration 60s` offers requests at a fixed rate and
+records what happens. The arrival rate is an input because in the real
+world it is a fact: users arrive when they arrive.
+
+Past saturation an open loop accumulates a queue, so **every latency
+number becomes a statement about how long the run was**. A ten-minute run
+reports worse latency than a two-minute one from the same engine at the
+same speed. That is not a bug in the tool; it is what an overloaded
+system does, and it is the answer to the question being asked.
+
+Back-pressure shows up as `skipped (full)` rather than as a lower offered
+rate, because the ticker drops a tick instead of blocking. The A/B
+comparator in `examples/09-multi-gpu/09e-fabric-ab/` treats an arm whose
+`actual_rps` falls below 80% of target as saturated and declares its
+latency rows not a measurement of the thing under test.
+
+## Closed loop: what is this engine's throughput curve
+
+`iplane load --sweep 1,2,4,8,16` holds exactly N requests in flight,
+replacing each as it completes, so the arrival rate becomes an **output**.
+The queue cannot run away, and throughput against N is the curve the cost
+model needs: cost per token is the rented hour over the tokens it
+produced, and N is the only knob that moves the denominator.
+
+### Steady state, not a warm-up sleep
+
+A fixed sleep is wrong in both directions at once, too short at the levels
+that take longest to fill the batch and pure waste at the levels that
+settle in two seconds. The sweep watches the thing that has to stop
+moving: it samples completion counts every `--sweep-window` and starts
+measuring once `--sweep-stable-windows` of them sit within
+`--sweep-tolerance` of their **running mean**.
+
+Against the mean rather than against the previous window, because during
+a gradual ramp consecutive windows are always close to each other and
+never close to where the level started. A pairwise check calls a ramp
+stable.
+
+**The tolerance has a floor of one completion per window.** A level
+running at five requests a second against a one-second window alternates
+between four and five forever; that is a 20% swing that no amount of
+waiting removes, and reporting it as instability is the tool being wrong
+rather than the engine. At counts high enough to resolve the configured
+tolerance, the configured one dominates.
+
+A level that never settles inside `--sweep-warmup-max` is measured and
+flagged rather than omitted. A gap in the ladder reads as an oversight.
+
+Workers keep running across the warm-up boundary; only the recording is
+switched on. Restarting would drain the engine's batch and hand the
+measured window the exact ramp the warm-up just discarded. (This is why
+`loadStats` tolerates a nil receiver.)
+
+### Reading the columns
+
+- **`batch`** is throughput times mean latency, Little's law against the
+  offered level, so it should equal the label. When it sags, the row is
+  describing a smaller batch than it claims. Two causes: workers erroring
+  rather than holding a request, or, more often, requests still in flight
+  when the window closed, which are disproportionately the slow ones. A
+  level queueing at an admission gate shows exactly this. Lengthen
+  `--sweep-duration` before trusting the numbers beside it.
+- **`ttft` and `itl` are separate on purpose.** Time to first token is
+  dominated by queueing and prefill; the gaps after it are decode. A
+  growing batch often leaves the first roughly alone and stretches the
+  second, and a single latency number blends them into something that
+  looks like the engine generating more slowly. Both need `--stream`; a
+  non-streamed reply arrives in one piece, so its first and last token
+  land at the same instant.
+- **`discarded` and `warmup`** say what was excluded, so two sweeps can
+  be compared knowing what each is made of.
+
+## Context length
+
+`--prompt-tokens N` draws a prompt of roughly that length from an
+embedded public-domain corpus (see `cmd/iplane/cmd/corpus/README.md`).
+
+Prose rather than generated filler for two reasons that both bear on the
+measurement. Filler tokenizes unrealistically, so the prompt costs a
+different number of tokens than its length suggests. And filler makes
+every request's prefix identical, so an engine with prefix caching
+reports a hit rate describing the load generator rather than the
+workload. The window rotates per request so concurrent requests overlap
+the way real traffic does instead of being clones or strangers.
+
+`charsPerToken` is 4, matching what the mock reports, so a mock run has
+the requested and reported counts agree. Against a real engine expect
+10–20% drift and read the engine's own `prompt_tokens` as the truth.
+
+A prompt longer than the corpus tiles it. At 1M tokens that is the same
+book about twenty-seven times, and a prefix-caching engine will notice;
+say so in any figure drawn from a run at that length.
+
+`iplane load session --system-prompt-tokens` covers the multi-turn growth
+case and draws from the same corpus.
+
+## Making the mock have a ceiling
+
+The mock admits everything by default, so a sweep against it is a
+straight line with no knee. `iplane mock-engine --kv-budget-tokens N`
+adds token-denominated admission and `--token-latency D` paces streamed
+frames so inter-token latency is measurable. Both default off, so every
+routing demo is unaffected. See `internal/backends/NOTES.md` for what the
+mock does and does not model.
+
+A worked capture, `--kv-budget-tokens 40000`, sweeping 1/4/16/64:
+
+| `--prompt-tokens` | shape of the curve |
+|---|---|
+| 500 | straight to 64 concurrent, 22k tok/s |
+| 4000 | knee between 16 and 64; TTFT 31ms → 96ms |
+| 16000 | ceiling below 16; at 64 throughput *falls*, TTFT 542ms, batch 39.6 of 64 |
+
+Inter-token latency stays at 2.1–2.5ms throughout, which is the mock
+being honest about modelling admission and not decode contention.
+
+## The comparison nobody has run yet
+
+`iplane model budget --sessions-at 8k,128k,1M` predicts a concurrency
+ceiling from arithmetic; `--sweep` measures one. Pointing them at each
+other is the interesting experiment, and against the mock it only tests
+the mock's own budget against itself. It wants a real engine (#358).
