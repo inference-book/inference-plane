@@ -118,17 +118,21 @@ const (
 	PrecisionINT8 Precision = "int8"
 	PrecisionAWQ  Precision = "awq"
 	PrecisionGPTQ Precision = "gptq"
+	// PrecisionMXFP4 is the block-scaled four-bit format the frontier
+	// sparse models ship in. Kept apart from awq/gptq because it measures
+	// cheaper per parameter; see BytesPerParam.
+	PrecisionMXFP4 Precision = "mxfp4"
 )
 
 // ParsePrecision maps an operator-supplied string onto the ladder.
 func ParsePrecision(s string) (Precision, error) {
 	switch p := Precision(strings.ToLower(strings.TrimSpace(s))); p {
-	case PrecisionFP16, PrecisionBF16, PrecisionFP8, PrecisionINT8, PrecisionAWQ, PrecisionGPTQ:
+	case PrecisionFP16, PrecisionBF16, PrecisionFP8, PrecisionINT8, PrecisionAWQ, PrecisionGPTQ, PrecisionMXFP4:
 		return p, nil
 	case "":
 		return "", fmt.Errorf("precision is required")
 	default:
-		return "", fmt.Errorf("unknown precision %q (want one of fp16, bf16, fp8, int8, awq, gptq)", s)
+		return "", fmt.Errorf("unknown precision %q (want one of fp16, bf16, fp8, int8, awq, gptq, mxfp4)", s)
 	}
 }
 
@@ -142,6 +146,20 @@ func ParsePrecision(s string) (Precision, error) {
 // lands near 4.8 effective bits per parameter, so 0.6 bytes is what an
 // operator actually pays. Budgeting 0.5 is the difference between a model
 // that fits a 24 GB card with cache headroom and one that does not.
+//
+// MXFP4 is 0.56 rather than 0.6, and the gap is not a rounding
+// preference. Both figures are dominated by the parameters a four-bit
+// build leaves at higher precision, and what share of the model that is
+// depends on the model. On a 32B dense build the embeddings and the
+// output head are a big enough share to pull the average to 4.8 bits. On
+// a frontier sparse model the routed experts are so much of the parameter
+// count that the unquantized remainder barely moves it. Two published
+// checkpoints measure it: openai/gpt-oss-120b is 65.25 GB over 116.83B
+// parameters (0.5585) and moonshotai/Kimi-K3 is 1560.86 GB over 2779.93B
+// (0.5615). The rung sits above both rather than between them, because
+// the two error directions are not symmetric: a budget that
+// under-promises refuses a shape that would have fit, and one that
+// over-promises buys an out-of-memory error after the rental starts.
 func (p Precision) BytesPerParam() float64 {
 	switch p {
 	case PrecisionFP16, PrecisionBF16:
@@ -150,6 +168,8 @@ func (p Precision) BytesPerParam() float64 {
 		return 1
 	case PrecisionAWQ, PrecisionGPTQ:
 		return 0.6
+	case PrecisionMXFP4:
+		return 0.57
 	}
 	return 0
 }
@@ -166,7 +186,7 @@ func (p Precision) BytesPerCacheElement() int64 {
 	switch p {
 	case PrecisionFP16, PrecisionBF16:
 		return 2
-	case PrecisionFP8, PrecisionINT8, PrecisionAWQ, PrecisionGPTQ:
+	case PrecisionFP8, PrecisionINT8, PrecisionAWQ, PrecisionGPTQ, PrecisionMXFP4:
 		return 1
 	}
 	return 0
@@ -244,6 +264,27 @@ type Budget struct {
 	// that makes a context-length decision legible: everything about how
 	// much traffic the engine holds runs through it.
 	KVBytesPerToken int64
+
+	// ActiveParams is the parameters read to decode one token, across the
+	// whole engine and before the card division, matching
+	// KVBytesPerToken. On a dense model it equals the parameter count,
+	// because a dense model reads all of itself every step. On a sparse
+	// one it is far smaller, and the difference is what lets a 2.8T model
+	// decode at the speed of a 100B one while being billed for the memory
+	// of a 2.8T one.
+	//
+	// Zero means the share could not be worked out, never that nothing is
+	// read. See ActiveParams for the cases that produce it.
+	ActiveParams int64
+
+	// ActiveWeightBytes is ActiveParams at the plan's weight precision:
+	// the weight traffic one decode step costs. Zero when ActiveParams is.
+	//
+	// A flat rate per parameter, the same simplification WeightBytes
+	// makes. A mixed-precision checkpoint holds the attention and the
+	// embeddings above the experts' precision, so a step that is mostly
+	// attention costs more than this says.
+	ActiveWeightBytes int64
 }
 
 // WorkingSetBytes is weights plus cache plus activations, the three terms
@@ -255,6 +296,104 @@ func (b Budget) WorkingSetBytes() int64 {
 // TotalBytes is what one card has to hold.
 func (b Budget) TotalBytes() int64 {
 	return b.WorkingSetBytes() + b.OverheadBytes
+}
+
+// ffnMatrices is how many weight matrices one feed-forward expert holds.
+//
+// Three, for the gated activations every current sparse model uses: a
+// gate projection and an up projection into the expert's intermediate
+// width, and a down projection back out. An architecture using an
+// ungated two-matrix feed-forward would overcount here by half, which is
+// one of the things the sanity check in ActiveParams catches.
+const ffnMatrices = 3
+
+// moeLayers is the layers that actually hold experts.
+//
+// Sparse models routinely make the first layer or three dense, and those
+// layers hold an ordinary feed-forward rather than an expert stack.
+func moeLayers(a *Arch) int32 {
+	n := a.GetLayers() - a.GetDenseLayers()
+	if n < 0 {
+		return 0
+	}
+	return n
+}
+
+// expertParams is the parameter count of one routed expert.
+//
+// The width is the expert's own where the model publishes one, since a
+// model that projects down before the expert stack runs its experts
+// narrower than itself.
+func expertParams(a *Arch) int64 {
+	width := int64(a.GetRoutedExpertHiddenSize())
+	if width <= 0 {
+		width = int64(a.GetHiddenSize())
+	}
+	return ffnMatrices * width * int64(a.GetMoeIntermediateSize())
+}
+
+// RoutedExpertParams is the parameters held in routed experts: resident
+// on the cards at all times, and read only when the router picks them.
+//
+// Zero for a dense model, and zero for a sparse model that publishes too
+// little of its shape to compute the share.
+func RoutedExpertParams(a *Arch) int64 {
+	if a.GetNumExperts() <= 0 {
+		return 0
+	}
+	layers, per := moeLayers(a), expertParams(a)
+	if layers <= 0 || per <= 0 {
+		return 0
+	}
+	return int64(layers) * int64(a.GetNumExperts()) * per
+}
+
+// ActiveParams is the parameters read to decode one token.
+//
+// Everything the model holds, less the routed experts the router did not
+// pick. Subtracting rather than adding up the pieces is deliberate: the
+// attention weights, the embeddings, the dense layers' feed-forward and
+// the shared experts are all read every step and all already counted in
+// the published parameter total, so naming them individually would mean
+// modelling four more shapes to arrive at a number the subtraction gets
+// for free.
+//
+// Zero means unknown, and every way to get there is a sparse model whose
+// share will not compute. It publishes no activated count, so there is
+// nothing to apportion. Its activated count exceeds its expert count,
+// which is a config to distrust rather than arithmetic to attempt. It
+// publishes no expert width, so the stack has no size. Or the computed
+// share comes out at or above the whole model, which means the shape
+// assumed here is not this model's, most likely an ungated feed-forward
+// or a width stated somewhere this does not read. Reporting a
+// dense-looking figure in any of those cases would be worse than
+// reporting none, since every use of this number is an argument that it
+// is much smaller than the total.
+func ActiveParams(a *Arch) int64 {
+	total := a.GetParams()
+	if total <= 0 {
+		return 0
+	}
+	if a.GetNumExperts() <= 0 {
+		// Dense, so every parameter is read every step.
+		return total
+	}
+	// Sparse from here on. A sparse model whose share will not compute is
+	// unknown rather than dense: falling through to the total would
+	// report a mixture-of-experts model as reading all of itself, which
+	// is the one answer that is certainly wrong.
+	resident := RoutedExpertParams(a)
+	if resident <= 0 {
+		return 0
+	}
+	active := a.GetNumExpertsPerTok()
+	if active <= 0 || active > a.GetNumExperts() {
+		return 0
+	}
+	if resident >= total {
+		return 0
+	}
+	return total - resident + int64(moeLayers(a))*int64(active)*expertParams(a)
 }
 
 // Compute returns the per-card budget for a model under a plan.
@@ -301,7 +440,9 @@ func Compute(a *Arch, p Plan) (Budget, error) {
 		KVBytes:         perCard(kv),
 		ActivationBytes: perCard(activations),
 		KVBytesPerToken: perToken,
+		ActiveParams:    ActiveParams(a),
 	}
+	b.ActiveWeightBytes = int64(float64(b.ActiveParams) * p.Weights.BytesPerParam())
 	b.OverheadBytes = int64(float64(b.WorkingSetBytes()) * OverheadFraction)
 	return b, nil
 }

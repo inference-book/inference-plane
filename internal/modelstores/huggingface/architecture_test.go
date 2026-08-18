@@ -615,7 +615,7 @@ func TestArchitectureReportsThePartFourTargets(t *testing.T) {
 				Params: 753329940480, Layers: 78, KvHeads: 64, HeadDim: 192,
 				HiddenSize: 6144, MaxPositionEmbeddings: 1048576,
 				NumExperts: 256, NumExpertsPerTok: 8, MoeIntermediateSize: 2048,
-				SharedExperts: 1, DenseLayers: 3,
+				SharedExperts: 1, DenseLayers: 3, RoutedExpertHiddenSize: 6144,
 			},
 		},
 		{
@@ -626,7 +626,7 @@ func TestArchitectureReportsThePartFourTargets(t *testing.T) {
 				Params: 2779931837184, Layers: 93, KvHeads: 96, HeadDim: 74,
 				HiddenSize: 7168, MaxPositionEmbeddings: 1048576,
 				NumExperts: 896, NumExpertsPerTok: 16, MoeIntermediateSize: 3072,
-				SharedExperts: 2, DenseLayers: 1,
+				SharedExperts: 2, DenseLayers: 1, RoutedExpertHiddenSize: 3584,
 			},
 		},
 	} {
@@ -643,5 +643,52 @@ func TestArchitectureReportsThePartFourTargets(t *testing.T) {
 				t.Errorf("architecture mismatch\n got %v\nwant %v", got.GetArchitecture(), tc.want)
 			}
 		})
+	}
+}
+
+// A model that runs its experts narrower than itself publishes the width,
+// and reading it as the model's own computes an expert stack larger than
+// the whole model. Everything else states nothing and means "full width",
+// which is stored as the hidden size rather than left at zero, since
+// every reader of the field multiplies by it.
+func TestArchitectureReadsTheExpertWidthAModelProjectsDownTo(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		fixture string
+		want    int32
+	}{
+		{"Kimi K3 projects down to 3584", "kimi-k3.json", 3584},
+		{"GLM 5.2 runs its experts at full width", "glm-5.2.json", 6144},
+		{"Mixtral runs its experts at full width", "mixtral.json", 4096},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newArchFixture(t)
+			f.infoBody = `{"id":"org/model","safetensors":{"total":1000000000}}`
+			f.configBody = loadTestdataConfig(t, tc.fixture)
+
+			got, err := f.store("").Architecture(context.Background(), &provisionerv1.DescribeModelRequest{ModelSpec: "org/model"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if n := got.GetArchitecture().GetRoutedExpertHiddenSize(); n != tc.want {
+				t.Errorf("routed expert hidden size = %d, want %d", n, tc.want)
+			}
+		})
+	}
+}
+
+// A dense model states no expert width and gets none, rather than
+// inheriting its hidden size for an expert stack it does not have.
+func TestArchitectureLeavesTheExpertWidthUnsetOnADenseModel(t *testing.T) {
+	f := newArchFixture(t)
+	f.infoBody = anchorInfo
+	f.configBody = loadTestdataConfig(t, "qwen2.5-32b.json")
+
+	got, err := f.store("").Architecture(context.Background(), &provisionerv1.DescribeModelRequest{ModelSpec: "Qwen/Qwen2.5-32B"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := got.GetArchitecture().GetRoutedExpertHiddenSize(); n != 0 {
+		t.Errorf("routed expert hidden size = %d on a dense model, want 0", n)
 	}
 }

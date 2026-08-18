@@ -515,12 +515,12 @@ func TestMinCardsAnswersWithTheFirstShapeSweepAccepts(t *testing.T) {
 	}
 }
 
-// The expert fields are read by nothing here yet. Separating what a model
-// weighs from what it reads per step is its own piece of work, and until
-// that lands a sparse model has to budget exactly like the dense model of
-// the same size, since every expert is resident either way. This pins
-// that: adding the fields changed no arithmetic.
-func TestComputeIgnoresTheExpertShapeUntilSomethingModelsIt(t *testing.T) {
+// The four memory claims do not move when a model turns out to be
+// sparse. Every expert is resident whether or not the router picks it,
+// so a sparse model occupies exactly what the dense model of the same
+// parameter count occupies. Only the per-step reporting differs, which
+// is the whole distinction this package now draws.
+func TestComputeChargesASparseModelForEveryExpert(t *testing.T) {
 	dense := &Arch{Params: 753_329_940_480, Layers: 78, KvHeads: 64, HeadDim: 192, HiddenSize: 6144}
 	sparse := &Arch{
 		Params: 753_329_940_480, Layers: 78, KvHeads: 64, HeadDim: 192, HiddenSize: 6144,
@@ -536,8 +536,24 @@ func TestComputeIgnoresTheExpertShapeUntilSomethingModelsIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a != b {
-		t.Errorf("expert fields moved the budget\n dense: %+v\nsparse: %+v", a, b)
+	for _, term := range []struct {
+		name    string
+		a, bVal int64
+	}{
+		{"weights", a.WeightBytes, b.WeightBytes},
+		{"cache", a.KVBytes, b.KVBytes},
+		{"activations", a.ActivationBytes, b.ActivationBytes},
+		{"overhead", a.OverheadBytes, b.OverheadBytes},
+	} {
+		if term.a != term.bVal {
+			t.Errorf("%s moved: dense %d, sparse %d", term.name, term.a, term.bVal)
+		}
+	}
+	if a.ActiveParams != dense.GetParams() {
+		t.Errorf("dense active = %d, want the full parameter count %d", a.ActiveParams, dense.GetParams())
+	}
+	if b.ActiveParams >= a.ActiveParams {
+		t.Errorf("sparse active = %d, want well under the dense %d", b.ActiveParams, a.ActiveParams)
 	}
 }
 
@@ -547,5 +563,127 @@ func TestComputeIgnoresTheExpertShapeUntilSomethingModelsIt(t *testing.T) {
 func TestValidateArchDoesNotRequireAnExpertCount(t *testing.T) {
 	if err := ValidateArch(&Arch{Params: 1, Layers: 1, KvHeads: 1, HeadDim: 1}); err != nil {
 		t.Errorf("dense arch rejected: %v", err)
+	}
+}
+
+// kimiK3 is the published shape of the model Part IV is aimed at: 2.78T
+// parameters over 93 layers, 896 routed experts of which 16 activate,
+// two shared experts, one dense layer, and an expert stack that runs at
+// 3584 rather than the model's own 7168.
+var kimiK3 = &Arch{
+	Params: 2_779_931_837_184, Layers: 93, KvHeads: 96, HeadDim: 74, HiddenSize: 7168,
+	NumExperts: 896, NumExpertsPerTok: 16, MoeIntermediateSize: 3072,
+	SharedExperts: 2, DenseLayers: 1, RoutedExpertHiddenSize: 3584,
+}
+
+// The expert-share arithmetic is checkable against the model's own
+// published tensor accounting, which is a stronger test than a golden
+// number. Hugging Face reports K3 as 2,722,740,830,208 parameters in
+// eight-bit tensors and the rest in bf16, and the eight-bit tensors are
+// the quantized routed experts. Computing that count from the shape
+// alone lands on it exactly.
+func TestRoutedExpertParamsMatchesThePublishedTensorAccounting(t *testing.T) {
+	const publishedU8 = 2_722_740_830_208
+	if got := RoutedExpertParams(kimiK3); got != publishedU8 {
+		t.Errorf("routed expert params = %d, want %d (K3's published eight-bit tensor count)", got, publishedU8)
+	}
+}
+
+// The number the whole part turns on: a 2.78T model that reads about a
+// hundred billion parameters per step.
+func TestActiveParamsSeparatesWhatIsHeldFromWhatIsRead(t *testing.T) {
+	active := ActiveParams(kimiK3)
+	if active != 105_811_378_944 {
+		t.Fatalf("active params = %d, want 105811378944", active)
+	}
+	if ratio := float64(kimiK3.GetParams()) / float64(active); ratio < 25 || ratio > 27 {
+		t.Errorf("held/read ratio = %.1f, want about 26", ratio)
+	}
+}
+
+// Resident and per-step at the precision the model actually ships in.
+// Both are checkable against the published checkpoint: 1560.86 GB on
+// disk, which is what the resident figure has to land near.
+func TestBudgetReportsResidentAndPerStepForKimiK3(t *testing.T) {
+	b, err := Compute(kimiK3, Plan{Weights: PrecisionMXFP4, MaxModelLen: 8192, MaxBatch: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resident := float64(b.WeightBytes) / float64(GB); resident < 1561 || resident > 1620 {
+		t.Errorf("resident = %.0f GB, want just above the published 1561 GB", resident)
+	}
+	if step := float64(b.ActiveWeightBytes) / float64(GB); step < 55 || step > 65 {
+		t.Errorf("per step = %.0f GB, want about 59 GB", step)
+	}
+	if b.ActiveWeightBytes >= b.WeightBytes/20 {
+		t.Errorf("per step %d is not far enough below resident %d", b.ActiveWeightBytes, b.WeightBytes)
+	}
+}
+
+// A dense model reads all of itself, so the two figures are the same
+// number and the sparse distinction costs it nothing.
+func TestActiveParamsIsTheWholeModelWhenItIsDense(t *testing.T) {
+	dense := &Arch{Params: 70_600_000_000, Layers: 80, KvHeads: 8, HeadDim: 128, HiddenSize: 8192}
+	if got := ActiveParams(dense); got != dense.GetParams() {
+		t.Errorf("active = %d, want %d", got, dense.GetParams())
+	}
+	if got := RoutedExpertParams(dense); got != 0 {
+		t.Errorf("routed expert params = %d on a dense model, want 0", got)
+	}
+}
+
+// Unknown rather than a plausible-looking figure, in each of the three
+// ways the share can fail to compute. A wrong active count is worse than
+// none, because every use of it is an argument that the number is small.
+func TestActiveParamsRefusesRatherThanGuessing(t *testing.T) {
+	base := func() *Arch {
+		return &Arch{
+			Params: 753_329_940_480, Layers: 78, KvHeads: 64, HeadDim: 192, HiddenSize: 6144,
+			NumExperts: 256, NumExpertsPerTok: 8, MoeIntermediateSize: 2048, DenseLayers: 3,
+		}
+	}
+	t.Run("no activated count published", func(t *testing.T) {
+		a := base()
+		a.NumExpertsPerTok = 0
+		if got := ActiveParams(a); got != 0 {
+			t.Errorf("active = %d, want 0", got)
+		}
+	})
+	t.Run("activated count exceeds the expert count", func(t *testing.T) {
+		a := base()
+		a.NumExpertsPerTok = 300
+		if got := ActiveParams(a); got != 0 {
+			t.Errorf("active = %d, want 0", got)
+		}
+	})
+	t.Run("computed expert share exceeds the whole model", func(t *testing.T) {
+		a := base()
+		// K3's width read at the model's own, which is the mistake that
+		// makes the expert stack come out twice the size of the model.
+		a.Params = 100_000_000
+		if got := ActiveParams(a); got != 0 {
+			t.Errorf("active = %d, want 0", got)
+		}
+	})
+}
+
+// The published four-bit checkpoints are the calibration for the rung,
+// so the rung has to reproduce them.
+func TestMXFP4ReproducesThePublishedCheckpointFootprints(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		params      int64
+		publishedGB float64
+	}{
+		{"openai/gpt-oss-120b", 116_829_156_672, 65.25},
+		{"moonshotai/Kimi-K3", 2_779_931_837_184, 1560.86},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := float64(tc.params) * PrecisionMXFP4.BytesPerParam() / float64(GB)
+			if diff := (got - tc.publishedGB) / tc.publishedGB; diff < 0 || diff > 0.03 {
+				t.Errorf("budgeted %.2f GB against a published %.2f GB (%.1f%% off; want 0 to 3%% over)",
+					got, tc.publishedGB, diff*100)
+			}
+		})
 	}
 }
