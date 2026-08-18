@@ -526,7 +526,8 @@ func (r *Router) handleWithObservability(w http.ResponseWriter, req *http.Reques
 			time.Since(start).Seconds())
 		if tokens := tcw.CompletionTokens(); tokens > 0 {
 			r.recorder.RecordRouterTokens(ctx,
-				dep.GetId(), dep.GetModel(), tenantID, priorityLabelStr, replicaID, tokens)
+				dep.GetId(), dep.GetModel(), tenantID, priorityLabelStr, replicaID,
+				contextBucket(tcw.PromptTokens()), tokens)
 		}
 	}()
 	if !r.forwardable(tcw, dep) {

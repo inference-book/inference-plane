@@ -333,14 +333,15 @@ func (r *Recorder) RecordReaperDestroy(ctx context.Context, reason string) {
 }
 
 // RecordRouterTokens adds n to the tokens-generated counter for a
-// router-mediated inference, labeled by deploy_id / model / tenant_id.
+// router-mediated inference, labeled by deploy_id / model / tenant_id and
+// the context band the prompt fell in.
 // Same instrument as RecordTokens; the extra labels make the router's
 // contribution distinguishable from v0.1 inference-service emissions.
 //
 // Skip calling this when n is zero or unknown (e.g., a streaming
 // request whose engine did not emit a `usage` frame) -- recording
 // zeros pollutes the counter without adding signal.
-func (r *Recorder) RecordRouterTokens(ctx context.Context, deployID, model, tenantID, priority, replicaID string, n int64) {
+func (r *Recorder) RecordRouterTokens(ctx context.Context, deployID, model, tenantID, priority, replicaID, contextBucket string, n int64) {
 	if r == nil || n <= 0 {
 		return
 	}
@@ -350,6 +351,7 @@ func (r *Recorder) RecordRouterTokens(ctx context.Context, deployID, model, tena
 		attribute.String(telemetry.LabelTenantID, tenantID),
 		attribute.String(telemetry.LabelPriority, priority),
 		attribute.String(telemetry.LabelInstanceID, replicaID),
+		attribute.String(telemetry.LabelContextBucket, contextBucket),
 	))
 }
 

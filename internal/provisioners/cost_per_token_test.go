@@ -70,7 +70,7 @@ func TestCostPerMillionTokensMatchesHandArithmetic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRecorder: %v", err)
 	}
-	rec.RecordRouterTokens(context.Background(), "dep-1", "qwen", "t-1", "interactive", "i-1", 250_000)
+	rec.RecordRouterTokens(context.Background(), "dep-1", "qwen", "t-1", "interactive", "i-1", "8k", 250_000)
 
 	var rm metricdata.ResourceMetrics
 	if err := reader.Collect(context.Background(), &rm); err != nil {
@@ -113,7 +113,7 @@ func TestTokensAndCostShareTheJoinKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRecorder: %v", err)
 	}
-	rec.RecordRouterTokens(context.Background(), "dep-1", "qwen", "t-1", "interactive", "i-1", 10)
+	rec.RecordRouterTokens(context.Background(), "dep-1", "qwen", "t-1", "interactive", "i-1", "8k", 10)
 
 	var rm metricdata.ResourceMetrics
 	if err := reader.Collect(context.Background(), &rm); err != nil {
