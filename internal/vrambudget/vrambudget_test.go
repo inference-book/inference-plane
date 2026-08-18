@@ -514,3 +514,38 @@ func TestMinCardsAnswersWithTheFirstShapeSweepAccepts(t *testing.T) {
 		}
 	}
 }
+
+// The expert fields are read by nothing here yet. Separating what a model
+// weighs from what it reads per step is its own piece of work, and until
+// that lands a sparse model has to budget exactly like the dense model of
+// the same size, since every expert is resident either way. This pins
+// that: adding the fields changed no arithmetic.
+func TestComputeIgnoresTheExpertShapeUntilSomethingModelsIt(t *testing.T) {
+	dense := &Arch{Params: 753_329_940_480, Layers: 78, KvHeads: 64, HeadDim: 192, HiddenSize: 6144}
+	sparse := &Arch{
+		Params: 753_329_940_480, Layers: 78, KvHeads: 64, HeadDim: 192, HiddenSize: 6144,
+		NumExperts: 256, NumExpertsPerTok: 8, MoeIntermediateSize: 2048, SharedExperts: 1, DenseLayers: 3,
+	}
+	plan := Plan{Weights: PrecisionFP8, MaxModelLen: 32768, MaxBatch: 16}
+
+	a, err := Compute(dense, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := Compute(sparse, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a != b {
+		t.Errorf("expert fields moved the budget\n dense: %+v\nsparse: %+v", a, b)
+	}
+}
+
+// A sparse model validates on the same fields a dense one does. The
+// expert count is not among them: a model that states no experts is
+// dense, which is a shape rather than an incomplete config.
+func TestValidateArchDoesNotRequireAnExpertCount(t *testing.T) {
+	if err := ValidateArch(&Arch{Params: 1, Layers: 1, KvHeads: 1, HeadDim: 1}); err != nil {
+		t.Errorf("dense arch rejected: %v", err)
+	}
+}

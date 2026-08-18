@@ -2677,8 +2677,43 @@ type ModelArchitecture struct {
 	// context length comes from when the operator does not choose one, so
 	// absent means the caller has to be asked rather than guessed at.
 	MaxPositionEmbeddings int32 `protobuf:"varint,6,opt,name=max_position_embeddings,json=maxPositionEmbeddings,proto3" json:"max_position_embeddings,omitempty"`
-	unknownFields         protoimpl.UnknownFields
-	sizeCache             protoimpl.SizeCache
+	// Routed experts per mixture-of-experts layer. Zero means the model is
+	// dense, which is a shape rather than a missing reading: a dense model
+	// publishes no expert count because it has none. Every field below
+	// reads zero on a dense model and no budget term changes.
+	//
+	// The hub spells this three ways and the spelling follows the model
+	// family rather than any convention: n_routed_experts (DeepSeek, GLM),
+	// num_experts (Qwen, Kimi K3), num_local_experts (Mixtral, Llama 4,
+	// GPT-OSS). All three land here.
+	NumExperts int32 `protobuf:"varint,7,opt,name=num_experts,json=numExperts,proto3" json:"num_experts,omitempty"`
+	// Experts the router activates for one token. This is the field that
+	// separates what a model weighs from what it costs to decode, because
+	// the engine reads only the activated experts per step while all of
+	// them stay resident. A 2.8T model that activates sixteen of 896
+	// experts decodes like a far smaller one and is billed like the large
+	// one.
+	NumExpertsPerTok int32 `protobuf:"varint,8,opt,name=num_experts_per_tok,json=numExpertsPerTok,proto3" json:"num_experts_per_tok,omitempty"`
+	// Feed-forward width of a single routed expert (moe_intermediate_size),
+	// which is what sets the per-expert parameter share. Models with no
+	// dense feed-forward alongside the experts publish this as the plain
+	// intermediate_size instead, and that is read here when no MoE-specific
+	// width is stated.
+	MoeIntermediateSize int32 `protobuf:"varint,9,opt,name=moe_intermediate_size,json=moeIntermediateSize,proto3" json:"moe_intermediate_size,omitempty"`
+	// Experts every token passes through regardless of routing. Their
+	// weights are read on every step, so they belong with the activated
+	// set rather than with the resident-but-idle remainder. Zero is the
+	// common case even among sparse models.
+	SharedExperts int32 `protobuf:"varint,10,opt,name=shared_experts,json=sharedExperts,proto3" json:"shared_experts,omitempty"`
+	// Leading layers that are dense rather than mixture-of-experts
+	// (first_k_dense_replace). Sparse models routinely make the first
+	// layer or three dense, and counting those layers' feed-forward
+	// weights as expert weights misattributes them to the activated share.
+	// Zero on a dense model means every layer is dense; zero on a sparse
+	// one means no dense prefix.
+	DenseLayers   int32 `protobuf:"varint,11,opt,name=dense_layers,json=denseLayers,proto3" json:"dense_layers,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ModelArchitecture) Reset() {
@@ -2749,6 +2784,41 @@ func (x *ModelArchitecture) GetHiddenSize() int32 {
 func (x *ModelArchitecture) GetMaxPositionEmbeddings() int32 {
 	if x != nil {
 		return x.MaxPositionEmbeddings
+	}
+	return 0
+}
+
+func (x *ModelArchitecture) GetNumExperts() int32 {
+	if x != nil {
+		return x.NumExperts
+	}
+	return 0
+}
+
+func (x *ModelArchitecture) GetNumExpertsPerTok() int32 {
+	if x != nil {
+		return x.NumExpertsPerTok
+	}
+	return 0
+}
+
+func (x *ModelArchitecture) GetMoeIntermediateSize() int32 {
+	if x != nil {
+		return x.MoeIntermediateSize
+	}
+	return 0
+}
+
+func (x *ModelArchitecture) GetSharedExperts() int32 {
+	if x != nil {
+		return x.SharedExperts
+	}
+	return 0
+}
+
+func (x *ModelArchitecture) GetDenseLayers() int32 {
+	if x != nil {
+		return x.DenseLayers
 	}
 	return 0
 }
@@ -3576,7 +3646,7 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"\fUpstreamAuth\x12\x16\n" +
 	"\x06header\x18\x01 \x01(\tR\x06header\x12\x1b\n" +
 	"\tvalue_env\x18\x02 \x01(\tR\bvalueEnv\x12!\n" +
-	"\fvalue_prefix\x18\x03 \x01(\tR\vvaluePrefix\"\xd2\x01\n" +
+	"\fvalue_prefix\x18\x03 \x01(\tR\vvaluePrefix\"\xa0\x03\n" +
 	"\x11ModelArchitecture\x12\x16\n" +
 	"\x06params\x18\x01 \x01(\x03R\x06params\x12\x16\n" +
 	"\x06layers\x18\x02 \x01(\x05R\x06layers\x12\x19\n" +
@@ -3584,7 +3654,14 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"\bhead_dim\x18\x04 \x01(\x05R\aheadDim\x12\x1f\n" +
 	"\vhidden_size\x18\x05 \x01(\x05R\n" +
 	"hiddenSize\x126\n" +
-	"\x17max_position_embeddings\x18\x06 \x01(\x05R\x15maxPositionEmbeddings\"5\n" +
+	"\x17max_position_embeddings\x18\x06 \x01(\x05R\x15maxPositionEmbeddings\x12\x1f\n" +
+	"\vnum_experts\x18\a \x01(\x05R\n" +
+	"numExperts\x12-\n" +
+	"\x13num_experts_per_tok\x18\b \x01(\x05R\x10numExpertsPerTok\x122\n" +
+	"\x15moe_intermediate_size\x18\t \x01(\x05R\x13moeIntermediateSize\x12%\n" +
+	"\x0eshared_experts\x18\n" +
+	" \x01(\x05R\rsharedExperts\x12!\n" +
+	"\fdense_layers\x18\v \x01(\x05R\vdenseLayers\"5\n" +
 	"\x14DescribeModelRequest\x12\x1d\n" +
 	"\n" +
 	"model_spec\x18\x01 \x01(\tR\tmodelSpec\"^\n" +

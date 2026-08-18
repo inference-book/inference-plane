@@ -34,6 +34,44 @@ type modelConfig struct {
 	// model's would report a KV cost of zero for a model that certainly
 	// has one.
 	TextConfig *modelConfig `json:"text_config"`
+
+	// The expert fields below are read through several spellings each,
+	// because the hub has no convention for them and the spelling follows
+	// the model family. Every alias is listed with the families that use
+	// it, so a reader can check the set against a config rather than
+	// against this file's guess about one.
+
+	// Routed expert count. DeepSeek and GLM say n_routed_experts, Qwen
+	// and Kimi K3 say num_experts, Mixtral and Llama 4 and GPT-OSS say
+	// num_local_experts.
+	NRoutedExperts  int32 `json:"n_routed_experts"`
+	NumExperts      int32 `json:"num_experts"`
+	NumLocalExperts int32 `json:"num_local_experts"`
+
+	// Activated experts per token. Every family says num_experts_per_tok
+	// except Kimi K3, which spells it out. GPT-OSS states both and they
+	// agree.
+	NumExpertsPerTok   int32 `json:"num_experts_per_tok"`
+	NumExpertsPerToken int32 `json:"num_experts_per_token"`
+	ExpertsPerToken    int32 `json:"experts_per_token"`
+
+	// Shared experts, the ones every token passes through. DeepSeek, GLM
+	// and Kimi K2 say n_shared_experts; Kimi K3 says num_shared_experts.
+	// Qwen2-MoE publishes only shared_expert_intermediate_size, a width
+	// with no count, and is deliberately not read here (see
+	// resolveExperts).
+	NSharedExperts   int32 `json:"n_shared_experts"`
+	NumSharedExperts int32 `json:"num_shared_experts"`
+
+	// Expert feed-forward width. MoEIntermediateSize is the expert's own
+	// width where a model has dense layers alongside the experts;
+	// IntermediateSize is the dense width in that case and the expert
+	// width in models that have no dense feed-forward at all.
+	MoEIntermediateSize int32 `json:"moe_intermediate_size"`
+	IntermediateSize    int32 `json:"intermediate_size"`
+
+	// Leading dense layers before the mixture-of-experts stack starts.
+	FirstKDenseReplace int32 `json:"first_k_dense_replace"`
 }
 
 // safetensorsInfo is HF's published tensor accounting, and the only
@@ -115,10 +153,60 @@ func (s *Store) Architecture(ctx context.Context, req *provisionerv1.DescribeMod
 		arch.HeadDim = cfg.HiddenSize / cfg.AttentionHead
 	}
 
+	resolveExperts(arch, cfg)
+
 	if err := vrambudget.ValidateArch(arch); err != nil {
 		return nil, fmt.Errorf("model %q config is missing what the budget needs: %w", id, err)
 	}
 	return &provisionerv1.DescribeModelResponse{Architecture: arch}, nil
+}
+
+// resolveExperts fills in the mixture-of-experts shape, or leaves it at
+// zero for a dense model.
+//
+// Zero here is a shape rather than a missing reading. A dense model has
+// no experts to count, so every field stays zero and no budget term
+// changes, which is what keeps this additive for every model the tool
+// handled before.
+//
+// The expert count gates the rest. Nothing else is read off a model that
+// states no experts, because the remaining fields all have dense
+// meanings: intermediate_size is a plain feed-forward width on a dense
+// model, and reading it as an expert's would make every dense model look
+// sparse to a caller keying on the field being set.
+func resolveExperts(arch *provisionerv1.ModelArchitecture, cfg *modelConfig) {
+	experts := firstNonZero(cfg.NRoutedExperts, cfg.NumExperts, cfg.NumLocalExperts)
+	if experts <= 0 {
+		return
+	}
+
+	arch.NumExperts = experts
+	arch.NumExpertsPerTok = firstNonZero(cfg.NumExpertsPerTok, cfg.NumExpertsPerToken, cfg.ExpertsPerToken)
+	// Absent is unknown and stays zero. Qwen2-MoE has exactly one shared
+	// expert and publishes only its width, and inferring a count from a
+	// width would be a guess where this file's other derivation (head_dim
+	// from hidden_size) is exact. The width is what an active-parameter
+	// term will want, and it can be read when there is a term reading it.
+	arch.SharedExperts = firstNonZero(cfg.NSharedExperts, cfg.NumSharedExperts)
+	// A model with no dense feed-forward beside its experts states one
+	// width and it is the expert's. A model with both states the expert
+	// width separately, so the plain field is its dense layers' and is
+	// only reached when no expert-specific width exists.
+	arch.MoeIntermediateSize = firstNonZero(cfg.MoEIntermediateSize, cfg.IntermediateSize)
+	arch.DenseLayers = cfg.FirstKDenseReplace
+}
+
+// firstNonZero returns the first stated value among a field's spellings.
+// Zero means the config did not state it under that name, which is what
+// makes ordering the aliases safe: a family states one of them and the
+// rest decode to zero.
+func firstNonZero(vals ...int32) int32 {
+	for _, v := range vals {
+		if v > 0 {
+			return v
+		}
+	}
+	return 0
 }
 
 // fetchConfig retrieves a model's config.json at a revision.
