@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/inference-book/inference-plane/internal/backends"
 )
@@ -26,9 +27,19 @@ import (
 //
 // What it does not model is prefill. The backend has already generated the
 // whole completion by the time this runs, so the first token arrives after
-// the mock's configured latency and the rest follow immediately. Real TTFT
-// separates queueing and prefill from decode; this only proves the plumbing.
-func streamChatCompletion(w http.ResponseWriter, resp *backends.GenerateResponse) {
+// the mock's configured latency and the rest follow after whatever gap
+// tokenGap sets. Real TTFT separates queueing and prefill from decode; this
+// only proves the plumbing.
+//
+// tokenGap is the pause between content frames. Zero emits them
+// back-to-back, which is what every caller did before inter-token latency
+// was a thing anyone measured, and which reports an inter-token latency of
+// approximately nothing. Setting it is what makes decode speed visible
+// without a GPU: the whole point of separating time-to-first-token from the
+// gaps after it is that a growing batch stretches the second while leaving
+// the first roughly alone, and a mock that emits its whole reply in one
+// burst cannot show that.
+func streamChatCompletion(w http.ResponseWriter, resp *backends.GenerateResponse, tokenGap time.Duration) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		// No flushing means no streaming; everything would buffer to the
@@ -50,6 +61,12 @@ func streamChatCompletion(w http.ResponseWriter, resp *backends.GenerateResponse
 		}
 		fmt.Fprintf(w, "data: %s\n\n", b)
 		flusher.Flush()
+	}
+
+	pace := func() {
+		if tokenGap > 0 {
+			time.Sleep(tokenGap)
+		}
 	}
 
 	type delta struct {
@@ -77,7 +94,14 @@ func streamChatCompletion(w http.ResponseWriter, resp *backends.GenerateResponse
 
 	send(frame(choice{Delta: delta{Role: "assistant"}}, nil))
 
-	for _, chunk := range chunkContent(completionText(resp)) {
+	for i, chunk := range chunkContent(completionText(resp)) {
+		// After the first, not before it. The gap before the first
+		// content frame is time-to-first-token and the backend has
+		// already slept it; pausing here as well would charge prefill
+		// twice.
+		if i > 0 {
+			pace()
+		}
 		send(frame(choice{Delta: delta{Content: chunk}}, nil))
 	}
 
