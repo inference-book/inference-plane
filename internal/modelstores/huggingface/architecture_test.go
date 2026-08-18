@@ -820,3 +820,59 @@ func TestArchitectureLeavesMTPLayersAtZeroWhenAbsent(t *testing.T) {
 		t.Errorf("MtpLayers = %d, want 0 when the config omits it", n)
 	}
 }
+
+// The three spellings seen in the wild. fp8 uses quant_method, NVFP4 uses
+// quant_algo, and compressed-tensors uses quant_method with a separate
+// format field naming the packing.
+const nvfp4Config = `{"num_hidden_layers":78,"num_attention_heads":64,"num_key_value_heads":64,` +
+	`"head_dim":192,"hidden_size":6144,"kv_lora_rank":512,"qk_rope_head_dim":64,` +
+	`"quantization_config":{"quant_algo":"NVFP4","quant_method":"modelopt","kv_cache_scheme":{"num_bits":8}}}`
+const fp8Config = `{"num_hidden_layers":78,"num_attention_heads":64,"num_key_value_heads":64,` +
+	`"head_dim":192,"hidden_size":6144,"kv_lora_rank":512,"qk_rope_head_dim":64,` +
+	`"quantization_config":{"quant_method":"fp8","fmt":"e4m3"}}`
+const packedConfig = `{"num_hidden_layers":78,"num_attention_heads":64,"num_key_value_heads":64,` +
+	`"head_dim":192,"hidden_size":6144,"kv_lora_rank":512,"qk_rope_head_dim":64,` +
+	`"quantization_config":{"quant_method":"compressed-tensors","format":"pack-quantized"}}`
+
+// TestArchitectureRecordsThePublishedQuantization: the parameter count is
+// the hub's element accounting, and on a packed checkpoint an element is
+// not a parameter. Recording the scheme is what lets a caller refuse to
+// apply a second precision to a figure that already has one.
+func TestArchitectureRecordsThePublishedQuantization(t *testing.T) {
+	for _, tc := range []struct {
+		name, config, want string
+	}{
+		{"the format wins over the toolkit", nvfp4Config, "NVFP4"},
+		{"fp8 uses quant_method", fp8Config, "fp8"},
+		{"compressed-tensors names its packing", packedConfig, "compressed-tensors"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newArchFixture(t)
+			f.infoBody, f.configBody = glm52Info, tc.config
+
+			got, err := f.store("").Architecture(context.Background(), &provisionerv1.DescribeModelRequest{ModelSpec: "org/m"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if q := got.GetArchitecture().GetQuantization(); q != tc.want {
+				t.Errorf("Quantization = %q, want %q", q, tc.want)
+			}
+		})
+	}
+}
+
+// TestArchitectureLeavesQuantizationEmptyForAFullPrecisionCheckpoint keeps
+// the field silent where there is nothing to say, so a caller can treat
+// non-empty as a fact rather than a default.
+func TestArchitectureLeavesQuantizationEmptyForAFullPrecisionCheckpoint(t *testing.T) {
+	f := newArchFixture(t)
+	f.infoBody, f.configBody = glm52Info, glm52Config
+
+	got, err := f.store("").Architecture(context.Background(), &provisionerv1.DescribeModelRequest{ModelSpec: "zai-org/GLM-5.2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q := got.GetArchitecture().GetQuantization(); q != "" {
+		t.Errorf("Quantization = %q, want empty for an unquantized checkpoint", q)
+	}
+}

@@ -117,24 +117,36 @@ func renderModelArchitecture(w interface{ Write([]byte) (int, error) }, spec str
 		}
 	}
 
-	// The weight ladder. Each step down roughly halves the term, and
-	// seeing the three side by side is the whole quantization decision.
-	var weights []string
-	for _, p := range []struct {
-		label string
-		prec  vrambudget.Precision
-	}{
-		{"fp16", vrambudget.PrecisionFP16},
-		{"fp8", vrambudget.PrecisionFP8},
-		{"4-bit", vrambudget.PrecisionAWQ},
-	} {
-		b, err := vrambudget.Compute(a, vrambudget.Plan{Weights: p.prec, MaxModelLen: 1, MaxBatch: 1})
-		if err != nil {
-			return err
+	// The weight ladder, for a checkpoint that still has a choice to make.
+	// Each step down roughly halves the term, and seeing the three side by
+	// side is the whole quantization decision.
+	//
+	// Suppressed for a checkpoint that already made it. The parameter
+	// count is the hub's element accounting, so on a packed checkpoint a
+	// ladder built from it prices a second quantization on top of the one
+	// already applied, and every figure in the row is wrong by whatever
+	// the packing did (#382).
+	if q := a.GetQuantization(); q != "" {
+		fmt.Fprintf(tw, "\n  weights\tpublished at %s; no ladder, this checkpoint already chose\n", q)
+		fmt.Fprintf(tw, "  \tsize it from the repo's own files, or from the unquantized model\n")
+	} else {
+		var weights []string
+		for _, p := range []struct {
+			label string
+			prec  vrambudget.Precision
+		}{
+			{"fp16", vrambudget.PrecisionFP16},
+			{"fp8", vrambudget.PrecisionFP8},
+			{"4-bit", vrambudget.PrecisionAWQ},
+		} {
+			b, err := vrambudget.Compute(a, vrambudget.Plan{Weights: p.prec, MaxModelLen: 1, MaxBatch: 1})
+			if err != nil {
+				return err
+			}
+			weights = append(weights, fmt.Sprintf("%s %s", formatGB(b.WeightBytes), p.label))
 		}
-		weights = append(weights, fmt.Sprintf("%s %s", formatGB(b.WeightBytes), p.label))
+		fmt.Fprintf(tw, "\n  weights\t%s\n", strings.Join(weights, "   "))
 	}
-	fmt.Fprintf(tw, "\n  weights\t%s\n", strings.Join(weights, "   "))
 
 	// The cache, per token and then at three context lengths. One
 	// sequence throughout, because batch multiplies the same number and

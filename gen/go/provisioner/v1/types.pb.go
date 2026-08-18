@@ -2780,7 +2780,24 @@ type ModelArchitecture struct {
 	// formula this corrects was validated against Kimi K3, whose count is
 	// zero, which is exactly why the error survived: DeepSeek-V3, GLM-4.5
 	// and GLM-5.2 all publish one.
-	MtpLayers     int32 `protobuf:"varint,16,opt,name=mtp_layers,json=mtpLayers,proto3" json:"mtp_layers,omitempty"`
+	MtpLayers int32 `protobuf:"varint,16,opt,name=mtp_layers,json=mtpLayers,proto3" json:"mtp_layers,omitempty"`
+	// The quantization the checkpoint was published at, as the hub states it
+	// (quantization_config.quant_method, or quant_algo where the packer uses
+	// that spelling). Empty for a full-precision checkpoint.
+	//
+	// Load-bearing because params is the hub's tensor-element accounting, not
+	// a parameter count, and on a packed checkpoint the two differ. NVFP4
+	// stores two values per element and reports 381B for a 753B model;
+	// compressed-tensors pack-quantized reports 785B for the same model,
+	// more than the bf16 original, because per-group scales and zero-points
+	// are elements too. Applying a weight precision to either figure
+	// quantizes a second time.
+	//
+	// FP8 is the trap: e4m3 is one byte per parameter, so the element count
+	// still equals the parameter count and the arithmetic comes out right.
+	// The official quantized variant behaving is what lets the community
+	// four-bit ones go unnoticed.
+	Quantization  string `protobuf:"bytes,17,opt,name=quantization,proto3" json:"quantization,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2925,6 +2942,13 @@ func (x *ModelArchitecture) GetMtpLayers() int32 {
 		return x.MtpLayers
 	}
 	return 0
+}
+
+func (x *ModelArchitecture) GetQuantization() string {
+	if x != nil {
+		return x.Quantization
+	}
+	return ""
 }
 
 // DescribeModelRequest asks what a model spec resolves to.
@@ -3751,7 +3775,7 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"\fUpstreamAuth\x12\x16\n" +
 	"\x06header\x18\x01 \x01(\tR\x06header\x12\x1b\n" +
 	"\tvalue_env\x18\x02 \x01(\tR\bvalueEnv\x12!\n" +
-	"\fvalue_prefix\x18\x03 \x01(\tR\vvaluePrefix\"\xf9\x04\n" +
+	"\fvalue_prefix\x18\x03 \x01(\tR\vvaluePrefix\"\x9d\x05\n" +
 	"\x11ModelArchitecture\x12\x16\n" +
 	"\x06params\x18\x01 \x01(\x03R\x06params\x12\x16\n" +
 	"\x06layers\x18\x02 \x01(\x05R\x06layers\x12\x19\n" +
@@ -3773,7 +3797,8 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"\x10qk_rope_head_dim\x18\x0e \x01(\x05R\rqkRopeHeadDim\x122\n" +
 	"\x15full_attention_layers\x18\x0f \x01(\x05R\x13fullAttentionLayers\x12\x1d\n" +
 	"\n" +
-	"mtp_layers\x18\x10 \x01(\x05R\tmtpLayers\"5\n" +
+	"mtp_layers\x18\x10 \x01(\x05R\tmtpLayers\x12\"\n" +
+	"\fquantization\x18\x11 \x01(\tR\fquantization\"5\n" +
 	"\x14DescribeModelRequest\x12\x1d\n" +
 	"\n" +
 	"model_spec\x18\x01 \x01(\tR\tmodelSpec\"^\n" +

@@ -78,6 +78,11 @@ type modelConfig struct {
 	// mention them, which is the whole reason this is read.
 	NumNextNPredictLayers int32 `json:"num_nextn_predict_layers"`
 
+	// Present when the checkpoint ships already quantized. Two spellings,
+	// because the packers do not agree: quant_method is the transformers
+	// convention and quant_algo is what NVIDIA's exporter writes.
+	QuantizationConfig *quantizationConfig `json:"quantization_config"`
+
 	// Width a routed expert operates at, where the model projects down
 	// before the expert stack. Absent means the experts run at the
 	// model's own hidden size, which is what almost every family does.
@@ -109,6 +114,38 @@ type linearAttnConfig struct {
 // parameter count on the Hub that is a measurement rather than a claim.
 type safetensorsInfo struct {
 	Total int64 `json:"total"`
+}
+
+// quantizationConfig is the part of a checkpoint's quantization block that
+// says which scheme packed it. The rest of the block describes per-group
+// widths and ignore lists, which matter to the engine and not to a caller
+// deciding whether a parameter count means what it usually means.
+type quantizationConfig struct {
+	QuantMethod string `json:"quant_method"`
+	QuantAlgo   string `json:"quant_algo"`
+}
+
+// scheme names the quantization, preferring the format over the tool that
+// produced it.
+//
+// NVIDIA's exporter writes both, and they say different things:
+// quant_algo is NVFP4 where quant_method is modelopt, which names the
+// toolkit and tells an operator nothing about how the weights are packed.
+// The transformers-native packers write only quant_method, and there it is
+// the format (fp8, compressed-tensors), so reading algo first and falling
+// back gets the more useful of the two in every case seen.
+//
+// Empty when the block exists and names neither, which reads the same as
+// absent to every caller and is the honest answer: something quantized
+// this and did not say what.
+func (q *quantizationConfig) scheme() string {
+	if q == nil {
+		return ""
+	}
+	if q.QuantAlgo != "" {
+		return q.QuantAlgo
+	}
+	return q.QuantMethod
 }
 
 // Architecture reports the part of a model fixed at training time, for
@@ -190,6 +227,12 @@ func (s *Store) Architecture(ctx context.Context, req *provisionerv1.DescribeMod
 	if arch.HeadDim == 0 && cfg.AttentionHead > 0 && cfg.KVLoraRank == 0 {
 		arch.HeadDim = cfg.HiddenSize / cfg.AttentionHead
 	}
+
+	// Recorded rather than acted on here. The parameter count above is the
+	// hub's element accounting, and on a packed checkpoint an element is
+	// not a parameter, so a caller applying a weight precision to it would
+	// be quantizing something already quantized (#382).
+	arch.Quantization = cfg.QuantizationConfig.scheme()
 
 	resolveExperts(arch, cfg)
 

@@ -211,7 +211,12 @@ for an already-quantized repo counts packed elements rather than
 parameters. `nvidia/GLM-5.2-NVFP4` reports 381B against the base model's
 753B, and `QuantTrio/GLM-5.2-Int4-Int8Mix` reports 785B, more than the
 bf16 original, because scales and zero-points are elements too. Applying a
-precision to either is quantizing twice. Tracked as #382; nothing in this
-package guards it yet, so a budget taken against a community 4-bit repo is
-not trustworthy today.
+precision to either is quantizing twice.
+
+This package still has no guard, and deliberately does not need one. The
+check sits at the operator surfaces, where `iplane model budget` refuses
+and `model describe` prints no ladder (#382). `Compute` stays arithmetic
+over whatever it is handed, so a caller passing a packed architecture in
+gets a packed answer out, and a new caller wants the same
+`GetQuantization()` check those two commands make.
 
