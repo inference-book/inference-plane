@@ -58,11 +58,16 @@ type Provider struct {
 }
 
 // CostRecorder holds the cost-related instruments described in the
-// chapter's cost-tracking subsection. Three signals:
+// chapter's cost-tracking subsection. Four signals:
 //
 //   - instance.uptime.seconds.total       (observable Int64Counter)
-//     wall-clock seconds since the control plane started. What you
-//     are billed for in metered mode.
+//     billed seconds per rented instance, measured from when the
+//     provider started charging.
+//
+//   - instance.cost.usd.total             (observable Float64Counter)
+//     what those seconds cost at the rate quoted at spawn. Divided by
+//     the token counter on instance_id it gives cost per token, which
+//     is the figure Part IV's economic argument rests on.
 //
 //   - inference.active.seconds.total      (sync Float64Counter)
 //     time actually serving inference. Combined with uptime gives
@@ -116,6 +121,15 @@ func NewCostRecorder(fleet FleetSource, providers []Provider) (*CostRecorder, er
 		metric.WithFloat64Callback(cr.observeInstanceRates),
 	); err != nil {
 		return nil, fmt.Errorf("cost: instance rate gauge: %w", err)
+	}
+
+	if _, err := meter.Float64ObservableCounter(
+		telemetry.MetricInstanceCost,
+		metric.WithUnit("USD"),
+		metric.WithDescription("Dollars spent per rented instance, being the billed seconds times the rate quoted at spawn. Divided by the token counter on instance_id it gives cost per token."),
+		metric.WithFloat64Callback(cr.observeInstanceCost),
+	); err != nil {
+		return nil, fmt.Errorf("cost: instance cost counter: %w", err)
 	}
 
 	if _, err := meter.Float64ObservableGauge(
@@ -188,6 +202,35 @@ func (cr *CostRecorder) observeInstanceRates(_ context.Context, observer metric.
 			continue
 		}
 		observer.Observe(inst.RateUSDPerHour/secondsPerHour, metric.WithAttributes(instanceAttrs(inst)...))
+	}
+	return nil
+}
+
+// observeInstanceCost emits what each instance has cost so far.
+//
+// The two series either side of this one carry the factors and left the
+// multiplication to whoever was reading. That worked while a cost figure
+// meant one number at the end of a run. Part IV needs cost per token as
+// concurrency rises, which is this divided by the token counter over a
+// window, and a join of two series through a third is not something a
+// panel query should have to express (#346).
+//
+// Computed at scrape time from the current quoted rate, which is exact
+// only because the rate is fixed when the instance is rented. A provider
+// whose price moved mid-rental would have every earlier second repriced
+// retroactively here. No rental is reclaimable or spot-priced today
+// (#333), so revisit this the day one is, and not before.
+//
+// Unpriced instances are omitted for the same reason observeInstanceRates
+// omits them. Zero is a bill, and unknown is not.
+func (cr *CostRecorder) observeInstanceCost(_ context.Context, observer metric.Float64Observer) error {
+	now := time.Now()
+	for _, inst := range cr.billing() {
+		if inst.RateUSDPerHour <= 0 {
+			continue
+		}
+		spend := inst.billedSeconds(now) * inst.RateUSDPerHour / secondsPerHour
+		observer.Observe(spend, metric.WithAttributes(instanceAttrs(inst)...))
 	}
 	return nil
 }

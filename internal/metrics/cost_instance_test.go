@@ -52,6 +52,10 @@ func seriesFor(t *testing.T, rm metricdata.ResourceMetrics, name string) []attri
 				for _, dp := range d.DataPoints {
 					out = append(out, dp.Attributes)
 				}
+			case metricdata.Sum[float64]:
+				for _, dp := range d.DataPoints {
+					out = append(out, dp.Attributes)
+				}
 			case metricdata.Gauge[float64]:
 				for _, dp := range d.DataPoints {
 					out = append(out, dp.Attributes)
@@ -75,6 +79,11 @@ func valuesFor(t *testing.T, rm metricdata.ResourceMetrics, name string) map[str
 				for _, dp := range d.DataPoints {
 					id, _ := dp.Attributes.Value(attribute.Key(telemetry.LabelInstanceID))
 					out[id.AsString()] = float64(dp.Value)
+				}
+			case metricdata.Sum[float64]:
+				for _, dp := range d.DataPoints {
+					id, _ := dp.Attributes.Value(attribute.Key(telemetry.LabelInstanceID))
+					out[id.AsString()] = dp.Value
 				}
 			case metricdata.Gauge[float64]:
 				for _, dp := range d.DataPoints {

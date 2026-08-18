@@ -121,6 +121,40 @@ A worked capture, `--kv-budget-tokens 40000`, sweeping 1/4/16/64:
 Inter-token latency stays at 2.1–2.5ms throughout, which is the mock
 being honest about modelling admission and not decode contention.
 
+## Cost per token
+
+A throughput curve is only half the economic story. The other half is
+what those tokens cost, and it falls as concurrency rises because a
+batched decode step reads the active weights once and splits that read
+across every sequence in the batch.
+
+Three series carry it. `instance.uptime.seconds.total` counts billed
+seconds per rented instance, `instance.rate.usd_per_second` carries the
+price the provider quoted when the instance was rented, and
+`instance.cost.usd.total` is their product. All three are labeled
+`instance_id`, and so is `inference.tokens.generated`, so cost per
+million tokens is a division:
+
+```promql
+increase(instance_cost_usd_total[$w])
+  / increase(inference_tokens_generated[$w]) * 1e6
+```
+
+Window it, and set `$w` to the sweep's steady-state window rather than
+to the whole run. A cumulative ratio averages every concurrency level
+together and the curve disappears, which is the one thing this
+measurement exists to show. Sum the numerator and denominator across a
+heterogeneous deployment's instances before dividing, since replicas on
+two providers cost different amounts per token and the deployment's
+figure is the blend.
+
+Two things to know before reading a number off it. An instance whose
+provider quoted no rate is absent from the cost series rather than
+counted as free, so a fleet with one unpriced instance understates
+spend rather than reporting a wrong total. And the product is computed
+from the rate as quoted at rent time, which is exact today because no
+rental is spot-priced or reclaimable (#333).
+
 ## The comparison nobody has run yet
 
 `iplane model budget --sessions-at 8k,128k,1M` predicts a concurrency

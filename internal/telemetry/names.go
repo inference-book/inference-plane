@@ -30,6 +30,9 @@ const MetricGPUEffectiveRate = "gpu.effective_rate.usd_per_second"
 // MetricInferenceActiveSeconds -- Counter of seconds spent actively serving inference, labeled by the instance that served them. Divided by instance.uptime it gives utilization, and the gap between the two is what idle capacity costs.
 const MetricInferenceActiveSeconds = "inference.active.seconds.total"
 
+// MetricInstanceCost -- Counter of dollars spent per rented instance, the product of the billed seconds and the rate the provider quoted at spawn. The uptime counter and the rate gauge publish those two factors separately, and this series publishes what they multiply to, so a cost figure no longer has to be assembled by hand. An instance whose provider reported no rate is omitted rather than reported as zero, because zero and unknown are not the same bill. Cost per million tokens divides this by the token counter, which carries the same instance_id: increase(instance_cost_usd_total[w]) / increase(inference_tokens_generated[w]) * 1e6. That ratio has to be windowed rather than cumulative. A lifetime average smears every concurrency level together, and the curve across those levels is what Part IV measures.
+const MetricInstanceCost = "instance.cost.usd.total"
+
 // MetricInstanceRate -- Gauge of the per-second price of one rented instance, from the rate the provider quoted at spawn. Joins instance.uptime on instance_id to give spend, which is the figure a cost argument is actually made from. Distinct from gpu.effective_rate, which prices the catalog rather than the fleet.
 const MetricInstanceRate = "instance.rate.usd_per_second"
 
