@@ -44,6 +44,7 @@ func EnginePlan(args []string, par *provisionerv1.Parallelism) (plan vrambudget.
 		Weights:  vrambudget.PrecisionFP16,
 		MaxBatch: 1,
 		TPSize:   par.GetTensorParallelSize(),
+		EPSize:   par.GetExpertParallelSize(),
 	}
 
 	for i := 0; i < len(args); i++ {

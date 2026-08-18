@@ -219,6 +219,17 @@ type Plan struct {
 	// TPSize is how many cards one engine shards across. 0 and 1 both
 	// mean a single card.
 	TPSize int32
+
+	// EPSize is how many ways the routed experts are spread, where that
+	// differs from the tensor split. 0 means the two are the same, which
+	// is every plan that asked for no expert parallelism.
+	//
+	// The two dimensions divide different parts of the model. Expert
+	// parallelism gives each rank whole experts and replicates everything
+	// else, so a plan running tp=1 with the width carried by data
+	// parallelism holds one eighth of the experts and a whole copy of the
+	// attention, the embeddings and the dense layers, on every card.
+	EPSize int32
 }
 
 // cacheDtype resolves the cache precision, defaulting to the weights'.
@@ -227,6 +238,15 @@ func (p Plan) cacheDtype() Precision {
 		return p.Weights
 	}
 	return p.KVCache
+}
+
+// expertCards is how many ways the routed experts divide, defaulting to
+// the tensor split when no expert parallelism was asked for.
+func (p Plan) expertCards() int32 {
+	if p.EPSize < 1 {
+		return p.cards()
+	}
+	return p.EPSize
 }
 
 // cards normalises TPSize so 0 and 1 both mean one card.
@@ -479,7 +499,18 @@ func Compute(a *Arch, p Plan) (Budget, error) {
 
 	// Weights: parameters times bytes per parameter. The one term that is
 	// exact and known before the engine starts.
-	weights := float64(a.GetParams()) * p.Weights.BytesPerParam()
+	//
+	// Split by what shards where. The routed experts divide across the
+	// expert ranks; everything else divides across the tensor ranks and
+	// is replicated over the rest. The two are the same number unless a
+	// plan asked for expert parallelism, which is why every existing plan
+	// computes what it computed before.
+	bytesPerParam := p.Weights.BytesPerParam()
+	routed := RoutedExpertParams(a)
+	weightBytesPerCard := int64(
+		float64(a.GetParams()-routed)*bytesPerParam/float64(cards) +
+			float64(routed)*bytesPerParam/float64(p.expertCards()),
+	)
 
 	// KV cache: the state one token contributes at each caching layer,
 	// summed over those layers, times the bytes per element the cache
@@ -510,7 +541,7 @@ func Compute(a *Arch, p Plan) (Budget, error) {
 
 	b := Budget{
 		Cards:           cards,
-		WeightBytes:     perCard(weights),
+		WeightBytes:     weightBytesPerCard,
 		KVBytes:         kvPerCard,
 		ActivationBytes: perCard(activations),
 		KVBytesPerToken: perToken,
