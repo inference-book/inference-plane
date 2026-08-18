@@ -181,6 +181,20 @@ one that turns the curve into the book's economic result), sweep output
 as a committed data artifact (#347), the cost-versus-concurrency Grafana
 panel (#348), `--ep` (#342) and the expert-divisibility check (#343).
 
+### Phase 2 — GLM-5.2, single node
+
+**Whole-node rental verified 2026-08-18 (#349), and it needed no code.**
+`gpu_count` already means N cards on one machine and
+`FABRIC_SCOPE_INTRA_NODE` already means they share a fast link, so asking
+for both is asking for a whole node. RunPod and Vast each offered an
+8-card intra-node box for the request, RunPod declaring the fabric from
+the SKU name and Vast measuring it per offer. Lambda offered nothing, and
+the cause is our own catalog rather than the vendor: its rows are the only
+ones describing a whole instance, and all seven are single-GPU, so the
+resolver excludes every shape before the adapter asks (#380). Findings and
+the captured output are in
+[docs/design/0008-whole-node-rental.md](docs/design/0008-whole-node-rental.md).
+
 ### What has not been tested against hardware
 
 Everything above is arithmetic and a mock. Two claims in particular are
