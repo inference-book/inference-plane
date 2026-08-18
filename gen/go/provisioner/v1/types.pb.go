@@ -2504,8 +2504,24 @@ type Parallelism struct {
 	// micro-batch boundary rather than per layer, which is why this is
 	// the split that tolerates a slower link between nodes.
 	PipelineParallelSize int32 `protobuf:"varint,2,opt,name=pipeline_parallel_size,json=pipelineParallelSize,proto3" json:"pipeline_parallel_size,omitempty"`
-	unknownFields        protoimpl.UnknownFields
-	sizeCache            protoimpl.SizeCache
+	// Ways the routed experts of a mixture-of-experts model are spread
+	// across cards. Each rank owns whole experts rather than a slice of
+	// every expert, so the per-layer exchange becomes a routed all-to-all
+	// of tokens instead of an all-reduce of activations.
+	//
+	// Declared as a degree, and no engine takes it as one. vLLM switches
+	// expert parallelism on with a boolean and derives the degree as
+	// tensor_parallel_size x data_parallel_size, so this field is what the
+	// operator asked for and the data-parallel width is computed from it.
+	// Storing that computed width here too would be two spellings of one
+	// fact; it is visible on engine_args, which is where every other flag
+	// the engine was given already is.
+	//
+	// Zero means the operator asked for no expert parallelism, which is
+	// also the only sensible request for a dense model.
+	ExpertParallelSize int32 `protobuf:"varint,3,opt,name=expert_parallel_size,json=expertParallelSize,proto3" json:"expert_parallel_size,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *Parallelism) Reset() {
@@ -2548,6 +2564,13 @@ func (x *Parallelism) GetTensorParallelSize() int32 {
 func (x *Parallelism) GetPipelineParallelSize() int32 {
 	if x != nil {
 		return x.PipelineParallelSize
+	}
+	return 0
+}
+
+func (x *Parallelism) GetExpertParallelSize() int32 {
+	if x != nil {
+		return x.ExpertParallelSize
 	}
 	return 0
 }
@@ -3698,10 +3721,11 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"considered\x18\x03 \x01(\x05R\n" +
 	"considered\x128\n" +
 	"\aanswers\x18\x04 \x03(\v2\x1e.provisioner.v1.ProviderAnswerR\aanswers\x12C\n" +
-	"\rcomparability\x18\x05 \x01(\v2\x1d.provisioner.v1.ComparabilityR\rcomparability\"u\n" +
+	"\rcomparability\x18\x05 \x01(\v2\x1d.provisioner.v1.ComparabilityR\rcomparability\"\xa7\x01\n" +
 	"\vParallelism\x120\n" +
 	"\x14tensor_parallel_size\x18\x01 \x01(\x05R\x12tensorParallelSize\x124\n" +
-	"\x16pipeline_parallel_size\x18\x02 \x01(\x05R\x14pipelineParallelSize\"f\n" +
+	"\x16pipeline_parallel_size\x18\x02 \x01(\x05R\x14pipelineParallelSize\x120\n" +
+	"\x14expert_parallel_size\x18\x03 \x01(\x05R\x12expertParallelSize\"f\n" +
 	"\fUpstreamAuth\x12\x16\n" +
 	"\x06header\x18\x01 \x01(\tR\x06header\x12\x1b\n" +
 	"\tvalue_env\x18\x02 \x01(\tR\bvalueEnv\x12!\n" +

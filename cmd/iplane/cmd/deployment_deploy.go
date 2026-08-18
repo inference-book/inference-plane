@@ -46,6 +46,7 @@ var (
 	deployAuthEnv         string
 	deployTP              int32
 	deployPP              int32
+	deployEP              int32
 	deployAuthHeader      string
 	deployAuthPrefix      string
 	deployGPUCount        int32
@@ -199,10 +200,11 @@ func runDeploymentDeploy(cmd *cobra.Command, args []string) error {
 	// Only the NAME of the variable travels. The credential is read by the
 	// daemon at forward time, so it never reaches the state file or a
 	// DescribeDeployment response.
-	if deployTP > 0 || deployPP > 0 {
+	if deployTP > 0 || deployPP > 0 || deployEP > 0 {
 		dep.Parallelism = &provisionerv1.Parallelism{
 			TensorParallelSize:   deployTP,
 			PipelineParallelSize: deployPP,
+			ExpertParallelSize:   deployEP,
 		}
 	}
 	if deployAuthEnv != "" {
@@ -316,6 +318,9 @@ func init() {
 	f.Int32Var(&deployMinRAM, "min-ram-gb", 0, `minimum system RAM for auto-provisioning, in GB`)
 	f.Int32Var(&deployTP, "tp", 0, `tensor-parallel size: cards one layer is sharded across. Must fit --gpu-count`)
 	f.Int32Var(&deployPP, "pp", 0, `pipeline-parallel size: stages the layers are split into. Must fit --gpu-count alongside --tp`)
+	f.Int32Var(&deployEP, "ep", 0, `expert-parallel size: ways a mixture-of-experts model's routed experts are spread across cards. `+
+		`No engine takes this as a degree, so it is translated: vLLM derives the expert degree as tp x data-parallel-size, `+
+		`so --ep 8 --tp 1 becomes --data-parallel-size=8 --enable-expert-parallel. Must be divisible by --tp, and tp x pp x (ep/tp) must fit --gpu-count`)
 	f.StringVar(&deployAuthEnv, "upstream-auth-env", "", `name of the env var holding the credential the router presents to an attached engine (hosted APIs behind a gateway)`)
 	f.StringVar(&deployAuthHeader, "upstream-auth-header", "", `header to carry the credential (default Authorization)`)
 	f.StringVar(&deployAuthPrefix, "upstream-auth-prefix", "", `prefix joined to the credential (default "Bearer " when the header is Authorization)`)

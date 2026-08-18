@@ -919,6 +919,23 @@ message Parallelism {
   // micro-batch boundary rather than per layer, which is why this is
   // the split that tolerates a slower link between nodes.
   int32 pipeline_parallel_size = 2;
+
+  // Ways the routed experts of a mixture-of-experts model are spread
+  // across cards. Each rank owns whole experts rather than a slice of
+  // every expert, so the per-layer exchange becomes a routed all-to-all
+  // of tokens instead of an all-reduce of activations.
+  //
+  // Declared as a degree, and no engine takes it as one. vLLM switches
+  // expert parallelism on with a boolean and derives the degree as
+  // tensor_parallel_size x data_parallel_size, so this field is what the
+  // operator asked for and the data-parallel width is computed from it.
+  // Storing that computed width here too would be two spellings of one
+  // fact; it is visible on engine_args, which is where every other flag
+  // the engine was given already is.
+  //
+  // Zero means the operator asked for no expert parallelism, which is
+  // also the only sensible request for a dense model.
+  int32 expert_parallel_size = 3;
 }
 
 // UpstreamAuth names a credential without carrying it.

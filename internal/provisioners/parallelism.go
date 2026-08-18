@@ -21,6 +21,14 @@ import (
 const (
 	vllmTensorParallelFlag   = "--tensor-parallel-size"
 	vllmPipelineParallelFlag = "--pipeline-parallel-size"
+	vllmDataParallelFlag     = "--data-parallel-size"
+
+	// Expert parallelism is a boolean here, not a degree. vLLM computes
+	// the degree as tensor_parallel_size x data_parallel_size, so asking
+	// for a width means setting those and switching this on. There is no
+	// --expert-parallel-size to emit, and emitting one fails the engine's
+	// argument parse on a machine that is already billing.
+	vllmEnableExpertParallelFlag = "--enable-expert-parallel"
 )
 
 // ValidateParallelism checks that a requested split fits the cards the
@@ -49,12 +57,12 @@ const (
 // control plane never reads them, and guessing would reject valid deployments
 // on a rule it cannot actually evaluate.
 func ValidateParallelism(p *provisionerv1.Parallelism, gpuCount int32, cardsKnown bool) ([]string, error) {
-	tp, pp := p.GetTensorParallelSize(), p.GetPipelineParallelSize()
-	if tp == 0 && pp == 0 {
+	tp, pp, ep := p.GetTensorParallelSize(), p.GetPipelineParallelSize(), p.GetExpertParallelSize()
+	if tp == 0 && pp == 0 && ep == 0 {
 		return nil, nil
 	}
-	if tp < 0 || pp < 0 {
-		return nil, fmt.Errorf("parallelism: sizes cannot be negative (tp=%d, pp=%d)", tp, pp)
+	if tp < 0 || pp < 0 || ep < 0 {
+		return nil, fmt.Errorf("parallelism: sizes cannot be negative (tp=%d, pp=%d, ep=%d)", tp, pp, ep)
 	}
 	// An unset dimension is one way, not zero ways.
 	if tp == 0 {
@@ -64,32 +72,79 @@ func ValidateParallelism(p *provisionerv1.Parallelism, gpuCount int32, cardsKnow
 		pp = 1
 	}
 
+	dp, err := dataParallelWidth(tp, ep)
+	if err != nil {
+		return nil, err
+	}
+
 	if !cardsKnown {
-		return parallelismArgs(tp, pp), nil
+		return parallelismArgs(tp, pp, dp, ep), nil
 	}
 	cards := gpuCount
 	if cards <= 0 {
 		cards = 1
 	}
-	if want := tp * pp; want > cards {
+	// dp multiplies alongside the other two. Each data-parallel rank is a
+	// whole engine replica holding its own share of the experts, so tp=1
+	// with ep=8 occupies eight cards even though the tensor split is one
+	// way, and counting only tp x pp would call that one card.
+	if want := tp * pp * dp; want > cards {
 		return nil, fmt.Errorf(
-			"parallelism: tensor_parallel_size %d x pipeline_parallel_size %d needs %d cards and the deployment asks for %d; "+
-				"raise --gpu-count or lower the split (a split cannot span instances yet)",
-			tp, pp, want, cards)
+			"parallelism: tensor_parallel_size %d x pipeline_parallel_size %d x data_parallel_size %d needs %d cards "+
+				"and the deployment asks for %d; raise --gpu-count or lower the split (a split cannot span instances yet)",
+			tp, pp, dp, want, cards)
 	}
 
-	return parallelismArgs(tp, pp), nil
+	return parallelismArgs(tp, pp, dp, ep), nil
+}
+
+// dataParallelWidth turns a requested expert-parallel degree into the
+// data-parallel width that produces it.
+//
+// vLLM derives the expert-parallel degree as tensor_parallel_size x
+// data_parallel_size, so the width is ep/tp and the division has to come
+// out whole. An operator asking to spread 8 experts across a 3-way tensor
+// split is describing something no engine can arrange, and the engine
+// would only say so once it had started.
+//
+// Returns 1 when no expert parallelism was asked for, which is what an
+// engine assumes and what makes the card arithmetic above unchanged for
+// every dense deployment.
+func dataParallelWidth(tp, ep int32) (int32, error) {
+	if ep <= 1 {
+		return 1, nil
+	}
+	if ep%tp != 0 {
+		return 0, fmt.Errorf(
+			"parallelism: expert_parallel_size %d is not divisible by tensor_parallel_size %d, "+
+				"and an engine derives the expert degree as tp x data_parallel_size, so there is no whole "+
+				"data-parallel width that gives %d; pick an expert size that %d divides",
+			ep, tp, ep, tp)
+	}
+	return ep / tp, nil
 }
 
 // parallelismArgs renders the split as engine flags, omitting a one-way
 // dimension because that is what the engine does unasked.
-func parallelismArgs(tp, pp int32) []string {
+//
+// The tensor size is emitted even at one way when expert parallelism is on.
+// The engine's behaviour differs between a one-way tensor split and an
+// unstated one under EP (attention replicates across data-parallel ranks
+// rather than sharding), so leaving it out would ask for a different
+// arrangement than the operator described.
+func parallelismArgs(tp, pp, dp, ep int32) []string {
 	var args []string
-	if tp > 1 {
+	if tp > 1 || ep > 1 {
 		args = append(args, fmt.Sprintf("%s=%d", vllmTensorParallelFlag, tp))
 	}
 	if pp > 1 {
 		args = append(args, fmt.Sprintf("%s=%d", vllmPipelineParallelFlag, pp))
+	}
+	if dp > 1 {
+		args = append(args, fmt.Sprintf("%s=%d", vllmDataParallelFlag, dp))
+	}
+	if ep > 1 {
+		args = append(args, vllmEnableExpertParallelFlag)
 	}
 	return args
 }
