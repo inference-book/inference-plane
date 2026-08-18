@@ -2,12 +2,14 @@ package cmd
 
 import (
 	"context"
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"io"
 	"math"
 	"net/http"
 	"os"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -15,6 +17,9 @@ import (
 	"sync/atomic"
 	"text/tabwriter"
 	"time"
+
+	"github.com/inference-book/inference-plane/gen/go/provisioner/v1/provisionerv1connect"
+	"github.com/inference-book/inference-plane/internal/version"
 )
 
 // Sweep mode drives a concurrency ladder rather than a fixed rate.
@@ -100,14 +105,48 @@ type sweepLevel struct {
 
 // sweepReport is the machine-readable form, and the artifact a figure
 // gets drawn from.
+//
+// Part IV's figures cost thousands of dollars of rented hardware to
+// reproduce, so a number that reaches a caption by being retyped out of a
+// terminal is a number nobody can check. Everything here is written so a
+// figure regenerates from the file: the measurements, and enough about
+// the run to say what was measured and on what.
+//
+// SchemaVersion exists because the book will read files produced by
+// whatever iplane looked like when each run happened. Bump it when a
+// column changes meaning, and never when one is added.
 type sweepReport struct {
-	Model          string       `json:"model"`
-	Endpoint       string       `json:"endpoint"`
-	MaxTokens      int          `json:"max_tokens"`
-	Stream         bool         `json:"stream"`
-	MeasureSeconds float64      `json:"measure_seconds"`
-	Levels         []sweepLevel `json:"levels"`
+	SchemaVersion int    `json:"schema_version"`
+	CapturedAt    string `json:"captured_at"`
+	IplaneVersion string `json:"iplane_version"`
+
+	Model    string `json:"model"`
+	Endpoint string `json:"endpoint"`
+	DeployID string `json:"deploy_id,omitempty"`
+
+	// What the control plane knows about the hardware. Empty when the
+	// sweep drove a bare URL, since then nothing was asked.
+	Fleet fleetProvenance `json:"fleet"`
+
+	// The request shape, which sets where the concurrency ceiling lands.
+	// PromptTokens especially: the ceiling falls as context rises, so a
+	// curve without it is a curve nobody can place.
+	PromptTokens int  `json:"prompt_tokens"`
+	MaxTokens    int  `json:"max_tokens"`
+	Stream       bool `json:"stream"`
+
+	// The method, so a reader can tell a settled measurement from a
+	// hurried one without being told.
+	MeasureSeconds float64 `json:"measure_seconds"`
+	WindowSeconds  float64 `json:"window_seconds"`
+	Tolerance      float64 `json:"tolerance"`
+	StableWindows  int     `json:"stable_windows"`
+
+	Levels []sweepLevel `json:"levels"`
 }
+
+// sweepSchemaVersion is the artifact's contract with the book.
+const sweepSchemaVersion = 1
 
 // parseSweepLevels reads the ladder.
 //
@@ -258,11 +297,20 @@ func runLoadSweep(ctx context.Context, out io.Writer) error {
 		levels, loadSweepDuration, base)
 
 	report := sweepReport{
+		SchemaVersion:  sweepSchemaVersion,
+		CapturedAt:     time.Now().UTC().Format(time.RFC3339),
+		IplaneVersion:  version.Version,
 		Model:          loadModel,
 		Endpoint:       base,
+		DeployID:       loadTarget,
+		PromptTokens:   loadPromptTokens,
 		MaxTokens:      loadMaxTokens,
 		Stream:         loadStream,
 		MeasureSeconds: loadSweepDuration.Seconds(),
+		WindowSeconds:  loadSweepWindow.Seconds(),
+		Tolerance:      loadSweepTolerance,
+		StableWindows:  loadSweepStableRuns,
+		Fleet:          sweepFleetProvenance(ctx),
 	}
 	for _, n := range levels {
 		lvl, err := measureSweepLevel(ctx, client, &cfg, n)
@@ -276,13 +324,43 @@ func runLoadSweep(ctx context.Context, out io.Writer) error {
 		}
 	}
 
-	if loadOutput == outputJSON {
+	switch loadOutput {
+	case outputJSON:
 		enc := json.NewEncoder(out)
 		enc.SetIndent("", "  ")
 		return enc.Encode(report)
+	case outputCSV:
+		return writeSweepCSV(out, report)
 	}
 	writeSweepTable(os.Stderr, report)
 	return nil
+}
+
+// sweepFleetProvenance asks the control plane what hardware this sweep is
+// about to measure.
+//
+// Only in --target mode, because that is the only mode where a deployment
+// id exists to ask about. A sweep against a bare URL leaves the fields
+// empty, which reads as "nobody asked" rather than as a claim.
+//
+// Failure is reported and then ignored. A sweep about to spend an hour of
+// rented time must not be refused because a metadata read did not answer,
+// and a file missing its hardware block is recoverable in a way a run
+// that never happened is not.
+func sweepFleetProvenance(ctx context.Context) fleetProvenance {
+	if loadTarget == "" || loadServiceURL == "" {
+		return fleetProvenance{}
+	}
+	base := strings.TrimRight(loadServiceURL, "/")
+	dc := &connectDeploymentClient{c: provisionerv1connect.NewDeploymentServiceClient(http.DefaultClient, base)}
+	ic := &connectProvisionerClient{c: provisionerv1connect.NewProvisionerServiceClient(http.DefaultClient, base)}
+
+	fleet, err := describeFleet(ctx, dc, ic, loadTarget)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not describe %q, the artifact will name no hardware: %v\n", loadTarget, err)
+		return fleetProvenance{}
+	}
+	return fleet
 }
 
 // measureSweepLevel holds exactly n requests in flight, waits for the
@@ -469,4 +547,128 @@ func steadyLabel(ok bool) string {
 		return "yes"
 	}
 	return "no"
+}
+
+// sweepCSVColumns and sweepCSVRow derive the CSV shape from sweepLevel's
+// own json tags, in declaration order.
+//
+// Reflected rather than written out twice so the two artifacts cannot
+// disagree. A field added to sweepLevel appears in both files with the
+// same name, and a field renamed in one is renamed in both, which is the
+// property that lets a figure read either format and get the same
+// columns. Adding a column is safe for a reader keyed by name; changing
+// what one means is what sweepSchemaVersion is for.
+func sweepCSVColumns() []string {
+	t := reflect.TypeOf(sweepLevel{})
+	out := make([]string, 0, t.NumField())
+	for i := 0; i < t.NumField(); i++ {
+		out = append(out, jsonFieldName(t.Field(i)))
+	}
+	return out
+}
+
+func sweepCSVRow(l sweepLevel) []string {
+	v := reflect.ValueOf(l)
+	out := make([]string, 0, v.NumField())
+	for i := 0; i < v.NumField(); i++ {
+		out = append(out, csvScalar(v.Field(i)))
+	}
+	return out
+}
+
+// jsonFieldName reads the tag, falling back to the Go name for a field
+// that never got one.
+func jsonFieldName(f reflect.StructField) string {
+	tag := f.Tag.Get("json")
+	if tag == "" {
+		return f.Name
+	}
+	if i := strings.IndexByte(tag, ','); i >= 0 {
+		tag = tag[:i]
+	}
+	if tag == "" {
+		return f.Name
+	}
+	return tag
+}
+
+// csvScalar renders one value. Floats use the shortest representation
+// that round-trips, so a figure reads the measured number rather than a
+// rounded one, and an integral float does not grow a decimal point.
+func csvScalar(v reflect.Value) string {
+	switch v.Kind() {
+	case reflect.Bool:
+		return strconv.FormatBool(v.Bool())
+	case reflect.Int, reflect.Int32, reflect.Int64:
+		return strconv.FormatInt(v.Int(), 10)
+	case reflect.Float32, reflect.Float64:
+		return strconv.FormatFloat(v.Float(), 'f', -1, 64)
+	default:
+		return fmt.Sprint(v.Interface())
+	}
+}
+
+// writeSweepCSV emits the ladder as one row per level, with the run's
+// provenance as leading comment lines.
+//
+// Comments rather than extra columns, because the provenance is constant
+// down the file and pgfplots wants a rectangle of numbers. Read it with
+// `comment chars=#`, which is the default for \pgfplotstableread.
+func writeSweepCSV(w io.Writer, r sweepReport) error {
+	for _, line := range sweepCSVPreamble(r) {
+		if _, err := fmt.Fprintf(w, "# %s\n", line); err != nil {
+			return err
+		}
+	}
+	cw := csv.NewWriter(w)
+	if err := cw.Write(sweepCSVColumns()); err != nil {
+		return err
+	}
+	for _, lvl := range r.Levels {
+		if err := cw.Write(sweepCSVRow(lvl)); err != nil {
+			return err
+		}
+	}
+	cw.Flush()
+	return cw.Error()
+}
+
+// sweepCSVPreamble is the provenance block, as `key value` lines. Same
+// facts the JSON carries as fields, in a form a comment-stripping reader
+// ignores and a human reading the file head does not.
+func sweepCSVPreamble(r sweepReport) []string {
+	lines := []string{
+		fmt.Sprintf("schema_version %d", r.SchemaVersion),
+		fmt.Sprintf("captured_at %s", r.CapturedAt),
+		fmt.Sprintf("iplane_version %s", r.IplaneVersion),
+		fmt.Sprintf("model %s", r.Model),
+		fmt.Sprintf("endpoint %s", r.Endpoint),
+	}
+	if r.DeployID != "" {
+		lines = append(lines, fmt.Sprintf("deploy_id %s", r.DeployID))
+	}
+	if r.Fleet.Provider != "" {
+		lines = append(lines, fmt.Sprintf("provider %s", r.Fleet.Provider))
+	}
+	if r.Fleet.GPUSKU != "" {
+		lines = append(lines, fmt.Sprintf("gpu_sku %s", r.Fleet.GPUSKU))
+	}
+	if r.Fleet.GPUCount > 0 {
+		lines = append(lines, fmt.Sprintf("gpu_count %d", r.Fleet.GPUCount))
+	}
+	if r.Fleet.Replicas > 0 {
+		lines = append(lines, fmt.Sprintf("replicas %d", r.Fleet.Replicas))
+	}
+	if r.Fleet.Plan != "" {
+		lines = append(lines, fmt.Sprintf("plan %s", r.Fleet.Plan))
+	}
+	return append(lines,
+		fmt.Sprintf("prompt_tokens %d", r.PromptTokens),
+		fmt.Sprintf("max_tokens %d", r.MaxTokens),
+		fmt.Sprintf("stream %t", r.Stream),
+		fmt.Sprintf("measure_seconds %g", r.MeasureSeconds),
+		fmt.Sprintf("window_seconds %g", r.WindowSeconds),
+		fmt.Sprintf("tolerance %g", r.Tolerance),
+		fmt.Sprintf("stable_windows %d", r.StableWindows),
+	)
 }

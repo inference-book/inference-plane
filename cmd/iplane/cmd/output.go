@@ -19,6 +19,7 @@ import (
 const (
 	outputTable = "table"
 	outputJSON  = "json"
+	outputCSV   = "csv"
 )
 
 // renderInstance writes one Instance using the operator's chosen

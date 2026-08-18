@@ -121,6 +121,63 @@ A worked capture, `--kv-budget-tokens 40000`, sweeping 1/4/16/64:
 Inter-token latency stays at 2.1–2.5ms throughout, which is the mock
 being honest about modelling admission and not decode contention.
 
+## The sweep as a data artifact
+
+A Part IV figure costs thousands of dollars of rented hardware to
+reproduce, so no number in one should reach a caption by being retyped
+out of a terminal. `--output json` and `--output csv` write the sweep to
+stdout while the human table goes to stderr, so a plain redirect captures
+data and nothing else.
+
+```
+iplane load --sweep 1,2,4,8,16 --target glm --service-url http://localhost:8080 \
+  --model zai-org/GLM-5.2 --prompt-tokens 8000 --stream \
+  --output csv > figures/glm-8k.csv
+```
+
+CSV is one row per level with the columns derived from the same struct
+tags the JSON uses, so the two formats always carry the same column names
+and a figure can read either. The provenance sits in leading `#` comment
+lines rather than in repeated columns, since it is constant down the file
+and pgfplots wants a rectangle of numbers. `\pgfplotstableread` skips
+those lines by default.
+
+```
+# schema_version 1
+# captured_at 2026-08-18T17:14:03Z
+# iplane_version v0.4.0
+# model zai-org/GLM-5.2
+# provider runpod
+# gpu_sku B200
+# gpu_count 4
+# plan tp4
+# prompt_tokens 8000
+concurrency,achieved_batch,requests_per_sec,tokens_per_sec,...
+1,0.96,9.99,772.3,...
+```
+
+`schema_version` is the contract. It gets bumped when a column changes
+meaning and never when one is added, so a reader keyed by column name
+keeps working as the sweep grows fields.
+
+The hardware block comes from the control plane rather than from flags.
+In `--target` mode the sweep reads the deployment and each instance
+behind it, so `provider`, `gpu_sku`, `gpu_count` and `plan` describe what
+was actually rented instead of what somebody typed. A deployment spanning
+two providers reports both, joined, because collapsing to one would
+describe a run that did not happen. Driving a bare `--url` leaves the
+block empty, which reads as nobody having asked.
+
+If that read fails, the sweep warns and keeps going. A run about to spend
+an hour of rented time is not worth refusing over a metadata lookup, and
+a file missing its hardware block can be annotated later in a way a run
+that never happened cannot.
+
+One thing to remember about `iplane_version`: it is the linker stamp, so
+`make build` and `make dist` record a real version while `go run
+./cmd/iplane` records `dev`. Use a built binary for anything whose numbers
+will end up in a figure.
+
 ## Cost per token
 
 A throughput curve is only half the economic story. The other half is

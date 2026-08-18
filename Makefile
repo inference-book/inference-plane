@@ -11,9 +11,13 @@ install:
 	@echo "installed to $$(go env GOBIN || echo $$(go env GOPATH)/bin)/$(BINARY)"
 
 # ── Local code ──────────────────────────────────────────────────────────
-build: ## Compile the iplane binary into bin/
+# Stamped, because `iplane load --sweep` records the build that produced
+# a measurement and an unstamped binary writes "dev" into a data artifact
+# a book figure is drawn from (#347). No -s -w here, unlike dist: a local
+# binary is one somebody may want to attach a debugger to.
+build: ## Compile the iplane binary into bin/ (version stamped)
 	@mkdir -p bin
-	go build -o bin/iplane ./cmd/iplane
+	go build -ldflags "$(VERSION_LDFLAGS)" -o bin/iplane ./cmd/iplane
 
 # ── Release artifacts ───────────────────────────────────────────────────
 # VERSION is stamped into the binary at link time. It defaults to the
@@ -21,7 +25,8 @@ build: ## Compile the iplane binary into bin/
 # something identifiable, and the release workflow overrides it with the
 # tag being built.
 VERSION    ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
-LDFLAGS    := -s -w -X github.com/inference-book/inference-plane/internal/version.Version=$(VERSION)
+VERSION_LDFLAGS := -X github.com/inference-book/inference-plane/internal/version.Version=$(VERSION)
+LDFLAGS    := -s -w $(VERSION_LDFLAGS)
 DIST_PLATFORMS := linux/amd64 linux/arm64
 
 # Linux binaries exist for one reason: the engine agent runs inside an
