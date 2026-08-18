@@ -50,7 +50,18 @@ func (s *Service) budgetCheck(ctx context.Context, req *provisionerv1.CreateDepl
 		s.logBudgetSkip(dep.GetId(), "no exact per-card capacity is recorded for the requested SKU")
 		return nil
 	}
-	if cards > 0 {
+	// The card count stands in for the tensor split, because a deployment
+	// that named no split is still going to be sized against the box it
+	// rents. That substitution is wrong the moment expert parallelism is
+	// involved: there the width is carried by data-parallel ranks, each
+	// holding whole experts and a full copy of everything else, so
+	// dividing the whole model by the card count understates the
+	// replicated part by the data-parallel width (#376).
+	//
+	// So the substitution stays for every plan that declared no expert
+	// size, which is every deployment that existed before --ep, and a plan
+	// that did declare one is sized against what it actually declared.
+	if cards > 0 && plan.EPSize <= 1 {
 		plan.TPSize = cards
 	}
 

@@ -134,3 +134,43 @@ func TestTheExpertSplitReachesTheBudget(t *testing.T) {
 }
 
 var _ = provisioners.ValidateExpertShape
+
+// TestTheExpertSplitChangesWhatTheBudgetSizes is the deploy-path half of
+// #376. Under tp=1 the eight-card width is carried by data-parallel ranks,
+// each holding whole experts and a full copy of the attention and the
+// embeddings, so the same plan needs materially more per card than the old
+// divide-everything-by-eight arithmetic said.
+func TestTheExpertSplitChangesWhatTheBudgetSizes(t *testing.T) {
+	// Eight 80 GB cards at a batch of 32. The old arithmetic put this at
+	// 76.0 GB per card and let it through; the corrected one puts it at
+	// 91.7 and refuses. That gap is the whole ticket, and it is the
+	// direction that rents hardware which then runs out of memory.
+	p := &capacityProvider{Provider: local.New(), name: "cap", bytes: a100Bytes}
+	svc := budgetService(t, p, glm52Arch)
+
+	req := moeDeployReq("glm", []string{"--quantization=mxfp4", "--max-model-len=8192", "--max-num-seqs=32"}, 8)
+	req.Deployment.Parallelism = &provisionerv1.Parallelism{TensorParallelSize: 1, ExpertParallelSize: 8}
+
+	_, err := svc.CreateDeployment(context.Background(), req)
+	if err == nil {
+		t.Fatal("accepted an expert-parallel plan whose replicated weights do not fit 80 GB cards")
+	}
+	if got := p.spawnCalls.Load(); got != 0 {
+		t.Errorf("provider spawned %d instance(s) before refusing", got)
+	}
+}
+
+// TestADeploymentWithNoExpertSplitIsSizedAsBefore pins the compatibility
+// promise. The card count still stands in for the tensor split everywhere
+// that expert parallelism was not asked for.
+func TestADeploymentWithNoExpertSplitIsSizedAsBefore(t *testing.T) {
+	p := &capacityProvider{Provider: local.New(), name: "cap", bytes: a100Bytes}
+	svc := budgetService(t, p, glm52Arch)
+
+	// The same plan that the expert-parallel case above is refused for.
+	// Naming no split still means sized against the box, so it fits.
+	if _, err := svc.CreateDeployment(context.Background(),
+		moeDeployReq("glm", []string{"--quantization=mxfp4", "--max-model-len=8192", "--max-num-seqs=32"}, 8)); err != nil {
+		t.Fatalf("a deployment naming no split is now refused: %v", err)
+	}
+}

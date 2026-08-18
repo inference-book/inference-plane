@@ -215,3 +215,52 @@ precision to either is quantizing twice. Tracked as #382; nothing in this
 package guards it yet, so a budget taken against a community 4-bit repo is
 not trustworthy today.
 
+## Two sharding dimensions, and they divide different parts of the model
+
+`Plan` carries `TPSize` and `EPSize` because tensor parallelism and expert
+parallelism do not shard the same thing. Tensor ranks each hold a slice of
+every weight. Expert ranks each hold *whole experts* and a full copy of
+everything else, so a plan running `tp=1` with the width carried by data
+parallelism holds one eighth of the routed experts and a whole copy of the
+attention, the embeddings and the dense layers, on every card.
+
+`Compute` splits the weight term accordingly: `RoutedExpertParams` over
+`EPSize`, the remainder over `TPSize`. `EPSize` at zero falls back to the
+tensor width, so every plan that asked for no expert parallelism computes
+what it always did.
+
+The size of the error this fixes, GLM-5.2 at mxfp4 on eight 80 GB cards:
+
+| plan | per card | verdict |
+| --- | --- | --- |
+| `tp=8` | 65.3 GB | fits |
+| `tp=1, ep=8`, before | 65.3 GB | fits, wrongly |
+| `tp=1, ep=8`, after | 77.3 GB | tight, against 77.3 usable |
+
+The corrected figure lands on the boundary almost exactly, which is worth
+knowing before reading much into either side of it.
+
+### The cache under data parallelism is still wrong, in the safe direction
+
+`LatentCache` replicates the cache on every card, and that is right under
+*tensor* parallelism, where every rank works the same sequence and needs
+that sequence's whole latent. Under *data* parallelism the ranks work
+different sequences, so each holds only its own share and the per-card
+cache should divide by the data-parallel width.
+
+Left alone deliberately. The error overstates the cache, so it refuses
+plans that would have fit, where the weight error understated and rented
+hardware that then runs out of memory. A budget that is wrong should be
+wrong in the direction that costs nothing. Worth fixing when a real run
+makes the refusals bite; the reasoning is here so nobody has to derive it
+twice.
+
+### None of this has met hardware
+
+The split follows vLLM's documented behaviour (`docs/serving/expert_parallel_deployment.md`,
+v0.26.0): expert layers shard across all EP ranks, attention replicates
+across data-parallel ranks when TP is 1 and shards when it is greater. The
+mixed case (`tp=2, ep=8`, so `dp=4`) follows from the same rule and has
+never been checked against a running engine. Same standing as the
+MLA-replication claim above: a reading, not a measurement.
+
