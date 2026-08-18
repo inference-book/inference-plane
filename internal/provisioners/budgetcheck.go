@@ -54,21 +54,12 @@ func (s *Service) budgetCheck(ctx context.Context, req *provisionerv1.CreateDepl
 		plan.TPSize = cards
 	}
 
-	src, ok := s.modelStore.(modelstores.ArchitectureSource)
-	if !ok {
-		return nil
-	}
-	resp, err := src.Architecture(ctx, &provisionerv1.DescribeModelRequest{ModelSpec: dep.GetModel()})
-	if err != nil {
-		// The model store already gated the spec at the pre-flight above.
-		// A shape it cannot read here is a model the hub describes
-		// incompletely, which is a reason to stop checking rather than a
-		// reason to stop deploying.
-		s.logBudgetSkip(dep.GetId(), fmt.Sprintf("the model's shape could not be read: %v", err))
+	arch := s.modelArchitecture(ctx, dep.GetId(), dep.GetModel())
+	if arch == nil {
 		return nil
 	}
 
-	b, err := vrambudget.Compute(resp.GetArchitecture(), plan)
+	b, err := vrambudget.Compute(arch, plan)
 	if err != nil {
 		s.logBudgetSkip(dep.GetId(), err.Error())
 		return nil
@@ -92,6 +83,50 @@ func (s *Service) budgetCheck(ctx context.Context, req *provisionerv1.CreateDepl
 			"largest_term", largestBudgetTerm(b))
 	}
 	return nil
+}
+
+// modelArchitecture reads the model's trained shape from whatever store is
+// configured, or nil when it cannot be had.
+//
+// Shared by the budget check and the expert-shape check so a deploy reads
+// the hub once. They ask different questions of the same answer, and two
+// fetches would double a network read on the create path for nothing.
+//
+// nil is "carry on without checking", never "refuse". A store with no hub
+// to ask and a hub that describes a model incompletely are both reasons to
+// stop checking rather than reasons to stop deploying.
+func (s *Service) modelArchitecture(ctx context.Context, deployID, spec string) *provisionerv1.ModelArchitecture {
+	src, ok := s.modelStore.(modelstores.ArchitectureSource)
+	if !ok {
+		return nil
+	}
+	resp, err := src.Architecture(ctx, &provisionerv1.DescribeModelRequest{ModelSpec: spec})
+	if err != nil {
+		// The model store already gated the spec at the create pre-flight.
+		s.logBudgetSkip(deployID, fmt.Sprintf("the model's shape could not be read: %v", err))
+		return nil
+	}
+	return resp.GetArchitecture()
+}
+
+// expertShapeCheck refuses an expert-parallel degree the model's expert
+// count does not divide.
+//
+// Separate from budgetCheck rather than folded into it, because the two
+// skip on different things. The budget needs a context length and an exact
+// per-card capacity, and gives up without either; this needs only the
+// expert count, so a deploy that states no context length still gets the
+// expert rule applied.
+//
+// Applied to an attached engine too. Whether a degree divides an expert
+// count is a fact about the weights, not about the machine, so the
+// cannot-count-somebody-else's-cards boundary does not reach it.
+func (s *Service) expertShapeCheck(ctx context.Context, req *provisionerv1.CreateDeploymentRequest) error {
+	dep := req.GetDeployment()
+	if dep.GetParallelism().GetExpertParallelSize() <= 1 {
+		return nil
+	}
+	return ValidateExpertShape(dep.GetParallelism(), s.modelArchitecture(ctx, dep.GetId(), dep.GetModel()))
 }
 
 // deployCardCapacity resolves what one card of this deploy holds, and

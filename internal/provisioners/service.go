@@ -1174,6 +1174,14 @@ func (s *Service) CreateDeployment(ctx context.Context, req *provisionerv1.Creat
 	}
 	dep.EngineArgs = append(dep.GetEngineArgs(), parArgs...)
 
+	// Ch 12: refuse an expert-parallel degree the model's expert count does
+	// not divide. Whole experts land on each rank, so an uneven split puts
+	// one more on some cards than others and the first symptom is that card
+	// running out of memory after the rental started (#343).
+	if err := s.expertShapeCheck(ctx, req); err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+
 	// Ch 12: read the plan back out of the arguments the engine is about
 	// to be given, and refuse one the cards cannot hold. After the
 	// parallelism args are appended, so the split the engine will
