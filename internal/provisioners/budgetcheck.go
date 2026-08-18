@@ -68,9 +68,9 @@ func (s *Service) budgetCheck(ctx context.Context, req *provisionerv1.CreateDepl
 	usableBytes := vrambudget.UsableBytes(cardBytes, vrambudget.DefaultUtilization)
 	switch b.Against(usableBytes) {
 	case vrambudget.Overcommitted:
-		return fmt.Errorf("this plan does not fit the cards it would rent: %s needs %s per card, and %s holds %s usable at %.2f utilization. %s is the largest claim. Reduce %s, %s, or quantize, or ask for more cards",
+		return fmt.Errorf("this plan does not fit the cards it would rent: %s needs %s per card, and %s holds %s usable at %.2f utilization. %s is the largest claim. %s",
 			dep.GetModel(), formatGB(b.TotalBytes()), formatGB(cardBytes), formatGB(usableBytes), vrambudget.DefaultUtilization,
-			largestBudgetTerm(b), vllmMaxModelLenFlag, vllmMaxNumSeqsFlag)
+			largestBudgetTerm(b), budgetRemedy(b))
 	case vrambudget.Tight:
 		// Tight clears only by eating the overhead band that stands in
 		// for the CUDA context and allocator fragmentation. It is a
@@ -192,6 +192,30 @@ func largestBudgetTerm(b vrambudget.Budget) string {
 		term = "activation"
 	}
 	return term
+}
+
+// budgetRemedy names the knobs that would move the term that failed.
+//
+// The old advice listed every knob in one sentence, context length first.
+// That reads fine on a 70B whose cache is most of the working set and is
+// actively misleading on a sparse model, where the weights are effectively
+// all of it: GLM-5.2 at fp16 wants 223.5 GB per card of which the cache is
+// 2.9, so an operator following the sentence in order shrinks the context
+// twice, gains three gigabytes, and concludes the tool is broken.
+//
+// The refusal already names the largest claim. This makes the remedy agree
+// with it, which matters more the bigger the rental being refused.
+func budgetRemedy(b vrambudget.Budget) string {
+	switch largestBudgetTerm(b) {
+	case "weights":
+		return fmt.Sprintf("Quantize (%s) or ask for more cards. The context and batch knobs are worth %s here, so they will not close a gap this size",
+			vllmQuantizationFlag, formatGB(b.KVBytes+b.ActivationBytes))
+	case "cache":
+		return fmt.Sprintf("Reduce %s or %s, or hold the cache at a lower precision (%s)",
+			vllmMaxModelLenFlag, vllmMaxNumSeqsFlag, vllmKVCacheDtypeFlag)
+	default:
+		return fmt.Sprintf("Reduce %s, which is what activation scales with", vllmMaxNumSeqsFlag)
+	}
 }
 
 // formatGB renders bytes as the decimal gigabytes vendors quote, so a
