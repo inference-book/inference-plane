@@ -320,8 +320,19 @@ const ffnMatrices = 3
 //
 // Sparse models routinely make the first layer or three dense, and those
 // layers hold an ordinary feed-forward rather than an expert stack.
+//
+// Multi-token-prediction layers are added back on. They sit past
+// num_hidden_layers and carry a full expert stack that the published
+// parameter total counts, so leaving them out sizes the routed share one
+// layer short and strands that layer's unpicked experts in the activated
+// figure. GLM-5.2 read 51.2B active against a checkpoint that says 41.8B
+// until this was added.
+//
+// The error survived #340 because the formula was checked against Kimi
+// K3, which publishes no such layer. DeepSeek-V3, GLM-4.5 and GLM-5.2 all
+// publish one.
 func moeLayers(a *Arch) int32 {
-	n := a.GetLayers() - a.GetDenseLayers()
+	n := a.GetLayers() - a.GetDenseLayers() + a.GetMtpLayers()
 	if n < 0 {
 		return 0
 	}

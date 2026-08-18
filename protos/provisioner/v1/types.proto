@@ -1085,6 +1085,22 @@ message ModelArchitecture {
   // Kimi K3 has 24 attention layers among 93, so counting all 93 prices
   // its cache at nearly four times what it costs.
   int32 full_attention_layers = 15;
+
+  // Expert-carrying layers the checkpoint holds beyond num_hidden_layers,
+  // used for multi-token prediction (num_nextn_predict_layers).
+  //
+  // These are real layers with a real expert stack, and the published
+  // parameter total counts them, but the layer count does not. Sizing the
+  // routed-expert share from num_hidden_layers alone therefore leaves one
+  // layer's worth of unpicked experts sitting in the activated figure:
+  // GLM-5.2 reads 51.2B active where the checkpoint says 41.8B, an
+  // overstatement of a quarter.
+  //
+  // Zero for a model with no such layer, which is most of them. The
+  // formula this corrects was validated against Kimi K3, whose count is
+  // zero, which is exactly why the error survived: DeepSeek-V3, GLM-4.5
+  // and GLM-5.2 all publish one.
+  int32 mtp_layers = 16;
 }
 
 // DescribeModelRequest asks what a model spec resolves to.

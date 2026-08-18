@@ -73,6 +73,11 @@ type modelConfig struct {
 	// Leading dense layers before the mixture-of-experts stack starts.
 	FirstKDenseReplace int32 `json:"first_k_dense_replace"`
 
+	// Expert-carrying layers past num_hidden_layers, for multi-token
+	// prediction. The checkpoint holds them and the layer count does not
+	// mention them, which is the whole reason this is read.
+	NumNextNPredictLayers int32 `json:"num_nextn_predict_layers"`
+
 	// Width a routed expert operates at, where the model projects down
 	// before the expert stack. Absent means the experts run at the
 	// model's own hidden size, which is what almost every family does.
@@ -229,6 +234,10 @@ func resolveExperts(arch *provisionerv1.ModelArchitecture, cfg *modelConfig) {
 	// only reached when no expert-specific width exists.
 	arch.MoeIntermediateSize = firstNonZero(cfg.MoEIntermediateSize, cfg.IntermediateSize)
 	arch.DenseLayers = cfg.FirstKDenseReplace
+	// The multi-token-prediction block is a real expert layer sitting past
+	// the published layer count, so the routed share has to include it or
+	// its unpicked experts land in the activated figure (#350).
+	arch.MtpLayers = cfg.NumNextNPredictLayers
 	// Absent means the experts run at the model's own width. Left at the
 	// hidden size rather than at zero, because every caller of this field
 	// multiplies by it and zero would silently price the expert stack at

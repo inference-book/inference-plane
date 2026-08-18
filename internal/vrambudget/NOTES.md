@@ -173,3 +173,45 @@ forwarding an optional capability needs a sentinel and not just a method.
 The hub-read side of this, including which config field names real model
 families actually use, is in
 [../modelstores/huggingface/NOTES.md](../modelstores/huggingface/NOTES.md).
+
+## The layer count is not the expert-layer count
+
+`config.num_hidden_layers` does not count the multi-token-prediction
+block, and the checkpoint does. GLM-5.2 publishes 78 layers and ships
+tensors for layer indices 0 through 78, where that last one carries a full
+256-expert stack. HF's safetensors accounting counts those experts in the
+parameter total.
+
+So sizing the routed-expert share from `num_hidden_layers - dense` leaves
+one layer of unpicked experts nowhere, and since the activated figure is
+computed by subtracting the resident share from the total, they land in
+it. GLM-5.2 read 51.2B active against a checkpoint that says 41.8B, an
+overstatement of a quarter, on the model Part IV rehearses with.
+
+`moeLayers` adds `mtp_layers` back on. Two things about that choice:
+
+- The MTP experts are counted as **resident**, which is unambiguous. They
+  are on the cards whether or not speculative decoding runs.
+- They are also counted as **read**, at the same top-k as any other layer,
+  which is true only when the engine actually runs multi-token prediction.
+  vLLM's is opt-in. Counting them errs high on the activated figure by one
+  layer's picked experts, which is the safe direction for a budget and
+  worth revisiting if a run ever cares about the difference.
+
+**Why this survived #340.** The formula was validated against Kimi K3,
+which publishes `num_nextn_predict_layers: 0`. K2 does too. DeepSeek-V3,
+GLM-4.5 and GLM-5.2 all publish 1, so the one model the arithmetic was
+checked against was the one model the error could not show up on. Found by
+#350, whose acceptance was to compare against a published config.
+
+## A pre-quantized checkpoint is not a smaller model
+
+The parameter count this package reads is HF's element accounting, which
+for an already-quantized repo counts packed elements rather than
+parameters. `nvidia/GLM-5.2-NVFP4` reports 381B against the base model's
+753B, and `QuantTrio/GLM-5.2-Int4-Int8Mix` reports 785B, more than the
+bf16 original, because scales and zero-points are elements too. Applying a
+precision to either is quantizing twice. Tracked as #382; nothing in this
+package guards it yet, so a budget taken against a community 4-bit repo is
+not trustworthy today.
+
