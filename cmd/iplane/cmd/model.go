@@ -209,6 +209,8 @@ func init() {
 	modelBudgetCmd.Flags().Int32Var(&budgetMaxModelLen, "max-model-len", 0,
 		"context length in tokens (default: the model's max_position_embeddings)")
 	modelBudgetCmd.Flags().Int32Var(&budgetMaxBatch, "max-batch", 1, "concurrent sequences")
+	modelBudgetCmd.Flags().StringVar(&budgetSessionsAt, "sessions-at", "",
+		"instead of one batch, report how many concurrent sessions fit at each of these context lengths (e.g. 8k,128k,1M)")
 	modelBudgetCmd.Flags().Int32Var(&budgetTP, "tp", 0,
 		"report this tensor-parallel width only (default: every candidate up to --max-cards)")
 	modelBudgetCmd.Flags().Float64Var(&budgetVRAMGB, "vram-gb", 0,

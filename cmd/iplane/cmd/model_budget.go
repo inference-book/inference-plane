@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 
@@ -24,6 +26,7 @@ var (
 	budgetMaxCards       int32
 	budgetRevision       string
 	budgetOutput         string
+	budgetSessionsAt     string
 )
 
 var modelBudgetCmd = &cobra.Command{
@@ -89,6 +92,10 @@ type budgetOpts struct {
 	maxCards    int32
 	tp          int32 // 0 means sweep every candidate count
 	format      string
+	// sessionsAt is the context ladder for the concurrency question.
+	// Empty means the operator asked the default question, which is
+	// whether one named batch fits.
+	sessionsAt []int32
 }
 
 // budgetOptionsFromFlags validates the flags into a plan.
@@ -151,7 +158,153 @@ func budgetOptionsFromFlags() (budgetOpts, error) {
 	o.maxCards = budgetMaxCards
 	o.tp = budgetTP
 	o.format = budgetOutput
+
+	ladder, err := parseContextLadder(budgetSessionsAt)
+	if err != nil {
+		return o, err
+	}
+	o.sessionsAt = ladder
+
 	return o, nil
+}
+
+// parseContextLadder reads the --sessions-at list.
+//
+// Accepts the units operators say rather than only the token counts they
+// mean, since the whole list is powers of two and "1048576" is harder to
+// check at a glance than "1M". k and M are binary here, matching how
+// every context length is actually quoted: a 128k window is 131072
+// tokens, not 128000.
+func parseContextLadder(s string) ([]int32, error) {
+	if strings.TrimSpace(s) == "" {
+		return nil, nil
+	}
+	var out []int32
+	for _, field := range strings.Split(s, ",") {
+		field = strings.TrimSpace(field)
+		if field == "" {
+			continue
+		}
+		mult := int64(1)
+		switch {
+		case strings.HasSuffix(field, "k"), strings.HasSuffix(field, "K"):
+			mult, field = 1024, field[:len(field)-1]
+		case strings.HasSuffix(field, "m"), strings.HasSuffix(field, "M"):
+			mult, field = 1024*1024, field[:len(field)-1]
+		}
+		n, err := strconv.ParseInt(field, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("--sessions-at: %q is not a context length (want a token count, or one with a k or M suffix)", field)
+		}
+		if n <= 0 {
+			return nil, fmt.Errorf("--sessions-at: context length must be positive, got %s", field)
+		}
+		total := n * mult
+		if total > math.MaxInt32 {
+			return nil, fmt.Errorf("--sessions-at: %s is longer than any engine addresses", field)
+		}
+		out = append(out, int32(total))
+	}
+	return out, nil
+}
+
+// writeSessionsTable answers the concurrency question across the context
+// ladder and the card ladder at once.
+//
+// Two axes rather than one, because the interesting thing is not either
+// number on its own. Concurrency collapsing as the context grows is half
+// of it; the other half is how much of that a card count buys back, and
+// for a model caching a compressed latent the answer is far less than an
+// operator expects, since the latent is replicated on every card.
+func writeSessionsTable(w io.Writer, spec string, a *provisionerv1.ModelArchitecture, o budgetOpts) (bool, error) {
+	cardCounts, err := sessionCardLadder(a, o)
+	if err != nil {
+		return false, err
+	}
+
+	fmt.Fprintf(w, "%s  %s params  %d layers\n", spec, formatParamsShort(a.GetParams()), a.GetLayers())
+	fmt.Fprintf(w, "plan   weights %s, cache %s\n", o.plan.Weights, o.plan.KVCache)
+	fmt.Fprintf(w, "card   %g GB (%g GiB = %s) at %.2f utilization = %s usable\n\n",
+		o.cardGB, o.cardGB, formatGB(o.cardBytes), o.utilization,
+		formatGB(vrambudget.UsableBytes(o.cardBytes, o.utilization)))
+
+	tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', tabwriter.AlignRight)
+	fmt.Fprintf(tw, "context")
+	for _, n := range cardCounts {
+		fmt.Fprintf(tw, "\t%s", formatCards(n))
+	}
+	// Prefixed with spaces rather than tab-terminated: tabwriter leaves a
+	// cell that is not tab-terminated unpadded, which is what keeps the
+	// numeric columns right-aligned, and the gap has to come from
+	// somewhere. Same trick the verdict column uses.
+	fmt.Fprintf(tw, "\t   cache/session\n")
+
+	any := false
+	for _, ctx := range o.sessionsAt {
+		fmt.Fprintf(tw, "%s", formatTokens(ctx))
+		plan := o.plan
+		plan.MaxModelLen = ctx
+		for _, cards := range cardCounts {
+			plan.TPSize = cards
+			n, err := vrambudget.MaxSessions(a, plan, o.cardBytes, o.utilization)
+			if err != nil {
+				return false, err
+			}
+			if n > 0 {
+				any = true
+				fmt.Fprintf(tw, "\t%d", n)
+			} else {
+				// A dash rather than a zero. Zero reads as a computed
+				// answer, and what happened is that the shape never got
+				// as far as costing a session.
+				fmt.Fprintf(tw, "\t-")
+			}
+		}
+		plan.TPSize = cardCounts[len(cardCounts)-1]
+		cache, _ := vrambudget.SessionCost(a, plan, ctx)
+		fmt.Fprintf(tw, "\t   %s\n", formatGB(cache))
+	}
+	if err := tw.Flush(); err != nil {
+		return false, err
+	}
+
+	fmt.Fprintln(w)
+	fmt.Fprintf(w, "cache/session is per card at %s.\n", formatCards(cardCounts[len(cardCounts)-1]))
+	if vrambudget.LatentCache(a) {
+		fmt.Fprintln(w, "this model caches a compressed latent, which is replicated on every card rather than")
+		fmt.Fprintln(w, "sharded, so cards buy room for weights and none for cache.")
+	}
+	if !any {
+		fmt.Fprintln(w, "no shape on this ladder holds even one session.")
+	}
+	return any, nil
+}
+
+// sessionCardLadder is the card counts the sessions table reports.
+//
+// The operator's --tp when they named one, since they are asking about a
+// shape they have in mind. Otherwise the same powers of two the budget
+// sweep uses, so the two tables are read against each other.
+func sessionCardLadder(a *provisionerv1.ModelArchitecture, o budgetOpts) ([]int32, error) {
+	if o.tp > 0 {
+		return []int32{o.tp}, nil
+	}
+	var out []int32
+	for n := int32(1); n <= o.maxCards; n *= 2 {
+		out = append(out, n)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("--max-cards %d leaves no card count to report", o.maxCards)
+	}
+	return out, nil
+}
+
+// formatCards labels a column the way the row it heads reads.
+func formatCards(n int32) string {
+	if n == 1 {
+		return "1 card"
+	}
+	return fmt.Sprintf("%d cards", n)
 }
 
 // budgetModelSpec folds --revision into the spec grammar the hub read
@@ -191,6 +344,17 @@ func renderModelBudget(w io.Writer, spec string, a *provisionerv1.ModelArchitect
 	if err := vrambudget.ValidateArch(a); err != nil {
 		return false, err
 	}
+	// The concurrency question supplies its own context lengths, so it
+	// does not need one defaulted and must not be refused for lacking
+	// one. A model that publishes no trained window is exactly the case
+	// where an operator names the ladder by hand.
+	if len(o.sessionsAt) > 0 {
+		if o.format == outputJSON {
+			return writeSessionsJSON(w, spec, a, o)
+		}
+		return writeSessionsTable(w, spec, a, o)
+	}
+
 	if o.plan.MaxModelLen == 0 {
 		if a.GetMaxPositionEmbeddings() <= 0 {
 			return false, fmt.Errorf("%s publishes no max_position_embeddings, so there is no context length to default to; pass --max-model-len", spec)
@@ -440,4 +604,73 @@ func writeBudgetJSON(w io.Writer, spec string, a *provisionerv1.ModelArchitectur
 // is quoting the name back and wants the name's own rounding.
 func formatParamsShort(n int64) string {
 	return fmt.Sprintf("%.1fB", float64(n)/1e9)
+}
+
+// sessionsJSON is the machine-readable form of the sessions table.
+//
+// One row per context length with a count per card width, rather than a
+// flat list of triples, because the figure this feeds is a curve per card
+// width and a flat list would have to be re-grouped to draw it.
+type sessionsJSON struct {
+	Model       string            `json:"model"`
+	Plan        budgetPlanJSON    `json:"plan"`
+	Card        budgetCardJSON    `json:"card"`
+	CardCounts  []int32           `json:"card_counts"`
+	Rows        []sessionsRowJSON `json:"rows"`
+	LatentCache bool              `json:"latent_cache"`
+}
+
+// sessionsRowJSON is one context length across the card ladder. Sessions
+// is index-aligned with CardCounts; zero means no session fits.
+type sessionsRowJSON struct {
+	ContextLen           int32   `json:"context_len"`
+	Sessions             []int64 `json:"sessions"`
+	CacheBytesPerSession int64   `json:"cache_bytes_per_session"`
+}
+
+func writeSessionsJSON(w io.Writer, spec string, a *provisionerv1.ModelArchitecture, o budgetOpts) (bool, error) {
+	cardCounts, err := sessionCardLadder(a, o)
+	if err != nil {
+		return false, err
+	}
+	out := sessionsJSON{
+		Model: spec,
+		Plan: budgetPlanJSON{
+			Weights: string(o.plan.Weights),
+			KVCache: string(o.plan.KVCache),
+		},
+		Card: budgetCardJSON{
+			VRAMBytes:   o.cardBytes,
+			Utilization: o.utilization,
+			UsableBytes: vrambudget.UsableBytes(o.cardBytes, o.utilization),
+		},
+		CardCounts:  cardCounts,
+		LatentCache: vrambudget.LatentCache(a),
+	}
+
+	any := false
+	widest := cardCounts[len(cardCounts)-1]
+	for _, ctx := range o.sessionsAt {
+		row := sessionsRowJSON{ContextLen: ctx}
+		plan := o.plan
+		plan.MaxModelLen = ctx
+		for _, cards := range cardCounts {
+			plan.TPSize = cards
+			n, err := vrambudget.MaxSessions(a, plan, o.cardBytes, o.utilization)
+			if err != nil {
+				return false, err
+			}
+			if n > 0 {
+				any = true
+			}
+			row.Sessions = append(row.Sessions, n)
+		}
+		plan.TPSize = widest
+		row.CacheBytesPerSession, _ = vrambudget.SessionCost(a, plan, ctx)
+		out.Rows = append(out.Rows, row)
+	}
+
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	return any, enc.Encode(out)
 }

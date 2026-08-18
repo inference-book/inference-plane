@@ -180,7 +180,10 @@ func formatKiB(b int64) string {
 // formatTokens renders a context length as the "32k" operators say
 // rather than the 32768 they mean.
 func formatTokens(n int32) string {
-	if n%1024 == 0 {
+	switch {
+	case n%(1024*1024) == 0:
+		return fmt.Sprintf("%dM:", n/(1024*1024))
+	case n%1024 == 0:
 		return fmt.Sprintf("%dk:", n/1024)
 	}
 	return fmt.Sprintf("%d:", n)

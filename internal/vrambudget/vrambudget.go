@@ -618,6 +618,84 @@ func MinCards(a *Arch, p Plan, cardBytes int64, utilization float64, maxCards in
 		widest.Cards, cardBytes/GB, float64(widest.Budget.TotalBytes())/float64(GB), float64(usable)/float64(GB))
 }
 
+// MaxSessions is how many sequences of the plan's context length fit
+// concurrently on the plan's cards, once the weights are placed.
+//
+// The inverse of Compute, and the question an operator actually has.
+// Compute answers "does this batch fit"; this answers "what batch fits",
+// which is the number that decides whether a deployment is economic. The
+// weights are a fixed cost paid once and the cache is a cost paid per
+// session, so what is left after the weights, divided by what a session
+// costs, is the concurrency the hardware supports. Everything about the
+// cost per token follows from it, because the fixed cost of reading the
+// weights splits across however many sessions are in flight.
+//
+// The plan's MaxBatch is ignored, since it is the answer rather than an
+// input. Zero means the weights alone do not leave room for one session,
+// which is a different failure from a small answer and reads that way
+// in any table quoting it.
+//
+// Activations are solved for alongside the cache rather than held
+// constant, because they follow the batch too. Treating them as fixed
+// overstates the answer at exactly the long contexts where the answer
+// matters.
+func MaxSessions(a *Arch, p Plan, cardBytes int64, utilization float64) (int64, error) {
+	if err := ValidateArch(a); err != nil {
+		return 0, err
+	}
+	probe := p
+	probe.MaxBatch = 1
+	if err := probe.Validate(); err != nil {
+		return 0, err
+	}
+	if cardBytes <= 0 {
+		return 0, fmt.Errorf("card memory must be positive, got %d", cardBytes)
+	}
+
+	cards := p.cards()
+	usable := float64(UsableBytes(cardBytes, utilization))
+
+	// The overhead band is a fraction of the working set, so a card holds
+	// (1 + OverheadFraction) times whatever the three real terms come to.
+	// Dividing it out here is what keeps the answer on the same side of
+	// the line Against calls Fits.
+	room := usable/(1+OverheadFraction) - float64(a.GetParams())*p.Weights.BytesPerParam()/float64(cards)
+	if room <= 0 {
+		return 0, nil
+	}
+
+	// Per session, per card. A latent cache is replicated rather than
+	// sharded, for the reason Compute gives, so more cards buy weight
+	// room and no cache room. Activations shard either way.
+	cache := float64(KVBytesPerToken(a, p.cacheDtype())) * float64(p.MaxModelLen)
+	if !LatentCache(a) {
+		cache /= float64(cards)
+	}
+	activation := float64(p.MaxModelLen) * float64(a.GetHiddenSize()) * activationElementBytes * ActivationFactor / float64(cards)
+
+	perSession := cache + activation
+	if perSession <= 0 {
+		return 0, fmt.Errorf("a session costs nothing at this shape, which cannot be right")
+	}
+	return int64(room / perSession), nil
+}
+
+// SessionCost is what one sequence of the given context length costs per
+// card, split into the cache and the activation scratch that follow it.
+//
+// Reported beside a session count because the count alone does not say
+// which term ran out, and past a few thousand tokens the answer is
+// almost always the cache.
+func SessionCost(a *Arch, p Plan, contextLen int32) (cache, activation int64) {
+	cards := p.cards()
+	c := float64(KVBytesPerToken(a, p.cacheDtype())) * float64(contextLen)
+	if !LatentCache(a) {
+		c /= float64(cards)
+	}
+	act := float64(contextLen) * float64(a.GetHiddenSize()) * activationElementBytes * ActivationFactor / float64(cards)
+	return int64(c), int64(act)
+}
+
 // Candidate is one card count a sweep looked at.
 //
 // A count either got a budget and a verdict, or it was refused before
