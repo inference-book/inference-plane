@@ -1,0 +1,228 @@
+{
+  "title": "Inference Plane Cost & Concurrency",
+  "uid": "inference-plane-cost",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "tags": [
+    "inference-plane",
+    "v0.4",
+    "cost"
+  ],
+  "timezone": "browser",
+  "time": {
+    "from": "now-30m",
+    "to": "now"
+  },
+  "refresh": "10s",
+  "panels": [
+    {
+      "id": 1,
+      "title": "What this dashboard shows",
+      "type": "text",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 11
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "**Part IV's economic result, watched live.**\n\nIn batched decode the engine reads the active weights once per step and splits that read across every sequence in the batch, so cost per token falls as concurrency rises, then flattens when per-token FLOPs take over. Where it stops falling is set by the KV cache, and where the cache caps you is set by context length. That is the whole argument, and these panels are it as it happens.\n\nDrive it with a closed-loop sweep, which holds N in flight and makes the rate an output:\n\n```\niplane load --sweep 1,2,4,8,16,32 --target <deploy-id> --service-url http://<iplane> \\\n  --model <model> --prompt-tokens 8000 --stream\n```\n\nRead the top two panels together. Concurrency steps up as a staircase and cost per million tokens plateaus at each step, so the pair is the cost-versus-concurrency curve on a shared time axis. Each sweep at a different `--prompt-tokens` shows up as its own `context_bucket` series, which is how two context lengths get compared.\n\n**Where the numbers come from.** `instance.cost.usd.total` is billed seconds times the rate the provider quoted at rent time (#346). `inference.tokens.generated` carries a `context_bucket` band read off the engine's usage block. Concurrency is `iplane.replica.in_flight` summed over replicas.\n\n**Two things that will mislead you.** An instance whose provider quoted no rate is absent from the cost series rather than counted as free, so a partly-unpriced fleet understates spend instead of reporting a wrong total. And the cost-per-token panel divides *total* spend by each band's tokens, which is exact while one context length is in flight at a time (what a sweep does) and inflates every band when several run at once.\n\nFor a figure rather than a screenshot, use the committed artifact: `iplane load --sweep ... --output csv` carries concurrency as an explicit column plus the hardware it ran on (#347)."
+      }
+    },
+    {
+      "id": 2,
+      "title": "Cost per million tokens (by context length)",
+      "description": "The money panel. Total spend over the window divided by each context band's tokens. Falls as concurrency rises, and flattens where the KV cache caps the batch. Exact while one context length is in flight at a time, which is what a sweep does; concurrent mixed contexts inflate every band because each is charged the whole spend.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "mimir"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 11,
+        "w": 12,
+        "h": 9
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(instance_cost_usd_total[$__rate_interval])) / sum by (context_bucket) (increase(inference_tokens_generated[$__rate_interval])) * 1e6",
+          "legendFormat": "{{context_bucket}} context"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineInterpolation": "linear",
+            "fillOpacity": 10
+          },
+          "unit": "currencyUSD",
+          "decimals": 2
+        }
+      }
+    },
+    {
+      "id": 3,
+      "title": "Achieved concurrency (in flight, per deployment)",
+      "description": "The x axis of the curve above. Requests actually in flight at the engine, summed across replicas. Under `iplane load --sweep` this is a staircase, one plateau per ladder rung, and the plateau is the window the cost figure beside it was measured over.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "mimir"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 11,
+        "w": 12,
+        "h": 9
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (deploy_id) (iplane_replica_in_flight)",
+          "legendFormat": "{{deploy_id}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineInterpolation": "linear",
+            "fillOpacity": 10
+          },
+          "unit": "short"
+        }
+      }
+    },
+    {
+      "id": 4,
+      "title": "Token throughput (by context length)",
+      "description": "Completion tokens per second, split the same way as the cost panel. Throughput climbing while cost per token falls is the batch amortising the weight read; throughput flat while concurrency still rises means the engine stopped admitting and the ceiling has been found.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "mimir"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 20,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (context_bucket) (rate(inference_tokens_generated[$__rate_interval]))",
+          "legendFormat": "{{context_bucket}} context"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineInterpolation": "linear",
+            "fillOpacity": 10
+          },
+          "unit": "short"
+        }
+      }
+    },
+    {
+      "id": 5,
+      "title": "Spend rate (USD/hour, per instance)",
+      "description": "What the fleet costs per hour right now, from the rate each provider quoted at rent time. One series per rented instance, so a heterogeneous deployment shows what each side of it costs. An instance whose provider quoted no rate is absent rather than plotted at zero.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "mimir"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 20,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (instance_id, provider, gpu_type) (instance_rate_usd_per_second) * 3600",
+          "legendFormat": "{{instance_id}} ({{provider}} {{gpu_type}})"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineInterpolation": "linear",
+            "fillOpacity": 10
+          },
+          "unit": "currencyUSD"
+        }
+      }
+    },
+    {
+      "id": 6,
+      "title": "Cumulative spend (USD)",
+      "description": "Billed seconds times the quoted rate, per instance, climbing while the instance runs and freezing when it stops. This is the number a run's total cost is read off, and the numerator of the cost-per-token panel. It bills from `created_at`, so an image-native provider's cold start is charged, which is where a big-model deploy spends most of its time (#335).",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "mimir"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 28,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (instance_id, provider) (instance_cost_usd_total)",
+          "legendFormat": "{{instance_id}} ({{provider}})"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineInterpolation": "linear",
+            "fillOpacity": 10
+          },
+          "unit": "currencyUSD"
+        }
+      }
+    },
+    {
+      "id": 7,
+      "title": "Utilisation: serving seconds against billed seconds",
+      "description": "Inference time over rental time, per instance. The gap is what idle capacity costs. A sweep should sit near 1.0 while a level is running, and everything below that during provisioning or between runs is spend with no tokens against it.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "mimir"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 28,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (instance_id) (rate(inference_active_seconds_total[$__rate_interval])) / sum by (instance_id) (rate(instance_uptime_seconds_total[$__rate_interval]))",
+          "legendFormat": "{{instance_id}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineInterpolation": "linear",
+            "fillOpacity": 10
+          },
+          "unit": "percentunit"
+        }
+      }
+    }
+  ]
+}

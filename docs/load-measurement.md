@@ -212,6 +212,25 @@ spend rather than reporting a wrong total. And the product is computed
 from the rate as quoted at rent time, which is exact today because no
 rental is spot-priced or reclaimable (#333).
 
+`inference.tokens.generated` carries a `context_bucket` label, an
+upper-bound band on the prompt length read off the engine's usage block,
+so several sweeps at different context lengths can be compared on one
+panel. Within a single sweep the value is constant, which is why the
+label splits runs rather than requests. A response reporting no prompt
+count lands in `unknown` rather than in the shortest band, since folding
+those together would let a non-reporting engine drag a cost curve toward
+a context length nobody ran.
+
+The **Inference Plane Cost & Concurrency** dashboard
+(`deploy/grafana/provisioning/dashboards/inference-plane-cost.json`) is
+this watched live: cost per million tokens split by context band, with
+achieved concurrency beside it so the pair reads as the curve on a shared
+time axis. Its cost panel divides *total* spend by each band's tokens,
+which is exact while one context length is in flight at a time and
+inflates every band when several run at once. For a figure rather than a
+screenshot, use the committed artifact above, where concurrency is an
+explicit column.
+
 ## The comparison nobody has run yet
 
 `iplane model budget --sessions-at 8k,128k,1M` predicts a concurrency
