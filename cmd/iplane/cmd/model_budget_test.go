@@ -15,6 +15,7 @@ import (
 	"github.com/inference-book/inference-plane/internal/modelstores"
 	"github.com/inference-book/inference-plane/internal/provisioners"
 	"github.com/inference-book/inference-plane/internal/provisioners/stores/file"
+	"github.com/inference-book/inference-plane/internal/vrambudget"
 )
 
 // llama70B is the shape the chapter's worked example is computed from:
@@ -93,6 +94,7 @@ func resetBudgetFlags() {
 	budgetMaxCards = 8
 	budgetRevision = "main"
 	budgetOutput = outputTable
+	budgetSessionsAt = ""
 	instanceServiceURL = ""
 	modelBudgetCmd.Flags().Lookup("revision").Changed = false
 }
@@ -375,5 +377,190 @@ func TestModelBudgetReadsTheCardLabelAsBinary(t *testing.T) {
 	}
 	if !strings.Contains(out, "77.3 GB usable") {
 		t.Errorf("usable memory is not 0.9 of 85.9 GB:\n%s", out)
+	}
+}
+
+// glm52Budget is GLM-5.2's published shape: a compressed latent cache on
+// every one of its 78 layers, which is what makes the card columns below
+// behave differently from a dense model's.
+var glm52Budget = &provisionerv1.ModelArchitecture{
+	Params: 753_329_940_480, Layers: 78, HiddenSize: 6144,
+	MaxPositionEmbeddings: 1_048_576,
+	KvLoraRank:            512, QkRopeHeadDim: 64,
+}
+
+// The wall, whole. Concurrency collapsing down the page is the chapter's
+// central result, and it is held as a golden because a figure gets drawn
+// from these numbers.
+func TestModelBudgetShowsConcurrencyCollapsingWithContext(t *testing.T) {
+	out, _, err := runBudget(t, glm52Budget, "zai-org/GLM-5.2",
+		"--vram-gb", "80", "--quantization", "fp8", "--sessions-at", "8k,128k,1M", "--max-cards", "32")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := `zai-org/GLM-5.2  753.3B params  78 layers
+plan   weights fp8, cache fp8
+card   80 GB (80 GiB = 85.9 GB) at 0.90 utilization = 77.3 GB usable
+
+   context   1 card   2 cards   4 cards   8 cards   16 cards   32 cards   cache/session
+       8k:        -         -         -         -         53        117   0.4 GB
+     128k:        -         -         -         -          3          7   5.9 GB
+       1M:        -         -         -         -          -          -   47.1 GB
+
+cache/session is per card at 32 cards.
+this model caches a compressed latent, which is replicated on every card rather than
+sharded, so cards buy room for weights and none for cache.
+`
+	if out != want {
+		t.Errorf("sessions table\n got:\n%s\nwant:\n%s", out, want)
+	}
+}
+
+// The 128k row, by hand, against the arithmetic rather than against the
+// implementation. 78 layers of a 512 + 64 latent at one byte over 131072
+// tokens is 5,888,802,816 bytes of cache per session; the activation
+// scratch adds 75,497,472 per card across 32; and the room left after
+// 753.33B fp8 weights on a 77.3 GB card, with the overhead band intact,
+// divides by that into seven.
+func TestModelBudgetSessionCountMatchesTheHandComputedArithmetic(t *testing.T) {
+	usable := float64(vrambudget.UsableBytes(80*vrambudget.GiB, 0.9))
+	room := usable/(1+vrambudget.OverheadFraction) - 753_329_940_480.0/32
+	cache := 78.0 * (512 + 64) * 1 * 131072
+	activation := 131072.0 * 6144 * 2 * vrambudget.ActivationFactor / 32
+	want := int64(room / (cache + activation))
+
+	if want != 7 {
+		t.Fatalf("the hand computation itself gives %d, so the test is wrong before the code is", want)
+	}
+	out, _, err := runBudget(t, glm52Budget, "zai-org/GLM-5.2",
+		"--vram-gb", "80", "--quantization", "fp8", "--sessions-at", "128k", "--max-cards", "32")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "     128k:        -         -         -         -          3          7   5.9 GB") {
+		t.Errorf("want a 128k row ending in 7 sessions on 32 cards, got:\n%s", out)
+	}
+}
+
+// A model whose cache shards gains far more from cards than one whose
+// latent is replicated, and the table is where an operator sees that.
+func TestModelBudgetShowsCardsBuyingConcurrencyWhenTheCacheShards(t *testing.T) {
+	out, _, err := runBudget(t, llama70B, "meta-llama/Llama-3.3-70B-Instruct",
+		"--vram-gb", "80", "--quantization", "fp8", "--sessions-at", "8k", "--max-cards", "8")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, "replicated on every card") {
+		t.Errorf("named the latent caveat for a per-head model:\n%s", out)
+	}
+	if !strings.Contains(out, "       8k:        -        41       128       302") {
+		t.Errorf("want concurrency multiplying across the card ladder, got:\n%s", out)
+	}
+}
+
+func TestModelBudgetReadsTheContextLadderTheWayOperatorsWriteIt(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		want []int32
+	}{
+		{"8k", []int32{8192}},
+		{"8k,128k,1M", []int32{8192, 131072, 1048576}},
+		{"4096", []int32{4096}},
+		{" 8K , 1m ", []int32{8192, 1048576}},
+		{"", nil},
+	} {
+		t.Run(tc.in, func(t *testing.T) {
+			got, err := parseContextLadder(tc.in)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got) != len(tc.want) {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Errorf("got %v, want %v", got, tc.want)
+				}
+			}
+		})
+	}
+}
+
+func TestModelBudgetRefusesAContextLadderItCannotRead(t *testing.T) {
+	for _, in := range []string{"8g", "abc", "0", "-1", "8k,"} {
+		t.Run(in, func(t *testing.T) {
+			got, err := parseContextLadder(in)
+			if in == "8k," {
+				// A trailing comma is a typo with an obvious reading,
+				// not an error worth stopping for.
+				if err != nil || len(got) != 1 {
+					t.Errorf("got %v, %v; want the one length it names", got, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Errorf("accepted %q as a context length", in)
+			}
+		})
+	}
+}
+
+// The exit status is the pre-flight gate, and it has to mean the same
+// thing in this mode: zero when some shape works, one when none does.
+func TestModelBudgetExitsNonZeroWhenNoShapeHoldsASession(t *testing.T) {
+	_, _, err := runBudget(t, glm52Budget, "zai-org/GLM-5.2",
+		"--vram-gb", "80", "--quantization", "fp16", "--sessions-at", "1M", "--max-cards", "2")
+	if err == nil {
+		t.Fatal("exited zero when nothing holds a session")
+	}
+}
+
+// The concurrency question names its own context lengths, so a model
+// that publishes no trained window must not be refused for lacking one.
+// That model is exactly the case where an operator names the ladder.
+func TestModelBudgetSessionsDoNotNeedTheModelToPublishAWindow(t *testing.T) {
+	noWindow := &provisionerv1.ModelArchitecture{
+		Params: 70_600_000_000, Layers: 80, KvHeads: 8, HeadDim: 128, HiddenSize: 8192,
+	}
+	out, _, err := runBudget(t, noWindow, "org/model",
+		"--vram-gb", "80", "--quantization", "fp8", "--sessions-at", "8k", "--max-cards", "8")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "8k:") {
+		t.Errorf("want an 8k row, got:\n%s", out)
+	}
+}
+
+// Both modes have to agree, since one is a table drawn from the other's
+// numbers and a figure gets drawn from whichever the reader ran.
+func TestModelBudgetSessionsAgreesAcrossTheTwoOutputModes(t *testing.T) {
+	out, _, err := runBudget(t, glm52Budget, "zai-org/GLM-5.2",
+		"--vram-gb", "80", "--quantization", "fp8", "--sessions-at", "8k,128k", "--max-cards", "32", "--output", "json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got sessionsJSON
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("parse json: %v\n%s", err, out)
+	}
+	if !got.LatentCache {
+		t.Error("json did not record the latent cache the table names in prose")
+	}
+	if len(got.CardCounts) != 6 || got.CardCounts[5] != 32 {
+		t.Fatalf("card counts = %v, want the powers of two up to 32", got.CardCounts)
+	}
+	if len(got.Rows) != 2 {
+		t.Fatalf("rows = %d, want 2", len(got.Rows))
+	}
+	if n := got.Rows[0].Sessions[5]; n != 117 {
+		t.Errorf("8k on 32 cards = %d, want the 117 the table prints", n)
+	}
+	if n := got.Rows[1].Sessions[5]; n != 7 {
+		t.Errorf("128k on 32 cards = %d, want the 7 the table prints", n)
+	}
+	if got.Rows[1].CacheBytesPerSession != 5_888_802_816 {
+		t.Errorf("cache per session = %d, want 5888802816", got.Rows[1].CacheBytesPerSession)
 	}
 }

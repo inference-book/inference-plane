@@ -1,6 +1,7 @@
 package vrambudget
 
 import (
+	"fmt"
 	"math"
 	"strings"
 	"testing"
@@ -837,4 +838,112 @@ func TestValidateArchAsksForTheFieldsTheCacheShapeActuallyUses(t *testing.T) {
 			t.Error("accepted a per-head model with no kv-head count")
 		}
 	})
+}
+
+// MaxSessions is the inverse of Compute, so the two have to agree at the
+// boundary: the count it reports fits, and one more does not. Checked
+// across shapes and contexts rather than at one point, because the two
+// calculations solve the same inequality from opposite ends and a sign
+// error shows up only at the edge.
+func TestMaxSessionsLandsExactlyOnTheBoundaryComputeDraws(t *testing.T) {
+	for _, arch := range []struct {
+		name string
+		a    *Arch
+	}{
+		{"per-head cache", &Arch{Params: 70_600_000_000, Layers: 80, KvHeads: 8, HeadDim: 128, HiddenSize: 8192}},
+		{"latent cache", deepSeekV3},
+		{"hybrid latent cache", kimiK3},
+	} {
+		for _, ctx := range []int32{8192, 131072, 1_048_576} {
+			for _, cards := range []int32{1, 8} {
+				t.Run(fmt.Sprintf("%s/%d/%dcards", arch.name, ctx, cards), func(t *testing.T) {
+					p := Plan{Weights: PrecisionFP8, MaxModelLen: ctx, TPSize: cards, MaxBatch: 1}
+					n, err := MaxSessions(arch.a, p, 80*GiB, DefaultUtilization)
+					if err != nil {
+						t.Fatal(err)
+					}
+					usable := UsableBytes(80*GiB, DefaultUtilization)
+					if n > 0 {
+						p.MaxBatch = int32(n)
+						b, err := Compute(arch.a, p)
+						if err != nil {
+							t.Fatal(err)
+						}
+						if v := b.Against(usable); v != Fits {
+							t.Errorf("%d sessions reported, but Compute says %s", n, v)
+						}
+					}
+					p.MaxBatch = int32(n) + 1
+					b, err := Compute(arch.a, p)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if v := b.Against(usable); v == Fits {
+						t.Errorf("%d sessions also fits, so %d was not the maximum", n+1, n)
+					}
+				})
+			}
+		}
+	}
+}
+
+// The wall itself. Concurrency collapses as the context grows, and it
+// collapses faster than linearly once the activation term joins the
+// cache, which is the shape the chapter's figure is drawn from.
+func TestSessionsCollapseAsTheContextGrows(t *testing.T) {
+	p := Plan{Weights: PrecisionFP8, TPSize: 16, MaxBatch: 1}
+	var prev int64 = -1
+	for _, ctx := range []int32{8192, 32768, 131072} {
+		p.MaxModelLen = ctx
+		n, err := MaxSessions(deepSeekV3, p, 80*GiB, DefaultUtilization)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if prev >= 0 && n >= prev {
+			t.Errorf("at %d tokens %d sessions fit, no fewer than the %d at the shorter context", ctx, n, prev)
+		}
+		prev = n
+	}
+}
+
+// Zero when the weights alone leave no room, which is a different answer
+// from a small one and has to be distinguishable by any table quoting it.
+func TestMaxSessionsIsZeroWhenTheWeightsDoNotLeaveRoom(t *testing.T) {
+	p := Plan{Weights: PrecisionFP16, MaxModelLen: 8192, MaxBatch: 1, TPSize: 1}
+	n, err := MaxSessions(kimiK3, p, 80*GiB, DefaultUtilization)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Errorf("%d sessions on one card for a 2.78T model at fp16, want 0", n)
+	}
+}
+
+// A latent cache is replicated, so cards buy weight room and no cache
+// room. Concurrency still rises with cards, because the weights shrink
+// per card and free the space a session needs, but it rises far more
+// slowly than for a model whose cache shards.
+func TestMoreCardsBuyLessConcurrencyForALatentCache(t *testing.T) {
+	perHead := &Arch{Params: 671_026_419_200, Layers: 61, KvHeads: 128, HeadDim: 128, HiddenSize: 7168}
+	p := Plan{Weights: PrecisionFP8, MaxModelLen: 32768, MaxBatch: 1}
+
+	gain := func(a *Arch) float64 {
+		p.TPSize = 16
+		lo, err := MaxSessions(a, p, 80*GiB, DefaultUtilization)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p.TPSize = 32
+		hi, err := MaxSessions(a, p, 80*GiB, DefaultUtilization)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if lo == 0 {
+			t.Fatalf("nothing fits on 16 cards, so there is no gain to measure")
+		}
+		return float64(hi) / float64(lo)
+	}
+	if l, h := gain(deepSeekV3), gain(perHead); l >= h {
+		t.Errorf("doubling cards multiplied latent concurrency by %.2f and per-head by %.2f; the latent should gain less", l, h)
+	}
 }
