@@ -24,6 +24,9 @@ var llama70B = &provisionerv1.ModelArchitecture{
 // "80GB" card.
 const a100Bytes int64 = 80 << 30
 
+// b200Bytes is 180 GiB, the exact capacity behind a "180GB" Blackwell.
+const b200Bytes int64 = 180 << 30
+
 // capacityProvider is a Provider that also answers the optional
 // card-capacity capability and counts every spawn, so a test can assert
 // that a refusal happened before anything was rented rather than merely
