@@ -14,7 +14,7 @@ Reference implementation of the control plane for *Inference Is All You Need* (A
 | `make down`        | Tear the full stack down                               |
 | `make rebuild`     | Rebuild local Docker images without starting           |
 | `make smoke`       | Go integration tests against a live stack              |
-| `make load`        | Synthetic traffic generator (works against mock or vllm) |
+| `make load`        | Synthetic traffic generator; defaults to `MODEL=mock/mock`, pass `MODEL=<exact string>` for a real deployment |
 | `make test`        | Unit tests (no live stack needed)                      |
 | `make build`       | Compile `bin/iplane`                                   |
 | `make dist`        | Cross-compile `dist/iplane-linux-{amd64,arm64}` with the version stamped in (what the engine agent is fetched from) |

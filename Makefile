@@ -96,8 +96,15 @@ smoke-lambdalabs: ## Hit the real Lambda Labs API (List is free; LAMBDA_RENT=1 a
 	@test -n "$$LAMBDA_API_KEY" || (echo "LAMBDA_API_KEY not set" && exit 1)
 	go test -tags=smoke_lambdalabs -v -count=1 -timeout=5m ./tests/smoke-lambdalabs/...
 
-load: ## Generate synthetic traffic against the running stack (safe with mock backend)
-	go run ./cmd/iplane load --url=http://localhost:8080
+# The load generator refuses to guess a model, because the string has to
+# match a live deployment exactly and a wrong one sends traffic nowhere.
+# mock/mock is what the mock-engine demos deploy under, so the bare
+# target works against a mock stack. Point it at a real deployment with
+# `make load MODEL=...`, using the string `iplane deployment list` prints.
+MODEL ?= mock/mock
+
+load: ## Generate synthetic traffic against the running stack (MODEL=... for a real deployment, defaults to the mock)
+	go run ./cmd/iplane load --url=http://localhost:8080 --model=$(MODEL)
 
 test: ## Run unit tests (no live stack needed)
 	go test ./...
