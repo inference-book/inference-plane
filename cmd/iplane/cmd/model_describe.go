@@ -94,6 +94,15 @@ func renderModelArchitecture(w interface{ Write([]byte) (int, error) }, spec str
 		if n := a.GetDenseLayers(); n > 0 {
 			fmt.Fprintf(tw, "  dense layers\t%d of %d\n", n, a.GetLayers())
 		}
+		// What the model reads to decode one token, against what it
+		// holds. The gap is why a sparse model is billed like its total
+		// and runs like its active share, and it is the one line here
+		// that a dense model has no version of.
+		if active := vrambudget.ActiveParams(a); active > 0 {
+			fmt.Fprintf(tw, "  active per step\t%s of %s (%.0fx smaller)\n",
+				formatParams(active), formatParams(a.GetParams()),
+				float64(a.GetParams())/float64(active))
+		}
 	}
 
 	// The weight ladder. Each step down roughly halves the term, and

@@ -72,6 +72,11 @@ type modelConfig struct {
 
 	// Leading dense layers before the mixture-of-experts stack starts.
 	FirstKDenseReplace int32 `json:"first_k_dense_replace"`
+
+	// Width a routed expert operates at, where the model projects down
+	// before the expert stack. Absent means the experts run at the
+	// model's own hidden size, which is what almost every family does.
+	RoutedExpertHiddenSize int32 `json:"routed_expert_hidden_size"`
 }
 
 // safetensorsInfo is HF's published tensor accounting, and the only
@@ -194,6 +199,11 @@ func resolveExperts(arch *provisionerv1.ModelArchitecture, cfg *modelConfig) {
 	// only reached when no expert-specific width exists.
 	arch.MoeIntermediateSize = firstNonZero(cfg.MoEIntermediateSize, cfg.IntermediateSize)
 	arch.DenseLayers = cfg.FirstKDenseReplace
+	// Absent means the experts run at the model's own width. Left at the
+	// hidden size rather than at zero, because every caller of this field
+	// multiplies by it and zero would silently price the expert stack at
+	// nothing.
+	arch.RoutedExpertHiddenSize = firstNonZero(cfg.RoutedExpertHiddenSize, cfg.HiddenSize)
 }
 
 // firstNonZero returns the first stated value among a field's spellings.

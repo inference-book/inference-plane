@@ -110,9 +110,10 @@ func TestModelDescribeReportsTheExpertShape(t *testing.T) {
   hidden size     6144
   context window  1048576 tokens
 
-  experts       256 routed, 8 active per token, 1 shared
-  expert width  2048
-  dense layers  3 of 78
+  experts          256 routed, 8 active per token, 1 shared
+  expert width     2048
+  dense layers     3 of 78
+  active per step  51.20 B of 753.33 B (15x smaller)
 
   weights   1506.7 GB fp16   753.3 GB fp8   452.0 GB 4-bit
   kv cache  3744.0 KiB per token at fp16, 1872.0 KiB at fp8

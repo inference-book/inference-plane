@@ -2711,9 +2711,16 @@ type ModelArchitecture struct {
 	// weights as expert weights misattributes them to the activated share.
 	// Zero on a dense model means every layer is dense; zero on a sparse
 	// one means no dense prefix.
-	DenseLayers   int32 `protobuf:"varint,11,opt,name=dense_layers,json=denseLayers,proto3" json:"dense_layers,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	DenseLayers int32 `protobuf:"varint,11,opt,name=dense_layers,json=denseLayers,proto3" json:"dense_layers,omitempty"`
+	// Model dimension a routed expert operates on, where that differs from
+	// the model's own (routed_expert_hidden_size). Most sparse models run
+	// their experts at full width and publish nothing here, so absent means
+	// hidden_size rather than zero. Kimi K3 projects down to 3584 from a
+	// 7168 model dimension, and reading its experts at full width computes
+	// an expert parameter share twice the size of the whole model.
+	RoutedExpertHiddenSize int32 `protobuf:"varint,12,opt,name=routed_expert_hidden_size,json=routedExpertHiddenSize,proto3" json:"routed_expert_hidden_size,omitempty"`
+	unknownFields          protoimpl.UnknownFields
+	sizeCache              protoimpl.SizeCache
 }
 
 func (x *ModelArchitecture) Reset() {
@@ -2819,6 +2826,13 @@ func (x *ModelArchitecture) GetSharedExperts() int32 {
 func (x *ModelArchitecture) GetDenseLayers() int32 {
 	if x != nil {
 		return x.DenseLayers
+	}
+	return 0
+}
+
+func (x *ModelArchitecture) GetRoutedExpertHiddenSize() int32 {
+	if x != nil {
+		return x.RoutedExpertHiddenSize
 	}
 	return 0
 }
@@ -3646,7 +3660,7 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"\fUpstreamAuth\x12\x16\n" +
 	"\x06header\x18\x01 \x01(\tR\x06header\x12\x1b\n" +
 	"\tvalue_env\x18\x02 \x01(\tR\bvalueEnv\x12!\n" +
-	"\fvalue_prefix\x18\x03 \x01(\tR\vvaluePrefix\"\xa0\x03\n" +
+	"\fvalue_prefix\x18\x03 \x01(\tR\vvaluePrefix\"\xdb\x03\n" +
 	"\x11ModelArchitecture\x12\x16\n" +
 	"\x06params\x18\x01 \x01(\x03R\x06params\x12\x16\n" +
 	"\x06layers\x18\x02 \x01(\x05R\x06layers\x12\x19\n" +
@@ -3661,7 +3675,8 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"\x15moe_intermediate_size\x18\t \x01(\x05R\x13moeIntermediateSize\x12%\n" +
 	"\x0eshared_experts\x18\n" +
 	" \x01(\x05R\rsharedExperts\x12!\n" +
-	"\fdense_layers\x18\v \x01(\x05R\vdenseLayers\"5\n" +
+	"\fdense_layers\x18\v \x01(\x05R\vdenseLayers\x129\n" +
+	"\x19routed_expert_hidden_size\x18\f \x01(\x05R\x16routedExpertHiddenSize\"5\n" +
 	"\x14DescribeModelRequest\x12\x1d\n" +
 	"\n" +
 	"model_spec\x18\x01 \x01(\tR\tmodelSpec\"^\n" +

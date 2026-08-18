@@ -1033,6 +1033,14 @@ message ModelArchitecture {
   // Zero on a dense model means every layer is dense; zero on a sparse
   // one means no dense prefix.
   int32 dense_layers = 11;
+
+  // Model dimension a routed expert operates on, where that differs from
+  // the model's own (routed_expert_hidden_size). Most sparse models run
+  // their experts at full width and publish nothing here, so absent means
+  // hidden_size rather than zero. Kimi K3 projects down to 3584 from a
+  // 7168 model dimension, and reading its experts at full width computes
+  // an expert parameter share twice the size of the whole model.
+  int32 routed_expert_hidden_size = 12;
 }
 
 // DescribeModelRequest asks what a model spec resolves to.
