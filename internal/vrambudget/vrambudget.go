@@ -96,6 +96,15 @@ func ValidateArch(a *Arch) error {
 		return fmt.Errorf("parameter count must be positive, got %d", a.GetParams())
 	case a.GetLayers() <= 0:
 		return fmt.Errorf("layer count must be positive, got %d", a.GetLayers())
+	}
+	// How the cache is shaped decides which fields have to be present.
+	// A model caching a compressed latent has no per-head key and value
+	// to size, so requiring a head count off it would reject a model
+	// whose cache this package can price exactly.
+	if a.GetKvLoraRank() > 0 {
+		return nil
+	}
+	switch {
 	case a.GetKvHeads() <= 0:
 		return fmt.Errorf("kv-head count must be positive, got %d", a.GetKvHeads())
 	case a.GetHeadDim() <= 0:
@@ -396,6 +405,48 @@ func ActiveParams(a *Arch) int64 {
 	return total - resident + int64(moeLayers(a))*int64(active)*expertParams(a)
 }
 
+// CachingLayers is the layers whose cache grows with the sequence.
+//
+// Every layer, unless the model is a hybrid that says otherwise. A
+// hybrid's linear-attention layers hold a state of fixed size however
+// long the sequence runs, so they contribute nothing per token and
+// counting them prices the cache at a multiple of what it costs.
+func CachingLayers(a *Arch) int32 {
+	if n := a.GetFullAttentionLayers(); n > 0 && n < a.GetLayers() {
+		return n
+	}
+	return a.GetLayers()
+}
+
+// LatentCache reports whether the model caches a compressed latent
+// rather than a key and a value per attention head.
+func LatentCache(a *Arch) bool { return a.GetKvLoraRank() > 0 }
+
+// KVBytesPerToken is the cache cost of one token, across the whole
+// engine.
+//
+// Two shapes, and which one a model uses moves the figure by more than an
+// order of magnitude rather than by a few percent.
+//
+// The ordinary shape stores a key and a value separately for every
+// key-value head at every layer, hence the two.
+//
+// The compressed shape stores one latent per token per layer, from which
+// every head's key and value are reconstructed on the fly, plus the
+// position-carrying part of the key which cannot be compressed and rides
+// uncompressed beside it. There is no factor of two, because the one
+// latent serves as both, and no head count, because the whole point of
+// the design is that the cache stops scaling with heads. DeepSeek-V3 at
+// 61 layers of 512 + 64 elements works out to 70,272 bytes per token at
+// bf16, which is the figure that model is published against.
+func KVBytesPerToken(a *Arch, cache Precision) int64 {
+	layers := int64(CachingLayers(a))
+	if LatentCache(a) {
+		return layers * (int64(a.GetKvLoraRank()) + int64(a.GetQkRopeHeadDim())) * cache.BytesPerCacheElement()
+	}
+	return 2 * layers * int64(a.GetKvHeads()) * int64(a.GetHeadDim()) * cache.BytesPerCacheElement()
+}
+
 // Compute returns the per-card budget for a model under a plan.
 //
 // Tensor parallelism divides the weights, the cache, and the activations
@@ -419,10 +470,10 @@ func Compute(a *Arch, p Plan) (Budget, error) {
 	// exact and known before the engine starts.
 	weights := float64(a.GetParams()) * p.Weights.BytesPerParam()
 
-	// KV cache: two (a key and a value, stored separately) times the
-	// state one token contributes at each layer, summed over layers,
-	// times the bytes per element the cache precision sets.
-	perToken := 2 * int64(a.GetLayers()) * int64(a.GetKvHeads()) * int64(a.GetHeadDim()) * p.cacheDtype().BytesPerCacheElement()
+	// KV cache: the state one token contributes at each caching layer,
+	// summed over those layers, times the bytes per element the cache
+	// precision sets.
+	perToken := KVBytesPerToken(a, p.cacheDtype())
 	kv := float64(perToken) * float64(p.MaxModelLen) * float64(p.MaxBatch)
 
 	// Activations: scratch for a forward pass, following batch, context,
@@ -434,10 +485,22 @@ func Compute(a *Arch, p Plan) (Budget, error) {
 
 	perCard := func(total float64) int64 { return int64(total / float64(cards)) }
 
+	// A latent cache is replicated on every card rather than sharded
+	// across them. Each rank reconstructs all of the heads it computes
+	// from the whole latent, so each rank needs the whole latent, and
+	// adding cards buys weight headroom without buying any cache
+	// headroom. This is the tradeoff compressed attention makes and it is
+	// the reason engines grow a separate data-parallel attention mode to
+	// escape it.
+	kvPerCard := perCard(kv)
+	if LatentCache(a) {
+		kvPerCard = int64(kv)
+	}
+
 	b := Budget{
 		Cards:           cards,
 		WeightBytes:     perCard(weights),
-		KVBytes:         perCard(kv),
+		KVBytes:         kvPerCard,
 		ActivationBytes: perCard(activations),
 		KVBytesPerToken: perToken,
 		ActiveParams:    ActiveParams(a),
@@ -591,7 +654,13 @@ func Sweep(a *Arch, p Plan, cardBytes int64, utilization float64, maxCards int32
 
 	var out []Candidate
 	for n := int32(1); n <= maxCards; n *= 2 {
-		if n > 1 && a.GetKvHeads()%n != 0 {
+		// The rule below is about how the cache shards, so it does not
+		// apply to a model whose cache does not shard at all. A latent
+		// cache is replicated on every card whatever the head count
+		// divides by, and refusing a card count on head-divisibility
+		// grounds would refuse a shape for a saving that was never on
+		// offer either way.
+		if n > 1 && !LatentCache(a) && a.GetKvHeads()%n != 0 {
 			out = append(out, Candidate{
 				Cards: n,
 				SkipReason: fmt.Sprintf("%d kv heads do not divide by %d, so an engine would replicate the cache across cards rather than shard it",

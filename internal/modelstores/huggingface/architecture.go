@@ -77,6 +77,27 @@ type modelConfig struct {
 	// before the expert stack. Absent means the experts run at the
 	// model's own hidden size, which is what almost every family does.
 	RoutedExpertHiddenSize int32 `json:"routed_expert_hidden_size"`
+
+	// The compressed-latent attention fields. A model publishing
+	// KVLoraRank caches one latent per token per layer instead of a key
+	// and a value per head, and QKRopeHeadDim is the uncompressed
+	// position-carrying remainder stored beside it.
+	KVLoraRank    int32 `json:"kv_lora_rank"`
+	QKRopeHeadDim int32 `json:"qk_rope_head_dim"`
+
+	// LinearAttn is where a hybrid model says which of its layers are
+	// ordinary attention. The rest are linear-attention layers whose
+	// state does not grow with the sequence, so they cost nothing per
+	// token and must not be counted.
+	LinearAttn *linearAttnConfig `json:"linear_attn_config"`
+}
+
+// linearAttnConfig is the hybrid-attention layer split. Only the list of
+// full-attention layers is read; the complementary list is derivable and
+// the rest of the block describes the linear layers' own shape, which
+// costs no cache.
+type linearAttnConfig struct {
+	FullAttnLayers []int32 `json:"full_attn_layers"`
 }
 
 // safetensorsInfo is HF's published tensor accounting, and the only
@@ -154,11 +175,20 @@ func (s *Store) Architecture(ctx context.Context, req *provisionerv1.DescribeMod
 	// head_dim is optional and derivable. Deriving it is exact rather
 	// than an estimate, since the hidden dimension is by construction the
 	// head dimension times the attention-head count.
-	if arch.HeadDim == 0 && cfg.AttentionHead > 0 {
+	//
+	// Not derived for a model that caches a compressed latent. The
+	// division is arithmetic that will always produce a number, and on a
+	// latent-cache model that number describes nothing: the model has no
+	// per-head key and value to size. Kimi K3 came out at 74, which is
+	// neither its qk_nope_head_dim of 128 nor its v_head_dim of 128 nor
+	// anything the engine allocates.
+	if arch.HeadDim == 0 && cfg.AttentionHead > 0 && cfg.KVLoraRank == 0 {
 		arch.HeadDim = cfg.HiddenSize / cfg.AttentionHead
 	}
 
 	resolveExperts(arch, cfg)
+
+	resolveAttention(arch, cfg)
 
 	if err := vrambudget.ValidateArch(arch); err != nil {
 		return nil, fmt.Errorf("model %q config is missing what the budget needs: %w", id, err)
@@ -204,6 +234,25 @@ func resolveExperts(arch *provisionerv1.ModelArchitecture, cfg *modelConfig) {
 	// multiplies by it and zero would silently price the expert stack at
 	// nothing.
 	arch.RoutedExpertHiddenSize = firstNonZero(cfg.RoutedExpertHiddenSize, cfg.HiddenSize)
+}
+
+// resolveAttention records how the model caches, which decides the shape
+// of the cache term rather than only its size.
+//
+// Absent throughout means the ordinary case: no latent, so a key and a
+// value per head; no hybrid split, so every layer pays.
+func resolveAttention(arch *provisionerv1.ModelArchitecture, cfg *modelConfig) {
+	arch.KvLoraRank = cfg.KVLoraRank
+	arch.QkRopeHeadDim = cfg.QKRopeHeadDim
+	if cfg.LinearAttn == nil {
+		return
+	}
+	// Recorded only when it is a real restriction. A list naming every
+	// layer says the same thing as no list, and storing it that way keeps
+	// one meaning for absent.
+	if n := int32(len(cfg.LinearAttn.FullAttnLayers)); n > 0 && n < cfg.Layers {
+		arch.FullAttentionLayers = n
+	}
 }
 
 // firstNonZero returns the first stated value among a field's spellings.

@@ -6,6 +6,35 @@
     "first_k_dense_replace": 1,
     "hidden_size": 7168,
     "intermediate_size": 33792,
+    "kv_lora_rank": 512,
+    "linear_attn_config": {
+      "full_attn_layers": [
+        4,
+        8,
+        12,
+        16,
+        20,
+        24,
+        28,
+        32,
+        36,
+        40,
+        44,
+        48,
+        52,
+        56,
+        60,
+        64,
+        68,
+        72,
+        76,
+        80,
+        84,
+        88,
+        92,
+        93
+      ]
+    },
     "max_position_embeddings": 1048576,
     "moe_intermediate_size": 3072,
     "num_attention_heads": 96,
@@ -14,6 +43,7 @@
     "num_hidden_layers": 93,
     "num_key_value_heads": 96,
     "num_shared_experts": 2,
+    "qk_rope_head_dim": 64,
     "routed_expert_hidden_size": 3584
   }
 }

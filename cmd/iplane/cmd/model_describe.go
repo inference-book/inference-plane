@@ -60,8 +60,20 @@ func renderModelArchitecture(w interface{ Write([]byte) (int, error) }, spec str
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fmt.Fprintf(tw, "  parameters\t%s\n", formatParams(a.GetParams()))
 	fmt.Fprintf(tw, "  layers\t%d\n", a.GetLayers())
-	fmt.Fprintf(tw, "  kv heads\t%d\n", a.GetKvHeads())
-	fmt.Fprintf(tw, "  head dim\t%d\n", a.GetHeadDim())
+	// How the model caches, rather than the per-head figures, when the
+	// per-head figures describe nothing it stores. A latent-cache model
+	// has no key and value per head to report, and printing a head count
+	// beside a cache that ignores it invites the arithmetic the cache
+	// term used to do.
+	if vrambudget.LatentCache(a) {
+		fmt.Fprintf(tw, "  kv latent\t%d + %d per token per layer\n", a.GetKvLoraRank(), a.GetQkRopeHeadDim())
+	} else {
+		fmt.Fprintf(tw, "  kv heads\t%d\n", a.GetKvHeads())
+		fmt.Fprintf(tw, "  head dim\t%d\n", a.GetHeadDim())
+	}
+	if n := vrambudget.CachingLayers(a); n < a.GetLayers() {
+		fmt.Fprintf(tw, "  caching layers\t%d of %d (the rest are linear attention)\n", n, a.GetLayers())
+	}
 	fmt.Fprintf(tw, "  hidden size\t%d\n", a.GetHiddenSize())
 	if n := a.GetMaxPositionEmbeddings(); n > 0 {
 		fmt.Fprintf(tw, "  context window\t%d tokens\n", n)
