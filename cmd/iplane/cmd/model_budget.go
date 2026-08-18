@@ -67,6 +67,17 @@ works as a pre-flight gate in front of a deploy.`,
 			return err
 		}
 
+		// A checkpoint that already chose a precision cannot be sized at
+		// another one. The parameter count is the hub's element
+		// accounting, and packing changes what an element is, so every
+		// row of the table would price a second quantization on top of
+		// the first (#382).
+		if q := resp.GetArchitecture().GetQuantization(); q != "" {
+			return fmt.Errorf("%s is published at %s, so its parameter count is packed elements rather than parameters "+
+				"and sizing it at another precision would quantize it twice. Budget the unquantized model and read the "+
+				"result as an upper bound, or size this one from the repo's own file sizes", spec, q)
+		}
+
 		fits, err := renderModelBudget(cmd.OutOrStdout(), spec, resp.GetArchitecture(), opts)
 		if err != nil {
 			return err

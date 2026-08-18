@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
@@ -182,5 +183,43 @@ func TestModelDescribeNamesTheLayersThatActuallyCache(t *testing.T) {
 		if bytes.Contains([]byte(got), []byte(unwanted)) {
 			t.Errorf("printed %q for a model with no per-head cache:\n%s", unwanted, got)
 		}
+	}
+}
+
+// TestModelDescribeSuppressesTheLadderForAPackedCheckpoint. The ladder is
+// built from the parameter count, and on a packed checkpoint that count is
+// the hub's element accounting, so every figure in the row would price a
+// second quantization on top of the one already applied.
+func TestModelDescribeSuppressesTheLadderForAPackedCheckpoint(t *testing.T) {
+	packed := &provisionerv1.ModelArchitecture{
+		Params: 380_990_000_000, Layers: 78, KvHeads: 64, HeadDim: 192,
+		HiddenSize: 6144, MaxPositionEmbeddings: 1_048_576,
+		Quantization: "NVFP4",
+	}
+
+	got, err := runDescribe(t, packed, "nvidia/GLM-5.2-NVFP4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "published at NVFP4") {
+		t.Errorf("output does not name the checkpoint's own precision:\n%s", got)
+	}
+	for _, banned := range []string{"fp16 ", " fp8 ", "4-bit"} {
+		if strings.Contains(got, banned) {
+			t.Errorf("output still offers %q, which would quantize a packed checkpoint twice:\n%s", banned, got)
+		}
+	}
+}
+
+// TestModelDescribeKeepsTheLadderForAFullPrecisionCheckpoint is the
+// compatibility half: the suppression is scoped to checkpoints that
+// declare a quantization and nothing else changes.
+func TestModelDescribeKeepsTheLadderForAFullPrecisionCheckpoint(t *testing.T) {
+	got, err := runDescribe(t, llama70B, "meta-llama/Llama-3.3-70B-Instruct")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "141.2 GB fp16") {
+		t.Errorf("the ladder went missing on an unquantized model:\n%s", got)
 	}
 }

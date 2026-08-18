@@ -100,6 +100,30 @@ K2 and K3 publish 0; dense models omit the field.
 ## `quantization_config` marks a checkpoint whose parameter count is packed
 
 Present on every quantized repo checked and absent on the base one, so it
-is a reliable signal. The counts it changes are documented in #382. This
-package does not act on it yet.
+is a reliable signal. Read into `ModelArchitecture.quantization`, and
+callers refuse to apply a second precision to a count that already has one
+(#382).
+
+**Two spellings, and the useful one is not the obvious one.** NVIDIA's
+exporter writes both `quant_method: modelopt`, which names the toolkit,
+and `quant_algo: NVFP4`, which names the format. The transformers-native
+packers write only `quant_method` and there it *is* the format (`fp8`,
+`compressed-tensors`). So read algo first and fall back to method, which
+gets the more informative of the two in every case seen.
+
+What the packing does to the count, for the same model:
+
+| repo | reports | against a 753.33B base |
+| --- | --- | --- |
+| `zai-org/GLM-5.2-FP8` | 753.38 B | right, e4m3 is one byte per parameter |
+| `nvidia/GLM-5.2-NVFP4` | 380.99 B | two values per element |
+| `QuantTrio/GLM-5.2-Int4-Int8Mix` | 784.98 B | *more*, scales and zero-points are elements |
+
+FP8 coming out right is what makes this easy to miss: the official
+quantized variant behaves and the community four-bit ones do not.
+
+Recording the scheme rather than correcting the count is deliberate.
+Deriving a true parameter count wants a format-by-format reading of how
+each packer stores scales, zero-points and group metadata, and a wrong
+correction is worse than a refusal because it looks like an answer.
 
