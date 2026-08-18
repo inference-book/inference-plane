@@ -130,7 +130,7 @@ func init() {
 	loadCmd.Flags().IntVar(&loadSweepStableRuns, "sweep-stable-windows", 3,
 		"consecutive settled windows a --sweep level needs before it is measured")
 	loadCmd.Flags().StringVar(&loadOutput, "output", "text",
-		"final summary format: text | json")
+		"final summary format: text | json | csv. json and csv write the sweep artifact to stdout (the human table goes to stderr, so a redirect captures data only); csv requires --sweep")
 }
 
 // loadEndpoint returns the (base, chatPath, completionsPath) tuple
@@ -172,8 +172,17 @@ func runLoad(parent context.Context) error {
 	if loadPriority != "" && loadPriority != "interactive" && loadPriority != "batch" {
 		return fmt.Errorf("--priority must be one of: interactive, batch (got %q)", loadPriority)
 	}
-	if loadOutput != "text" && loadOutput != "json" {
-		return fmt.Errorf("--output must be one of: text, json (got %q)", loadOutput)
+	switch loadOutput {
+	case "text", outputJSON:
+	case outputCSV:
+		// A CSV of one summary row is a table with nothing to plot
+		// against. The format exists for the ladder, so say so rather
+		// than emitting a file whose shape implies a curve.
+		if loadSweepLevels == "" {
+			return errors.New("--output csv needs --sweep (a csv of one summary row has no curve in it); use text or json for the open loop")
+		}
+	default:
+		return fmt.Errorf("--output must be one of: text, json, csv (got %q)", loadOutput)
 	}
 	if loadModel == "" {
 		return errors.New("--model is required (no default; get the exact string from `iplane deployment list`)")
