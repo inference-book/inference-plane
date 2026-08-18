@@ -27,6 +27,7 @@ var (
 	mockEngineAssemble     time.Duration
 	mockEngineDegradeAfter time.Duration
 	mockEngineLinks        int
+	mockEngineTokenGap     time.Duration
 )
 
 // mockEngineCmd runs a standalone OpenAI-compatible mock engine. It is
@@ -56,6 +57,8 @@ func init() {
 	mockEngineCmd.Flags().IntVar(&mockEnginePort, "port", 9001, "port to listen on (127.0.0.1)")
 	mockEngineCmd.Flags().DurationVar(&mockEngineLatency, "latency", 0,
 		"fixed per-request latency; 0 keeps the realistic bimodal-with-tail default. Routing demos set this low (e.g. 3ms) so runs finish fast.")
+	mockEngineCmd.Flags().DurationVar(&mockEngineTokenGap, "token-latency", 0,
+		"pause between streamed content frames, so inter-token latency is measurable without a GPU. 0 (default) emits the whole reply in one burst, which is what every existing demo expects")
 	mockEngineCmd.Flags().StringVar(&mockEngineRegister, "register", "",
 		"control-plane URL to register with (e.g. http://127.0.0.1:8080); empty disables registration")
 	mockEngineCmd.Flags().StringVar(&mockEngineID, "engine-id", "",
@@ -79,6 +82,14 @@ func init() {
 // the handlers without binding a port. label tags log lines (the port in
 // the server path).
 func newMockEngineMux(be *backends.MockBackend, label string) *http.ServeMux {
+	return newMockEngineMuxWithPacing(be, label, 0)
+}
+
+// newMockEngineMuxWithPacing is newMockEngineMux with a gap between
+// streamed content frames. Separate constructor rather than a parameter
+// on the original, so the existing callers keep reading as the thing they
+// were and only the sweep harness has to know pacing exists.
+func newMockEngineMuxWithPacing(be *backends.MockBackend, label string, tokenGap time.Duration) *http.ServeMux {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	chat := func(w http.ResponseWriter, r *http.Request) {
 		var req backends.GenerateRequest
@@ -97,7 +108,7 @@ func newMockEngineMux(be *backends.MockBackend, label string) *http.ServeMux {
 			return
 		}
 		if req.Stream {
-			streamChatCompletion(w, &resp)
+			streamChatCompletion(w, &resp, tokenGap)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -127,7 +138,7 @@ func runMockEngine(parent context.Context, port int) error {
 		opts = append(opts, backends.WithLatency(mockEngineLatency, mockEngineLatency))
 	}
 	be := backends.NewMock(fmt.Sprintf("mock-engine:%d", port), opts...)
-	mux := newMockEngineMux(be, fmt.Sprintf("%d", port))
+	mux := newMockEngineMuxWithPacing(be, fmt.Sprintf("%d", port), mockEngineTokenGap)
 
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 

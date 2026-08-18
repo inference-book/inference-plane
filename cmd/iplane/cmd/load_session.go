@@ -275,6 +275,18 @@ type chatResult struct {
 	Tokens  int64
 	TTFT    time.Duration
 	HasTTFT bool
+
+	// ITLs is the gap between consecutive content frames, one entry per
+	// frame after the first. Empty on a non-streamed response and on a
+	// stream that produced one frame, both of which are "not measured"
+	// rather than "zero" for the reason TTFT is.
+	//
+	// Separate from TTFT because the two answer different questions and
+	// move independently: time to first token is dominated by queueing
+	// and prefill, and the gap between tokens afterwards is decode. A
+	// batch that doubles will often leave the first roughly alone and
+	// stretch the second, which is invisible in a single latency number.
+	ITLs []time.Duration
 }
 
 // parseChatResponse extracts the assistant reply text, completion token
@@ -324,6 +336,8 @@ func parseChatResponse(resp *http.Response, stream bool, start time.Time) chatRe
 	var tokens int64
 	var ttft time.Duration
 	var hasTTFT bool
+	var itls []time.Duration
+	last := start
 	for sc.Scan() {
 		line := sc.Bytes()
 		if !bytes.HasPrefix(line, []byte("data: ")) {
@@ -354,10 +368,14 @@ func parseChatResponse(resp *http.Response, stream bool, start time.Time) chatRe
 			// it produced anything, understating TTFT by the whole
 			// prefill on a long prompt.
 			if chunk := frame.Choices[0].Delta.Content; chunk != "" {
+				now := time.Now()
 				if !hasTTFT {
-					ttft = time.Since(start)
+					ttft = now.Sub(start)
 					hasTTFT = true
+				} else {
+					itls = append(itls, now.Sub(last))
 				}
+				last = now
 				sb.WriteString(chunk)
 			}
 		}
@@ -365,7 +383,7 @@ func parseChatResponse(resp *http.Response, stream bool, start time.Time) chatRe
 			tokens = frame.Usage.CompletionTokens
 		}
 	}
-	return chatResult{Content: sb.String(), Tokens: tokens, TTFT: ttft, HasTTFT: hasTTFT}
+	return chatResult{Content: sb.String(), Tokens: tokens, TTFT: ttft, HasTTFT: hasTTFT, ITLs: itls}
 }
 
 // sessionID is the stable per-conversation identity stamped into

@@ -114,6 +114,18 @@ func init() {
 		"X-IPlane-Tenant header value (empty = no header, router treats as 'default')")
 	loadCmd.Flags().BoolVar(&loadStream, "stream", false,
 		"request streaming completions (sets stream=true in request body); SSE response is parsed for token counts")
+	loadCmd.Flags().StringVar(&loadSweepLevels, "sweep", "",
+		"closed-loop concurrency ladder instead of a fixed rate, e.g. 1,2,4,8,16 (ignores --rps and --duration)")
+	loadCmd.Flags().DurationVar(&loadSweepDuration, "sweep-duration", 30*time.Second,
+		"how long to measure each --sweep level, after it reaches steady state")
+	loadCmd.Flags().DurationVar(&loadSweepWarmupMax, "sweep-warmup-max", 90*time.Second,
+		"give up waiting for a --sweep level to settle after this long and measure it anyway")
+	loadCmd.Flags().DurationVar(&loadSweepWindow, "sweep-window", 3*time.Second,
+		"sampling window the --sweep steady-state check compares")
+	loadCmd.Flags().Float64Var(&loadSweepTolerance, "sweep-tolerance", 0.1,
+		"how far a --sweep window's throughput may sit from the running mean and still count as settled")
+	loadCmd.Flags().IntVar(&loadSweepStableRuns, "sweep-stable-windows", 3,
+		"consecutive settled windows a --sweep level needs before it is measured")
 	loadCmd.Flags().StringVar(&loadOutput, "output", "text",
 		"final summary format: text | json")
 }
@@ -143,11 +155,16 @@ func loadEndpoint() (base, chatPath, completionsPath string, err error) {
 }
 
 func runLoad(parent context.Context) error {
-	if loadRPS <= 0 {
-		return errors.New("--rps must be > 0")
-	}
-	if loadDuration <= 0 {
-		return errors.New("--duration must be > 0")
+	// The rate flags are the open loop's inputs and the sweep has no use
+	// for them, so they are not validated on that path. Checking them
+	// anyway would refuse a sweep for a --rps the sweep never reads.
+	if loadSweepLevels == "" {
+		if loadRPS <= 0 {
+			return errors.New("--rps must be > 0")
+		}
+		if loadDuration <= 0 {
+			return errors.New("--duration must be > 0")
+		}
 	}
 	if loadPriority != "" && loadPriority != "interactive" && loadPriority != "batch" {
 		return fmt.Errorf("--priority must be one of: interactive, batch (got %q)", loadPriority)
@@ -158,6 +175,12 @@ func runLoad(parent context.Context) error {
 	if loadModel == "" {
 		return errors.New("--model is required (no default; get the exact string from `iplane deployment list`)")
 	}
+	if loadSweepLevels != "" {
+		ctx, stop := signal.NotifyContext(parent, os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		return runLoadSweep(ctx, os.Stdout)
+	}
+
 	base, chatPath, completionsPath, err := loadEndpoint()
 	if err != nil {
 		return err
@@ -308,6 +331,7 @@ func fireLoadRequest(ctx context.Context, c *http.Client, cfg *loadFireConfig, s
 	dur := time.Since(t0)
 
 	st.recordSuccess(dur, res.Tokens)
+	st.recordITLs(res.ITLs)
 	// Only when actually measured. A stream that carried no content has
 	// nothing to time, and counting it as zero would flatter the percentile.
 	if res.HasTTFT {
@@ -370,9 +394,21 @@ type loadStats struct {
 	// unmeasured turns and padding the gaps with zeros would drag every
 	// percentile toward a number no request experienced.
 	ttfts []time.Duration
+
+	// itls holds inter-token gaps, many per streamed request rather than
+	// one, so its length is unrelated to the request count in a way the
+	// other sample sets' lengths are not.
+	itls []time.Duration
 }
 
+// A nil *loadStats discards every recording, which is how the sweep
+// keeps firing requests through its warm-up window without letting them
+// into the measurement. The alternative, gating at each call site, put
+// the same condition in four places and got it wrong in one.
 func (s *loadStats) recordSuccess(d time.Duration, tokens int64) {
+	if s == nil {
+		return
+	}
 	s.mu.Lock()
 	s.successes++
 	s.latencies = append(s.latencies, d)
@@ -384,12 +420,33 @@ func (s *loadStats) recordSuccess(d time.Duration, tokens int64) {
 // reading exists, so len(ttfts) is the sample count rather than the request
 // count and the two are allowed to differ.
 func (s *loadStats) recordTTFT(d time.Duration) {
+	if s == nil {
+		return
+	}
 	s.mu.Lock()
 	s.ttfts = append(s.ttfts, d)
 	s.mu.Unlock()
 }
 
-func (s *loadStats) recordError() { atomic.AddInt64(&s.errors, 1) }
+func (s *loadStats) recordError() {
+	if s == nil {
+		return
+	}
+	atomic.AddInt64(&s.errors, 1)
+}
+
+// recordITLs adds one request's inter-token gaps. Appended rather than
+// summarised per request, because the interesting percentile is over
+// gaps and not over per-request means: a request that stalls once in
+// forty tokens has a fine mean and a p95 that says what happened.
+func (s *loadStats) recordITLs(gaps []time.Duration) {
+	if s == nil || len(gaps) == 0 {
+		return
+	}
+	s.mu.Lock()
+	s.itls = append(s.itls, gaps...)
+	s.mu.Unlock()
+}
 
 // loadSummary is the structured form of the final stats line. JSON
 // output mode marshals it directly; text output formats it as a
@@ -434,33 +491,41 @@ func (s *loadStats) summary(elapsed time.Duration, targetRPS float64) loadSummar
 		sum.TokensPerSec = float64(s.tokens) / elapsed.Seconds()
 	}
 	if len(s.latencies) > 0 {
-		sort.Slice(s.latencies, func(i, j int) bool { return s.latencies[i] < s.latencies[j] })
-		p := func(q float64) time.Duration {
-			i := int(float64(len(s.latencies)) * q)
-			if i >= len(s.latencies) {
-				i = len(s.latencies) - 1
-			}
-			return s.latencies[i]
-		}
-		sum.LatencyP50Ms = p(0.50).Milliseconds()
-		sum.LatencyP95Ms = p(0.95).Milliseconds()
-		sum.LatencyP99Ms = p(0.99).Milliseconds()
+		sum.LatencyP50Ms = quantile(s.latencies, 0.50).Milliseconds()
+		sum.LatencyP95Ms = quantile(s.latencies, 0.95).Milliseconds()
+		sum.LatencyP99Ms = quantile(s.latencies, 0.99).Milliseconds()
 	}
 	if len(s.ttfts) > 0 {
-		sort.Slice(s.ttfts, func(i, j int) bool { return s.ttfts[i] < s.ttfts[j] })
-		p := func(q float64) time.Duration {
-			i := int(float64(len(s.ttfts)) * q)
-			if i >= len(s.ttfts) {
-				i = len(s.ttfts) - 1
-			}
-			return s.ttfts[i]
-		}
 		sum.TTFTSamples = int64(len(s.ttfts))
-		sum.TTFTP50Ms = p(0.50).Milliseconds()
-		sum.TTFTP95Ms = p(0.95).Milliseconds()
-		sum.TTFTP99Ms = p(0.99).Milliseconds()
+		sum.TTFTP50Ms = quantile(s.ttfts, 0.50).Milliseconds()
+		sum.TTFTP95Ms = quantile(s.ttfts, 0.95).Milliseconds()
+		sum.TTFTP99Ms = quantile(s.ttfts, 0.99).Milliseconds()
 	}
 	return sum
+}
+
+// quantile is the nearest-rank percentile over a sample set, sorting the
+// slice in place.
+//
+// Extracted from the two copies that used to sit inline in summary(),
+// once a third and fourth caller appeared with the sweep's per-level
+// inter-token latencies. The semantics are the ones the existing tests
+// pin, index clamped to the last element, so it is the same arithmetic
+// rather than a better one: changing the definition would silently move
+// every number the demos have already committed to results files.
+//
+// An empty sample set returns zero, which callers distinguish from a
+// measured zero by checking the length first, the way summary() does.
+func quantile(samples []time.Duration, q float64) time.Duration {
+	if len(samples) == 0 {
+		return 0
+	}
+	sort.Slice(samples, func(i, j int) bool { return samples[i] < samples[j] })
+	i := int(float64(len(samples)) * q)
+	if i >= len(samples) {
+		i = len(samples) - 1
+	}
+	return samples[i]
 }
 
 func (s *loadStats) print(elapsed time.Duration, targetRPS float64, format string) {
