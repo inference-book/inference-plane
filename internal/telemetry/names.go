@@ -45,7 +45,7 @@ const MetricQueueWaitSeconds = "iplane.queue.wait.seconds"
 // MetricReaperDestroysTotal -- Counter of deployments destroyed by the idle-TTL reaper, labeled by reason (idle, etc.). Operator-facing signal of leak protection working.
 const MetricReaperDestroysTotal = "iplane.reaper.destroys.total"
 
-// MetricReplicaInFlight -- Synchronous gauge of current in-flight requests per (deploy_id, replica_id). Emitted on dispatch + on response so the value tracks live load. Demo 06's "watch replicas equalize under round-robin" panel reads this (v0.2 ch7-beat3.6,
+// MetricReplicaInFlight -- Synchronous gauge of current in-flight requests per (deploy_id, instance_id). Emitted on dispatch + on response so the value tracks live load. Demo 06's "watch replicas equalize under round-robin" panel reads this (v0.2 ch7-beat3.6,
 const MetricReplicaInFlight = "iplane.replica.in_flight"
 
 // MetricRequestDuration -- Histogram of request duration in seconds. Bucket edges tuned for the bimodal LLM latency distribution (Chapter 6.6.4).
@@ -57,7 +57,7 @@ const MetricRequestsTotal = "inference.requests.total"
 // MetricRouterAffinityTotal -- Counter of session-affinity outcomes, labeled by deploy_id / outcome. For each request carrying X-IPlane-Session, the router compares the chosen replica against where that session last landed -- "hit" when it matches (the session's prefix is where it was left), "miss" when it moved or was first-seen. The hit-rate = hit / (hit + miss) is the Ch 8 money panel -- round-robin scatters sessions so it sits near 1/N, prefix_affinity pins them so it climbs toward 1.0. A routing-locality signal measured at the router; a faithful proxy for the engine's own gpu_prefix_cache_hit_rate (which iplane can't see without scraping the engine, issue
 const MetricRouterAffinityTotal = "iplane.router.affinity.total"
 
-// MetricRouterDecisionsTotal -- Counter of routing decisions, labeled by deploy_id / replica_id / outcome. Outcomes -- "picked" when a replica was selected, "no_replicas" when all were empty/quarantined (the 503 replica_unavailable path). Complementary to inference.requests.total which counts completed requests with downstream status (v0.2 ch7-beat3.6,
+// MetricRouterDecisionsTotal -- Counter of routing decisions, labeled by deploy_id / instance_id / outcome. Outcomes -- "picked" when a replica was selected, "no_replicas" when all were empty/quarantined (the 503 replica_unavailable path). Complementary to inference.requests.total which counts completed requests with downstream status (v0.2 ch7-beat3.6,
 const MetricRouterDecisionsTotal = "iplane.router.decisions.total"
 
 // MetricTokensGenerated -- Counter of tokens generated. The right load metric for LLM workloads -- correlates with cost in a way request count never can.
@@ -97,7 +97,6 @@ const (
 	LabelPriority = "priority"
 	LabelProvider = "provider"
 	LabelReason = "reason"
-	LabelReplicaID = "replica_id"
 	LabelResult = "result"
 	LabelStatus = "status"
 	LabelStorageTier = "storage_tier"
