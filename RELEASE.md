@@ -1,23 +1,31 @@
 # Release lifecycle
 
 This repo is paired with `../book/` in the Tanenbaum/MINIX model. Each
-book version (`v0.1`, `v0.2`, `v0.3`, `v1.0`) maps to a chapter range
-and to a release branch + tag in this repo:
+book version maps to a chapter range and to a release branch + tag in
+this repo:
 
 | Book version | Chapters    | Branch          | Initial tag |
 | ------------ | ----------- | --------------- | ----------- |
 | v0.1         | Ch 6        | `release/v0.1`  | `v0.1.0`    |
 | v0.2         | Ch 7–10     | `release/v0.2`  | `v0.2.0`    |
 | v0.3         | Ch 11–12    | `release/v0.3`  | `v0.3.0`    |
-| v1.0         | Ch 13–16    | `release/v1.0`  | `v1.0.0`    |
+| v0.4         | Ch 13–15    | `release/v0.4`  | `v0.4.0`    |
 
-There is no Part V row because the book no longer has a Part V. The 2026-08
-restructure collapsed the old Part IV/V split into a single closing Part IV
-of four chapters (Ch 13-16), so v1.0 now covers all of it. The SaaS-platform
-material that used to be Ch 15-19 is one optional chapter, Ch 15, and stays
-behind feature flags on `release/v1.0` since none of it is inference-specific.
-See `ROADMAP.md`, which is canonical for the version-to-chapter mapping and
-which this table must agree with.
+**v1.0 is absent from that table on purpose.** It is cut after the book
+is finished, as the post-publication release carrying the
+interface-stability promise, and no chapter closes on it. Every version
+the manuscript references is above. Treating v1.0 as a chapter range is
+what this table used to do, and it forced a choice between shipping the
+stability promise before the book was done and holding the book's last
+chapters hostage to it.
+
+The last chapters are Part IV, the frontier capstone, and they ship on
+`release/v0.4`. There is no Part V row because the book no longer has a
+Part V: the 2026-08 restructure folded the SaaS-platform material into
+one optional chapter, and the 2026-08-17 restructure cut that chapter
+too and replaced the whole part with the capstone. See `ROADMAP.md`,
+which is canonical for the version-to-chapter mapping and which this
+table must agree with.
 
 ## While drafting a chapter
 
@@ -91,9 +99,9 @@ Bugs and errata in a chapter whose release is already cut land on
 the introducing chapter onward**.
 
 - A Ch 6 fix → cherry-picks to `release/v0.1`, `release/v0.2`,
-  `release/v0.3`, `release/v1.0`.
+  `release/v0.3`, `release/v0.4`.
 - A Ch 8 fix → cherry-picks to `release/v0.2`, `release/v0.3`,
-  `release/v1.0` (v0.1 doesn't have Ch 8 content).
+  `release/v0.4` (v0.1 doesn't have Ch 8 content).
 - Use `git cherry-pick -x <sha>` so the cherry-picked commit message
   records the original SHA for traceability.
 

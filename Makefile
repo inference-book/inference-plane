@@ -1,13 +1,17 @@
 .PHONY: build up down infra-up infra-down rebuild pull smoke load logs dashboards clean check-pins help install examples dist dist-checksums dist-clean
 
 PKG    := ./cmd/iplane
+BINARY := iplane
 
 # Default target: list available targets.
 help:
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
+# Stamped for the same reason `build` is: an unstamped binary writes "dev"
+# as the provenance on any sweep artifact a figure is drawn from (#347),
+# and `install` is the one people put on their PATH.
 install:
-	go install $(PKG)
+	go install -ldflags "$(VERSION_LDFLAGS)" $(PKG)
 	@echo "installed to $$(go env GOBIN || echo $$(go env GOPATH)/bin)/$(BINARY)"
 
 # ── Local code ──────────────────────────────────────────────────────────
