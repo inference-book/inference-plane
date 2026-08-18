@@ -1,0 +1,18 @@
+{
+  "text_config": {
+    "architectures": [
+      "KimiLinearForCausalLM"
+    ],
+    "first_k_dense_replace": 1,
+    "hidden_size": 7168,
+    "intermediate_size": 33792,
+    "max_position_embeddings": 1048576,
+    "moe_intermediate_size": 3072,
+    "num_attention_heads": 96,
+    "num_experts": 896,
+    "num_experts_per_token": 16,
+    "num_hidden_layers": 93,
+    "num_key_value_heads": 96,
+    "num_shared_experts": 2
+  }
+}

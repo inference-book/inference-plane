@@ -67,6 +67,35 @@ func renderModelArchitecture(w interface{ Write([]byte) (int, error) }, spec str
 		fmt.Fprintf(tw, "  context window\t%d tokens\n", n)
 	}
 
+	// The expert block, present only for a model that states experts.
+	// Zero is a dense model rather than an unread config, so a dense
+	// model gets no block at all and prints what it printed before these
+	// fields existed.
+	//
+	// Each fact is printed only where the config states it, for the same
+	// reason. A model that publishes a routed count and no activation
+	// count gets the count alone, rather than "0 active per token" for a
+	// model that certainly activates some.
+	if experts := a.GetNumExperts(); experts > 0 {
+		facts := []string{fmt.Sprintf("%d routed", experts)}
+		if n := a.GetNumExpertsPerTok(); n > 0 {
+			facts = append(facts, fmt.Sprintf("%d active per token", n))
+		}
+		if n := a.GetSharedExperts(); n > 0 {
+			facts = append(facts, fmt.Sprintf("%d shared", n))
+		}
+		fmt.Fprintf(tw, "\n  experts\t%s\n", strings.Join(facts, ", "))
+		if n := a.GetMoeIntermediateSize(); n > 0 {
+			fmt.Fprintf(tw, "  expert width\t%d\n", n)
+		}
+		// Quoted against the layer count, because three dense layers
+		// means something different in a 78-layer model than in a
+		// 12-layer one.
+		if n := a.GetDenseLayers(); n > 0 {
+			fmt.Fprintf(tw, "  dense layers\t%d of %d\n", n, a.GetLayers())
+		}
+	}
+
 	// The weight ladder. Each step down roughly halves the term, and
 	// seeing the three side by side is the whole quantization decision.
 	var weights []string

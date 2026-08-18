@@ -5,6 +5,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -357,5 +359,289 @@ func TestArchitectureTakesTheContextWindowFromTheLanguageModel(t *testing.T) {
 	}
 	if n := got.GetArchitecture().GetMaxPositionEmbeddings(); n != 32_768 {
 		t.Errorf("max position embeddings = %d, want the text_config's 32768", n)
+	}
+}
+
+// loadTestdataConfig reads a config.json captured from the hub. These are
+// the published files trimmed to the keys the budget reads, kept whole
+// rather than hand-written because what is under test is which spelling
+// a real model family actually uses. A hand-written fixture would only
+// re-assert the spelling the implementation already assumes.
+func loadTestdataConfig(t *testing.T, name string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("testdata", name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// The expert-count field has three spellings on the hub and the spelling
+// follows the model family. Reading one of them would report the other
+// two families as dense, which is a wrong answer rather than a missing
+// one: a dense reading of a sparse model says every parameter is read on
+// every step.
+func TestArchitectureReadsEveryExpertCountSpelling(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		fixture  string
+		spelling string
+		experts  int32
+	}{
+		{"GLM 5.2", "glm-5.2.json", "n_routed_experts", 256},
+		{"GLM 4.5", "glm-4.5.json", "n_routed_experts", 160},
+		{"Kimi K3", "kimi-k3.json", "num_experts", 896},
+		{"Qwen3 MoE", "qwen3-moe.json", "num_experts", 128},
+		{"Qwen2 MoE", "qwen2-moe.json", "num_experts", 64},
+		{"Mixtral", "mixtral.json", "num_local_experts", 8},
+		{"GPT-OSS", "gpt-oss.json", "num_local_experts", 128},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newArchFixture(t)
+			f.infoBody = `{"id":"org/model","safetensors":{"total":1000000000}}`
+			f.configBody = loadTestdataConfig(t, tc.fixture)
+
+			got, err := f.store("").Architecture(context.Background(), &provisionerv1.DescribeModelRequest{ModelSpec: "org/model"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if n := got.GetArchitecture().GetNumExperts(); n != tc.experts {
+				t.Errorf("experts via %s = %d, want %d", tc.spelling, n, tc.experts)
+			}
+		})
+	}
+}
+
+// Kimi K3 spells the activated count num_experts_per_token where every
+// other family spells it num_experts_per_tok. It is the flagship target
+// of the cost-curve work, and reading zero activated experts from it
+// would make a 2.8T model look like it decodes all 2.8T every step.
+func TestArchitectureReadsEveryActivatedExpertSpelling(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		fixture string
+		active  int32
+	}{
+		{"Kimi K3 says num_experts_per_token", "kimi-k3.json", 16},
+		{"GLM 5.2 says num_experts_per_tok", "glm-5.2.json", 8},
+		{"GPT-OSS says both and they agree", "gpt-oss.json", 4},
+		{"Mixtral", "mixtral.json", 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newArchFixture(t)
+			f.infoBody = `{"id":"org/model","safetensors":{"total":1000000000}}`
+			f.configBody = loadTestdataConfig(t, tc.fixture)
+
+			got, err := f.store("").Architecture(context.Background(), &provisionerv1.DescribeModelRequest{ModelSpec: "org/model"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if n := got.GetArchitecture().GetNumExpertsPerTok(); n != tc.active {
+				t.Errorf("experts per token = %d, want %d", n, tc.active)
+			}
+		})
+	}
+}
+
+func TestArchitectureReadsBothSharedExpertSpellings(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		fixture string
+		shared  int32
+	}{
+		{"GLM 5.2 says n_shared_experts", "glm-5.2.json", 1},
+		{"Kimi K3 says num_shared_experts", "kimi-k3.json", 2},
+		{"Mixtral has none", "mixtral.json", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newArchFixture(t)
+			f.infoBody = `{"id":"org/model","safetensors":{"total":1000000000}}`
+			f.configBody = loadTestdataConfig(t, tc.fixture)
+
+			got, err := f.store("").Architecture(context.Background(), &provisionerv1.DescribeModelRequest{ModelSpec: "org/model"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if n := got.GetArchitecture().GetSharedExperts(); n != tc.shared {
+				t.Errorf("shared experts = %d, want %d", n, tc.shared)
+			}
+		})
+	}
+}
+
+// Qwen2-MoE has exactly one shared expert and publishes only its width,
+// never a count. Inferring the count from the width would be a guess, and
+// this file's other derivation (head_dim from hidden_size) is exact. The
+// width is what the active-parameter term will want, and it can be read
+// when there is a term reading it.
+func TestArchitectureLeavesTheSharedCountUnknownWhenOnlyItsWidthIsPublished(t *testing.T) {
+	f := newArchFixture(t)
+	f.infoBody = `{"id":"Qwen/Qwen2-57B-A14B","safetensors":{"total":57408658944}}`
+	f.configBody = loadTestdataConfig(t, "qwen2-moe.json")
+
+	got, err := f.store("").Architecture(context.Background(), &provisionerv1.DescribeModelRequest{ModelSpec: "Qwen/Qwen2-57B-A14B"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := got.GetArchitecture().GetSharedExperts(); n != 0 {
+		t.Errorf("shared experts = %d, want 0 (unknown); the config states a width and no count", n)
+	}
+}
+
+// Mixtral and GPT-OSS have no dense feed-forward beside the experts, so
+// intermediate_size is the expert's width. The families that have both
+// state the expert width separately, and taking intermediate_size from
+// them would report the dense layer's width as the expert's.
+func TestArchitectureReadsTheExpertWidthFromWhicheverFieldStatesIt(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		fixture string
+		width   int32
+	}{
+		{"GLM 5.2 states both, expert width wins", "glm-5.2.json", 2048},
+		{"Kimi K3 states both", "kimi-k3.json", 3072},
+		{"Mixtral states only intermediate_size", "mixtral.json", 14336},
+		{"GPT-OSS states only intermediate_size", "gpt-oss.json", 2880},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newArchFixture(t)
+			f.infoBody = `{"id":"org/model","safetensors":{"total":1000000000}}`
+			f.configBody = loadTestdataConfig(t, tc.fixture)
+
+			got, err := f.store("").Architecture(context.Background(), &provisionerv1.DescribeModelRequest{ModelSpec: "org/model"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if n := got.GetArchitecture().GetMoeIntermediateSize(); n != tc.width {
+				t.Errorf("expert width = %d, want %d", n, tc.width)
+			}
+		})
+	}
+}
+
+func TestArchitectureReadsTheDenseLayerPrefix(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		fixture string
+		dense   int32
+	}{
+		{"GLM 5.2 makes its first three layers dense", "glm-5.2.json", 3},
+		{"Kimi K3 makes its first layer dense", "kimi-k3.json", 1},
+		{"Mixtral has no dense prefix", "mixtral.json", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newArchFixture(t)
+			f.infoBody = `{"id":"org/model","safetensors":{"total":1000000000}}`
+			f.configBody = loadTestdataConfig(t, tc.fixture)
+
+			got, err := f.store("").Architecture(context.Background(), &provisionerv1.DescribeModelRequest{ModelSpec: "org/model"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if n := got.GetArchitecture().GetDenseLayers(); n != tc.dense {
+				t.Errorf("dense layers = %d, want %d", n, tc.dense)
+			}
+		})
+	}
+}
+
+// A dense model has no expert fields to report, and zero is the answer
+// rather than an absent reading. Asserted field by field because a
+// partial read is the failure mode that would not show up as an error.
+func TestArchitectureReportsADenseModelAsHavingNoExperts(t *testing.T) {
+	f := newArchFixture(t)
+	f.infoBody = `{"id":"Qwen/Qwen2.5-32B","safetensors":{"total":32760000000}}`
+	f.configBody = loadTestdataConfig(t, "qwen2.5-32b.json")
+
+	got, err := f.store("").Architecture(context.Background(), &provisionerv1.DescribeModelRequest{ModelSpec: "Qwen/Qwen2.5-32B"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := got.GetArchitecture()
+	for _, f := range []struct {
+		name string
+		got  int32
+	}{
+		{"num_experts", a.GetNumExperts()},
+		{"num_experts_per_tok", a.GetNumExpertsPerTok()},
+		{"moe_intermediate_size", a.GetMoeIntermediateSize()},
+		{"shared_experts", a.GetSharedExperts()},
+		{"dense_layers", a.GetDenseLayers()},
+	} {
+		if f.got != 0 {
+			t.Errorf("%s = %d on a dense model, want 0", f.name, f.got)
+		}
+	}
+	// The dense read is unchanged, which is the compatibility claim.
+	if err := vrambudget.ValidateArch(a); err != nil {
+		t.Errorf("dense model no longer validates: %v", err)
+	}
+}
+
+// A dense model states intermediate_size too, and it is the plain
+// feed-forward width rather than an expert's. Reading it as an expert
+// width would make every dense model look sparse to anything keying on
+// the field being set.
+func TestArchitectureDoesNotReadAnExpertWidthOffADenseModel(t *testing.T) {
+	f := newArchFixture(t)
+	f.infoBody = anchorInfo
+	f.configBody = `{"num_hidden_layers":64,"num_attention_heads":40,"num_key_value_heads":8,"hidden_size":5120,"head_dim":128,"intermediate_size":27648,"first_k_dense_replace":0}`
+
+	got, err := f.store("").Architecture(context.Background(), &provisionerv1.DescribeModelRequest{ModelSpec: "Qwen/Qwen2.5-32B"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := got.GetArchitecture().GetMoeIntermediateSize(); n != 0 {
+		t.Errorf("expert width = %d on a dense model, want 0", n)
+	}
+}
+
+// The two models Part IV is built around, read end to end against their
+// published configs. This is the acceptance criterion, and it is a
+// separate test from the spelling matrix because these two numbers are
+// the ones the chapters quote.
+func TestArchitectureReportsThePartFourTargets(t *testing.T) {
+	for _, tc := range []struct {
+		spec    string
+		fixture string
+		info    string
+		want    *provisionerv1.ModelArchitecture
+	}{
+		{
+			spec:    "zai-org/GLM-5.2",
+			fixture: "glm-5.2.json",
+			info:    `{"id":"zai-org/GLM-5.2","safetensors":{"total":753329940480}}`,
+			want: &provisionerv1.ModelArchitecture{
+				Params: 753329940480, Layers: 78, KvHeads: 64, HeadDim: 192,
+				HiddenSize: 6144, MaxPositionEmbeddings: 1048576,
+				NumExperts: 256, NumExpertsPerTok: 8, MoeIntermediateSize: 2048,
+				SharedExperts: 1, DenseLayers: 3,
+			},
+		},
+		{
+			spec:    "moonshotai/Kimi-K3",
+			fixture: "kimi-k3.json",
+			info:    `{"id":"moonshotai/Kimi-K3","safetensors":{"total":2779931837184}}`,
+			want: &provisionerv1.ModelArchitecture{
+				Params: 2779931837184, Layers: 93, KvHeads: 96, HeadDim: 74,
+				HiddenSize: 7168, MaxPositionEmbeddings: 1048576,
+				NumExperts: 896, NumExpertsPerTok: 16, MoeIntermediateSize: 3072,
+				SharedExperts: 2, DenseLayers: 1,
+			},
+		},
+	} {
+		t.Run(tc.spec, func(t *testing.T) {
+			f := newArchFixture(t)
+			f.infoBody = tc.info
+			f.configBody = loadTestdataConfig(t, tc.fixture)
+
+			got, err := f.store("").Architecture(context.Background(), &provisionerv1.DescribeModelRequest{ModelSpec: tc.spec})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !proto.Equal(got.GetArchitecture(), tc.want) {
+				t.Errorf("architecture mismatch\n got %v\nwant %v", got.GetArchitecture(), tc.want)
+			}
+		})
 	}
 }
