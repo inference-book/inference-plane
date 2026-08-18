@@ -53,6 +53,7 @@ var (
 	loadTenant       string
 	loadStream       bool
 	loadOutput       string
+	loadPromptTokens int
 )
 
 var loadCmd = &cobra.Command{
@@ -114,6 +115,8 @@ func init() {
 		"X-IPlane-Tenant header value (empty = no header, router treats as 'default')")
 	loadCmd.Flags().BoolVar(&loadStream, "stream", false,
 		"request streaming completions (sets stream=true in request body); SSE response is parsed for token counts")
+	loadCmd.Flags().IntVar(&loadPromptTokens, "prompt-tokens", 0,
+		"approximate prompt length in tokens, drawn from a public-domain corpus; 0 keeps the short built-in prompts")
 	loadCmd.Flags().StringVar(&loadSweepLevels, "sweep", "",
 		"closed-loop concurrency ladder instead of a fixed rate, e.g. 1,2,4,8,16 (ignores --rps and --duration)")
 	loadCmd.Flags().DurationVar(&loadSweepDuration, "sweep-duration", 30*time.Second,
@@ -342,7 +345,7 @@ func fireLoadRequest(ctx context.Context, c *http.Client, cfg *loadFireConfig, s
 func loadCompletionBody() []byte {
 	body := map[string]any{
 		"model":      loadModel,
-		"prompt":     pickLoadPrompt(),
+		"prompt":     synthPrompt(loadPromptTokens),
 		"max_tokens": loadMaxTokens,
 	}
 	if loadStream {
@@ -356,7 +359,7 @@ func loadCompletionBody() []byte {
 func loadChatBody() []byte {
 	body := map[string]any{
 		"model":      loadModel,
-		"messages":   []map[string]string{{"role": "user", "content": pickLoadPrompt()}},
+		"messages":   []map[string]string{{"role": "user", "content": synthPrompt(loadPromptTokens)}},
 		"max_tokens": loadMaxTokens,
 	}
 	if loadStream {

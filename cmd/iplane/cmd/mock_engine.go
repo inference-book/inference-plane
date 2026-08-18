@@ -28,6 +28,7 @@ var (
 	mockEngineDegradeAfter time.Duration
 	mockEngineLinks        int
 	mockEngineTokenGap     time.Duration
+	mockEngineKVBudget     int
 )
 
 // mockEngineCmd runs a standalone OpenAI-compatible mock engine. It is
@@ -57,6 +58,8 @@ func init() {
 	mockEngineCmd.Flags().IntVar(&mockEnginePort, "port", 9001, "port to listen on (127.0.0.1)")
 	mockEngineCmd.Flags().DurationVar(&mockEngineLatency, "latency", 0,
 		"fixed per-request latency; 0 keeps the realistic bimodal-with-tail default. Routing demos set this low (e.g. 3ms) so runs finish fast.")
+	mockEngineCmd.Flags().IntVar(&mockEngineKVBudget, "kv-budget-tokens", 0,
+		"cap the tokens held across all in-flight sequences, so how many fit depends on how long they are. 0 (default) admits everything, which is what the routing demos expect")
 	mockEngineCmd.Flags().DurationVar(&mockEngineTokenGap, "token-latency", 0,
 		"pause between streamed content frames, so inter-token latency is measurable without a GPU. 0 (default) emits the whole reply in one burst, which is what every existing demo expects")
 	mockEngineCmd.Flags().StringVar(&mockEngineRegister, "register", "",
@@ -136,6 +139,9 @@ func runMockEngine(parent context.Context, port int) error {
 	var opts []backends.MockOption
 	if mockEngineLatency > 0 {
 		opts = append(opts, backends.WithLatency(mockEngineLatency, mockEngineLatency))
+	}
+	if mockEngineKVBudget > 0 {
+		opts = append(opts, backends.WithKVBudget(mockEngineKVBudget))
 	}
 	be := backends.NewMock(fmt.Sprintf("mock-engine:%d", port), opts...)
 	mux := newMockEngineMuxWithPacing(be, fmt.Sprintf("%d", port), mockEngineTokenGap)

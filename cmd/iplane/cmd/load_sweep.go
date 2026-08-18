@@ -46,13 +46,19 @@ var (
 type sweepLevel struct {
 	Concurrency int `json:"concurrency"`
 
-	// AchievedBatch is throughput times mean latency, which is the
-	// concurrency the run actually sustained. It should land on
-	// Concurrency and is reported because the interesting case is when it
-	// does not: a level whose achieved batch sags below its nominal one
-	// spent part of the window with workers erroring out rather than
-	// holding a request in flight, and every per-token figure on that row
-	// is then describing a smaller batch than its label claims.
+	// AchievedBatch is throughput times mean latency, Little's law
+	// against the offered level. It should land on Concurrency, and it is
+	// reported because the interesting case is when it does not.
+	//
+	// Two ways it sags. Workers can spend part of the window erroring
+	// rather than holding a request in flight. More often, and more
+	// usefully, the requests still in flight when the window closes are
+	// never recorded, and they are disproportionately the slow ones, so
+	// a level whose latencies are long relative to --sweep-duration
+	// undercounts. Both mean the row is describing a smaller batch than
+	// its label, and both are a reason to lengthen the window before
+	// trusting the numbers beside it. A level queueing at the engine's
+	// admission gate shows exactly this.
 	AchievedBatch float64 `json:"achieved_batch"`
 
 	RequestsPerSec float64 `json:"requests_per_sec"`
@@ -432,6 +438,10 @@ func writeSweepTable(w io.Writer, r sweepReport) {
 		fmt.Fprintln(w, "so its first token and its last land at the same instant.")
 	}
 	for _, l := range r.Levels {
+		if l.AchievedBatch > 0 && l.AchievedBatch < float64(l.Concurrency)*0.9 {
+			fmt.Fprintf(w, "level %d sustained a batch of %.1f against the %d offered; its requests are outlasting the measurement window.\n",
+				l.Concurrency, l.AchievedBatch, l.Concurrency)
+		}
 		if !l.SteadyState {
 			fmt.Fprintf(w, "level %d never settled within --sweep-warmup-max; its row was measured mid-ramp.\n", l.Concurrency)
 		}
