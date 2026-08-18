@@ -138,19 +138,16 @@ Per the cadence note above: if the manual path and the iplane move don't each fi
 
 ## v0.4 — Frontier MoE (active, see epic #361)
 
-**Chapters:** Part IV. **Branch:** not yet cut.
+**Chapters:** Ch 13–15 (Part IV) · **Branch:** `release/v0.4`, not yet cut
+· **Tags:** `ch13-final`, `ch14-final`, `ch15-final`, initial `v0.4.0`
 
-Part IV was restructured 2026-08-18 around a single capstone approached
+Part IV was restructured 2026-08-17 around a single capstone approached
 from the large end: take the biggest open-weight model that exists, work
 backwards through the vendors, hardware, engines, quantization and staging
 needed to make it serve, then measure what it costs per session as
 concurrency rises. Plan docs are `../book/part4_outline.md`,
 `part4_roadmap.md` and `part4_tickets.md`; the ticket breakdown is epic
 #361.
-
-**#338 owns reconciling the version-to-part mapping**, here and in
-RELEASE.md, both of which still map v1.0 to Ch 13-16. The v1.0 section
-below is stale pending that ticket and is deliberately not edited here.
 
 ### Phase 1 — MoE awareness and the measurement harness (no hardware)
 
@@ -195,41 +192,69 @@ never been pointed at each other on a real engine.
 
 ---
 
-## v1.0 — Production Ceiling (low detail)
+## v1.0 — Post-publication (low detail)
 
-**Chapters:** Ch 13 (Production Operations), Ch 14 (Running on Infrastructure You Own), Ch 15 (Turning It Into a Product, optional), Ch 16 (The Ceiling, and What Comes Next)
-**Branch:** `release/v1.0` · **Tags:** `ch13-final`, `ch14-final`, `ch15-final`, `ch16-final`
+**Chapters:** none. **Branch:** `release/v1.0`, cut after the book is done.
 
-Capabilities promised:
+v1.0 used to be a chapter range, Ch 13-16, and stopped being one when the
+2026-08-17 restructure made Part IV the frontier capstone and gave it
+`release/v0.4`. What the version is *for* survived that change. It is the
+release that promises interface stability, and it is cut once the
+manuscript is finished, so the promise is made about code no chapter is
+still moving.
 
-- **Kubernetes provisioner.** Ch 14 runs the same control plane against a cluster the operator already owns rather than capacity it rents. A cluster is another capacity source, so this should land as a new `Provisioner` implementation behind the existing interface, not as a parallel code path. This is the largest new surface v1.0 implies.
-- Deploy 400B-class models on multi-host H100 clusters. Note the book stops short of reproducing this: Ch 16 argues the economics of 400B rather than walking a reader through a cluster almost nobody can rent. The capability stays on this roadmap as an iplane goal, but it is no longer a chapter's hands-on requirement.
+Nothing in the book closes on it, which is the property worth keeping. The
+alternative is either shipping a stability promise while the last chapters
+are still being written, or holding those chapters until the promise is
+ready.
+
+Capabilities promised, carried over from when this was a chapter range and
+still the right list for a post-publication release:
+
+- **Kubernetes provisioner.** Running the same control plane against a
+  cluster the operator already owns rather than capacity it rents. A
+  cluster is another capacity source, so this lands as a new `Provisioner`
+  implementation behind the existing interface, not as a parallel code
+  path. The largest new surface v1.0 implies.
 - SLO/SLI definitions as iplane primitives, not just Grafana panels
 - Auto-scaling on traffic, cost-aware spot fallback
-- Runbook tooling: `iplane drain`, `iplane snapshot`, `iplane rollback`
-- **Multi-operator state sync.** Shared fleet state across a team. Backend-pluggable (S3, Postgres, etcd). The v0.1 state-file schema should be designed with this in mind.
-- **Plugin / extension surface.** Stable interfaces for third-party Provisioners, ModelStores, image catalogs, routing policies. Affects which interfaces we promise to keep stable from v0.3 onward.
-- **Alerting / SLO breach detection.** Beyond dashboards: alert rules, paging integrations, breach detection.
-- **Backup / disaster recovery.** State snapshots, restore from corrupted state.
+- Runbook tooling: `iplane snapshot`, `iplane rollback`
+- **Multi-operator state sync.** Shared fleet state across a team.
+  Backend-pluggable (S3, Postgres, etcd). The v0.1 state-file schema was
+  designed with this in mind.
+- **Plugin / extension surface.** Stable interfaces for third-party
+  Provisioners, ModelStores, image catalogs, routing policies. This is the
+  interface-stability promise made concrete, and it is why the version
+  waits for the book rather than the other way round.
+- **Alerting / SLO breach detection.** Beyond dashboards: alert rules,
+  paging integrations, breach detection.
+- **Backup / disaster recovery.** State snapshots, restore from corrupted
+  state.
+
+The 400B-on-multi-host-H100 goal that used to sit here has been overtaken.
+Part IV serves a trillion-parameter model on rented capacity and measures
+what it costs, so that capability is a v0.4 concern with real runs behind
+it rather than a v1.0 promise.
 
 Design questions deferred to when this version becomes active.
 
 ---
 
-## Part V — Productizing (folded into Ch 15, 2026-08)
+## Part V — cut (2026-08-17)
 
-**Chapters:** Ch 15 only. The book no longer has a Part V; the old five-chapter track (Ch 15-19) collapsed into one optional chapter inside Part IV, because the material applies to any platform service and teaches nothing specific about inference. The capabilities below stay accurate as a list of what that chapter shows the seams for; they are simply not five chapters' worth of book. Original scope note follows.
+The book has no Part V and no productization chapter. The 2026-07
+restructure moved auth, rate limiting, multi-tenancy, billing and a
+commercial capstone into an optional five-chapter Part V, on the reasoning
+that they apply to any platform service and teach nothing specific about
+inference. The 2026-08 restructure folded those five into one optional
+chapter on the same reasoning. The 2026-08-17 restructure applied it once
+more, cut that chapter too, and replaced the whole part with the frontier
+capstone now in v0.4.
 
-**Versioning:** Versioning is orthogonal to v0.1–v1.0; lives behind feature flags on `release/v1.0` (or a sibling branch if it grows large enough). None of this is inference-specific; the chapters call this out and the iplane code keeps the SaaS surface optional.
-
-Capabilities promised:
-
-- Auth, API keys, user management
-- Rate limiting and quotas
-- Multi-tenancy and tenant isolation
-- Per-tenant cost attribution and billing
-- Audit log of who provisioned/deployed what, when, where (compliance-relevant)
-- CodeLab capstone (commercial AI coding assistant)
+None of the capabilities is disowned. Auth is tracked as #224 and
+per-tenant cost attribution as #302, both scheduled against the same
+build-only-what-can-be-tried rule as everything else. They are simply not
+chapters, and this roadmap no longer promises them as a version.
 
 ---
 

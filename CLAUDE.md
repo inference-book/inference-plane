@@ -27,7 +27,7 @@ Reference implementation of the control plane for *Inference Is All You Need* (A
 ## Conventions
 
 - **Generated code is committed** (`gen/`, `internal/telemetry/names.go`, book's `metric-names.tex`). Regen + commit together; `make check-names` and `make check-pins` run as CI gates.
-- **Versioned releases** map to book parts: `release/v0.1` (Ch 6), `release/v0.2` (Ch 7–10), etc. Tag `vX.Y.0` for the immutable chapter snapshot. See [RELEASE.md](RELEASE.md) for the lifecycle (active branch is a moving snapshot until the chapter is cut; revisits cherry-pick forward).
+- **Versioned releases** map to book parts: `release/v0.1` (Ch 6), `release/v0.2` (Ch 7–10), `release/v0.3` (Ch 11–12), `release/v0.4` (Ch 13–15). `v1.0` carries no chapters and is cut after the book is done. Tag `vX.Y.Z` per chapter plus an immutable `chNN-final`. See [RELEASE.md](RELEASE.md) for the lifecycle (active branch is a moving snapshot until the chapter is cut; revisits cherry-pick forward).
 - **gRPC server is source of truth.** Connect-RPC adapters and grpc-gateway are HTTP bindings on top — both dial the in-process gRPC server.
 - **Build only what can be tried on real hardware.** A capability that can only ever be demonstrated against a mock is a claim the book cannot support. Mocks stay as scaffolding for behaviour a real provider can also produce (`mock-engine` keeps the routing demos free and the real runs have happened). See [ROADMAP.md](ROADMAP.md#build-only-what-can-be-tried-on-real-hardware) for the rule and the two capabilities it currently rules out.
 
