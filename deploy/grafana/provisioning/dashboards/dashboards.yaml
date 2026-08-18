@@ -1,8 +1,14 @@
 # Dashboard provisioning config. Grafana scans the path below at
 # startup (and every updateIntervalSeconds thereafter) and loads any
 # *.json files as dashboards. This folder holds the serving dashboards
-# (inference-plane-v01 / -v02) and the deployment & lifecycle dashboard
-# (inference-plane-deployment) covering the provision/teardown path.
+# (inference-plane-v01 / -v02), the deployment & lifecycle dashboard
+# (inference-plane-deployment) covering the provision/teardown path, and
+# the cost & concurrency dashboard (inference-plane-cost) carrying Part
+# IV's economic curve.
+#
+# Every panel here is checked against metric-names.yaml by
+# tests/dashboards, so a panel naming a metric nobody emits fails the
+# suite rather than rendering as an empty graph in a screenshot.
 
 apiVersion: 1
 

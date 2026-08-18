@@ -63,7 +63,7 @@ const MetricRouterAffinityTotal = "iplane.router.affinity.total"
 // MetricRouterDecisionsTotal -- Counter of routing decisions, labeled by deploy_id / instance_id / outcome. Outcomes -- "picked" when a replica was selected, "no_replicas" when all were empty/quarantined (the 503 replica_unavailable path). Complementary to inference.requests.total which counts completed requests with downstream status (v0.2 ch7-beat3.6,
 const MetricRouterDecisionsTotal = "iplane.router.decisions.total"
 
-// MetricTokensGenerated -- Counter of tokens generated. The right load metric for LLM workloads -- correlates with cost in a way request count never can.
+// MetricTokensGenerated -- Counter of tokens generated. The right load metric for LLM workloads, since it correlates with cost in a way request count never can. Labeled by context_bucket, an upper-bound band on the prompt length read off the engine's usage block, because cost per token depends on context length and two runs at different context lengths are not the same measurement. A response reporting no prompt count lands in the "unknown" band rather than in the shortest one.
 const MetricTokensGenerated = "inference.tokens.generated"
 
 
@@ -91,6 +91,7 @@ const (
 const (
 	LabelBillingMode = "billing_mode"
 	LabelClass = "class"
+	LabelContextBucket = "context_bucket"
 	LabelDeployID = "deploy_id"
 	LabelGPUType = "gpu_type"
 	LabelInstanceID = "instance_id"

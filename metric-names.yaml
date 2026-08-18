@@ -30,7 +30,15 @@ metrics:
 
   - key: tokens_generated
     value: inference.tokens.generated
-    description: Counter of tokens generated. The right load metric for LLM workloads -- correlates with cost in a way request count never can.
+    description: >-
+      Counter of tokens generated. The right load metric for LLM
+      workloads, since it correlates with cost in a way request count
+      never can. Labeled by context_bucket, an upper-bound band on the
+      prompt length read off the engine's usage block, because cost per
+      token depends on context length and two runs at different context
+      lengths are not the same measurement. A response reporting no
+      prompt count lands in the "unknown" band rather than in the
+      shortest one.
 
   - key: backend_healthy
     value: inference.backend.healthy
@@ -164,3 +172,5 @@ labels:
     value: storage_tier
   - key: instance_id
     value: instance_id
+  - key: context_bucket
+    value: context_bucket

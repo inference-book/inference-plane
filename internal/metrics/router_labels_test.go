@@ -78,7 +78,7 @@ func attrSetsFor(rm metricdata.ResourceMetrics, name string) []attribute.Set {
 func TestRouterSeriesCarryInstanceIDNotReplicaID(t *testing.T) {
 	rm := collectRouter(t, func(r *Recorder) {
 		r.RecordRouterRequest(context.Background(), "dep-1", "qwen", "t-1", "interactive", "i-1", "success", 0.4)
-		r.RecordRouterTokens(context.Background(), "dep-1", "qwen", "t-1", "interactive", "i-1", 128)
+		r.RecordRouterTokens(context.Background(), "dep-1", "qwen", "t-1", "interactive", "i-1", "8k", 128)
 		r.RecordRouterDecision(context.Background(), "dep-1", "i-1", "picked")
 		r.RecordReplicaInFlight(context.Background(), "dep-1", "i-1", 3)
 	})

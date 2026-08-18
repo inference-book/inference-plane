@@ -48,6 +48,13 @@ type tokenCountingWriter struct {
 	// streaming responses updated on each parsed event with a
 	// usage field; for non-streaming computed at close().
 	tokens int64
+
+	// promptTokens is the latest observed prompt_tokens count, read
+	// off the same usage block. Context length sets where the
+	// concurrency ceiling lands, so cost per token is only comparable
+	// between runs that agree on it, and the engine reports it in a
+	// frame the proxy already decodes.
+	promptTokens int64
 }
 
 // newTokenCountingWriter wraps w. Returns a writer that also
@@ -119,9 +126,22 @@ func (w *tokenCountingWriter) Flush() {
 // emitting the token metric rather than recording a misleading 0.
 func (w *tokenCountingWriter) CompletionTokens() int64 {
 	if w.bodyBuf != nil {
-		return extractCompletionTokens(w.bodyBuf.Bytes())
+		_, completion := extractUsage(w.bodyBuf.Bytes())
+		return completion
 	}
 	return w.tokens
+}
+
+// PromptTokens returns the parsed prompt length, by the same rules
+// CompletionTokens follows. Zero means no usage data was observed, which
+// the caller reports as an unknown context bucket rather than as a short
+// prompt.
+func (w *tokenCountingWriter) PromptTokens() int64 {
+	if w.bodyBuf != nil {
+		prompt, _ := extractUsage(w.bodyBuf.Bytes())
+		return prompt
+	}
+	return w.promptTokens
 }
 
 // StatusLabel returns a metric-friendly status label for the
@@ -184,8 +204,15 @@ func (w *tokenCountingWriter) extractFromEvent(event []byte) {
 		return
 	}
 	joined := bytes.Join(dataLines, []byte("\n"))
-	if n := extractCompletionTokens(joined); n > 0 {
-		w.tokens = n
+	prompt, completion := extractUsage(joined)
+	if completion > 0 {
+		w.tokens = completion
+	}
+	// Kept independently of the completion count: an engine that
+	// reports the prompt length on its first frame and the completion
+	// count on its last would otherwise lose one of them.
+	if prompt > 0 {
+		w.promptTokens = prompt
 	}
 }
 
@@ -212,26 +239,30 @@ func eventTerminatorLen(buf []byte, at int) int {
 	return 2 // \n\n
 }
 
-// extractCompletionTokens decodes a JSON blob and returns the
-// usage.completion_tokens field if present. Returns zero when the
-// blob is malformed, doesn't contain usage, or completion_tokens is
-// missing. Used for both streaming SSE data payloads and
-// non-streaming response bodies.
-func extractCompletionTokens(data []byte) int64 {
+// extractUsage decodes a JSON blob and returns the usage block's prompt
+// and completion counts. Either is zero when the blob is malformed, has
+// no usage, or omits that field. Used for both streaming SSE data
+// payloads and non-streaming response bodies.
+//
+// One decode for both numbers. They arrive in the same object and
+// unmarshalling twice to read two sibling fields would double the parse
+// cost on a path that runs per response.
+func extractUsage(data []byte) (prompt, completion int64) {
 	// Strip the OpenAI streaming terminal sentinel ("[DONE]") -- not
 	// JSON, would yield a parse error otherwise.
 	if bytes.Equal(bytes.TrimSpace(data), []byte("[DONE]")) {
-		return 0
+		return 0, 0
 	}
 	var probe struct {
 		Usage struct {
+			PromptTokens     int64 `json:"prompt_tokens"`
 			CompletionTokens int64 `json:"completion_tokens"`
 		} `json:"usage"`
 	}
 	if err := json.Unmarshal(data, &probe); err != nil {
-		return 0
+		return 0, 0
 	}
-	return probe.Usage.CompletionTokens
+	return probe.Usage.PromptTokens, probe.Usage.CompletionTokens
 }
 
 func isStreamingContentType(ct string) bool {
