@@ -59,3 +59,7 @@ deploy/docker-compose.override.yaml
 
 # Session handoff notes: local working state, not project docs.
 HANDOFF_*.md
+
+# Raw provider capacity samples (hack/capacity-sample.sh). The log grows
+# per run; a distilled artifact gets committed, the raw series does not.
+capacity-samples.jsonl
