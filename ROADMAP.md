@@ -183,6 +183,31 @@ panel (#348), `--ep` (#342) and the expert-divisibility check (#343).
 
 ### Phase 2 — GLM-5.2, single node
 
+**Everything Phase 2 can do without hardware shipped 2026-08-18.** The
+pre-rent refusal understands MoE shapes and its advice now names the knobs
+that move the term that failed rather than the ones that do not (#351).
+GLM-5.2's figures were checked against its published config and two
+defects fell out: the multi-token-prediction block is an expert layer the
+layer count omits, which put the activated share a quarter too high on
+every model that publishes one (#350), and a pre-quantized checkpoint's
+parameter count is packed elements, so the precision ladder was quantizing
+twice (#382). Expert parallelism divides the routed experts and replicates
+everything else, which the budget now computes rather than dividing the
+whole model by one number (#376).
+
+**What is left is #358, the measurement run**, which is the first thing in
+Part IV that spends money. `iplane model budget` still cannot express an
+expert-parallel plan, so it disagrees with the deploy path (#387), and
+that is worth closing before sizing a rental by hand.
+
+**Provider economics audited the same day**, free, in
+[docs/design/0009-provider-economics.md](docs/design/0009-provider-economics.md):
+a five-to-eight-times spread between the marketplaces and the
+hyperscalers, eight-card capacity that went from three offers to none and
+back inside four hours, a seven-times spread in host download bandwidth
+that decides whether staging weights is worth building at all, and the
+arithmetic showing Kimi K3 cannot fit a single node at any price.
+
 **Whole-node rental verified 2026-08-18 (#349), and it needed no code.**
 `gpu_count` already means N cards on one machine and
 `FABRIC_SCOPE_INTRA_NODE` already means they share a fast link, so asking
