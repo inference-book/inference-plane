@@ -27,6 +27,7 @@ var (
 	budgetRevision       string
 	budgetOutput         string
 	budgetSessionsAt     string
+	budgetExpertParallel bool
 )
 
 var modelBudgetCmd = &cobra.Command{
@@ -103,6 +104,11 @@ type budgetOpts struct {
 	maxCards    int32
 	tp          int32 // 0 means sweep every candidate count
 	format      string
+	// expertParallel switches what a row of the table is. Without it a
+	// row is a tensor width and --tp narrows the sweep to one of them.
+	// With it a row is the expert width, --tp is the tensor width inside
+	// it, and the data-parallel width is what is left over.
+	expertParallel bool
 	// sessionsAt is the context ladder for the concurrency question.
 	// Empty means the operator asked the default question, which is
 	// whether one named batch fits.
@@ -157,7 +163,21 @@ func budgetOptionsFromFlags() (budgetOpts, error) {
 		return o, fmt.Errorf("--output must be %q or %q, got %q", outputTable, outputJSON, budgetOutput)
 	}
 
+	if budgetExpertParallel && !powerOfTwo(budgetTP) {
+		// Same answer the tensor sweep gives an operator asking about 3
+		// or 6 cards, and for the same reason: engines shard a layer
+		// across powers of two, and here the tensor width is a real
+		// width rather than a row to look up.
+		return o, fmt.Errorf("--tp %d is not a tensor-parallel width this budget plans for: engines shard across powers of two", budgetTP)
+	}
+
 	o.plan = vrambudget.Plan{Weights: weights, KVCache: cache, MaxModelLen: budgetMaxModelLen, MaxBatch: budgetMaxBatch}
+	o.expertParallel = budgetExpertParallel
+	if o.expertParallel {
+		// The plan carries the tensor width from here on. Zero and one
+		// both mean one card, which is what Plan already reads them as.
+		o.plan.TPSize = budgetTP
+	}
 	// The label is a binary count, so "80 GB" is 80 GiB and holds 85.9
 	// decimal GB. Reading a vendor's label as decimal removed seven
 	// percent of every card before the arithmetic started, which is
@@ -177,6 +197,66 @@ func budgetOptionsFromFlags() (budgetOpts, error) {
 	o.sessionsAt = ladder
 
 	return o, nil
+}
+
+// powerOfTwo accepts 0 alongside the powers, since an unset --tp is a
+// tensor width of one rather than a width nobody named.
+func powerOfTwo(n int32) bool {
+	return n >= 0 && n&(n-1) == 0
+}
+
+// planAtCards sizes the plan for a row of n cards, on whichever axis the
+// operator asked for.
+//
+// One helper rather than an assignment at each table, so the budget table
+// and the sessions table cannot end up describing different shapes for
+// the same row.
+func planAtCards(o budgetOpts, n int32) vrambudget.Plan {
+	plan := o.plan
+	if o.expertParallel {
+		plan.EPSize = n
+		return plan
+	}
+	plan.TPSize = n
+	return plan
+}
+
+// expertParallelPlanSuffix names the shape in the header, since the same
+// card count means two different arrangements depending on the flag and
+// the header is the only place that says which one was computed.
+func expertParallelPlanSuffix(o budgetOpts) string {
+	if !o.expertParallel {
+		return ""
+	}
+	return fmt.Sprintf(", experts across every card, tensor width %d", o.plan.TensorWidth())
+}
+
+// expertParallelRowNote reads one row of the table out in the vocabulary
+// the deploy flags use, because `--ep` there is a degree and the row here
+// is a card count, and an operator carrying the answer to a deploy has to
+// translate between them.
+//
+// The widest row rather than a general statement, since the sentence is
+// only legible with real numbers in it and that is the row an operator
+// sizing a machine is reading.
+func expertParallelRowNote(o budgetOpts, cards int32) string {
+	tp := o.plan.TensorWidth()
+	return fmt.Sprintf("each row spreads the routed experts across all of its cards: %d cards is --ep %d --tp %d, "+
+		"so %d data-parallel rank(s) each holding a whole copy of the attention, the embeddings and the dense layers.",
+		cards, cards, tp, cards/tp)
+}
+
+// widestRow is the largest card count the table actually reported,
+// skipped rows included. A note quoting --max-cards instead would name a
+// row the sweep never walked whenever the ceiling is not a power of two.
+func widestRow(candidates []vrambudget.Candidate) int32 {
+	var n int32
+	for _, c := range candidates {
+		if c.Cards > n {
+			n = c.Cards
+		}
+	}
+	return n
 }
 
 // parseContextLadder reads the --sessions-at list.
@@ -234,7 +314,7 @@ func writeSessionsTable(w io.Writer, spec string, a *provisionerv1.ModelArchitec
 	}
 
 	fmt.Fprintf(w, "%s  %s params  %d layers\n", spec, formatParamsShort(a.GetParams()), a.GetLayers())
-	fmt.Fprintf(w, "plan   weights %s, cache %s\n", o.plan.Weights, o.plan.KVCache)
+	fmt.Fprintf(w, "plan   weights %s, cache %s%s\n", o.plan.Weights, o.plan.KVCache, expertParallelPlanSuffix(o))
 	fmt.Fprintf(w, "card   %g GB (%g GiB = %s) at %.2f utilization = %s usable\n\n",
 		o.cardGB, o.cardGB, formatGB(o.cardBytes), o.utilization,
 		formatGB(vrambudget.UsableBytes(o.cardBytes, o.utilization)))
@@ -251,12 +331,12 @@ func writeSessionsTable(w io.Writer, spec string, a *provisionerv1.ModelArchitec
 	fmt.Fprintf(tw, "\t   cache/session\n")
 
 	any := false
+	widest := cardCounts[len(cardCounts)-1]
 	for _, ctx := range o.sessionsAt {
 		fmt.Fprintf(tw, "%s", formatTokens(ctx))
-		plan := o.plan
-		plan.MaxModelLen = ctx
 		for _, cards := range cardCounts {
-			plan.TPSize = cards
+			plan := planAtCards(o, cards)
+			plan.MaxModelLen = ctx
 			n, err := vrambudget.MaxSessions(a, plan, o.cardBytes, o.utilization)
 			if err != nil {
 				return false, err
@@ -271,8 +351,7 @@ func writeSessionsTable(w io.Writer, spec string, a *provisionerv1.ModelArchitec
 				fmt.Fprintf(tw, "\t-")
 			}
 		}
-		plan.TPSize = cardCounts[len(cardCounts)-1]
-		cache, _ := vrambudget.SessionCost(a, plan, ctx)
+		cache, _ := vrambudget.SessionCost(a, planAtCards(o, widest), ctx)
 		fmt.Fprintf(tw, "\t   %s\n", formatGB(cache))
 	}
 	if err := tw.Flush(); err != nil {
@@ -280,7 +359,15 @@ func writeSessionsTable(w io.Writer, spec string, a *provisionerv1.ModelArchitec
 	}
 
 	fmt.Fprintln(w)
-	fmt.Fprintf(w, "cache/session is per card at %s.\n", formatCards(cardCounts[len(cardCounts)-1]))
+	if o.expertParallel {
+		fmt.Fprintln(w, expertParallelRowNote(o, widest))
+		// The cache divides by the tensor width and nothing else, so
+		// under expert parallelism every row of this column is the same
+		// number and naming the widest row would suggest otherwise.
+		fmt.Fprintf(w, "cache/session is per card at tensor width %d, which every row shares.\n", o.plan.TensorWidth())
+	} else {
+		fmt.Fprintf(w, "cache/session is per card at %s.\n", formatCards(cardCounts[len(cardCounts)-1]))
+	}
 	if vrambudget.LatentCache(a) {
 		fmt.Fprintln(w, "this model caches a compressed latent, which is replicated on every card rather than")
 		fmt.Fprintln(w, "sharded, so cards buy room for weights and none for cache.")
@@ -296,12 +383,20 @@ func writeSessionsTable(w io.Writer, spec string, a *provisionerv1.ModelArchitec
 // The operator's --tp when they named one, since they are asking about a
 // shape they have in mind. Otherwise the same powers of two the budget
 // sweep uses, so the two tables are read against each other.
+//
+// Under --expert-parallel --tp is not a row at all, so the ladder stays
+// the card ladder and the counts a tensor width does not divide drop out
+// of it, matching the rows the budget sweep skips for the same reason.
 func sessionCardLadder(a *provisionerv1.ModelArchitecture, o budgetOpts) ([]int32, error) {
-	if o.tp > 0 {
+	if o.tp > 0 && !o.expertParallel {
 		return []int32{o.tp}, nil
 	}
+	tp := o.plan.TensorWidth()
 	var out []int32
 	for n := int32(1); n <= o.maxCards; n *= 2 {
+		if o.expertParallel && n%tp != 0 {
+			continue
+		}
 		out = append(out, n)
 	}
 	if len(out) == 0 {
@@ -395,8 +490,14 @@ func renderModelBudget(w io.Writer, spec string, a *provisionerv1.ModelArchitect
 // budgetCandidates is the sweep, or the single shape --tp pins it to.
 //
 // --tp narrows the sweep rather than computing separately, so the two
-// modes cannot disagree about a row they share.
+// modes cannot disagree about a row they share. Under --expert-parallel
+// it does not narrow at all: there the row is the expert width and --tp
+// is the tensor width every row is built around, so pinning a row to it
+// would answer a question nobody asked.
 func budgetCandidates(a *provisionerv1.ModelArchitecture, o budgetOpts) ([]vrambudget.Candidate, error) {
+	if o.expertParallel {
+		return vrambudget.SweepExpertParallel(a, o.plan, o.cardBytes, o.utilization, o.maxCards)
+	}
 	all, err := vrambudget.Sweep(a, o.plan, o.cardBytes, o.utilization, o.maxCards)
 	if err != nil || o.tp == 0 {
 		return all, err
@@ -415,8 +516,8 @@ func budgetCandidates(a *provisionerv1.ModelArchitecture, o budgetOpts) ([]vramb
 func writeBudgetTable(w io.Writer, spec string, a *provisionerv1.ModelArchitecture, o budgetOpts, candidates []vrambudget.Candidate, fewest int32) error {
 	fmt.Fprintf(w, "%s  %s params  %d layers  %d kv-heads  head-dim %d\n",
 		spec, formatParamsShort(a.GetParams()), a.GetLayers(), a.GetKvHeads(), a.GetHeadDim())
-	fmt.Fprintf(w, "plan   weights %s, cache %s, %d tokens x %d sequences\n",
-		o.plan.Weights, o.plan.KVCache, o.plan.MaxModelLen, o.plan.MaxBatch)
+	fmt.Fprintf(w, "plan   weights %s, cache %s, %d tokens x %d sequences%s\n",
+		o.plan.Weights, o.plan.KVCache, o.plan.MaxModelLen, o.plan.MaxBatch, expertParallelPlanSuffix(o))
 	fmt.Fprintf(w, "card   %g GB (%g GiB = %s) at %.2f utilization = %s usable\n\n",
 		o.cardGB, o.cardGB, formatGB(o.cardBytes),
 		o.utilization, formatGB(vrambudget.UsableBytes(o.cardBytes, o.utilization)))
@@ -455,6 +556,10 @@ func writeBudgetTable(w io.Writer, spec string, a *provisionerv1.ModelArchitectu
 	}
 
 	fmt.Fprintln(w)
+	if o.expertParallel {
+		fmt.Fprintln(w, expertParallelRowNote(o, widestRow(candidates)))
+		fmt.Fprintln(w)
+	}
 	if fewest > 0 {
 		fmt.Fprintf(w, "fewest cards that fit: %d\n", fewest)
 	} else {
@@ -529,6 +634,27 @@ type budgetPlanJSON struct {
 	KVCache     string `json:"kv_cache"`
 	MaxModelLen int32  `json:"max_model_len"`
 	MaxBatch    int32  `json:"max_batch"`
+	// Both omitted unless --expert-parallel was asked for, because
+	// without it a row's card count is the tensor width and stating it
+	// twice invites a reader to believe the two could differ.
+	TensorParallelSize int32 `json:"tensor_parallel_size,omitempty"`
+	ExpertParallel     bool  `json:"expert_parallel,omitempty"`
+}
+
+// budgetPlanDoc renders the plan half of both JSON documents, so the two
+// cannot describe the same flags differently.
+func budgetPlanDoc(o budgetOpts) budgetPlanJSON {
+	doc := budgetPlanJSON{
+		Weights:     string(o.plan.Weights),
+		KVCache:     string(o.plan.KVCache),
+		MaxModelLen: o.plan.MaxModelLen,
+		MaxBatch:    o.plan.MaxBatch,
+	}
+	if o.expertParallel {
+		doc.TensorParallelSize = o.plan.TensorWidth()
+		doc.ExpertParallel = true
+	}
+	return doc
 }
 
 type budgetCardJSON struct {
@@ -571,12 +697,7 @@ func writeBudgetJSON(w io.Writer, spec string, a *provisionerv1.ModelArchitectur
 			HiddenSize:            a.GetHiddenSize(),
 			MaxPositionEmbeddings: a.GetMaxPositionEmbeddings(),
 		},
-		Plan: budgetPlanJSON{
-			Weights:     string(o.plan.Weights),
-			KVCache:     string(o.plan.KVCache),
-			MaxModelLen: o.plan.MaxModelLen,
-			MaxBatch:    o.plan.MaxBatch,
-		},
+		Plan: budgetPlanDoc(o),
 		Card: budgetCardJSON{
 			VRAMBytes:   o.cardBytes,
 			Utilization: o.utilization,
@@ -644,12 +765,14 @@ func writeSessionsJSON(w io.Writer, spec string, a *provisionerv1.ModelArchitect
 	if err != nil {
 		return false, err
 	}
+	// The sessions document states no context length or batch. The ladder
+	// is the context axis and the batch is what the table solves for.
+	planDoc := budgetPlanDoc(o)
+	planDoc.MaxModelLen, planDoc.MaxBatch = 0, 0
+
 	out := sessionsJSON{
 		Model: spec,
-		Plan: budgetPlanJSON{
-			Weights: string(o.plan.Weights),
-			KVCache: string(o.plan.KVCache),
-		},
+		Plan:  planDoc,
 		Card: budgetCardJSON{
 			VRAMBytes:   o.cardBytes,
 			Utilization: o.utilization,
@@ -663,10 +786,9 @@ func writeSessionsJSON(w io.Writer, spec string, a *provisionerv1.ModelArchitect
 	widest := cardCounts[len(cardCounts)-1]
 	for _, ctx := range o.sessionsAt {
 		row := sessionsRowJSON{ContextLen: ctx}
-		plan := o.plan
-		plan.MaxModelLen = ctx
 		for _, cards := range cardCounts {
-			plan.TPSize = cards
+			plan := planAtCards(o, cards)
+			plan.MaxModelLen = ctx
 			n, err := vrambudget.MaxSessions(a, plan, o.cardBytes, o.utilization)
 			if err != nil {
 				return false, err
@@ -676,8 +798,7 @@ func writeSessionsJSON(w io.Writer, spec string, a *provisionerv1.ModelArchitect
 			}
 			row.Sessions = append(row.Sessions, n)
 		}
-		plan.TPSize = widest
-		row.CacheBytesPerSession, _ = vrambudget.SessionCost(a, plan, ctx)
+		row.CacheBytesPerSession, _ = vrambudget.SessionCost(a, planAtCards(o, widest), ctx)
 		out.Rows = append(out.Rows, row)
 	}
 

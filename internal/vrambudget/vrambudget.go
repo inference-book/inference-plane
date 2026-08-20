@@ -249,13 +249,20 @@ func (p Plan) expertCards() int32 {
 	return p.EPSize
 }
 
-// cards normalises TPSize so 0 and 1 both mean one card.
-func (p Plan) cards() int32 {
+// TensorWidth is TPSize normalised so 0 and 1 both mean one card.
+//
+// Exported because a command that prints a plan back to an operator has
+// to print the width the arithmetic used, not the field as typed, and an
+// unset --tp is a width of one rather than a width nobody chose.
+func (p Plan) TensorWidth() int32 {
 	if p.TPSize < 1 {
 		return 1
 	}
 	return p.TPSize
 }
+
+// cards is TensorWidth under the name the arithmetic below reads in.
+func (p Plan) cards() int32 { return p.TensorWidth() }
 
 // Validate reports whether the plan is usable for a budget.
 func (p Plan) Validate() error {
@@ -478,6 +485,28 @@ func KVBytesPerToken(a *Arch, cache Precision) int64 {
 	return 2 * layers * int64(a.GetKvHeads()) * int64(a.GetHeadDim()) * cache.BytesPerCacheElement()
 }
 
+// weightBytesPerCard is what one card holds of the model's weights.
+//
+// Parameters times bytes per parameter, split by what shards where. The
+// routed experts divide across the expert ranks; everything else divides
+// across the tensor ranks and is replicated over the rest. The two are
+// the same number unless a plan asked for expert parallelism, which is
+// why every existing plan computes what it computed before.
+//
+// The one term that is exact and known before the engine starts. Compute
+// and MaxSessions have to price it the same way, since one asks whether a
+// batch fits beside the weights and the other asks what is left once they
+// are placed, so a weight figure written out twice is a budget that
+// contradicts itself under expert parallelism.
+func weightBytesPerCard(a *Arch, p Plan) int64 {
+	bytesPerParam := p.Weights.BytesPerParam()
+	routed := RoutedExpertParams(a)
+	return int64(
+		float64(a.GetParams()-routed)*bytesPerParam/float64(p.cards()) +
+			float64(routed)*bytesPerParam/float64(p.expertCards()),
+	)
+}
+
 // Compute returns the per-card budget for a model under a plan.
 //
 // Tensor parallelism divides the weights, the cache, and the activations
@@ -496,21 +525,6 @@ func Compute(a *Arch, p Plan) (Budget, error) {
 	}
 
 	cards := p.cards()
-
-	// Weights: parameters times bytes per parameter. The one term that is
-	// exact and known before the engine starts.
-	//
-	// Split by what shards where. The routed experts divide across the
-	// expert ranks; everything else divides across the tensor ranks and
-	// is replicated over the rest. The two are the same number unless a
-	// plan asked for expert parallelism, which is why every existing plan
-	// computes what it computed before.
-	bytesPerParam := p.Weights.BytesPerParam()
-	routed := RoutedExpertParams(a)
-	weightBytesPerCard := int64(
-		float64(a.GetParams()-routed)*bytesPerParam/float64(cards) +
-			float64(routed)*bytesPerParam/float64(p.expertCards()),
-	)
 
 	// KV cache: the state one token contributes at each caching layer,
 	// summed over those layers, times the bytes per element the cache
@@ -541,7 +555,7 @@ func Compute(a *Arch, p Plan) (Budget, error) {
 
 	b := Budget{
 		Cards:           cards,
-		WeightBytes:     weightBytesPerCard,
+		WeightBytes:     weightBytesPerCard(a, p),
 		KVBytes:         kvPerCard,
 		ActivationBytes: perCard(activations),
 		KVBytesPerToken: perToken,
@@ -701,7 +715,7 @@ func MaxSessions(a *Arch, p Plan, cardBytes int64, utilization float64) (int64, 
 	// (1 + OverheadFraction) times whatever the three real terms come to.
 	// Dividing it out here is what keeps the answer on the same side of
 	// the line Against calls Fits.
-	room := usable/(1+OverheadFraction) - float64(a.GetParams())*p.Weights.BytesPerParam()/float64(cards)
+	room := usable/(1+OverheadFraction) - float64(weightBytesPerCard(a, p))
 	if room <= 0 {
 		return 0, nil
 	}
@@ -761,6 +775,35 @@ type Candidate struct {
 //
 // The candidate rule is MinCards' and is documented there.
 func Sweep(a *Arch, p Plan, cardBytes int64, utilization float64, maxCards int32) ([]Candidate, error) {
+	return sweep(a, p, cardBytes, utilization, maxCards, tensorAxis)
+}
+
+// SweepExpertParallel is the same walk for a plan whose width is carried
+// by expert parallelism: the routed experts spread across every card in
+// the row, the plan's TPSize is the tensor width inside it, and the
+// data-parallel width is what is left over.
+//
+// A separate entry point rather than a flag on Plan, because the two
+// sweeps disagree about what a row *is*. Under tensor parallelism the row
+// is the tensor width and the plan's own TPSize is an input to narrow
+// with; here the row is the expert width and TPSize is a fixed width the
+// row divides into. One function that read the difference off a field
+// would leave every caller guessing which meaning it had (#387).
+func SweepExpertParallel(a *Arch, p Plan, cardBytes int64, utilization float64, maxCards int32) ([]Candidate, error) {
+	return sweep(a, p, cardBytes, utilization, maxCards, expertAxis)
+}
+
+// sweepAxis is what a row's card count means.
+type sweepAxis int
+
+const (
+	// tensorAxis: the row is how many cards one engine shards across.
+	tensorAxis sweepAxis = iota
+	// expertAxis: the row is how many ways the routed experts spread.
+	expertAxis
+)
+
+func sweep(a *Arch, p Plan, cardBytes int64, utilization float64, maxCards int32, axis sweepAxis) ([]Candidate, error) {
 	if err := ValidateArch(a); err != nil {
 		return nil, err
 	}
@@ -770,26 +813,29 @@ func Sweep(a *Arch, p Plan, cardBytes int64, utilization float64, maxCards int32
 	if maxCards < 1 {
 		maxCards = 8
 	}
+	tp := p.cards()
+	// Under the expert axis the tensor width is the same on every row, so
+	// a width the KV heads do not divide is a fact about the plan rather
+	// than about a card count. Reported once, as a refusal, since the
+	// alternative is the same sentence under every row of the table.
+	if axis == expertAxis && tp > 1 && !LatentCache(a) && a.GetKvHeads()%tp != 0 {
+		return nil, fmt.Errorf("a tensor width of %d does not divide the model's %d kv heads, so an engine would replicate the cache across cards rather than shard it",
+			tp, a.GetKvHeads())
+	}
 	usable := UsableBytes(cardBytes, utilization)
 
 	var out []Candidate
 	for n := int32(1); n <= maxCards; n *= 2 {
-		// The rule below is about how the cache shards, so it does not
-		// apply to a model whose cache does not shard at all. A latent
-		// cache is replicated on every card whatever the head count
-		// divides by, and refusing a card count on head-divisibility
-		// grounds would refuse a shape for a saving that was never on
-		// offer either way.
-		if n > 1 && !LatentCache(a) && a.GetKvHeads()%n != 0 {
-			out = append(out, Candidate{
-				Cards: n,
-				SkipReason: fmt.Sprintf("%d kv heads do not divide by %d, so an engine would replicate the cache across cards rather than shard it",
-					a.GetKvHeads(), n),
-			})
+		if reason := skipReason(a, n, tp, axis); reason != "" {
+			out = append(out, Candidate{Cards: n, SkipReason: reason})
 			continue
 		}
 		try := p
-		try.TPSize = n
+		if axis == expertAxis {
+			try.EPSize = n
+		} else {
+			try.TPSize = n
+		}
 		b, err := Compute(a, try)
 		if err != nil {
 			return nil, err
@@ -797,4 +843,39 @@ func Sweep(a *Arch, p Plan, cardBytes int64, utilization float64, maxCards int32
 		out = append(out, Candidate{Cards: n, Budget: b, Verdict: b.Against(usable)})
 	}
 	return out, nil
+}
+
+// skipReason says why a card count is not a candidate, or "" when it is.
+//
+// Each rule refuses a count whose per-card budget would describe a shape
+// no engine would actually run, which is worse than no row at all. The
+// arithmetic still produces a number, and the number reads as a plan.
+func skipReason(a *Arch, n, tp int32, axis sweepAxis) string {
+	if axis == expertAxis {
+		// The row divides into whole data-parallel ranks, or the shape
+		// does not exist. A row narrower than the tensor width fails this
+		// too, which is the same answer for the same reason.
+		if n%tp != 0 {
+			return fmt.Sprintf("a tensor width of %d does not divide a %d-card row, so there is no whole number of data-parallel ranks", tp, n)
+		}
+		// Whether a degree divides the expert count is the deploy path's
+		// rule too (provisioners.ValidateExpertShape), and for the same
+		// reason: an uneven split budgets the average while one card
+		// carries the maximum.
+		if experts := a.GetNumExperts(); experts > 0 && experts%n != 0 {
+			return fmt.Sprintf("%d routed experts do not divide by %d, so some cards would hold %d experts and others %d",
+				experts, n, experts/n+1, experts/n)
+		}
+		return ""
+	}
+	// The rule below is about how the cache shards, so it does not apply
+	// to a model whose cache does not shard at all. A latent cache is
+	// replicated on every card whatever the head count divides by, and
+	// refusing a card count on head-divisibility grounds would refuse a
+	// shape for a saving that was never on offer either way.
+	if n > 1 && !LatentCache(a) && a.GetKvHeads()%n != 0 {
+		return fmt.Sprintf("%d kv heads do not divide by %d, so an engine would replicate the cache across cards rather than shard it",
+			a.GetKvHeads(), n)
+	}
+	return ""
 }

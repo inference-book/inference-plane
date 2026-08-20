@@ -245,6 +245,41 @@ The size of the error this fixes, GLM-5.2 at mxfp4 on eight 80 GB cards:
 The corrected figure lands on the boundary almost exactly, which is worth
 knowing before reading much into either side of it.
 
+### The sweep has two axes, and a row means a different thing on each
+
+`Sweep` walks card counts where the row *is* the tensor width. Under
+expert parallelism that reading falls apart, because the width is carried
+by data-parallel ranks and the tensor width is a separate, smaller number.
+`SweepExpertParallel` is the same walk with the row read as the expert
+width, the plan's `TPSize` held fixed as the tensor width inside it, and
+the data-parallel width falling out as `row / tp`.
+
+Two entry points rather than a field on `Plan`, because a caller cannot
+tell from one function which meaning it got, and the CLI flags had already
+diverged the same way (#387). `iplane model budget --tp` narrows the sweep
+to one row; under `--expert-parallel` the same flag sets a width instead.
+
+Three rules refuse a row, and each one exists because the arithmetic still
+produces a number for a shape no engine would run:
+
+- A row the tensor width does not divide has no whole number of
+  data-parallel ranks. This covers a row narrower than the width too.
+- A row that does not divide the routed expert count would leave one card
+  holding one more expert than the budget priced. Same rule the deploy
+  path applies in `provisioners.ValidateExpertShape`, so the two surfaces
+  refuse the same shapes.
+- A tensor width the KV heads do not divide makes an engine replicate the
+  cache rather than shard it. On the expert axis the width is the same on
+  every row, so this one is a refusal rather than a per-row skip.
+
+`MaxSessions` shares `weightBytesPerCard` with `Compute` for the same
+reason. One asks whether a batch fits beside the weights and the other
+asks what is left once they are placed, so a weight term computed twice is
+a budget that contradicts itself: at `tp=1 ep=8` the old copy divided the
+whole model by the tensor width, which is no division at all, and the
+concurrency table reported room for thirty-two sessions of GLM-5.2 at 8k
+where the arithmetic supports seven.
+
 ### The cache under data parallelism is still wrong, in the safe direction
 
 `LatentCache` replicates the cache on every card, and that is right under

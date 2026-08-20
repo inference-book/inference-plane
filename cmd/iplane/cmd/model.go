@@ -212,7 +212,10 @@ func init() {
 	modelBudgetCmd.Flags().StringVar(&budgetSessionsAt, "sessions-at", "",
 		"instead of one batch, report how many concurrent sessions fit at each of these context lengths (e.g. 8k,128k,1M)")
 	modelBudgetCmd.Flags().Int32Var(&budgetTP, "tp", 0,
-		"report this tensor-parallel width only (default: every candidate up to --max-cards)")
+		"report this tensor-parallel width only (default: every candidate up to --max-cards); with --expert-parallel it sets the tensor width instead of picking a row")
+	modelBudgetCmd.Flags().BoolVar(&budgetExpertParallel, "expert-parallel", false,
+		"size a mixture-of-experts plan whose width is carried by expert parallelism: each row spreads the routed experts across all of its cards "+
+			"and replicates the rest, so a row of 8 with --tp 1 is 'deployment deploy --ep 8 --tp 1'")
 	modelBudgetCmd.Flags().Float64Var(&budgetVRAMGB, "vram-gb", 0,
 		"card memory as the vendor labels it, so 80 for an 80GB card (required); read as GiB, which is what the card holds")
 	modelBudgetCmd.Flags().Float64Var(&budgetUtilization, "gpu-memory-utilization", vrambudget.DefaultUtilization,
