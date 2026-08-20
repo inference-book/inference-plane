@@ -95,6 +95,7 @@ func resetBudgetFlags() {
 	budgetRevision = "main"
 	budgetOutput = outputTable
 	budgetSessionsAt = ""
+	budgetExpertParallel = false
 	instanceServiceURL = ""
 	modelBudgetCmd.Flags().Lookup("revision").Changed = false
 }
@@ -382,11 +383,19 @@ func TestModelBudgetReadsTheCardLabelAsBinary(t *testing.T) {
 
 // glm52Budget is GLM-5.2's published shape: a compressed latent cache on
 // every one of its 78 layers, which is what makes the card columns below
-// behave differently from a dense model's.
+// behave differently from a dense model's, and a 256-expert stack on 76
+// of them, which is what an expert-parallel plan divides.
+//
+// The expert fields change nothing on the tensor axis, where the routed
+// share and the rest divide by the same card count, and the goldens above
+// are the proof of it.
 var glm52Budget = &provisionerv1.ModelArchitecture{
 	Params: 753_329_940_480, Layers: 78, HiddenSize: 6144,
 	MaxPositionEmbeddings: 1_048_576,
 	KvLoraRank:            512, QkRopeHeadDim: 64,
+	DenseLayers: 3, MtpLayers: 1,
+	NumExperts: 256, NumExpertsPerTok: 8, SharedExperts: 1,
+	MoeIntermediateSize: 2048,
 }
 
 // The wall, whole. Concurrency collapsing down the page is the chapter's
@@ -563,4 +572,185 @@ func TestModelBudgetSessionsAgreesAcrossTheTwoOutputModes(t *testing.T) {
 	if got.Rows[1].CacheBytesPerSession != 5_888_802_816 {
 		t.Errorf("cache per session = %d, want 5888802816", got.Rows[1].CacheBytesPerSession)
 	}
+}
+
+// The plan #387 exists for. `deployment deploy --ep 8 --tp 1` sizes a
+// GLM-5.2 rental correctly and this command could not express the same
+// shape, so an operator checking the rental by hand read the tensor row
+// and saw twelve gigabytes per card that the deploy path knew about.
+//
+// Held whole rather than by row: the note under the table is what tells a
+// reader that a row here is a card count and `--ep` there is a degree,
+// and a number nobody can translate is not an answer.
+func TestModelBudgetSizesAnExpertParallelPlan(t *testing.T) {
+	out, _, err := runBudget(t, glm52Budget, "zai-org/GLM-5.2",
+		"--quantization", "mxfp4", "--max-model-len", "8192", "--max-batch", "8",
+		"--tp", "1", "--expert-parallel", "--vram-gb", "80")
+	// Exit 1, because the widest row is tight rather than fitting: it
+	// clears only by eating the overhead band. That is the answer rather
+	// than a failure of the command.
+	var ec exitCoder
+	if !errors.As(err, &ec) || ec.ExitCode() != 1 {
+		t.Fatalf("expected the exit gate to refuse a plan whose best row is only tight, got %v", err)
+	}
+
+	want := strings.Join([]string{
+		"zai-org/GLM-5.2  753.3B params  78 layers  0 kv-heads  head-dim 0",
+		"plan   weights mxfp4, cache mxfp4, 8192 tokens x 8 sequences, experts across every card, tensor width 1",
+		"card   80 GB (80 GiB = 85.9 GB) at 0.90 utilization = 77.3 GB usable",
+		"",
+		"   cards    weights    cache   activation   overhead      total   verdict",
+		// The routed experts divide by the row and the attention, the
+		// embeddings and the dense layers do not, so the weight column
+		// falls far more slowly than the tensor table's does.
+		"       1   429.4 GB   2.9 GB       1.2 GB    65.0 GB   498.6 GB   overcommitted",
+		"       2   220.1 GB   2.9 GB       1.2 GB    33.6 GB   257.9 GB   overcommitted",
+		"       4   115.4 GB   2.9 GB       1.2 GB    17.9 GB   137.5 GB   overcommitted",
+		// 77.3 against 77.3 usable. The boundary almost exactly, which is
+		// worth knowing before reading confidence into either side of it.
+		"       8    63.1 GB   2.9 GB       1.2 GB    10.1 GB    77.3 GB   tight",
+		"",
+		"each row spreads the routed experts across all of its cards: 8 cards is --ep 8 --tp 1, so 8 data-parallel rank(s) each holding a whole copy of the attention, the embeddings and the dense layers.",
+		"",
+		"fewest cards that fit: none within --max-cards 8",
+		"largest term: weights, 99% of the working set",
+		"",
+	}, "\n")
+	if out != want {
+		t.Errorf("output drifted.\n--- got ---\n%s\n--- want ---\n%s", out, want)
+	}
+}
+
+// The same eight cards under the two arrangements, which is the gap the
+// ticket measures: twelve gigabytes per card, and the difference between
+// a verdict of fits and a verdict of tight.
+func TestModelBudgetExpertParallelIsNotTheTensorRow(t *testing.T) {
+	args := []string{"zai-org/GLM-5.2", "--quantization", "mxfp4", "--max-model-len", "8192",
+		"--max-batch", "8", "--vram-gb", "80", "--output", outputJSON}
+	tensor, _, err := runBudget(t, glm52Budget, args...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expert, _, _ := runBudget(t, glm52Budget, append(args, "--tp", "1", "--expert-parallel")...)
+
+	tensorRow := budgetRowByCards(t, decodeBudget(t, tensor), 8)
+	expertRow := budgetRowByCards(t, decodeBudget(t, expert), 8)
+	if tensorRow.TotalBytes >= expertRow.TotalBytes {
+		t.Errorf("expert parallelism replicates what tensor parallelism shards, so it must cost more per card: tensor %d, expert %d",
+			tensorRow.TotalBytes, expertRow.TotalBytes)
+	}
+	if tensorRow.Verdict != "fits" || expertRow.Verdict != "tight" {
+		t.Errorf("verdicts drifted: tensor %q, expert %q (want fits and tight)", tensorRow.Verdict, expertRow.Verdict)
+	}
+}
+
+// The agreement the ticket asks for, checked against the deploy path
+// itself rather than against a figure copied out of it. `CreateDeployment`
+// reads its plan back out of the engine arguments and the parallelism
+// message, so that is what this builds, and the two have to land on the
+// same byte count for the same shape.
+func TestModelBudgetExpertParallelAgreesWithTheDeployPath(t *testing.T) {
+	out, _, _ := runBudget(t, glm52Budget, "zai-org/GLM-5.2",
+		"--quantization", "mxfp4", "--max-model-len", "8192", "--max-batch", "8",
+		"--tp", "1", "--expert-parallel", "--vram-gb", "80", "--output", outputJSON)
+	row := budgetRowByCards(t, decodeBudget(t, out), 8)
+
+	plan, usable := provisioners.EnginePlan(
+		[]string{"--quantization", "mxfp4", "--max-model-len", "8192", "--max-num-seqs", "8"},
+		&provisionerv1.Parallelism{TensorParallelSize: 1, ExpertParallelSize: 8})
+	if !usable {
+		t.Fatal("the deploy path could not read a plan out of these arguments")
+	}
+	deploy, err := vrambudget.Compute(glm52Budget, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deploy.TotalBytes() != row.TotalBytes {
+		t.Errorf("the budget and the deploy path disagree about the same plan: budget %d, deploy %d",
+			row.TotalBytes, deploy.TotalBytes())
+	}
+}
+
+// A row narrower than the tensor width is not a shape, and neither is one
+// the width does not divide: there is no whole number of data-parallel
+// ranks either way. Reported as a skip with its reason, the way the
+// tensor sweep reports a card count the KV heads do not divide.
+func TestModelBudgetSkipsExpertRowsTheTensorWidthDoesNotDivide(t *testing.T) {
+	out, _, _ := runBudget(t, glm52Budget, "zai-org/GLM-5.2",
+		"--quantization", "mxfp4", "--max-model-len", "8192", "--max-batch", "8",
+		"--tp", "2", "--expert-parallel", "--vram-gb", "80")
+
+	if !strings.Contains(out, "skipped 1 cards: a tensor width of 2 does not divide a 1-card row") {
+		t.Errorf("no skip line for the row narrower than the tensor width:\n%s", out)
+	}
+	// And it is a skip rather than a row with numbers in it: a budget for
+	// a shape no engine would run reads as a plan.
+	for _, line := range strings.Split(out, "\n") {
+		if f := strings.Fields(line); len(f) > 1 && f[0] == "1" {
+			t.Errorf("the skipped row was budgeted anyway: %q", line)
+		}
+	}
+}
+
+// The concurrency question under the same plan, by hand rather than
+// against the implementation. Eight cards at tp=1 hold 63.1 GB of weights
+// each, which leaves 4.13 GB of the 77.3 GB card once the overhead band
+// is kept intact, and a session at 8k costs 0.368 GB of latent cache plus
+// 0.151 GB of activation scratch. That divides into seven.
+//
+// Wrong before #387 in the expensive direction: the weight term divided
+// the whole model by eight, understating it by 9.4 GB per card, and the
+// table reported room for thirty-two sessions that the hardware does not
+// have.
+func TestModelBudgetExpertParallelSessionsMatchTheHandComputedArithmetic(t *testing.T) {
+	out, _, err := runBudget(t, glm52Budget, "zai-org/GLM-5.2",
+		"--quantization", "mxfp4", "--sessions-at", "8k", "--tp", "1",
+		"--expert-parallel", "--vram-gb", "80", "--output", outputJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc sessionsJSON
+	if err := json.Unmarshal([]byte(out), &doc); err != nil {
+		t.Fatalf("decode: %v\n%s", err, out)
+	}
+	if len(doc.Rows) != 1 || len(doc.Rows[0].Sessions) != len(doc.CardCounts) {
+		t.Fatalf("unexpected shape: %+v", doc)
+	}
+	if got := doc.Rows[0].Sessions[len(doc.CardCounts)-1]; got != 7 {
+		t.Errorf("sessions on %d cards = %d, want 7", doc.CardCounts[len(doc.CardCounts)-1], got)
+	}
+}
+
+// Under --expert-parallel, --tp is a width the engine has to shard a
+// layer across rather than a row to look up, so the answer for a width no
+// engine shards across is the same refusal the tensor sweep gives.
+func TestModelBudgetRefusesAnExpertParallelTensorWidthNoEngineShardsAcross(t *testing.T) {
+	_, _, err := runBudget(t, glm52Budget, "zai-org/GLM-5.2",
+		"--quantization", "mxfp4", "--max-model-len", "8192", "--max-batch", "8",
+		"--tp", "3", "--expert-parallel", "--vram-gb", "80")
+	if err == nil || !strings.Contains(err.Error(), "powers of two") {
+		t.Errorf("want the powers-of-two refusal for --tp 3, got %v", err)
+	}
+	// An unset --tp is a width of one rather than a width nobody named,
+	// so it must not be caught by the same rule.
+	if _, _, err := runBudget(t, glm52Budget, "zai-org/GLM-5.2",
+		"--quantization", "mxfp4", "--max-model-len", "8192", "--max-batch", "8",
+		"--expert-parallel", "--vram-gb", "80"); err != nil {
+		var ec exitCoder
+		if !errors.As(err, &ec) {
+			t.Errorf("--expert-parallel without --tp was refused: %v", err)
+		}
+	}
+}
+
+// budgetRowByCards returns the JSON row for a card count.
+func budgetRowByCards(t *testing.T, doc budgetJSON, cards int32) budgetRowJSON {
+	t.Helper()
+	for _, row := range doc.Candidates {
+		if row.Cards == cards {
+			return row
+		}
+	}
+	t.Fatalf("no row for %d cards in %+v", cards, doc.Candidates)
+	return budgetRowJSON{}
 }

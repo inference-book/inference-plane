@@ -104,3 +104,131 @@ func TestADenseModelIgnoresTheExpertSize(t *testing.T) {
 		t.Errorf("WeightBytes = %d, want %d", plain.WeightBytes, want)
 	}
 }
+
+// sparseMoE is a small non-latent mixture of experts, for the rules that
+// need a cache that shards and an expert count that does not divide by
+// every power of two. Six experts and six KV heads are chosen for exactly
+// that: neither divides by four.
+func sparseMoE() *provisionerv1.ModelArchitecture {
+	return &provisionerv1.ModelArchitecture{
+		Params: 100_000_000_000, Layers: 32, KvHeads: 6, HeadDim: 128,
+		HiddenSize: 4096, MaxPositionEmbeddings: 32_768,
+		NumExperts: 6, NumExpertsPerTok: 2, MoeIntermediateSize: 1024,
+	}
+}
+
+// The row means the expert width here, and the tensor width comes from
+// the plan and stays put. Checked against the arithmetic rather than
+// against another call: the whole failure #387 describes is two surfaces
+// that each looked self-consistent.
+func TestSweepExpertParallelPutsTheExpertWidthOnTheRow(t *testing.T) {
+	got, err := vrambudget.SweepExpertParallel(glm52(), fp16Plan(1, 0), 80*vrambudget.GiB, 0.9, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 4 {
+		t.Fatalf("want rows for 1, 2, 4 and 8 cards, got %d", len(got))
+	}
+	for _, c := range got {
+		want := glmRoutedParams*2/int64(c.Cards) + glmNonRoutedParams*2
+		if c.Budget.WeightBytes != want {
+			t.Errorf("%d cards: WeightBytes = %d, want %d (the experts over the row, everything else replicated)",
+				c.Cards, c.Budget.WeightBytes, want)
+		}
+		// The tensor width is one on every row, so the cache and the
+		// activations never divide. A row that quietly sharded them would
+		// still produce a plausible table.
+		if c.Budget.Cards != 1 {
+			t.Errorf("%d cards: budget computed at tensor width %d, want 1", c.Cards, c.Budget.Cards)
+		}
+	}
+}
+
+// A row the tensor width does not divide has no whole number of
+// data-parallel ranks, so it is not a shape. That covers a row narrower
+// than the width too, which is the same answer for the same reason.
+func TestSweepExpertParallelSkipsRowsTheTensorWidthDoesNotDivide(t *testing.T) {
+	got, err := vrambudget.SweepExpertParallel(glm52(), fp16Plan(4, 0), 80*vrambudget.GiB, 0.9, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range got {
+		skipped := c.SkipReason != ""
+		if want := c.Cards%4 != 0; skipped != want {
+			t.Errorf("%d cards: skipped = %v, want %v (reason %q)", c.Cards, skipped, want, c.SkipReason)
+		}
+	}
+}
+
+// The deploy path refuses an expert degree the expert count does not
+// divide, because an uneven split budgets the average while one card
+// carries the maximum. A budget that ranked such a row would recommend
+// the shape the deploy then refuses.
+func TestSweepExpertParallelSkipsAnUnevenExpertSplit(t *testing.T) {
+	got, err := vrambudget.SweepExpertParallel(sparseMoE(), fp16Plan(1, 0), 80*vrambudget.GiB, 0.9, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range got {
+		skipped := c.SkipReason != ""
+		if want := 6%c.Cards != 0; skipped != want {
+			t.Errorf("%d cards against 6 experts: skipped = %v, want %v (reason %q)", c.Cards, skipped, want, c.SkipReason)
+		}
+	}
+}
+
+// The tensor width is the same on every row here, so a width the KV heads
+// do not divide is a fact about the plan. Refused once rather than
+// repeated as a skip line under every row.
+func TestSweepExpertParallelRefusesATensorWidthTheKVHeadsDoNotDivide(t *testing.T) {
+	_, err := vrambudget.SweepExpertParallel(sparseMoE(), fp16Plan(4, 0), 80*vrambudget.GiB, 0.9, 8)
+	if err == nil {
+		t.Fatal("want a refusal: 6 kv heads do not divide by a tensor width of 4")
+	}
+	// And a width they do divide is not refused, so the rule is the head
+	// count rather than the width being greater than one.
+	if _, err := vrambudget.SweepExpertParallel(sparseMoE(), fp16Plan(2, 0), 80*vrambudget.GiB, 0.9, 8); err != nil {
+		t.Errorf("a tensor width of 2 divides 6 kv heads and must be allowed: %v", err)
+	}
+	// A latent cache is replicated whatever the head count says, so the
+	// rule must not reach a model whose cache does not shard at all.
+	if _, err := vrambudget.SweepExpertParallel(glm52(), fp16Plan(4, 0), 80*vrambudget.GiB, 0.9, 8); err != nil {
+		t.Errorf("a latent cache shards by nothing, so the head rule does not apply: %v", err)
+	}
+}
+
+// MaxSessions and Compute have to price the weights the same way, since
+// one asks whether a batch fits beside them and the other asks what is
+// left once they are placed. They did not under expert parallelism:
+// MaxSessions divided the whole model by the tensor width, which on a
+// tp=1 plan is no division at all.
+func TestMaxSessionsPricesTheWeightsTheWayComputeDoes(t *testing.T) {
+	plan := fp16Plan(1, 8)
+	plan.Weights = vrambudget.PrecisionMXFP4
+	plan.MaxModelLen = 8192
+
+	got, err := vrambudget.MaxSessions(glm52(), plan, 80*vrambudget.GiB, 0.9)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// By hand: 63.10 GB of weights per card against 77.31 GB usable
+	// leaves 4.13 GB with the overhead band intact, and a session at 8k
+	// costs 368,050,176 bytes of latent cache plus 150,994,944 of
+	// activation scratch.
+	weights := float64(glmNonRoutedParams)*0.57 + float64(glmRoutedParams)*0.57/8
+	usable := float64(vrambudget.UsableBytes(80*vrambudget.GiB, 0.9))
+	room := usable/1.15 - weights
+	// 78 layers of a 512 + 64 latent at one byte over 8192 tokens, plus
+	// 8192 tokens of a 6144-wide hidden state at two bytes, scaled by the
+	// activation factor. Neither divides, because the tensor width is one.
+	cache := float64(78 * (512 + 64) * 8192)
+	activation := 8192 * 6144 * 2 * vrambudget.ActivationFactor
+	want := int64(room / (cache + activation))
+	if want != 7 {
+		t.Fatalf("the hand arithmetic itself drifted: %d", want)
+	}
+	if got != want {
+		t.Errorf("MaxSessions = %d, want %d", got, want)
+	}
+}
