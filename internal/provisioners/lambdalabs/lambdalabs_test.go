@@ -273,8 +273,8 @@ func TestMapLambdaState(t *testing.T) {
 }
 
 // TestMatchSKUs_VRAMThreshold: a request with min_vram_gb=80
-// returns only large-tier SKUs (A100 SXM4, H100 PCIe, H100 SXM5,
-// GH200, B200) -- not the 24 GB A10 or 40 GB A100 PCIe.
+// returns only large-tier SKUs (H100 PCIe, H100 SXM5, GH200, B200)
+// -- not the 24 GB A10, and not either 40 GB A100.
 func TestMatchSKUs_VRAMThreshold(t *testing.T) {
 	reqs := &provisionerv1.ResourceRequirements{MinVramGb: 80}
 	got := MatchSKUs(reqs)

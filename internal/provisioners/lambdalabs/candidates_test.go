@@ -25,7 +25,11 @@ const instanceTypesJSON = `{"data":{
   "gpu_1x_h100_sxm5": {
     "instance_type": {"name":"gpu_1x_h100_sxm5","price_cents_per_hour":429,
       "architecture":"x86_64","specs":{"vcpus":26,"memory_gib":225,"storage_gib":1024,"gpus":1}},
-    "regions_with_capacity_available":[]}
+    "regions_with_capacity_available":[]},
+  "gpu_8x_a100_80gb_sxm4": {
+    "instance_type": {"name":"gpu_8x_a100_80gb_sxm4","price_cents_per_hour":2232,
+      "architecture":"x86_64","specs":{"vcpus":240,"memory_gib":1800,"storage_gib":20480,"gpus":8}},
+    "regions_with_capacity_available":[{"name":"us-east-1"}]}
 }}`
 
 func candidateProvider(t *testing.T) *Provider {
@@ -127,24 +131,33 @@ func TestCandidatesUseTheLivePriceNotTheCatalog(t *testing.T) {
 // in this catalog where that bites. Providers spell the fact differently, so
 // the adapter must normalize rather than pass the vendor's string through.
 func TestCandidatesNormalizeArchitecture(t *testing.T) {
-	got, err := candidateProvider(t).Candidates(context.Background(),
-		&provisionerv1.ResourceRequirements{MinVramGb: 80})
-	if err != nil {
-		t.Fatalf("Candidates: %v", err)
-	}
-
-	byName := map[string]*provisioners.Candidate{}
-	for _, c := range got {
-		byName[c.GetSku()] = c
-	}
-	if a := byName["gpu_1x_gh200"].GetArchitecture(); a != provisioners.ArchARM64 {
+	// By name rather than by a VRAM floor. Which shapes a floor admits
+	// depends on the catalog's prices and on the resolver's cap, and this
+	// is a test about one field on one shape.
+	p := candidateProvider(t)
+	if a := candidateForSKU(t, p, "gpu_1x_gh200").GetArchitecture(); a != provisioners.ArchARM64 {
 		t.Errorf("gh200 architecture = %q, want %q", a, provisioners.ArchARM64)
 	}
 	// "x86_64" on the wire, "amd64" once normalized. Passing the raw string
 	// through would leave a caller comparing it against Vast's "amd64".
-	if a := byName["gpu_1x_a100_sxm4"].GetArchitecture(); a != provisioners.ArchAMD64 {
+	if a := candidateForSKU(t, p, "gpu_1x_a100_sxm4").GetArchitecture(); a != provisioners.ArchAMD64 {
 		t.Errorf("a100 architecture = %q, want %q normalized from x86_64", a, provisioners.ArchAMD64)
 	}
+}
+
+// candidateForSKU asks for one shape by name, which bypasses the catalog
+// resolver, so a test about a candidate's fields does not also depend on
+// what the catalog would have matched.
+func candidateForSKU(t *testing.T, p *Provider, sku string) *provisioners.Candidate {
+	t.Helper()
+	got, err := p.Candidates(context.Background(), &provisionerv1.ResourceRequirements{Sku: sku})
+	if err != nil {
+		t.Fatalf("Candidates(%s): %v", sku, err)
+	}
+	if len(got) == 0 {
+		t.Fatalf("no candidate for %s", sku)
+	}
+	return got[0]
 }
 
 // Lambda publishes system RAM and a GPU count but never the card's memory, so
@@ -202,8 +215,8 @@ func TestInstanceTypesDecodeIsKeyedByName(t *testing.T) {
 	if err := json.Unmarshal([]byte(instanceTypesJSON), &resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if len(resp.Data) != 3 {
-		t.Fatalf("decoded %d shapes, want 3", len(resp.Data))
+	if len(resp.Data) != 4 {
+		t.Fatalf("decoded %d shapes, want 4", len(resp.Data))
 	}
 	if got := resp.Data["gpu_1x_gh200"].InstanceType.Architecture; got != "arm64" {
 		t.Errorf("architecture = %q, want arm64", got)
@@ -228,21 +241,22 @@ func TestCandidatesRefuseToSubstituteOnDemandForReclaimable(t *testing.T) {
 }
 
 // Third of the cross-adapter agreement on one physical card (#323).
+//
+// Against the eight-card shape, because Lambda's 80 GB A100 is sold only
+// that way: gpu_1x_a100_sxm4 is a 40 GB card, and this test used to assert
+// 80 against it from a catalog row that said so wrongly (#380).
 func TestCandidatesCarryExactCardCapacity(t *testing.T) {
-	p := candidateProvider(t)
+	c := candidateForSKU(t, candidateProvider(t), "gpu_8x_a100_80gb_sxm4")
 
-	got, err := p.Candidates(context.Background(), &provisionerv1.ResourceRequirements{Sku: "gpu_1x_a100_sxm4"})
-	if err != nil {
-		t.Fatalf("Candidates: %v", err)
-	}
-	if len(got) == 0 {
-		t.Fatal("no candidates")
-	}
-	c := got[0]
 	if c.GetVramGbPerGpu() != 80 {
 		t.Errorf("advertised VRAM = %d, want the catalog's 80", c.GetVramGbPerGpu())
 	}
 	if want := int64(85_899_345_920); c.GetVramBytesPerGpu() != want {
 		t.Errorf("exact VRAM = %d, want %d (80 GiB)", c.GetVramBytesPerGpu(), want)
+	}
+	// Per card, not per instance. An eight-card shape reporting eight
+	// times the memory would size a model onto a card that cannot hold it.
+	if c.GetGpuCount() != 8 {
+		t.Errorf("gpu count = %d, want 8", c.GetGpuCount())
 	}
 }

@@ -11,22 +11,27 @@ import (
 
 // SKUSpec describes one Lambda Labs instance type (the "gpu_<N>x_<gpu>"
 // SKU). Lambda's catalog is much smaller and tighter than Vast's
-// marketplace -- fixed offerings, fixed prices, with availability
-// changing by region rather than by host. Verified via probe of
-// /api/v1/instance-types on 2026-06.
+// marketplace: fixed offerings, fixed prices, with availability changing
+// by region rather than by host.
 //
-// The catalog here is the SUBSET we offer for the iplane class
-// taxonomy (small / medium / large / xlarge). Lambda has more (the
-// 8x H100 SXM5 at $32/hr, the 8x B200 at $53/hr); operators who
-// want those pass --gpu-sku explicitly.
+// Every field here is transcribed from /api/v1/instance-types, recorded
+// on 2026-08-20 and committed as testdata/instance-types.json.
+// TestCatalogTranscribesTheVendorsInstanceTypes checks the rows against
+// it, because a hand-copied catalog is only as good as its last reading
+// and nothing else in the system can tell that a number is stale.
 type SKUSpec struct {
 	// Name is the Lambda Labs instance_type_name (e.g. "gpu_1x_a10").
 	Name string
-	// DisplayName is the human-readable form Lambda's docs use.
+	// DisplayName is Lambda's own `description`, verbatim. Copied rather
+	// than composed so it can be checked against the recorded response.
 	DisplayName string
-	// VRAMGb is GPU memory per card.
+	// VRAMGb is GPU memory per card, read out of `gpu_description`.
+	// Lambda publishes the card's memory nowhere else, which is why this
+	// catalog exists at all.
 	VRAMGb int
-	// GPUCount is the number of GPUs on the instance.
+	// GPUCount is the number of GPUs on the instance. Lambda is the one
+	// provider whose rows describe a whole instance rather than a card,
+	// so a request for eight cards is a request for a row that has eight.
 	GPUCount int
 	// PriceUSDPerHour is the on-demand price at cataloging.
 	// Authoritative price comes back on each /instance-types call.
@@ -39,31 +44,63 @@ type SKUSpec struct {
 	Family fabric.Family
 }
 
-// skus is the catalog the resolver iterates. Sorted by VRAM tier
-// (small / medium / large / xlarge) then by price within tier.
-// Lambda's pricing is fixed (unlike Vast's marketplace), so the
-// "cheapest-first" ordering is deterministic at catalog time.
+// skus is the catalog the resolver iterates. Grouped by card count and
+// ordered by price within each group, which is how an operator reads it;
+// the resolver sorts by price itself and does not depend on the order.
 //
-// SKUs omitted from this curated list (operator can still request
-// via --gpu-sku):
-//   - gpu_4x_a100, gpu_8x_a100 (multi-GPU; iplane v0.2 is single-GPU
-//     per replica)
-//   - gpu_4x_h100_*, gpu_8x_h100_* (same)
-//   - gpu_*x_b200_* (same; also very expensive)
-//   - gpu_8x_v100_n (older arch; iplane doesn't optimize for V100)
+// The multi-GPU rows are what make a whole-node request resolvable here.
+// Every row used to be one card, so the shared resolver excluded all of
+// them before the adapter called Lambda, and a request for eight cards
+// got nothing while RunPod and Vast both answered (#380).
+//
+// Two shapes are deliberately left out, and both are omissions of
+// evidence rather than of interest:
+//
+//   - gpu_8x_v100 and gpu_8x_v100_n. Lambda calls both "Tesla V100 (16
+//     GB)" and names no form factor, in the token or in the description.
+//     The SXM2 part carries NVLink and the PCIe part carries nothing, so
+//     either mapping asserts an interconnect nobody vouched for, in one
+//     direction or the other.
+//   - gpu_1x_rtx6000. "RTX 6000 (24 GB)" is the Turing Quadro, not the
+//     48 GB RTX 6000 Ada that FamilyRTX6000Ada names.
+//
+// Both remain rentable through an operator-supplied --gpu-sku, which is
+// what an uncatalogued shape has always meant here.
 var skus = []SKUSpec{
-	// Small (~24 GB VRAM): A10 is the cheap entry.
-	{Name: "gpu_1x_a10", DisplayName: "1x A10 (24 GB)", VRAMGb: 24, GPUCount: 1, PriceUSDPerHour: 1.29, Family: fabric.FamilyA10},
-	// Medium (~48 GB VRAM): A6000 isn't in Lambda's catalog;
-	// closest equivalent is the A100 PCIE at 40 GB.
-	{Name: "gpu_1x_a100", DisplayName: "1x A100 (40 GB PCIE)", VRAMGb: 40, GPUCount: 1, PriceUSDPerHour: 1.29, Family: fabric.FamilyA100PCIe},
-	// Large (~80 GB VRAM): A100 SXM4 / H100 PCIE.
-	{Name: "gpu_1x_a100_sxm4", DisplayName: "1x A100 (80 GB SXM4)", VRAMGb: 80, GPUCount: 1, PriceUSDPerHour: 1.99, Family: fabric.FamilyA100SXM},
-	{Name: "gpu_1x_h100_pcie", DisplayName: "1x H100 (80 GB PCIE)", VRAMGb: 80, GPUCount: 1, PriceUSDPerHour: 3.29, Family: fabric.FamilyH100PCIe},
-	{Name: "gpu_1x_h100_sxm5", DisplayName: "1x H100 (80 GB SXM5)", VRAMGb: 80, GPUCount: 1, PriceUSDPerHour: 4.29, Family: fabric.FamilyH100SXM},
-	// XL (>=96 GB): GH200 superchip.
+	// One card.
+	{Name: "gpu_1x_a6000", DisplayName: "1x A6000 (48 GB)", VRAMGb: 48, GPUCount: 1, PriceUSDPerHour: 1.09, Family: fabric.FamilyA6000},
+	{Name: "gpu_1x_a10", DisplayName: "1x A10 (24 GB PCIe)", VRAMGb: 24, GPUCount: 1, PriceUSDPerHour: 1.29, Family: fabric.FamilyA10},
+	// Both A100 singles are 40 GB. The 80 GB SXM4 part is sold only as
+	// the eight-card shape below, and reading this row as 80 promised
+	// 85.9 GB per card to the pre-rent budget check on a card holding
+	// 42.9.
+	{Name: "gpu_1x_a100", DisplayName: "1x A100 (40 GB PCIe)", VRAMGb: 40, GPUCount: 1, PriceUSDPerHour: 1.99, Family: fabric.FamilyA100PCIe},
+	{Name: "gpu_1x_a100_sxm4", DisplayName: "1x A100 (40 GB SXM4)", VRAMGb: 40, GPUCount: 1, PriceUSDPerHour: 1.99, Family: fabric.FamilyA100SXM},
+	// GH200 is arm64 and everything else here is x86_64, which nothing in
+	// the deploy path checks. See NOTES.md.
 	{Name: "gpu_1x_gh200", DisplayName: "1x GH200 (96 GB)", VRAMGb: 96, GPUCount: 1, PriceUSDPerHour: 2.29, Family: fabric.FamilyGH200},
+	{Name: "gpu_1x_h100_pcie", DisplayName: "1x H100 (80 GB PCIe)", VRAMGb: 80, GPUCount: 1, PriceUSDPerHour: 3.29, Family: fabric.FamilyH100PCIe},
+	{Name: "gpu_1x_h100_sxm5", DisplayName: "1x H100 (80 GB SXM5)", VRAMGb: 80, GPUCount: 1, PriceUSDPerHour: 4.29, Family: fabric.FamilyH100SXM},
 	{Name: "gpu_1x_b200_sxm6", DisplayName: "1x B200 (180 GB SXM6)", VRAMGb: 180, GPUCount: 1, PriceUSDPerHour: 6.99, Family: fabric.FamilyB200},
+
+	// Two cards.
+	{Name: "gpu_2x_a6000", DisplayName: "2x A6000 (48 GB)", VRAMGb: 48, GPUCount: 2, PriceUSDPerHour: 2.18, Family: fabric.FamilyA6000},
+	{Name: "gpu_2x_a100", DisplayName: "2x A100 (40 GB PCIe)", VRAMGb: 40, GPUCount: 2, PriceUSDPerHour: 3.98, Family: fabric.FamilyA100PCIe},
+	{Name: "gpu_2x_h100_sxm5", DisplayName: "2x H100 (80 GB SXM5)", VRAMGb: 80, GPUCount: 2, PriceUSDPerHour: 8.38, Family: fabric.FamilyH100SXM},
+	{Name: "gpu_2x_b200_sxm6", DisplayName: "2x B200 (180 GB SXM6)", VRAMGb: 180, GPUCount: 2, PriceUSDPerHour: 13.78, Family: fabric.FamilyB200},
+
+	// Four cards.
+	{Name: "gpu_4x_a6000", DisplayName: "4x A6000 (48 GB)", VRAMGb: 48, GPUCount: 4, PriceUSDPerHour: 4.36, Family: fabric.FamilyA6000},
+	{Name: "gpu_4x_a100", DisplayName: "4x A100 (40 GB PCIe)", VRAMGb: 40, GPUCount: 4, PriceUSDPerHour: 7.96, Family: fabric.FamilyA100PCIe},
+	{Name: "gpu_4x_h100_sxm5", DisplayName: "4x H100 (80 GB SXM5)", VRAMGb: 80, GPUCount: 4, PriceUSDPerHour: 16.36, Family: fabric.FamilyH100SXM},
+
+	// Eight cards. These are the shapes a frontier sparse model needs, and
+	// the SXM rows carry a board-integrated fabric, so they resolve
+	// INTRA_NODE from the declared tier alone.
+	{Name: "gpu_8x_a100", DisplayName: "8x A100 (40 GB SXM4)", VRAMGb: 40, GPUCount: 8, PriceUSDPerHour: 15.92, Family: fabric.FamilyA100SXM},
+	{Name: "gpu_8x_a100_80gb_sxm4", DisplayName: "8x A100 (80 GB SXM4)", VRAMGb: 80, GPUCount: 8, PriceUSDPerHour: 22.32, Family: fabric.FamilyA100SXM},
+	{Name: "gpu_8x_h100_sxm5", DisplayName: "8x H100 (80 GB SXM5)", VRAMGb: 80, GPUCount: 8, PriceUSDPerHour: 31.92, Family: fabric.FamilyH100SXM},
+	{Name: "gpu_8x_b200_sxm6", DisplayName: "8x B200 (180 GB SXM6)", VRAMGb: 180, GPUCount: 8, PriceUSDPerHour: 53.52, Family: fabric.FamilyB200},
 }
 
 // MaxSKUsPerRequest caps the SKUs the resolver will try when no
