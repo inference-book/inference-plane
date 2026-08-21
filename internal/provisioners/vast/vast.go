@@ -297,12 +297,12 @@ func (p *Provider) Spawn(ctx context.Context, spec *provisionerv1.Spec) (*provis
 	resolvedClass := reqs.GetClass()
 	switch {
 	case resolvedSKU != "":
-		gpuTypeIDs = []string{normalizeGpuName(resolvedSKU)}
+		gpuTypeIDs = candidateSKUs(reqs)
 		if resolvedClass == "" {
 			resolvedClass = classifySKU(resolvedSKU)
 		}
 	default:
-		gpuTypeIDs = MatchSKUs(reqs)
+		gpuTypeIDs = candidateSKUs(reqs)
 		if len(gpuTypeIDs) == 0 {
 			return nil, provisioners.NewProviderError(p.Name(), "spawn",
 				fmt.Errorf("no SKU in the vast catalog satisfies min_vram_gb=%d min_ram_gb=%d",
@@ -328,30 +328,15 @@ func (p *Provider) Spawn(ctx context.Context, spec *provisionerv1.Spec) (*provis
 	}
 	label := instanceLabelPrefix + spec.GetId()
 
-	// Search-then-rent loop: try the SKU list in order until we find
-	// an offer to rent.
-	var (
-		picked    *offerSummary
-		pickedFor string
-	)
-	for _, gpuName := range gpuTypeIDs {
-		offer, err := p.findOffer(ctx, gpuName, gpuCount, diskGB, reqs)
-		if err != nil {
-			return nil, wrapErr("spawn:search", err)
-		}
-		if offer != nil {
-			picked = offer
-			pickedFor = gpuName
-			break
-		}
+	// Search-then-rent: try the SKU list in order until one has an offer.
+	picked, pickedFor, err := p.findAnyOffer(ctx, gpuTypeIDs, gpuCount, diskGB, reqs)
+	if err != nil {
+		return nil, wrapErr("spawn:search", err)
 	}
 	if picked == nil {
-		// Name the quality floors in the message. They are the one constraint
-		// the operator did not type, so an empty result reads as "no capacity"
-		// when it may well be "capacity exists, all of it below the floor".
 		return nil, provisioners.NewProviderError(p.Name(), "spawn",
-			fmt.Errorf("no rentable offer found for class=%s sku=%s gpu_count=%d (search also required inet_down>=%gMbps reliability2>=%g; retry, relax the constraints, or lower the floors via IPLANE_VAST_MIN_INET_DOWN_MBPS / IPLANE_VAST_MIN_RELIABILITY)",
-				resolvedClass, resolvedSKU, gpuCount, p.minInetDownMbps, p.minReliability), 0)
+			fmt.Errorf("no rentable offer found for class=%s sku=%s gpu_count=%d (%s)",
+				resolvedClass, resolvedSKU, gpuCount, p.floorsHint()), 0)
 	}
 
 	rented, err := p.rentOffer(ctx, picked.ID, image, label, diskGB)
@@ -541,6 +526,51 @@ func offerVRAMCeilingMB(gpuName string) int {
 		return 0
 	}
 	return spec.VRAMMaxGb * 1100
+}
+
+// candidateSKUs is the ordered list of catalog tokens a requirement
+// resolves to: the operator's own --sku when they named one, normalised to
+// the wire spelling, and otherwise every row that satisfies the numbers,
+// cheapest first.
+func candidateSKUs(reqs *provisionerv1.ResourceRequirements) []string {
+	if sku := reqs.GetSku(); sku != "" {
+		return []string{normalizeGpuName(sku)}
+	}
+	return MatchSKUs(reqs)
+}
+
+// findAnyOffer walks the candidate SKUs in order and returns the first
+// offer any of them has, with the SKU it came from.
+//
+// A nil offer alongside a nil error means every search was clean and
+// empty, which is a different thing from an error and is why both callers
+// have to check it. Deploy did not, and dereferenced the nil (#392).
+//
+// Ordered rather than exhaustive on purpose: the list arrives
+// cheapest-first and the first SKU with capacity wins, so a catalog row
+// with no offers costs one search rather than excluding the deploy.
+func (p *Provider) findAnyOffer(ctx context.Context, gpuTypeIDs []string, gpuCount, diskGB int, reqs *provisionerv1.ResourceRequirements) (*offerSummary, string, error) {
+	for _, gpuName := range gpuTypeIDs {
+		offer, err := p.findOffer(ctx, gpuName, gpuCount, diskGB, reqs)
+		if err != nil {
+			return nil, "", err
+		}
+		if offer != nil {
+			return offer, gpuName, nil
+		}
+	}
+	return nil, "", nil
+}
+
+// floorsHint names the marketplace quality floors in an empty-result
+// message.
+//
+// They are the one constraint the operator did not type, so an empty
+// result reads as "no capacity" when it may well be "capacity exists, all
+// of it below the floor".
+func (p *Provider) floorsHint() string {
+	return fmt.Sprintf("search also required inet_down>=%gMbps reliability2>=%g; retry, relax the constraints, or lower the floors via IPLANE_VAST_MIN_INET_DOWN_MBPS / IPLANE_VAST_MIN_RELIABILITY",
+		p.minInetDownMbps, p.minReliability)
 }
 
 func (p *Provider) findOffer(ctx context.Context, gpuName string, gpuCount, diskGB int, reqs *provisionerv1.ResourceRequirements) (*offerSummary, error) {

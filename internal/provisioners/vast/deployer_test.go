@@ -292,3 +292,70 @@ func TestVastDoesNotClaimToAttachMounts(t *testing.T) {
 		t.Error("vast declares it attaches mounts, but its deployer never reads dep.GetMounts()")
 	}
 }
+
+// searchOnly answers the offer search with the given payload and 404s
+// everything else, which is enough for the paths that never reach a rent.
+func searchOnly(t *testing.T, body string) *Provider {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v0/bundles/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(body))
+	})
+	p, _ := newTestProvider(t, mux)
+	return p
+}
+
+// findOffer returns a nil offer with a nil error when the search is clean
+// and empty, and Deploy used to dereference it. The panic took down the
+// whole daemon, in a goroutine holding no rented machine only by luck of
+// where in the function it sat (#392).
+func TestDeployRefusesWhenNoOfferMatches(t *testing.T) {
+	emit, updates := collect()
+
+	err := searchOnly(t, `{"offers":[]}`).Deploy(t.Context(), engineDep(), engineInst(), nil, emit)
+
+	if err == nil {
+		t.Fatal("want an error when no offer matches")
+	}
+	// The floors are the one constraint the operator did not type, so an
+	// empty result reads as "no capacity" when it is usually "capacity
+	// exists, all of it below the floor". Same message Spawn gives.
+	if !strings.Contains(err.Error(), "IPLANE_VAST_MIN_INET_DOWN_MBPS") {
+		t.Errorf("error = %v, want it to name the marketplace floors", err)
+	}
+	if len(*updates) == 0 || (*updates)[len(*updates)-1].State != provisionerv1.DeploymentState_DEPLOYMENT_STATE_FAILED {
+		t.Error("failure was not emitted as a terminal state")
+	}
+}
+
+// Spawn walks every SKU the requirements match and stops at the first with
+// an offer. Deploy searched only the cheapest catalog row, so it gave up
+// while the row below had capacity, and `iplane capacity` listed offers the
+// deploy could not find.
+func TestDeploySearchesEverySKUTheRequirementsMatch(t *testing.T) {
+	var searched []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v0/bundles/", func(w http.ResponseWriter, r *http.Request) {
+		searched = append(searched, r.URL.Query().Get("q"))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"offers":[]}`))
+	})
+	p, _ := newTestProvider(t, mux)
+
+	inst := engineInst()
+	// No SKU, so the catalog decides: several rows clear 80 GB and the
+	// search has to try them all rather than only the cheapest.
+	inst.Spec.Requirements = &provisionerv1.ResourceRequirements{MinVramGb: 80, GpuCount: 8, MinDiskGb: 600}
+	emit, _ := collect()
+
+	if err := p.Deploy(t.Context(), engineDep(), inst, nil, emit); err == nil {
+		t.Fatal("want an error when no offer matches")
+	}
+	if want := len(MatchSKUs(inst.GetSpec().GetRequirements())); len(searched) != want {
+		t.Errorf("searched %d SKU(s), want %d (the whole matching set)", len(searched), want)
+	}
+	if len(searched) < 2 {
+		t.Fatalf("the fixture needs several matching SKUs to be a test at all, got %d", len(searched))
+	}
+}
