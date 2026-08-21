@@ -487,3 +487,50 @@ type testErrString string
 
 func (e testErrString) Error() string { return string(e) }
 func testErr(s string) error          { return testErrString(s) }
+
+// A provider that panics used to take the daemon with it: launchReplica
+// runs Deploy in a bare goroutine, so a nil dereference inside an adapter
+// is a process-level crash rather than a failed replica. It happened for
+// real on the Vast deployer (#392), at a line twelve above the call that
+// rents the machine.
+//
+// The direction that matters is money, not tidiness. A panic past the rent
+// kills the control plane while it holds a rented box whose contract id was
+// never written down, so nothing knows to destroy it (#393).
+func TestFanOutContainsAProviderPanic(t *testing.T) {
+	svc, _ := fanOutMultiReplicaSvc(t, func(inst *provisionerv1.Instance, emit func(provisioners.DeployStateUpdate)) error {
+		if inst.GetId() == "boom-r1" {
+			var offer *struct{ ID int }
+			_ = offer.ID // the shape of the real one: a nil deref mid-deploy
+		}
+		emit(provisioners.DeployStateUpdate{
+			State:          provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING,
+			ContainerID:    inst.GetId() + "-container",
+			EngineEndpoint: "http://" + inst.GetId() + ":8000",
+		})
+		return nil
+	})
+
+	resp, err := svc.CreateDeployment(context.Background(), multiReplicaCreateReq("boom", 3))
+	if err != nil {
+		t.Fatalf("CreateDeployment: %v", err)
+	}
+
+	dep := resp.GetDeployment()
+	// One failed replica out of three, which is the same answer an ordinary
+	// error from the same adapter would have produced.
+	if dep.GetState() != provisionerv1.DeploymentState_DEPLOYMENT_STATE_DEGRADED {
+		t.Errorf("state = %s, want DEGRADED", dep.GetState())
+	}
+	if eps := dep.GetEngineEndpoints(); len(eps) != 3 || eps[1] != "" {
+		t.Errorf("slots wrong: %v", eps)
+	}
+	// And the operator is told which replica died and that it panicked,
+	// since a panic is a bug report rather than a capacity problem.
+	if !strings.Contains(dep.GetFailureReason(), "boom-r1") {
+		t.Errorf("failure_reason should name the replica: %q", dep.GetFailureReason())
+	}
+	if !strings.Contains(dep.GetFailureReason(), "panic") {
+		t.Errorf("failure_reason should say it panicked: %q", dep.GetFailureReason())
+	}
+}
