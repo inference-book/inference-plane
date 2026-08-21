@@ -787,14 +787,16 @@ func (s *Service) launchMember(ctx context.Context, deployID string, slot int, m
 	nodes := member.instances
 	if len(nodes) == 1 {
 		// The ordinary case, and deliberately the same code path it has
-		// always been: one machine, one engine, one result.
-		s.launchReplica(ctx, deployID, slot, nodes[0], key, dep, results)
+		// always been: one machine, one engine, one result. Rank 0
+		// because a one-machine engine is its own rank 0, whatever
+		// position the member holds in the deployment.
+		s.launchReplica(ctx, deployID, slot, 0, nodes[0], key, dep, results)
 		return
 	}
 
 	per := make(chan fanOutResult, len(nodes))
-	for _, inst := range nodes {
-		go s.launchReplica(ctx, deployID, slot, inst, key, dep, per)
+	for node, inst := range nodes {
+		go s.launchReplica(ctx, deployID, slot, node, inst, key, dep, per)
 	}
 
 	var (
@@ -835,8 +837,8 @@ func (s *Service) launchMember(ctx context.Context, deployID string, slot int, m
 // until the executor returns. Successful deploys also finalize the
 // underlying instance from PENDING -> ACTIVE via the existing
 // finalizeInstanceAfterDeploy path, identical to single-instance.
-func (s *Service) launchReplica(ctx context.Context, deployID string, slot int, inst *provisionerv1.Instance, key *sshkeys.KeyPair, dep *provisionerv1.Deployment, results chan<- fanOutResult) {
-	endpoint, err := s.runReplicaDeploy(ctx, deployID, slot, inst, key, dep)
+func (s *Service) launchReplica(ctx context.Context, deployID string, slot, nodeIndex int, inst *provisionerv1.Instance, key *sshkeys.KeyPair, dep *provisionerv1.Deployment, results chan<- fanOutResult) {
+	endpoint, err := s.runReplicaDeploy(ctx, deployID, slot, nodeIndex, inst, key, dep)
 	results <- fanOutResult{
 		instanceID: inst.GetId(),
 		endpoint:   endpoint,
@@ -862,7 +864,7 @@ func (s *Service) launchReplica(ctx context.Context, deployID string, slot int, 
 // The panic is still a bug, so it is logged with its stack and named as a
 // panic in the failure reason. An operator reading "no capacity" when the
 // truth is "the adapter crashed" would go looking in the wrong place.
-func (s *Service) runReplicaDeploy(ctx context.Context, deployID string, slot int, inst *provisionerv1.Instance, key *sshkeys.KeyPair, dep *provisionerv1.Deployment) (endpoint string, err error) {
+func (s *Service) runReplicaDeploy(ctx context.Context, deployID string, slot, nodeIndex int, inst *provisionerv1.Instance, key *sshkeys.KeyPair, dep *provisionerv1.Deployment) (endpoint string, err error) {
 	replicaID := inst.GetId()
 	obs := s.newDeployObserver(ctx, deployKindProvision, deployID, inst, storageTierForDeployment(dep))
 	emit := func(u DeployStateUpdate) {
@@ -897,7 +899,7 @@ func (s *Service) runReplicaDeploy(ctx context.Context, deployID string, slot in
 	// id rather than a parallel identifier, so the control plane can join a
 	// registration back to the slot that produced it with a lookup instead
 	// of a parse.
-	slotDep := withAgentEnv(dep, replicaID, slot, inst.GetProvider(), s.agentServiceURL)
+	slotDep := withAgentEnv(dep, replicaID, nodeIndex, inst.GetProvider(), s.agentServiceURL)
 	err = s.deployerFor(inst).Deploy(obs.ctx(), slotDep, inst, key, emit)
 	obs.finish(err)
 	endpoint = s.readSlotEndpoint(deployID, slot)

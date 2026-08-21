@@ -2,6 +2,7 @@ package provisioners_test
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -161,5 +162,54 @@ func TestLosingOneOfSeveralSingleNodeMembersIsStillDegraded(t *testing.T) {
 	}
 	if got := resp.GetDeployment().GetState(); got != provisionerv1.DeploymentState_DEPLOYMENT_STATE_DEGRADED {
 		t.Errorf("state = %s, want DEGRADED", got)
+	}
+}
+
+// What a node is told about itself is the one thing that decides whether
+// a span can become an engine. A multi-node engine runs the same image
+// everywhere with a different job per node: rank 0 serves, the rest join
+// it. The image can only tell which it is from IPLANE_NODE_INDEX.
+//
+// Shipped wrong in the first cut: every node of a member was handed the
+// member's slot, so a four-node member told four machines they were node
+// zero. An entrypoint branching on it would have started four heads, and
+// the engine registry, which builds Engine.span by node index, would have
+// deduped the span back down to one.
+func TestEveryNodeOfASpanIsToldItsRank(t *testing.T) {
+	prov := &fanOutMockProvider{name: "mockfan"}
+	svc, _ := fanOutSvcWith(t, prov)
+
+	if _, err := svc.CreateDeployment(context.Background(), spanReq("k3", 4)); err != nil {
+		t.Fatalf("CreateDeployment: %v", err)
+	}
+
+	for want, id := range []string{"k3-n0", "k3-n1", "k3-n2", "k3-n3"} {
+		env, ok := prov.envSeen[id]
+		if !ok {
+			t.Errorf("%s was never deployed", id)
+			continue
+		}
+		if got := env["IPLANE_NODE_INDEX"]; got != strconv.Itoa(want) {
+			t.Errorf("%s was told IPLANE_NODE_INDEX=%q, want %q", id, got, strconv.Itoa(want))
+		}
+	}
+}
+
+// A fan-out of independent replicas is N engines of one node each, so
+// every one of them is its own rank 0. The member's position in the
+// deployment is not a rank within an engine, and conflating them is what
+// the bug above was.
+func TestEachSingleNodeReplicaIsItsOwnRankZero(t *testing.T) {
+	prov := &fanOutMockProvider{name: "mockfan"}
+	svc, _ := fanOutSvcWith(t, prov)
+
+	if _, err := svc.CreateDeployment(context.Background(), multiReplicaCreateReq("fan", 3)); err != nil {
+		t.Fatalf("CreateDeployment: %v", err)
+	}
+
+	for _, id := range []string{"fan-r0", "fan-r1", "fan-r2"} {
+		if got := prov.envSeen[id]["IPLANE_NODE_INDEX"]; got != "0" {
+			t.Errorf("%s was told IPLANE_NODE_INDEX=%q, want 0: it is a whole engine, not a rank", id, got)
+		}
 	}
 }

@@ -3,6 +3,7 @@ package provisioners_test
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -53,6 +54,11 @@ type fanOutMockProvider struct {
 	// terminated records every machine handed back, so a test can assert
 	// the ones a failed member had already rented went away.
 	terminated []string
+	// envSeen is what each machine was told about itself, keyed by
+	// instance id. A node's rank is the one thing an image needs in order
+	// to know whether it is the head or a worker.
+	envSeen map[string]map[string]string
+	mu      sync.Mutex
 }
 
 func (p *fanOutMockProvider) Name() string { return p.name }
@@ -88,7 +94,13 @@ func (p *fanOutMockProvider) List(context.Context, map[string]string) ([]*provis
 	return nil, nil
 }
 
-func (p *fanOutMockProvider) Deploy(_ context.Context, _ *provisionerv1.Deployment, inst *provisionerv1.Instance, _ *sshkeys.KeyPair, emit func(provisioners.DeployStateUpdate)) error {
+func (p *fanOutMockProvider) Deploy(_ context.Context, dep *provisionerv1.Deployment, inst *provisionerv1.Instance, _ *sshkeys.KeyPair, emit func(provisioners.DeployStateUpdate)) error {
+	p.mu.Lock()
+	if p.envSeen == nil {
+		p.envSeen = map[string]map[string]string{}
+	}
+	p.envSeen[inst.GetId()] = dep.GetEnv()
+	p.mu.Unlock()
 	if p.deployFn != nil {
 		return p.deployFn(inst, emit)
 	}
