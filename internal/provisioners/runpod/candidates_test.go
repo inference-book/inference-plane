@@ -35,6 +35,15 @@ const gpuTypesFixture = `{"gpuTypes":[
  {"id":"NVIDIA H100 NVL","displayName":"H100 NVL","memoryInGb":94,
   "secureCloud":true,"communityCloud":true,
   "lowestPrice":{"uninterruptablePrice":null,"stockStatus":"Low"}}
+],
+"dataCenters":[
+ {"id":"AP-IN-1","location":"India","storageSupport":false,
+  "gpuAvailability":[{"gpuTypeId":"NVIDIA A100-SXM4-80GB","available":true,"stockStatus":"Low"}]},
+ {"id":"EUR-IS-1","location":"Europe","storageSupport":true,
+  "gpuAvailability":[{"gpuTypeId":"NVIDIA A100-SXM4-80GB","available":true,"stockStatus":"Medium"},
+                     {"gpuTypeId":"NVIDIA L4","available":false,"stockStatus":null}]},
+ {"id":"US-MO-1","location":"United States","storageSupport":false,
+  "gpuAvailability":[{"gpuTypeId":"NVIDIA L4","available":true,"stockStatus":"High"}]}
 ]}`
 
 // candidateProvider serves the fixture for any gpuTypes query and records
@@ -145,18 +154,26 @@ func TestCandidatesFilterThroughTheSameResolverAsSpawn(t *testing.T) {
 // RunPod rents a GPU type and picks the datacenter itself, so there is no host
 // to identify, no offer to name, and no region to record. Empty is the honest
 // answer; a synthesized id would point at something that was never a place.
-func TestCandidatesLeaveHostOfferAndRegionEmpty(t *testing.T) {
+func TestCandidatesLeaveHostAndOfferEmpty(t *testing.T) {
 	got, err := candidateProvider(t, nil).Candidates(context.Background(),
 		&provisionerv1.ResourceRequirements{Sku: "NVIDIA A100-SXM4-80GB"})
 	if err != nil {
 		t.Fatalf("Candidates: %v", err)
 	}
-	if len(got) != 1 {
-		t.Fatalf("got %d candidates, want 1", len(got))
+	if len(got) == 0 {
+		t.Fatal("no candidates")
 	}
-	if got[0].GetHostId() != "" || got[0].GetOfferId() != "" || got[0].GetRegion() != "" {
-		t.Errorf("HostID=%q OfferID=%q Region=%q, want all empty on a provider with none of those concepts",
-			got[0].GetHostId(), got[0].GetOfferId(), got[0].GetRegion())
+	known := map[string]bool{"AP-IN-1": true, "EUR-IS-1": true, "US-MO-1": true}
+	for _, c := range got {
+		if c.GetHostId() != "" || c.GetOfferId() != "" {
+			t.Errorf("HostID=%q OfferID=%q, want both empty on a provider with neither concept",
+				c.GetHostId(), c.GetOfferId())
+		}
+		// Region is no longer empty, but it is still never invented: it is a
+		// datacenter id the payload named, or nothing.
+		if r := c.GetRegion(); r != "" && !known[r] {
+			t.Errorf("region = %q, which no datacenter in the payload named", r)
+		}
 	}
 }
 
@@ -168,11 +185,15 @@ func TestCandidatesUseTheLivePriceNotTheCatalog(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Candidates: %v", err)
 	}
-	if len(got) != 1 {
-		t.Fatalf("got %d candidates, want 1", len(got))
+	if len(got) == 0 {
+		t.Fatal("no candidates")
 	}
-	if got[0].GetPriceUsdPerHour() != 1.39 {
-		t.Errorf("price = %v, want the live 1.39", got[0].GetPriceUsdPerHour())
+	// Every row, since the price is a property of the type and one row per
+	// datacenter must not let a stale figure in through a side door.
+	for _, c := range got {
+		if c.GetPriceUsdPerHour() != 1.39 {
+			t.Errorf("%s price = %v, want the live 1.39", c.GetRegion(), c.GetPriceUsdPerHour())
+		}
 	}
 	if catalog := LookupSKU("NVIDIA A100-SXM4-80GB"); catalog != nil &&
 		got[0].GetPriceUsdPerHour() == catalog.PriceUSDPerHour {
@@ -211,11 +232,19 @@ func TestCandidatesCarryStockStatusAsAProviderAttr(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Candidates: %v", err)
 	}
-	if len(got) != 1 {
-		t.Fatalf("got %d candidates, want 1", len(got))
+	byRegion := map[string]string{}
+	for _, c := range got {
+		if s := c.GetAttrs()["stock_status"]; s == "" {
+			t.Errorf("%s carries no stock_status", c.GetRegion())
+		} else {
+			byRegion[c.GetRegion()] = s
+		}
 	}
-	if got[0].GetAttrs()["stock_status"] != "Medium" {
-		t.Errorf("stock_status = %q, want Medium", got[0].GetAttrs()["stock_status"])
+	// Per datacenter rather than one figure for the type. "Low here, Medium
+	// there" is the distinction the type-level reading flattens, and it is
+	// the one that decides where to send a deploy.
+	if byRegion["AP-IN-1"] != "Low" || byRegion["EUR-IS-1"] != "Medium" {
+		t.Errorf("stock by datacenter = %v, want AP-IN-1 Low and EUR-IS-1 Medium", byRegion)
 	}
 }
 
@@ -278,5 +307,96 @@ func TestCandidatesCarryExactCardCapacity(t *testing.T) {
 	}
 	if want := int64(85_899_345_920); c.GetVramBytesPerGpu() != want {
 		t.Errorf("exact VRAM = %d, want %d (80 GiB)", c.GetVramBytesPerGpu(), want)
+	}
+}
+
+// RunPod does publish where its capacity is, and this adapter used to say
+// it did not. `dataCenters { gpuAvailability(gpuCount) }` answers it per
+// width, and the datacenter is decision-relevant rather than trivia: a
+// network volume is locked to one, so a model staged in the wrong place is
+// a warm cache no deploy can mount.
+//
+// Found the hard way while planning #358. RunPod had eight-card capacity in
+// exactly one datacenter and that one supports no volumes, which `iplane
+// capacity` had no way to say.
+func TestCandidatesReportWhereTheCapacityIs(t *testing.T) {
+	got, err := candidateProvider(t, nil).Candidates(context.Background(),
+		&provisionerv1.ResourceRequirements{Sku: "NVIDIA A100-SXM4-80GB", GpuCount: 8})
+	if err != nil {
+		t.Fatalf("Candidates: %v", err)
+	}
+
+	byRegion := map[string]*provisionerv1.Candidate{}
+	for _, c := range got {
+		byRegion[c.GetRegion()] = c
+	}
+	if len(byRegion) != 2 {
+		t.Fatalf("want one candidate per datacenter holding the type, got %d: %+v", len(got), got)
+	}
+	for _, want := range []string{"AP-IN-1", "EUR-IS-1"} {
+		if byRegion[want] == nil {
+			t.Errorf("no candidate for %s: %+v", want, got)
+		}
+	}
+	// The datacenter a volume can live in is the whole reason to report it.
+	if s := byRegion["EUR-IS-1"].GetAttrs()["datacenter_storage"]; s != "true" {
+		t.Errorf("EUR-IS-1 storage attr = %q, want true", s)
+	}
+	if s := byRegion["AP-IN-1"].GetAttrs()["datacenter_storage"]; s != "false" {
+		t.Errorf("AP-IN-1 storage attr = %q, want false", s)
+	}
+	// Stock is per datacenter, not one figure for the type.
+	if s := byRegion["EUR-IS-1"].GetAttrs()["stock_status"]; s != "Medium" {
+		t.Errorf("EUR-IS-1 stock = %q, want the datacenter's own Medium", s)
+	}
+}
+
+// A datacenter that lists the type as unavailable is not a place you can
+// have it. Reporting it would put a row in front of an operator that they
+// cannot act on, which is the same call the null-stock filter makes one
+// level up.
+func TestCandidatesSkipDatacentersThatHaveNone(t *testing.T) {
+	got, err := candidateProvider(t, nil).Candidates(context.Background(),
+		&provisionerv1.ResourceRequirements{Sku: "NVIDIA L4"})
+	if err != nil {
+		t.Fatalf("Candidates: %v", err)
+	}
+	for _, c := range got {
+		// The fixture has EUR-IS-1 holding an L4 entry with available:false.
+		if c.GetRegion() == "EUR-IS-1" {
+			t.Errorf("offered an L4 in a datacenter that reported none: %+v", c)
+		}
+	}
+	if len(got) != 1 || got[0].GetRegion() != "US-MO-1" {
+		t.Errorf("want the one datacenter that has it, got %+v", got)
+	}
+}
+
+// The datacenter view is extra information, so losing it must not lose the
+// candidate. A type the price query says is available, that no datacenter
+// list mentions, is still available: RunPod schedules it somewhere.
+func TestCandidatesSurviveADatacenterListThatSaysNothing(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"gpuTypes":[
+		 {"id":"NVIDIA A100-SXM4-80GB","displayName":"A100 SXM","memoryInGb":80,
+		  "secureCloud":true,"communityCloud":true,
+		  "lowestPrice":{"uninterruptablePrice":1.39,"stockStatus":"Medium"}}],
+		 "dataCenters":[]}}`))
+	}))
+	t.Cleanup(srv.Close)
+	rt := &rewriteTransport{toHost: strings.TrimPrefix(srv.URL, "http://")}
+	p := New(NewClient("test-api-key", WithHTTPClient(&http.Client{Transport: rt})))
+
+	got, err := p.Candidates(context.Background(),
+		&provisionerv1.ResourceRequirements{Sku: "NVIDIA A100-SXM4-80GB", GpuCount: 8})
+	if err != nil {
+		t.Fatalf("Candidates: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("want the type reported once with no region, got %d: %+v", len(got), got)
+	}
+	if r := got[0].GetRegion(); r != "" {
+		t.Errorf("region = %q, want empty when no datacenter named it", r)
 	}
 }
