@@ -43,7 +43,7 @@ import (
 // Deployment.Env is the operator's pass-through, and silently overwriting a
 // key they set would be the kind of surprise that costs an afternoon. The
 // identity keys are ours to compute only because nothing else sets them.
-func withAgentEnv(dep *provisionerv1.Deployment, engineID string, slot int, provider, serviceURL string) *provisionerv1.Deployment {
+func withAgentEnv(dep *provisionerv1.Deployment, engineID string, nodeIndex int, provider, serviceURL string) *provisionerv1.Deployment {
 	out := proto.Clone(dep).(*provisionerv1.Deployment)
 	if out.Env == nil {
 		out.Env = map[string]string{}
@@ -54,7 +54,16 @@ func withAgentEnv(dep *provisionerv1.Deployment, engineID string, slot int, prov
 		engineagent.EnvDeploymentID: dep.GetId(),
 		engineagent.EnvModel:        dep.GetModel(),
 		engineagent.EnvProvider:     provider,
-		engineagent.EnvNodeIndex:    strconv.Itoa(slot),
+		// The node's rank WITHIN ITS ENGINE, not the member's position in
+		// the deployment. A fan-out of independent replicas is N engines
+		// of one node each, so every one of them is its own rank 0; a
+		// member spanning K machines ranks them 0..K-1.
+		//
+		// The distinction is what an image branches on to decide whether
+		// it is the head or a worker, and what the registry orders a
+		// span by. Handing every node the member slot told four machines
+		// they were node zero (#212).
+		engineagent.EnvNodeIndex: strconv.Itoa(nodeIndex),
 	}
 	if serviceURL != "" {
 		stamp[engineagent.EnvServiceURL] = serviceURL
