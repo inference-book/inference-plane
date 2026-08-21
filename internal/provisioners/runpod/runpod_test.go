@@ -179,10 +179,11 @@ func TestSpawn_NoMatchingSKU(t *testing.T) {
 		t.Error("provider should reject before HTTP")
 		return 500, "{}"
 	})
-	// Asking for more VRAM than any SKU in the runpod catalog provides
-	// (no GPU in the table has > 96 GB VRAM).
+	// Asking for more VRAM than any SKU in the runpod catalog provides.
+	// The floor tracks the catalog: 200 used to clear every card and stopped
+	// doing so when the 288 GB B300 was cataloged (#354).
 	spec := okSpec()
-	spec.Requirements = &provisionerv1.ResourceRequirements{MinVramGb: 200}
+	spec.Requirements = &provisionerv1.ResourceRequirements{MinVramGb: 400}
 	_, err := p.Spawn(context.Background(), spec)
 	if err == nil {
 		t.Fatal("Spawn should reject when no SKU satisfies the constraint")
@@ -691,7 +692,7 @@ func TestMatchSKUs(t *testing.T) {
 	}{
 		{"24GB VRAM", &provisionerv1.ResourceRequirements{MinVramGb: 24}, "NVIDIA RTX A5000", true},
 		{"80GB VRAM", &provisionerv1.ResourceRequirements{MinVramGb: 80}, "NVIDIA A100 80GB PCIe", true},
-		{"200GB VRAM (above all SKUs)", &provisionerv1.ResourceRequirements{MinVramGb: 200}, "", false},
+		{"400GB VRAM (above all SKUs, B300 included)", &provisionerv1.ResourceRequirements{MinVramGb: 400}, "", false},
 		{"40GB+128RAM (H100 PCIe is cheapest with 128 GB system RAM)", &provisionerv1.ResourceRequirements{MinVramGb: 40, MinRamGb: 128}, "NVIDIA H100 PCIe", true},
 	}
 	for _, c := range cases {

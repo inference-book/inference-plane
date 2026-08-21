@@ -504,9 +504,25 @@ func offerVRAMFloorMB(gpuName string, reqs *provisionerv1.ResourceRequirements) 
 	if want <= 0 {
 		return 0
 	}
-	// 3% under the nominal figure, so a card advertised as 80 GB still
-	// matches when the host reports 81251 MB rather than a round 81920.
-	return want * 970
+	// Two steps, deliberately separate. One constant doing both jobs is how
+	// every Blackwell card got excluded from every search: the conversion is
+	// only right if a label reads as roughly 1000 MiB per GB, and the labels
+	// are not consistent about it (#401).
+	//
+	// Vast reports gpu_ram in MiB. A vendor label may be a binary count (an
+	// A100's "80GB" is 80 GiB, reported 81920) or a decimal one (a B300's
+	// "288GB" is 288.4 decimal GB, reported 275040 MiB, which is 268.6 GiB).
+	// Converting as decimal is the smaller of the two readings and therefore
+	// the generous one for a floor, which is the direction a floor wants:
+	// its job is to keep the 40 GB part out of an 80 GB request, not to
+	// bound the top.
+	//
+	// Measured on 2026-08-21, floors against what the card reports:
+	// A100 74000/81920, H200 130425/143771, B200 177600/183359,
+	// B300 266400/275040. The nearest tier below an 80 GB card reports
+	// 40960, so the slack never blurs two tiers.
+	const mibPerDecimalGB = 953 // 1e9 / (1 << 20)
+	return want * mibPerDecimalGB * 97 / 100
 }
 
 // offerVRAMCeilingMB returns the per-GPU memory an offer must not exceed, in

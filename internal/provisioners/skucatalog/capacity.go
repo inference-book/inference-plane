@@ -10,10 +10,15 @@ const GiB int64 = 1 << 30
 // An allow-list rather than a conversion, because the labels are
 // marketing and only some of them are honest about the arithmetic. An
 // A100 80GB holds 80 GiB, which nvidia-smi shows as 81920 MiB and which
-// is 85.9 decimal GB. An H200's 141 and a Blackwell's 180 or 192 are
+// is 85.9 decimal GB. An H200's 141 and a Blackwell's 180, 192 or 288 are
 // vendor decimal figures that are not clean binary counts, so they are
 // absent here and resolve to unknown rather than to a number that is
 // several gigabytes wrong on the most expensive cards we can rent.
+//
+// The B300 is the measured case for that: Vast reports the card as 275040
+// MiB, which is 268.6 GiB and 288.4 decimal GB, so reading its "288" as
+// binary would promise 309 GB and over-commit every budget on the
+// priciest card on the market by twenty gigabytes.
 //
 // A label nobody has verified defaults to unknown, which is the safe
 // direction: a budget that declines to conclude sends an operator to
