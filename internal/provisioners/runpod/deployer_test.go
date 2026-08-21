@@ -750,3 +750,40 @@ func (c *collector) lastContainer() string {
 	}
 	return c.updates[len(c.updates)-1].ContainerID
 }
+
+// The instance record learns its price from a Describe that only runs when
+// the deploy succeeds, so a pod that was rented and then failed to serve
+// recorded no rate, and a zero rate is dropped from the spend join rather
+// than summed as free. The create response already carries the figure
+// (#397).
+func TestDeployReportsWhatThePodCosts(t *testing.T) {
+	proxyURL := proxyServer(t, http.StatusOK)
+	f := &fakeRunPod{t: t, respond: func(method, path string, _ []byte) (int, string) {
+		if method == "POST" && path == "/pods" {
+			return 201, `{"id":"rp-engine-1","desiredStatus":"RUNNING","costPerHr":21.52}`
+		}
+		t.Errorf("unexpected %s %s", method, path)
+		return 500, "{}"
+	}}
+	srv := httptest.NewServer(f.handler())
+	t.Cleanup(srv.Close)
+	p := New(NewClient("test-api-key", WithBaseURL(srv.URL), WithHTTPClient(srv.Client())),
+		WithSSHReadyWait(2*time.Second, 5*time.Millisecond),
+		WithProxyBaseURL(proxyURL),
+	)
+
+	c := &collector{}
+	if err := p.Deploy(context.Background(), okDep(), okInst(), nil, c.emit); err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+
+	var got float64
+	for _, u := range c.updates {
+		if u.HourlyRateUSD > 0 {
+			got = u.HourlyRateUSD
+		}
+	}
+	if got != 21.52 {
+		t.Errorf("no update carried the pod's price: rate = %v, want 21.52", got)
+	}
+}

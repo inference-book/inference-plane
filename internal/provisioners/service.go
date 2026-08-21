@@ -1547,6 +1547,25 @@ func (s *Service) patchDeployment(id string, u DeployStateUpdate) error {
 				inst.ProviderId = u.ContainerID
 			}
 		}
+		// Stamped the moment the deploy reports it, for the reason
+		// provider_id is: a deploy that fails after renting still leaves a
+		// machine that was billing, and a rate written only on the happy
+		// path prices the rentals that went well and loses the ones that
+		// did not.
+		//
+		// Keyed on the deployment's instance rather than on the deployment
+		// id, because the two are the same only for an auto-provisioned
+		// 1:1 record and a deployment placed onto an existing instance
+		// would otherwise price nothing at all.
+		if u.HourlyRateUSD > 0 {
+			instID := rec.GetInstanceId()
+			if instID == "" {
+				instID = id
+			}
+			if inst, ok := f.Instances[instID]; ok {
+				inst.HourlyRateUsd = u.HourlyRateUSD
+			}
+		}
 		if u.EngineEndpoint != "" {
 			rec.EngineEndpoint = u.EngineEndpoint
 			// v0.2 ch7-beat3.2 / #84: maintain the parallel

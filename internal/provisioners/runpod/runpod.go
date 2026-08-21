@@ -794,6 +794,12 @@ type createPodResponse struct {
 	ID            string `json:"id"`
 	DesiredStatus string `json:"desiredStatus"`
 	Status        string `json:"status"`
+	// CostPerHr is bound so the deploy can report what it just rented.
+	// The instance record otherwise learns the price from a Describe that
+	// only runs when the deploy succeeds, so a deploy that rents a pod and
+	// then fails records no rate at all (#397). Absent in a response leaves
+	// it zero, which is what unknown already means everywhere else.
+	CostPerHr float64 `json:"costPerHr"`
 }
 
 // podBody mirrors the subset of RunPod's pod schema we consume. We

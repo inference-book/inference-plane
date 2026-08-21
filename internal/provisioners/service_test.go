@@ -1663,3 +1663,98 @@ func TestDestroyDeployment_NotFound(t *testing.T) {
 		t.Fatal("destroy of missing id should error")
 	}
 }
+
+// An image-native deploy rents its own hardware, so the deploy is the only
+// thing that ever sees the quoted price. It had nowhere to report it, so
+// the instance record carried a zero rate, and zero means unknown: the
+// rental was dropped from instance.rate.usd_per_second rather than priced
+// wrongly, and spend, being a join on instance_id, lost the box silently
+// (#397). Measured on a real 8x A100 rental whose record read $0.0000/hr.
+func TestDeployStampsTheRentedRateOntoTheInstance(t *testing.T) {
+	deployer := &mockDeployerProvider{mockProvider: &mockProvider{name: "mock"}}
+	deployer.deployFn = func(emit func(provisioners.DeployStateUpdate)) error {
+		emit(provisioners.DeployStateUpdate{
+			State:         provisionerv1.DeploymentState_DEPLOYMENT_STATE_CONFIGURING,
+			Phase:         "test:rent",
+			ContainerID:   "mock-pod-1",
+			HourlyRateUSD: 10.4021,
+		})
+		emit(provisioners.DeployStateUpdate{
+			State:          provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING,
+			Phase:          "test:ready",
+			EngineEndpoint: "http://1.2.3.4:8000",
+		})
+		return nil
+	}
+
+	store, err := file.Open(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("file.Open: %v", err)
+	}
+	svc := provisioners.New([]provisioners.Provider{deployer}, store, "default",
+		provisioners.WithKeyStore(newKeyStore(t)))
+
+	if _, err := svc.CreateDeployment(context.Background(), &provisionerv1.CreateDeploymentRequest{
+		Deployment: &provisionerv1.Deployment{Id: "priced", Image: "vllm/vllm-openai:v0.7.0", Model: "Qwen/Qwen2.5-1.5B-Instruct", EnginePort: 8000},
+		ReplicasSpec: []*provisionerv1.ReplicaSpec{{
+			Provider:     "mock",
+			Requirements: &provisionerv1.ResourceRequirements{Class: provisioners.GPUClassSmall, GpuCount: 1},
+			Replicas:     1,
+		}},
+		Wait: true,
+	}); err != nil {
+		t.Fatalf("CreateDeployment: %v", err)
+	}
+
+	f, _ := store.Read()
+	if got := f.Instances["priced"].GetHourlyRateUsd(); got != 10.4021 {
+		t.Errorf("instance rate = %v, want 10.4021 (a zero here is dropped from the spend join, not summed as free)", got)
+	}
+}
+
+// The same, down the single-instance path. A deployment placed onto an
+// instance that already exists patches through patchDeployment rather than
+// patchDeploymentSlot, and the two write the record separately.
+func TestDeployStampsTheRentedRateOnTheSingleInstancePath(t *testing.T) {
+	deployer := &mockDeployerProvider{mockProvider: &mockProvider{name: "mock"}}
+	deployer.deployFn = func(emit func(provisioners.DeployStateUpdate)) error {
+		emit(provisioners.DeployStateUpdate{
+			State:          provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING,
+			Phase:          "test:ready",
+			ContainerID:    "mock-pod-1",
+			EngineEndpoint: "http://1.2.3.4:8000",
+			HourlyRateUSD:  3.29,
+		})
+		return nil
+	}
+
+	store, err := file.Open(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("file.Open: %v", err)
+	}
+	svc := provisioners.New([]provisioners.Provider{deployer}, store, "default",
+		provisioners.WithKeyStore(newKeyStore(t)))
+	_ = store.Update(func(f *provisioners.State) error {
+		f.Instances["my-pod"] = &provisionerv1.Instance{
+			Id: "my-pod", Provider: "mock", ProviderId: "mock:my-pod",
+			State:    provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE,
+			Hardware: &provisionerv1.Hardware{GpuSku: "mock-sku"},
+		}
+		return nil
+	})
+
+	if _, err := svc.CreateDeployment(context.Background(), &provisionerv1.CreateDeploymentRequest{
+		Deployment: &provisionerv1.Deployment{
+			Id: "placed", InstanceId: "my-pod",
+			Image: "vllm/vllm-openai:v0.7.0", Model: "Qwen/Qwen2.5-1.5B-Instruct", EnginePort: 8000,
+		},
+		Wait: true,
+	}); err != nil {
+		t.Fatalf("CreateDeployment: %v", err)
+	}
+
+	f, _ := store.Read()
+	if got := f.Instances["my-pod"].GetHourlyRateUsd(); got != 3.29 {
+		t.Errorf("instance rate = %v, want 3.29", got)
+	}
+}
