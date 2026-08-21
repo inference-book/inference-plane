@@ -36,6 +36,12 @@ type SKUSpec struct {
 	// PriceUSDPerHour is the on-demand price at cataloging.
 	// Authoritative price comes back on each /instance-types call.
 	PriceUSDPerHour float64
+	// Architecture is the host's CPU architecture, normalized. Lambda is the
+	// only catalog that states it, because it is the only one selling a
+	// shape whose architecture follows from the shape: a GH200 is a Grace
+	// Hopper superchip and therefore arm64, and every other Lambda shape is
+	// x86_64. An x86 engine image does not start on the former (#390).
+	Architecture string
 	// Family maps this SKU onto the cross-provider fabric catalog.
 	// Lambda names the form factor in the instance type itself
 	// ("gpu_1x_a100_sxm4" vs "gpu_1x_h100_pcie"), so the declared tier
@@ -68,39 +74,39 @@ type SKUSpec struct {
 // what an uncatalogued shape has always meant here.
 var skus = []SKUSpec{
 	// One card.
-	{Name: "gpu_1x_a6000", DisplayName: "1x A6000 (48 GB)", VRAMGb: 48, GPUCount: 1, PriceUSDPerHour: 1.09, Family: fabric.FamilyA6000},
-	{Name: "gpu_1x_a10", DisplayName: "1x A10 (24 GB PCIe)", VRAMGb: 24, GPUCount: 1, PriceUSDPerHour: 1.29, Family: fabric.FamilyA10},
+	{Name: "gpu_1x_a6000", DisplayName: "1x A6000 (48 GB)", VRAMGb: 48, GPUCount: 1, PriceUSDPerHour: 1.09, Architecture: provisioners.ArchAMD64, Family: fabric.FamilyA6000},
+	{Name: "gpu_1x_a10", DisplayName: "1x A10 (24 GB PCIe)", VRAMGb: 24, GPUCount: 1, PriceUSDPerHour: 1.29, Architecture: provisioners.ArchAMD64, Family: fabric.FamilyA10},
 	// Both A100 singles are 40 GB. The 80 GB SXM4 part is sold only as
 	// the eight-card shape below, and reading this row as 80 promised
 	// 85.9 GB per card to the pre-rent budget check on a card holding
 	// 42.9.
-	{Name: "gpu_1x_a100", DisplayName: "1x A100 (40 GB PCIe)", VRAMGb: 40, GPUCount: 1, PriceUSDPerHour: 1.99, Family: fabric.FamilyA100PCIe},
-	{Name: "gpu_1x_a100_sxm4", DisplayName: "1x A100 (40 GB SXM4)", VRAMGb: 40, GPUCount: 1, PriceUSDPerHour: 1.99, Family: fabric.FamilyA100SXM},
+	{Name: "gpu_1x_a100", DisplayName: "1x A100 (40 GB PCIe)", VRAMGb: 40, GPUCount: 1, PriceUSDPerHour: 1.99, Architecture: provisioners.ArchAMD64, Family: fabric.FamilyA100PCIe},
+	{Name: "gpu_1x_a100_sxm4", DisplayName: "1x A100 (40 GB SXM4)", VRAMGb: 40, GPUCount: 1, PriceUSDPerHour: 1.99, Architecture: provisioners.ArchAMD64, Family: fabric.FamilyA100SXM},
 	// GH200 is arm64 and everything else here is x86_64, which nothing in
 	// the deploy path checks. See NOTES.md.
-	{Name: "gpu_1x_gh200", DisplayName: "1x GH200 (96 GB)", VRAMGb: 96, GPUCount: 1, PriceUSDPerHour: 2.29, Family: fabric.FamilyGH200},
-	{Name: "gpu_1x_h100_pcie", DisplayName: "1x H100 (80 GB PCIe)", VRAMGb: 80, GPUCount: 1, PriceUSDPerHour: 3.29, Family: fabric.FamilyH100PCIe},
-	{Name: "gpu_1x_h100_sxm5", DisplayName: "1x H100 (80 GB SXM5)", VRAMGb: 80, GPUCount: 1, PriceUSDPerHour: 4.29, Family: fabric.FamilyH100SXM},
-	{Name: "gpu_1x_b200_sxm6", DisplayName: "1x B200 (180 GB SXM6)", VRAMGb: 180, GPUCount: 1, PriceUSDPerHour: 6.99, Family: fabric.FamilyB200},
+	{Name: "gpu_1x_gh200", DisplayName: "1x GH200 (96 GB)", VRAMGb: 96, GPUCount: 1, PriceUSDPerHour: 2.29, Architecture: provisioners.ArchARM64, Family: fabric.FamilyGH200},
+	{Name: "gpu_1x_h100_pcie", DisplayName: "1x H100 (80 GB PCIe)", VRAMGb: 80, GPUCount: 1, PriceUSDPerHour: 3.29, Architecture: provisioners.ArchAMD64, Family: fabric.FamilyH100PCIe},
+	{Name: "gpu_1x_h100_sxm5", DisplayName: "1x H100 (80 GB SXM5)", VRAMGb: 80, GPUCount: 1, PriceUSDPerHour: 4.29, Architecture: provisioners.ArchAMD64, Family: fabric.FamilyH100SXM},
+	{Name: "gpu_1x_b200_sxm6", DisplayName: "1x B200 (180 GB SXM6)", VRAMGb: 180, GPUCount: 1, PriceUSDPerHour: 6.99, Architecture: provisioners.ArchAMD64, Family: fabric.FamilyB200},
 
 	// Two cards.
-	{Name: "gpu_2x_a6000", DisplayName: "2x A6000 (48 GB)", VRAMGb: 48, GPUCount: 2, PriceUSDPerHour: 2.18, Family: fabric.FamilyA6000},
-	{Name: "gpu_2x_a100", DisplayName: "2x A100 (40 GB PCIe)", VRAMGb: 40, GPUCount: 2, PriceUSDPerHour: 3.98, Family: fabric.FamilyA100PCIe},
-	{Name: "gpu_2x_h100_sxm5", DisplayName: "2x H100 (80 GB SXM5)", VRAMGb: 80, GPUCount: 2, PriceUSDPerHour: 8.38, Family: fabric.FamilyH100SXM},
-	{Name: "gpu_2x_b200_sxm6", DisplayName: "2x B200 (180 GB SXM6)", VRAMGb: 180, GPUCount: 2, PriceUSDPerHour: 13.78, Family: fabric.FamilyB200},
+	{Name: "gpu_2x_a6000", DisplayName: "2x A6000 (48 GB)", VRAMGb: 48, GPUCount: 2, PriceUSDPerHour: 2.18, Architecture: provisioners.ArchAMD64, Family: fabric.FamilyA6000},
+	{Name: "gpu_2x_a100", DisplayName: "2x A100 (40 GB PCIe)", VRAMGb: 40, GPUCount: 2, PriceUSDPerHour: 3.98, Architecture: provisioners.ArchAMD64, Family: fabric.FamilyA100PCIe},
+	{Name: "gpu_2x_h100_sxm5", DisplayName: "2x H100 (80 GB SXM5)", VRAMGb: 80, GPUCount: 2, PriceUSDPerHour: 8.38, Architecture: provisioners.ArchAMD64, Family: fabric.FamilyH100SXM},
+	{Name: "gpu_2x_b200_sxm6", DisplayName: "2x B200 (180 GB SXM6)", VRAMGb: 180, GPUCount: 2, PriceUSDPerHour: 13.78, Architecture: provisioners.ArchAMD64, Family: fabric.FamilyB200},
 
 	// Four cards.
-	{Name: "gpu_4x_a6000", DisplayName: "4x A6000 (48 GB)", VRAMGb: 48, GPUCount: 4, PriceUSDPerHour: 4.36, Family: fabric.FamilyA6000},
-	{Name: "gpu_4x_a100", DisplayName: "4x A100 (40 GB PCIe)", VRAMGb: 40, GPUCount: 4, PriceUSDPerHour: 7.96, Family: fabric.FamilyA100PCIe},
-	{Name: "gpu_4x_h100_sxm5", DisplayName: "4x H100 (80 GB SXM5)", VRAMGb: 80, GPUCount: 4, PriceUSDPerHour: 16.36, Family: fabric.FamilyH100SXM},
+	{Name: "gpu_4x_a6000", DisplayName: "4x A6000 (48 GB)", VRAMGb: 48, GPUCount: 4, PriceUSDPerHour: 4.36, Architecture: provisioners.ArchAMD64, Family: fabric.FamilyA6000},
+	{Name: "gpu_4x_a100", DisplayName: "4x A100 (40 GB PCIe)", VRAMGb: 40, GPUCount: 4, PriceUSDPerHour: 7.96, Architecture: provisioners.ArchAMD64, Family: fabric.FamilyA100PCIe},
+	{Name: "gpu_4x_h100_sxm5", DisplayName: "4x H100 (80 GB SXM5)", VRAMGb: 80, GPUCount: 4, PriceUSDPerHour: 16.36, Architecture: provisioners.ArchAMD64, Family: fabric.FamilyH100SXM},
 
 	// Eight cards. These are the shapes a frontier sparse model needs, and
 	// the SXM rows carry a board-integrated fabric, so they resolve
 	// INTRA_NODE from the declared tier alone.
-	{Name: "gpu_8x_a100", DisplayName: "8x A100 (40 GB SXM4)", VRAMGb: 40, GPUCount: 8, PriceUSDPerHour: 15.92, Family: fabric.FamilyA100SXM},
-	{Name: "gpu_8x_a100_80gb_sxm4", DisplayName: "8x A100 (80 GB SXM4)", VRAMGb: 80, GPUCount: 8, PriceUSDPerHour: 22.32, Family: fabric.FamilyA100SXM},
-	{Name: "gpu_8x_h100_sxm5", DisplayName: "8x H100 (80 GB SXM5)", VRAMGb: 80, GPUCount: 8, PriceUSDPerHour: 31.92, Family: fabric.FamilyH100SXM},
-	{Name: "gpu_8x_b200_sxm6", DisplayName: "8x B200 (180 GB SXM6)", VRAMGb: 180, GPUCount: 8, PriceUSDPerHour: 53.52, Family: fabric.FamilyB200},
+	{Name: "gpu_8x_a100", DisplayName: "8x A100 (40 GB SXM4)", VRAMGb: 40, GPUCount: 8, PriceUSDPerHour: 15.92, Architecture: provisioners.ArchAMD64, Family: fabric.FamilyA100SXM},
+	{Name: "gpu_8x_a100_80gb_sxm4", DisplayName: "8x A100 (80 GB SXM4)", VRAMGb: 80, GPUCount: 8, PriceUSDPerHour: 22.32, Architecture: provisioners.ArchAMD64, Family: fabric.FamilyA100SXM},
+	{Name: "gpu_8x_h100_sxm5", DisplayName: "8x H100 (80 GB SXM5)", VRAMGb: 80, GPUCount: 8, PriceUSDPerHour: 31.92, Architecture: provisioners.ArchAMD64, Family: fabric.FamilyH100SXM},
+	{Name: "gpu_8x_b200_sxm6", DisplayName: "8x B200 (180 GB SXM6)", VRAMGb: 180, GPUCount: 8, PriceUSDPerHour: 53.52, Architecture: provisioners.ArchAMD64, Family: fabric.FamilyB200},
 }
 
 // MaxSKUsPerRequest caps the SKUs the resolver will try when no
@@ -126,6 +132,7 @@ func catalogEntries() []skucatalog.Entry {
 			VRAMGb:          sku.VRAMGb,
 			GPUCount:        sku.GPUCount,
 			PriceUSDPerHour: sku.PriceUSDPerHour,
+			Architecture:    sku.Architecture,
 			Family:          sku.Family,
 		})
 	}

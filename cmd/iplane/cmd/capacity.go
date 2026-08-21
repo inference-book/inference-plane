@@ -43,6 +43,7 @@ var (
 	capacityFabric    string
 	capacityFabricBW  int32
 	capacityReclaim   string
+	capacityArch      string
 	capacityOutput    string
 	capacityLimit     int
 	capacityTimeoutSc int
@@ -74,6 +75,11 @@ var capacityCmd = &cobra.Command{
 			Class:     capacityClass,
 			Sku:       capacitySKU,
 		}
+		arch, err := parseArch(capacityArch)
+		if err != nil {
+			return err
+		}
+		reqs.Architecture = arch
 		fabricScope, err := parseFabricScope(capacityFabric)
 		if err != nil {
 			return err
@@ -366,6 +372,7 @@ func init() {
 	f.Int32Var(&capacityMinDisk, "min-disk-gb", 0, `minimum container disk, in GB`)
 	f.StringVar(&capacityFabric, "fabric", "", fabricFlagUsage)
 	f.StringVar(&capacityReclaim, "reclaim", "", reclaimFlagUsage)
+	f.StringVar(&capacityArch, "arch", "", archFlagUsage)
 	f.Int32Var(&capacityFabricBW, "min-fabric-gbps", 0, minFabricGbpsUsage)
 	f.StringVar(&capacityOutput, "output", "table", `output format: table | json`)
 	f.IntVar(&capacityLimit, "limit", 0, `show at most N candidates (0 = all)`)

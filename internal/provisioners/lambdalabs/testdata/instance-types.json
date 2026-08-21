@@ -5,6 +5,7 @@
       "description": "1x A10 (24 GB PCIe)",
       "gpu_description": "A10 (24 GB PCIe)",
       "price_cents_per_hour": 129,
+      "architecture": "x86_64",
       "specs": {
         "gpus": 1,
         "vcpus": 30,
@@ -19,6 +20,7 @@
       "description": "1x A100 (40 GB PCIe)",
       "gpu_description": "A100 (40 GB PCIe)",
       "price_cents_per_hour": 199,
+      "architecture": "x86_64",
       "specs": {
         "gpus": 1,
         "vcpus": 30,
@@ -33,6 +35,7 @@
       "description": "1x A100 (40 GB SXM4)",
       "gpu_description": "A100 (40 GB SXM4)",
       "price_cents_per_hour": 199,
+      "architecture": "x86_64",
       "specs": {
         "gpus": 1,
         "vcpus": 30,
@@ -47,6 +50,7 @@
       "description": "1x A6000 (48 GB)",
       "gpu_description": "A6000 (48 GB)",
       "price_cents_per_hour": 109,
+      "architecture": "x86_64",
       "specs": {
         "gpus": 1,
         "vcpus": 14,
@@ -61,6 +65,7 @@
       "description": "1x B200 (180 GB SXM6)",
       "gpu_description": "B200 (180 GB SXM6)",
       "price_cents_per_hour": 699,
+      "architecture": "x86_64",
       "specs": {
         "gpus": 1,
         "vcpus": 26,
@@ -75,6 +80,7 @@
       "description": "1x GH200 (96 GB)",
       "gpu_description": "GH200 (96 GB)",
       "price_cents_per_hour": 229,
+      "architecture": "arm64",
       "specs": {
         "gpus": 1,
         "vcpus": 64,
@@ -89,6 +95,7 @@
       "description": "1x H100 (80 GB PCIe)",
       "gpu_description": "H100 (80 GB PCIe)",
       "price_cents_per_hour": 329,
+      "architecture": "x86_64",
       "specs": {
         "gpus": 1,
         "vcpus": 26,
@@ -103,6 +110,7 @@
       "description": "1x H100 (80 GB SXM5)",
       "gpu_description": "H100 (80 GB SXM5)",
       "price_cents_per_hour": 429,
+      "architecture": "x86_64",
       "specs": {
         "gpus": 1,
         "vcpus": 26,
@@ -117,6 +125,7 @@
       "description": "1x RTX 6000 (24 GB)",
       "gpu_description": "RTX 6000 (24 GB)",
       "price_cents_per_hour": 69,
+      "architecture": "x86_64",
       "specs": {
         "gpus": 1,
         "vcpus": 14,
@@ -131,6 +140,7 @@
       "description": "2x A100 (40 GB PCIe)",
       "gpu_description": "A100 (40 GB PCIe)",
       "price_cents_per_hour": 398,
+      "architecture": "x86_64",
       "specs": {
         "gpus": 2,
         "vcpus": 60,
@@ -145,6 +155,7 @@
       "description": "2x A6000 (48 GB)",
       "gpu_description": "A6000 (48 GB)",
       "price_cents_per_hour": 218,
+      "architecture": "x86_64",
       "specs": {
         "gpus": 2,
         "vcpus": 28,
@@ -159,6 +170,7 @@
       "description": "2x B200 (180 GB SXM6)",
       "gpu_description": "B200 (180 GB SXM6)",
       "price_cents_per_hour": 1378,
+      "architecture": "x86_64",
       "specs": {
         "gpus": 2,
         "vcpus": 52,
@@ -173,6 +185,7 @@
       "description": "2x H100 (80 GB SXM5)",
       "gpu_description": "H100 (80 GB SXM5)",
       "price_cents_per_hour": 838,
+      "architecture": "x86_64",
       "specs": {
         "gpus": 2,
         "vcpus": 52,
@@ -187,6 +200,7 @@
       "description": "4x A100 (40 GB PCIe)",
       "gpu_description": "A100 (40 GB PCIe)",
       "price_cents_per_hour": 796,
+      "architecture": "x86_64",
       "specs": {
         "gpus": 4,
         "vcpus": 120,
@@ -201,6 +215,7 @@
       "description": "4x A6000 (48 GB)",
       "gpu_description": "A6000 (48 GB)",
       "price_cents_per_hour": 436,
+      "architecture": "x86_64",
       "specs": {
         "gpus": 4,
         "vcpus": 56,
@@ -215,6 +230,7 @@
       "description": "4x H100 (80 GB SXM5)",
       "gpu_description": "H100 (80 GB SXM5)",
       "price_cents_per_hour": 1636,
+      "architecture": "x86_64",
       "specs": {
         "gpus": 4,
         "vcpus": 104,
@@ -229,6 +245,7 @@
       "description": "8x A100 (40 GB SXM4)",
       "gpu_description": "A100 (40 GB SXM4)",
       "price_cents_per_hour": 1592,
+      "architecture": "x86_64",
       "specs": {
         "gpus": 8,
         "vcpus": 124,
@@ -243,6 +260,7 @@
       "description": "8x A100 (80 GB SXM4)",
       "gpu_description": "A100 (80 GB SXM4)",
       "price_cents_per_hour": 2232,
+      "architecture": "x86_64",
       "specs": {
         "gpus": 8,
         "vcpus": 240,
@@ -257,6 +275,7 @@
       "description": "8x B200 (180 GB SXM6)",
       "gpu_description": "B200 (180 GB SXM6)",
       "price_cents_per_hour": 5352,
+      "architecture": "x86_64",
       "specs": {
         "gpus": 8,
         "vcpus": 208,
@@ -271,6 +290,7 @@
       "description": "8x H100 (80 GB SXM5)",
       "gpu_description": "H100 (80 GB SXM5)",
       "price_cents_per_hour": 3192,
+      "architecture": "x86_64",
       "specs": {
         "gpus": 8,
         "vcpus": 208,
@@ -285,6 +305,7 @@
       "description": "8x Tesla V100 (16 GB)",
       "gpu_description": "Tesla V100 (16 GB)",
       "price_cents_per_hour": 632,
+      "architecture": "x86_64",
       "specs": {
         "gpus": 8,
         "vcpus": 92,
@@ -299,6 +320,7 @@
       "description": "8x Tesla V100 (16 GB)",
       "gpu_description": "Tesla V100 (16 GB)",
       "price_cents_per_hour": 632,
+      "architecture": "x86_64",
       "specs": {
         "gpus": 8,
         "vcpus": 88,

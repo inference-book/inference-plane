@@ -65,6 +65,15 @@ type Entry struct {
 
 	// Family maps the row onto the cross-provider fabric catalog.
 	Family fabric.Family
+
+	// Architecture is the CPU architecture of a host of this shape,
+	// normalized ("amd64" / "arm64"), or empty when the catalog does not
+	// know. Only Lambda's rows carry it, because only Lambda sells a shape
+	// whose architecture follows from the shape: a GH200 is a Grace Hopper
+	// superchip and therefore arm64. Elsewhere it is a property of the
+	// rented host rather than of the card, so the live candidate reports it
+	// and a catalog row cannot.
+	Architecture string
 }
 
 // FabricMode selects how much the catalog stage is allowed to conclude about a
@@ -147,6 +156,18 @@ func Match(entries []Entry, reqs *provisionerv1.ResourceRequirements, mode Fabri
 			continue
 		}
 		if e.GPUCount > 0 && reqs.GetGpuCount() > 0 && e.GPUCount < int(reqs.GetGpuCount()) {
+			continue
+		}
+		// An x86 engine image does not start on an arm64 host, and the
+		// failure surfaces as a container that will not run on a machine
+		// that is already billing (#390).
+		//
+		// A row that states nothing is kept rather than excluded. Unlike a
+		// fabric, an unrecorded architecture is not a capability whose
+		// absence costs the whole rental, and excluding every silent row
+		// would empty the two catalogs that never state it the moment an
+		// operator names an architecture at all.
+		if want := reqs.GetArchitecture(); want != "" && e.Architecture != "" && e.Architecture != want {
 			continue
 		}
 		if !satisfiesFabric(e.Family, reqs, mode) {

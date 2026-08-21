@@ -51,6 +51,7 @@ var (
 	deployAuthPrefix      string
 	deployGPUCount        int32
 	deployFabric          string
+	deployArch            string
 	deployFabricBW        int32
 	deployDebugShell      bool
 	deployIdleTTL         time.Duration
@@ -246,6 +247,10 @@ func runDeploymentDeploy(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return err
 		}
+		arch, err := parseArch(deployArch)
+		if err != nil {
+			return err
+		}
 		req.ReplicasSpec = []*provisionerv1.ReplicaSpec{{
 			Provider: deployProvider,
 			Region:   deployRegion,
@@ -259,6 +264,7 @@ func runDeploymentDeploy(cmd *cobra.Command, args []string) error {
 				GpuCount:      deployGPUCount,
 				FabricScope:   fabricScope,
 				MinFabricGbps: deployFabricBW,
+				Architecture:  arch,
 			},
 		}}
 	}
@@ -327,6 +333,7 @@ func init() {
 	f.Int32Var(&deployMinDisk, "min-disk-gb", 0, `minimum container disk for auto-provisioning, in GB`)
 	f.Int32Var(&deployGPUCount, "gpu-count", 0, `number of GPUs for auto-provisioning (default 1)`)
 	f.StringVar(&deployFabric, "fabric", "", fabricFlagUsage)
+	f.StringVar(&deployArch, "arch", "", archFlagUsage)
 	f.Int32Var(&deployFabricBW, "min-fabric-gbps", 0, minFabricGbpsUsage)
 	f.Int32Var(&deployEnginePort, "engine-port", 8000, `port the engine listens on`)
 	f.StringSliceVar(&deployEngineArgs, "engine-args", nil,

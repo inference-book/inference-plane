@@ -56,7 +56,11 @@ func (s *Service) ListCandidatesAcross(ctx context.Context, providerNames []stri
 		go func(i int, name string) {
 			defer wg.Done()
 			cands, err := s.CandidatesFrom(ctx, name, reqs)
-			answers[i] = answerFor(name, cands, err)
+			// After the provider answers rather than inside each adapter:
+			// only Lambda's catalog knows an architecture before the call,
+			// and the others report it per candidate, so this is the one
+			// place every provider's answer can be judged the same way.
+			answers[i] = answerFor(name, FilterArchitecture(cands, reqs.GetArchitecture()), err)
 		}(i, name)
 	}
 	wg.Wait()
@@ -82,6 +86,31 @@ func answerFor(name string, cands []*Candidate, err error) *ProviderAnswer {
 		out.Outcome = provisionerv1.AnswerOutcome_ANSWER_OUTCOME_NO_CAPACITY
 	default:
 		out.Outcome = provisionerv1.AnswerOutcome_ANSWER_OUTCOME_ANSWERED
+	}
+	return out
+}
+
+// FilterArchitecture drops candidates whose reported CPU architecture the
+// request refuses.
+//
+// A candidate that reports nothing is kept. RunPod reports no architecture
+// at all, so excluding silence would empty its listing the moment an
+// operator stated one, and unlike a fabric this is not a capability whose
+// absence costs the whole rental: the failure is a container that will not
+// start, found in minutes rather than in a quietly degraded run (#390).
+//
+// An empty want is unconstrained, so a request that predates the field is
+// untouched.
+func FilterArchitecture(cands []*Candidate, want string) []*Candidate {
+	if want == "" {
+		return cands
+	}
+	out := make([]*Candidate, 0, len(cands))
+	for _, c := range cands {
+		if a := c.GetArchitecture(); a != "" && a != want {
+			continue
+		}
+		out = append(out, c)
 	}
 	return out
 }
