@@ -99,10 +99,15 @@ func (p *Provider) Deploy(ctx context.Context, dep *provisionerv1.Deployment, in
 			strings.Join(gpuTypeIDs, ", "), gpuCount, p.floorsHint()))
 	}
 
+	// The price rides along with the rent, because this is the only moment
+	// anything in the system sees it: the offer is gone from the
+	// marketplace a second later and the instance record has no other
+	// source for it (#397).
 	emit(provisioners.DeployStateUpdate{
 		State:           provisionerv1.DeploymentState_DEPLOYMENT_STATE_STARTING,
 		Phase:           "vast:rent",
-		ProgressMessage: fmt.Sprintf("renting offer %d (%s x%d)", offer.ID, skuName, gpuCount),
+		ProgressMessage: fmt.Sprintf("renting offer %d (%s x%d) at $%.4f/hr", offer.ID, skuName, gpuCount, offer.DphTotal),
+		HourlyRateUSD:   offer.DphTotal,
 	})
 
 	rented, err := p.rentEngine(ctx, offer.ID, dep, engineCmd, enginePort, diskGB)

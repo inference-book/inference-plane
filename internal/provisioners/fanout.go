@@ -860,6 +860,14 @@ func (s *Service) patchDeploymentSlot(deployID, replicaInstanceID string, u Depl
 				inst.ProviderId = u.ContainerID
 			}
 		}
+		// Per replica, because a heterogeneous fleet spans providers and
+		// prices inside one deployment, and spend is a join on the
+		// instance rather than a figure the deployment carries.
+		if u.HourlyRateUSD > 0 {
+			if inst, ok := f.Instances[replicaInstanceID]; ok {
+				inst.HourlyRateUsd = u.HourlyRateUSD
+			}
+		}
 
 		// Surface what the slot is doing on the deployment record.
 		//

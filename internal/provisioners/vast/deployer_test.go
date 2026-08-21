@@ -359,3 +359,37 @@ func TestDeploySearchesEverySKUTheRequirementsMatch(t *testing.T) {
 		t.Fatalf("the fixture needs several matching SKUs to be a test at all, got %d", len(searched))
 	}
 }
+
+// The rented price is known exactly once, at the moment the offer is
+// rented, and the deploy path had nowhere to report it. So an instance
+// created by a deploy carried no rate, and a zero rate means unknown,
+// which drops the rental out of the spend join entirely rather than
+// costing it wrongly (#397).
+func TestDeployReportsWhatTheOfferCost(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v0/bundles/", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"offers":[{"id":42,"gpu_name":"RTX_3060","num_gpus":1,"disk_space":200,"dph_total":10.4021,"machine_id":7}]}`))
+	})
+	mux.HandleFunc("/api/v0/asks/42/", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"success":true,"new_contract":99}`))
+	})
+	// A host that will never run the container, so the deploy ends at the
+	// first readiness tick instead of polling out the engine-ready budget.
+	mux.HandleFunc("/api/v0/instances/99/", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"instances":{"id":99,"cur_state":"stopped","status_msg":"error pulling image configuration"}}`))
+	})
+	p, _ := newTestProvider(t, mux)
+	emit, updates := collect()
+
+	_ = p.Deploy(t.Context(), engineDep(), engineInst(), nil, emit)
+
+	var got float64
+	for _, u := range *updates {
+		if u.HourlyRateUSD > 0 {
+			got = u.HourlyRateUSD
+		}
+	}
+	if got != 10.4021 {
+		t.Errorf("no update carried the offer's price: rate = %v, want 10.4021 (updates: %+v)", got, *updates)
+	}
+}

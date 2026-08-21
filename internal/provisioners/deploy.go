@@ -22,6 +22,19 @@ type DeployStateUpdate struct {
 	ContainerID     string
 	EngineEndpoint  string
 	FailureReason   string
+
+	// HourlyRateUSD is what the provider charges for the machine this
+	// deploy just rented, reported the moment it is known and zero on
+	// every other update.
+	//
+	// An image-native deploy rents its own hardware, so it is the only
+	// thing that ever sees the quoted price; Spawn's instance record has
+	// nowhere to learn it from. Without this field a deployed instance
+	// carried a zero rate, and zero means unknown rather than free, so
+	// CostRecorder omitted the rental from instance.rate.usd_per_second
+	// and spend, which is a join on instance_id, silently lost the box
+	// (#397).
+	HourlyRateUSD float64
 }
 
 // Deployer is an optional Provider capability for image-native

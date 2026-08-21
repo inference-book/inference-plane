@@ -80,6 +80,10 @@ func (p *Provider) Deploy(ctx context.Context, dep *provisionerv1.Deployment, in
 		Phase:           "runpod:scheduling",
 		ProgressMessage: "pod created; waiting for engine /health via proxy URL",
 		ContainerID:     created.ID,
+		// Reported here rather than left to the post-deploy Describe,
+		// which never runs when the deploy fails. A pod that was rented
+		// and never served still billed for the attempt (#397).
+		HourlyRateUSD: created.CostPerHr,
 	})
 
 	// Wait for the engine to be reachable via RunPod's HTTPS proxy.
