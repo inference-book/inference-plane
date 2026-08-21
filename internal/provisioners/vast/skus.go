@@ -117,6 +117,12 @@ var skus = []SKUSpec{
 	{GpuName: "H100_NVL", DisplayName: "H100 NVL", VRAMGb: 94, DefaultSystemRAMGb: 192, PriceUSDPerHour: 2.30, Family: fabric.FamilyH100NVL},
 	{GpuName: "H200", DisplayName: "H200", VRAMGb: 141, DefaultSystemRAMGb: 256, PriceUSDPerHour: 3.20, Family: fabric.FamilyH200SXM},
 	{GpuName: "B200", DisplayName: "B200", VRAMGb: 192, DefaultSystemRAMGb: 256, PriceUSDPerHour: 4.80, Family: fabric.FamilyB200},
+	// 288 GB per card, so eight of them hold 2304 GB. That is the
+	// single-node route to a model that otherwise needs a cross-node pool:
+	// Kimi K3 is 1560 GB at four bits and fits eight of nothing smaller.
+	// Cataloged 2026-08-21 against live offers at $11.25/card-hr, 2x
+	// through 8x, gpu_ram 275040 MiB.
+	{GpuName: "B300", DisplayName: "B300", VRAMGb: 288, DefaultSystemRAMGb: 384, PriceUSDPerHour: 11.25, Family: fabric.FamilyB300},
 }
 
 // MaxSKUsPerRequest caps the SKUs the resolver will try when no

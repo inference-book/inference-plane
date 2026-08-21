@@ -88,6 +88,11 @@ var skus = []SKUSpec{
 	{GpuTypeID: "NVIDIA H100 NVL", VRAMGb: 94, DefaultSystemRAMGb: 128, PriceUSDPerHour: 2.99, Family: fabric.FamilyH100NVL},
 	{GpuTypeID: "NVIDIA H200", VRAMGb: 141, DefaultSystemRAMGb: 192, PriceUSDPerHour: 3.99, Family: fabric.FamilyH200SXM},
 	{GpuTypeID: "NVIDIA B200", VRAMGb: 192, DefaultSystemRAMGb: 256, PriceUSDPerHour: 5.99, Family: fabric.FamilyB200},
+	// 288 GB per card. Eight hold 2304 GB, which is the single-node route
+	// to a 1.4 TB model. The wire id carries the form factor and a suffix
+	// RunPod does not explain ("SXM6 AC"), so it is transcribed rather than
+	// tidied: it is the string a create call has to send.
+	{GpuTypeID: "NVIDIA B300 SXM6 AC", VRAMGb: 288, DefaultSystemRAMGb: 384, PriceUSDPerHour: 11.99, Family: fabric.FamilyB300},
 }
 
 // Class-to-constraint-defaults lives in the service layer
