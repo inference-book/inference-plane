@@ -69,6 +69,29 @@ func (s *Service) budgetCheck(ctx context.Context, req *provisionerv1.CreateDepl
 	if arch == nil {
 		return nil
 	}
+	// A checkpoint that already chose a precision cannot be sized at
+	// another one. The hub's parameter count is packed elements rather
+	// than parameters, so pricing it at the engine's default quantizes it
+	// twice: cyankiwi/GLM-5.2-AWQ-INT4 is 474 GB of four-bit weights, 59
+	// GB per card across eight, and read as fp16 it comes to 327.7 GB per
+	// card and refuses a deploy that fits comfortably.
+	//
+	// `iplane model budget` learned this in #382 and refuses to price such
+	// a checkpoint at all. This path is the same lesson arriving late: the
+	// operator surface declined to answer while the deploy path answered
+	// wrongly, in the direction that blocks a rental rather than the one
+	// that wastes it.
+	//
+	// Skipping rather than attempting is right for the same reason every
+	// other missing input here skips. A false refusal is worse than the
+	// silence it replaces, and the packed count gives nothing to compute
+	// from.
+	if q := arch.GetQuantization(); q != "" {
+		s.logBudgetSkip(dep.GetId(), fmt.Sprintf(
+			"%s is published at %s, so its parameter count is packed elements and pricing it at another precision would quantize it twice",
+			dep.GetModel(), q))
+		return nil
+	}
 
 	b, err := vrambudget.Compute(arch, plan)
 	if err != nil {
