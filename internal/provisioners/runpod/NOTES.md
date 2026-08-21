@@ -91,3 +91,33 @@ The phase ladder (`runpod:scheduling` -> `runpod:image-pull` -> `engine:init`)
 and its derivation from pod status stay here, because they are claims about what
 RunPod's API reports. Vast has its own, and the two deliberately share only the
 `engine:init` rung so a dashboard can put them side by side.
+
+## The API knows where the capacity is, and this adapter used to say it did not
+
+`dataCenters { gpuAvailability(input:{gpuCount:N}) }` reports availability
+per datacenter at the same width the price query asks about, and `Spawn`
+already accepts a region as a best-effort `dataCenterIds` pin. The comment
+that said RunPod "schedules wherever it has capacity" described the rent
+path's default and quietly became a claim about what the API knows.
+
+The datacenter is decision-relevant because a **network volume is locked to
+one**. A model staged into the wrong datacenter is a warm cache no deploy
+can mount. Measured 2026-08-21: RunPod's only eight-card capacity on the
+whole platform was AP-IN-1, and AP-IN-1 supports no volumes, so the
+stage-then-rent-warm plan was impossible that day and nothing in the CLI
+could say so (#399).
+
+Candidates are now one row per (type, datacenter), with the datacenter's own
+stock reading where it has one, and `datacenter_storage` in the attrs. A
+type no datacenter list mentions still gets a row with no region, because
+the datacenter view is extra information and losing it must not lose the
+candidate.
+
+## costPerHr rides on the create response
+
+The pod's price is bound off `createPodResponse` and reported through
+`DeployStateUpdate.HourlyRateUSD`, rather than being left to the `Describe`
+that runs after a successful deploy. A deploy that rents a pod and then
+fails to serve still billed for the attempt, and the rate arriving only on
+the happy path is what made those rentals vanish from spend (#397). An
+absent field leaves zero, which is what unknown already meant.

@@ -102,6 +102,15 @@ answers a question they did not ask.
 `gpus`, and never the card's memory. So a Lambda candidate mixes live price with
 catalogued VRAM, and an uncatalogued shape reports 0 rather than a guess.
 
+**No API-provisionable clusters.** 1-Click Clusters are the cross-node,
+InfiniBand product, and they are console-only: every cluster-shaped v1 path
+404s (`/clusters`, `/cluster-types`, `/one-click-clusters`) while the paths
+this adapter uses answer normally. Lambda's docs describe a wizard, a
+reservation stated **in weeks**, and an invoice. So it is neither
+API-provisionable nor on-demand, and a weekly invoice is a different
+commercial shape from the per-second rentals the cost model is built on.
+Checked 2026-08-21; see the comment on #352.
+
 **No API-creatable filesystems.** `POST /file-systems` returns 405; persistent
 filesystems exist and are dashboard-only. This is why Lambda has no
 `VolumeManager` and why the warm-cache path cannot reach it. See

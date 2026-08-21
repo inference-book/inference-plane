@@ -331,6 +331,18 @@ effort:
   rented. Ch 10's span column stays degenerate and Ch 11 opens on exactly this
   gap, which is the honest position: the requirement is expressible and gets
   refused. Revisit when a vendor sells one.
+
+  Checked again 2026-08-21. Lambda's 1-Click Clusters were proposed as the
+  vendor that ends this (#352) and do not: every cluster-shaped v1 path 404s,
+  and the product is reserved by the week through the console against an
+  invoice, which is neither API-provisionable nor on-demand. Nebius and others
+  do sell API-provisionable InfiniBand, so the concession is softening, but
+  reaching one means a new adapter rather than extending an existing one.
+
+  The pressure has also dropped from the other side. An 8x B300 is 2304 GB and
+  Kimi K3 is 1560 GB at four bits, so the frontier model this was needed for
+  now fits on one node, rentable today (#354). Cross-node stops being the only
+  route to #360.
 - **Reclaim notice (issue 289).** No vendor publishes an impending-reclaim
   signal, and a reclaim cannot be induced on demand, so an implementation could
   not be validated against the event it exists to catch. The re-placement half
