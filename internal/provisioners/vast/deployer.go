@@ -79,18 +79,24 @@ func (p *Provider) Deploy(ctx context.Context, dep *provisionerv1.Deployment, in
 	if diskGB <= 0 {
 		diskGB = defaultDiskGB
 	}
-	skuName := reqs.GetSku()
-	if skuName == "" {
-		if matches := MatchSKUs(reqs); len(matches) > 0 {
-			skuName = matches[0]
-		} else {
-			return deployFailed(emit, "vast:find-offer", fmt.Errorf(
-				"no vast SKU satisfies the requirements (min_vram_gb=%d)", reqs.GetMinVramGb()))
-		}
+	// The same search Spawn runs, for the same reason: the catalog is
+	// ordered by price and only the marketplace knows which of those rows
+	// has anything tonight. Taking matches[0] alone gave up while the row
+	// below had capacity, and it dereferenced the nil that an empty search
+	// returns (#392).
+	gpuTypeIDs := candidateSKUs(reqs)
+	if len(gpuTypeIDs) == 0 {
+		return deployFailed(emit, "vast:find-offer", fmt.Errorf(
+			"no vast SKU satisfies the requirements (min_vram_gb=%d)", reqs.GetMinVramGb()))
 	}
-	offer, err := p.findOffer(ctx, skuName, gpuCount, diskGB, reqs)
+	offer, skuName, err := p.findAnyOffer(ctx, gpuTypeIDs, gpuCount, diskGB, reqs)
 	if err != nil {
 		return deployFailed(emit, "vast:find-offer", err)
+	}
+	if offer == nil {
+		return deployFailed(emit, "vast:find-offer", fmt.Errorf(
+			"no rentable offer found for sku(s) %s at gpu_count=%d (%s)",
+			strings.Join(gpuTypeIDs, ", "), gpuCount, p.floorsHint()))
 	}
 
 	emit(provisioners.DeployStateUpdate{
