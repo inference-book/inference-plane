@@ -3,6 +3,8 @@ package provisioners
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"runtime/debug"
 	"strings"
 	"sync"
 
@@ -686,29 +688,75 @@ func (s *Service) recordAppendedSlots(deployID string, placements []*provisioner
 // underlying instance from PENDING -> ACTIVE via the existing
 // finalizeInstanceAfterDeploy path, identical to single-instance.
 func (s *Service) launchReplica(ctx context.Context, deployID string, slot int, inst *provisionerv1.Instance, key *sshkeys.KeyPair, dep *provisionerv1.Deployment, results chan<- fanOutResult) {
+	endpoint, err := s.runReplicaDeploy(ctx, deployID, slot, inst, key, dep)
+	results <- fanOutResult{
+		instanceID: inst.GetId(),
+		endpoint:   endpoint,
+		err:        err,
+	}
+}
+
+// runReplicaDeploy is the body of one slot's deploy, with a panic in the
+// provider turned into that slot's error.
+//
+// Split out from launchReplica so the send on results happens in exactly
+// one place. A recover that had to send for itself would have to know
+// whether the normal path already had, and the aggregator counts one
+// result per slot.
+//
+// Containing the panic is about money rather than tidiness. A provider
+// adapter runs here in a bare goroutine, so a nil dereference inside one
+// used to be a process-level crash: the daemon died, and any machine that
+// adapter had already rented was left billing with its contract id
+// unwritten and nothing left running to destroy it. One failed replica is
+// a state the rest of this file already knows how to handle (#393).
+//
+// The panic is still a bug, so it is logged with its stack and named as a
+// panic in the failure reason. An operator reading "no capacity" when the
+// truth is "the adapter crashed" would go looking in the wrong place.
+func (s *Service) runReplicaDeploy(ctx context.Context, deployID string, slot int, inst *provisionerv1.Instance, key *sshkeys.KeyPair, dep *provisionerv1.Deployment) (endpoint string, err error) {
 	replicaID := inst.GetId()
 	obs := s.newDeployObserver(ctx, deployKindProvision, deployID, inst, storageTierForDeployment(dep))
 	emit := func(u DeployStateUpdate) {
 		obs.observe(u)
 		_ = s.patchDeploymentSlot(deployID, replicaID, u)
 	}
+
+	defer func() {
+		r := recover()
+		if r == nil {
+			return
+		}
+		err = fmt.Errorf("provider %q panicked mid-deploy: %v", inst.GetProvider(), r)
+		slog.Error("provider panicked mid-deploy",
+			"deployment", deployID, "replica", replicaID, "provider", inst.GetProvider(),
+			"panic", fmt.Sprint(r), "stack", string(debug.Stack()))
+		// Through the same emit the provider would have used, so the slot
+		// reaches a terminal state and the record does not sit STARTING
+		// forever. Any instance the adapter rented before it panicked is
+		// recorded by then, which is what a destroy needs to reach it.
+		emit(DeployStateUpdate{
+			State:         provisionerv1.DeploymentState_DEPLOYMENT_STATE_FAILED,
+			Phase:         "provider:panic",
+			FailureReason: err.Error(),
+		})
+		obs.finish(err)
+		endpoint = s.readSlotEndpoint(deployID, slot)
+	}()
+
 	// Per-slot copy: every slot in a fan-out reads the same dep record but
 	// needs its own agent identity. The engine id IS the replica instance
 	// id rather than a parallel identifier, so the control plane can join a
 	// registration back to the slot that produced it with a lookup instead
 	// of a parse.
 	slotDep := withAgentEnv(dep, replicaID, slot, inst.GetProvider(), s.agentServiceURL)
-	err := s.deployerFor(inst).Deploy(obs.ctx(), slotDep, inst, key, emit)
+	err = s.deployerFor(inst).Deploy(obs.ctx(), slotDep, inst, key, emit)
 	obs.finish(err)
-	endpoint := s.readSlotEndpoint(deployID, slot)
+	endpoint = s.readSlotEndpoint(deployID, slot)
 	if err == nil {
 		s.finalizeInstanceAfterDeploy(ctx, inst, deployID)
 	}
-	results <- fanOutResult{
-		instanceID: replicaID,
-		endpoint:   endpoint,
-		err:        err,
-	}
+	return endpoint, err
 }
 
 // applyAggregateState stamps the deployment's terminal state after
