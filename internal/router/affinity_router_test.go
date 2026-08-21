@@ -38,11 +38,10 @@ func TestRouter_PrefixAffinity_HeaderRoutesStickily(t *testing.T) {
 	r := New(&fakeDeploymentClient{describe: func(_ *provisionerv1.DescribeDeploymentRequest) (*provisionerv1.DescribeDeploymentResponse, error) {
 		return &provisionerv1.DescribeDeploymentResponse{
 			Deployment: &provisionerv1.Deployment{
-				Id:              "aff",
-				State:           provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING,
-				InstanceIds:     ids,
-				EngineEndpoints: endpoints,
-				EngineEndpoint:  endpoints[0], // satisfy the singular-endpoint readiness gate
+				Id:             "aff",
+				State:          provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING,
+				Replicas:       membersFrom(ids, endpoints),
+				EngineEndpoint: endpoints[0], // satisfy the singular-endpoint readiness gate
 			},
 		}, nil
 	}}, nil, WithRoutingPolicy(policy.NewPrefixAffinity(0)))

@@ -41,11 +41,9 @@ func (s *Service) LocateEngineNode(engineID string) (hostID, provider, endpoint 
 	// derivable from the instance id in the single-replica case, where
 	// replicaInstanceID collapses the slot suffix away.
 	for _, dep := range file.Deployments {
-		for slot, id := range dep.GetInstanceIds() {
-			if id != engineID {
-				continue
-			}
-			if eps := dep.GetEngineEndpoints(); slot < len(eps) {
+		slot := MemberOf(dep, engineID)
+		if slot >= 0 {
+			if eps := EffectiveEndpoints(dep); slot < len(eps) {
 				endpoint = eps[slot]
 			}
 			// engine_endpoints is the plural, per-replica set. The legacy

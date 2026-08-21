@@ -119,7 +119,7 @@ func (s *Service) Migrate(ctx context.Context, req MigrateRequest) (*MigratePlan
 			"deployment %q must be RUNNING or DEGRADED to migrate (got %s)", req.DeploymentID, rec.GetState())
 	}
 
-	source := slices.Clone(rec.GetInstanceIds())
+	source := EffectiveInstanceIDs(rec)
 	if len(source) == 0 && rec.GetInstanceId() != "" {
 		source = []string{rec.GetInstanceId()}
 	}
@@ -177,7 +177,7 @@ func (s *Service) Migrate(ctx context.Context, req MigrateRequest) (*MigratePlan
 	// Whatever is in instance_ids now and was not in the source set is what we
 	// just added. Derived rather than assumed, because a concurrent scale
 	// would otherwise have this draining somebody else's new replicas.
-	for _, id := range scaled.GetDeployment().GetInstanceIds() {
+	for _, id := range EffectiveInstanceIDs(scaled.GetDeployment()) {
 		if !slices.Contains(source, id) {
 			plan.AddedInstances = append(plan.AddedInstances, id)
 		}

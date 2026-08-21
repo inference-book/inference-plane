@@ -42,9 +42,9 @@ func inst(provider, sku string, cards int32) *provisionerv1.Instance {
 func TestDescribeFleetNamesTheHardwareTheSweepRanOn(t *testing.T) {
 	f := &fakeDescriber{
 		dep: &provisionerv1.Deployment{
-			Id:          "glm",
-			InstanceIds: []string{"i-1"},
-			EngineArgs:  []string{"--tensor-parallel-size", "4", "--model", "zai-org/GLM-5.2"},
+			Id:         "glm",
+			Replicas:   []*provisionerv1.ReplicaBacking{{InstanceIds: []string{"i-1"}}},
+			EngineArgs: []string{"--tensor-parallel-size", "4", "--model", "zai-org/GLM-5.2"},
 		},
 		instances: map[string]*provisionerv1.Instance{"i-1": inst("runpod", "B200", 4)},
 	}
@@ -64,7 +64,9 @@ func TestDescribeFleetNamesTheHardwareTheSweepRanOn(t *testing.T) {
 // not happen.
 func TestDescribeFleetReportsEveryProviderInAHeterogeneousFleet(t *testing.T) {
 	f := &fakeDescriber{
-		dep: &provisionerv1.Deployment{InstanceIds: []string{"i-1", "i-2", "i-3"}},
+		dep: &provisionerv1.Deployment{Replicas: []*provisionerv1.ReplicaBacking{
+			{InstanceIds: []string{"i-1"}}, {InstanceIds: []string{"i-2"}}, {InstanceIds: []string{"i-3"}},
+		}},
 		instances: map[string]*provisionerv1.Instance{
 			"i-1": inst("vast", "H100_SXM", 8),
 			"i-2": inst("runpod", "B200", 8),

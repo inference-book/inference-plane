@@ -132,7 +132,7 @@ func (s *Service) ScaleDeployment(ctx context.Context, req *provisionerv1.ScaleD
 		return nil, status.Errorf(codes.FailedPrecondition, "deployment %q must be RUNNING or DEGRADED to scale (got %s)", id, rec.GetState())
 	}
 
-	current := len(rec.GetInstanceIds())
+	current := len(rec.GetReplicas())
 	if current == 0 {
 		// Beat 1+2 single-instance deployment: instance_ids is empty,
 		// the singular instance_id is the only slot. Treat as current=1
@@ -156,16 +156,18 @@ func (s *Service) ScaleDeployment(ctx context.Context, req *provisionerv1.ScaleD
 	// happened). Beat 1+2 records predate replica_specs so the
 	// operator-intent shape was never stored; the resolved form
 	// from the Instance is the best available signal.
-	if len(rec.GetInstanceIds()) == 0 && rec.GetInstanceId() != "" {
+	if len(rec.GetReplicas()) == 0 && rec.GetInstanceId() != "" {
 		anchorID := rec.GetInstanceId()
 		anchorInst, anchorOK := file.Instances[anchorID]
 		_ = s.store.Update(func(f *State) error {
 			r := f.Deployments[id]
-			if r == nil || len(r.GetInstanceIds()) > 0 {
+			if r == nil || len(r.GetReplicas()) > 0 {
 				return nil
 			}
-			r.InstanceIds = []string{r.GetInstanceId()}
-			r.EngineEndpoints = []string{r.GetEngineEndpoint()}
+			r.Replicas = []*provisionerv1.ReplicaBacking{{
+				InstanceIds:    []string{r.GetInstanceId()},
+				EngineEndpoint: r.GetEngineEndpoint(),
+			}}
 			if anchorOK && anchorInst.GetSpec() != nil {
 				r.ReplicaSpecs = []*provisionerv1.ReplicaSpec{{
 					Provider:     anchorInst.GetProvider(),
@@ -266,7 +268,7 @@ func (s *Service) anchorReplicaSpec(file *State, rec *provisionerv1.Deployment) 
 		return specs[0], nil
 	}
 	var anchorID string
-	if ids := rec.GetInstanceIds(); len(ids) > 0 && ids[0] != "" {
+	if ids := EffectiveMemberInstanceIDs(rec); len(ids) > 0 && ids[0] != "" {
 		anchorID = ids[0]
 	} else {
 		anchorID = rec.GetInstanceId()
@@ -608,11 +610,16 @@ func (s *Service) recordCreateSlots(deployID string, placements []*provisionerv1
 			return nil
 		}
 		count := len(placements)
-		rec.InstanceIds = make([]string, count)
-		rec.EngineEndpoints = make([]string, count)
+		// One member per placement, each backed by that one instance.
+		// A member whose placement failed keeps its slot with no
+		// instances, so the arrays stay index-aligned with
+		// replica_specs and #93's reconciliation knows which slot to
+		// retry.
+		rec.Replicas = make([]*provisionerv1.ReplicaBacking, count)
 		for i, inst := range placements {
+			rec.Replicas[i] = &provisionerv1.ReplicaBacking{}
 			if inst != nil {
-				rec.InstanceIds[i] = inst.GetId()
+				rec.Replicas[i].InstanceIds = []string{inst.GetId()}
 			}
 		}
 		// Single-instance carve-out: preserve Ch 6's 1:1 mapping
@@ -639,8 +646,8 @@ func (s *Service) recordCreateSlots(deployID string, placements []*provisionerv1
 
 // recordAppendedSlots is the scale-up analog of recordCreateSlots:
 // the deployment already has slots 0..startingSlot-1 stamped;
-// appendReplicas extends instance_ids / engine_endpoints /
-// replica_specs by len(placements) slots starting at startingSlot.
+// appendReplicas extends replicas / replica_specs by len(placements)
+// slots starting at startingSlot.
 // Existing slots (including DEGRADED tombstones with empty ids)
 // are untouched -- scale appends, never repairs.
 func (s *Service) recordAppendedSlots(deployID string, placements []*provisionerv1.Instance, startingSlot int) {
@@ -650,22 +657,19 @@ func (s *Service) recordAppendedSlots(deployID string, placements []*provisioner
 		if !ok {
 			return nil
 		}
-		// Grow all three arrays to startingSlot+len(placements). If
-		// the existing arrays were shorter (Beat-1+2 legacy
-		// deployment with len < startingSlot), pad with empties.
+		// Grow the member list to startingSlot+len(placements). If it
+		// was shorter (a legacy single-instance record), pad with
+		// empty members rather than shifting the new ones down.
 		need := startingSlot + len(placements)
-		for len(rec.InstanceIds) < need {
-			rec.InstanceIds = append(rec.InstanceIds, "")
-		}
-		for len(rec.EngineEndpoints) < need {
-			rec.EngineEndpoints = append(rec.EngineEndpoints, "")
+		for len(rec.Replicas) < need {
+			rec.Replicas = append(rec.Replicas, &provisionerv1.ReplicaBacking{})
 		}
 		for len(rec.ReplicaSpecs) < startingSlot {
 			rec.ReplicaSpecs = append(rec.ReplicaSpecs, nil)
 		}
 		for i, inst := range placements {
 			if inst != nil {
-				rec.InstanceIds[startingSlot+i] = inst.GetId()
+				rec.Replicas[startingSlot+i].InstanceIds = []string{inst.GetId()}
 			}
 		}
 		// Append the new slots' specs. Failed slots still get their
@@ -826,24 +830,16 @@ func (s *Service) patchDeploymentSlot(deployID, replicaInstanceID string, u Depl
 		if !ok {
 			return nil
 		}
-		slot := -1
-		for i, id := range rec.GetInstanceIds() {
-			if id == replicaInstanceID {
-				slot = i
-				break
-			}
-		}
+		// The update names an instance; the record it belongs to is a
+		// member, which may hold several. A multi-node member reports
+		// one endpoint however many of its nodes announce one, so the
+		// lookup is by membership rather than by position.
+		slot := MemberOf(rec, replicaInstanceID)
 		if slot < 0 {
 			return nil
 		}
-		// Defensive: grow engine_endpoints if it lags instance_ids
-		// (recordPlacedSlots should have sized them in lockstep,
-		// but a partial-restore race could leave them mismatched).
-		for len(rec.EngineEndpoints) <= slot {
-			rec.EngineEndpoints = append(rec.EngineEndpoints, "")
-		}
 		if u.EngineEndpoint != "" {
-			rec.EngineEndpoints[slot] = u.EngineEndpoint
+			rec.Replicas[slot].EngineEndpoint = u.EngineEndpoint
 			// Singular engine_endpoint mirrors slot 0 for backward
 			// compat: forwardable()'s precondition checks the
 			// singular, and dashboards predating the parallel-
@@ -883,10 +879,10 @@ func (s *Service) patchDeploymentSlot(deployID, replicaInstanceID string, u Depl
 		// belongs to applyAggregateState once every slot has reported, so
 		// this deliberately never writes a terminal state.
 		if u.Phase != "" {
-			rec.CurrentPhase = slotLabel(rec.GetInstanceIds(), replicaInstanceID, u.Phase)
+			rec.CurrentPhase = slotLabel(EffectiveInstanceIDs(rec), replicaInstanceID, u.Phase)
 		}
 		if u.ProgressMessage != "" {
-			rec.ProgressMessage = slotLabel(rec.GetInstanceIds(), replicaInstanceID, u.ProgressMessage)
+			rec.ProgressMessage = slotLabel(EffectiveInstanceIDs(rec), replicaInstanceID, u.ProgressMessage)
 		}
 		if next, ok := provisioningAdvance(rec.GetState(), u.State); ok {
 			rec.State = next
@@ -952,10 +948,10 @@ func (s *Service) readSlotEndpoint(deployID string, slot int) string {
 	if !ok {
 		return ""
 	}
-	if slot < 0 || slot >= len(rec.GetEngineEndpoints()) {
+	if slot < 0 || slot >= len(rec.GetReplicas()) {
 		return ""
 	}
-	return rec.EngineEndpoints[slot]
+	return rec.GetReplicas()[slot].GetEngineEndpoint()
 }
 
 // placeReplicaInstance synthesizes one of the N per-replica Instance

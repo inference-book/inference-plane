@@ -39,8 +39,7 @@ var runtimeDeploymentFields = []protoreflect.Name{
 	"failure_reason",
 	"container_id",
 	"engine_endpoint",
-	"engine_endpoints",
-	"instance_ids",
+	"replicas",
 	"unhealthy_instance_ids",
 	"replica_specs",
 }

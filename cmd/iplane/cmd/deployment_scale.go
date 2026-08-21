@@ -104,7 +104,7 @@ func runDeploymentScale(cmd *cobra.Command, args []string) error {
 	}
 
 	dep := resp.GetDeployment()
-	current := len(dep.GetInstanceIds())
+	current := len(dep.GetReplicas())
 	if current == 0 && dep.GetInstanceId() != "" {
 		current = 1
 	}

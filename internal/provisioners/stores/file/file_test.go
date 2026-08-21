@@ -290,12 +290,12 @@ func TestSchemaVersion_BumpedTo1Dot6(t *testing.T) {
 func TestDeployment_InstanceIds_RoundTrip(t *testing.T) {
 	s := newStore(t)
 	want := &provisionerv1.Deployment{
-		Id:          "multi-instance-llama",
-		InstanceId:  "runpod-a", // singular = primary instance
-		InstanceIds: []string{"runpod-a", "vast-b", "lambda-c"},
-		Image:       "vllm/vllm-openai:0.7.0",
-		Model:       "Qwen/Qwen2.5-7B-Instruct",
-		State:       provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING,
+		Id:         "multi-instance-llama",
+		InstanceId: "runpod-a", // singular = primary instance
+		Replicas:   []*provisionerv1.ReplicaBacking{{InstanceIds: []string{"runpod-a"}}, {InstanceIds: []string{"vast-b"}}, {InstanceIds: []string{"lambda-c"}}},
+		Image:      "vllm/vllm-openai:0.7.0",
+		Model:      "Qwen/Qwen2.5-7B-Instruct",
+		State:      provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING,
 	}
 	if err := s.Update(func(f *provisioners.State) error {
 		f.Deployments["multi-instance-llama"] = want
@@ -311,7 +311,7 @@ func TestDeployment_InstanceIds_RoundTrip(t *testing.T) {
 	if !ok {
 		t.Fatal("deployment missing after round-trip")
 	}
-	gotIDs := dep.GetInstanceIds()
+	gotIDs := provisioners.EffectiveInstanceIDs(dep)
 	if len(gotIDs) != 3 {
 		t.Fatalf("InstanceIds = %v, want 3 entries", gotIDs)
 	}
@@ -324,11 +324,11 @@ func TestDeployment_InstanceIds_RoundTrip(t *testing.T) {
 
 // TestDeployment_InstanceIds_ForwardCompat: a v0.2-early state file
 // (schema 1.2, only singular instance_id) loads cleanly with an
-// EMPTY instance_ids list. Downstream readers handle this via
-// EffectiveInstanceIDs (added in #84): empty list falls back to
-// [instance_id] so single-instance Beat 1+2 deployments work
-// unchanged after the schema bump.
-func TestDeployment_InstanceIds_ForwardCompat(t *testing.T) {
+// EMPTY members list. Downstream readers handle this via
+// EffectiveInstanceIDs: no members falls back to [instance_id], so a
+// record written before the field existed still resolves to the one
+// member it always was.
+func TestDeployment_LegacyRecordResolvesToOneMember(t *testing.T) {
 	s := newStore(t)
 	raw := `{
   "schema_version": "1.2",
@@ -356,8 +356,14 @@ func TestDeployment_InstanceIds_ForwardCompat(t *testing.T) {
 	if !ok {
 		t.Fatal("legacy-llama missing")
 	}
-	if got := dep.GetInstanceIds(); len(got) != 0 {
-		t.Errorf("legacy record InstanceIds = %v, want empty (no field present in 1.2)", got)
+	// A record written before members existed carries only the singular
+	// instance_id, and the helper is what turns that into the one member
+	// it always was. Readers never branch on the absence themselves.
+	if got := provisioners.EffectiveInstanceIDs(dep); len(got) != 1 || got[0] != "my-pod" {
+		t.Errorf("legacy record resolves to %v, want [my-pod] via the singular fallback", got)
+	}
+	if len(dep.GetReplicas()) != 0 {
+		t.Errorf("replicas = %v, want empty: the field did not exist when this record was written", dep.GetReplicas())
 	}
 	if dep.GetInstanceId() != "my-pod" {
 		t.Errorf("singular instance_id = %q, want my-pod (must still load)", dep.GetInstanceId())
@@ -694,7 +700,7 @@ func TestUpdate_SurvivesGCPressure(t *testing.T) {
 // errString is the cheapest way to make an error from a literal in tests.
 type errString string
 
-func (e errString) Error() string { return string(e) }
+func (e errString) Error() string  { return string(e) }
 func errFromString(s string) error { return errString(s) }
 
 func itoa(i int) string {

@@ -56,7 +56,10 @@ func describeFleet(ctx context.Context, dc deploymentDescriber, ic instanceDescr
 	d := dep.GetDeployment()
 	out.Plan = planFromEngineArgs(d.GetEngineArgs())
 
-	ids := d.GetInstanceIds()
+	var ids []string
+	for _, r := range d.GetReplicas() {
+		ids = append(ids, r.GetInstanceIds()...)
+	}
 	if len(ids) == 0 {
 		// v0.1-shaped records carry the singular field only. Same
 		// fallback the router's effective helpers make.

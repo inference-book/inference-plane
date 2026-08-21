@@ -30,11 +30,10 @@ func TestRouter_DecisionCounter_Picked(t *testing.T) {
 	r := New(&fakeDeploymentClient{
 		describe: func(*provisionerv1.DescribeDeploymentRequest) (*provisionerv1.DescribeDeploymentResponse, error) {
 			return &provisionerv1.DescribeDeploymentResponse{Deployment: &provisionerv1.Deployment{
-				Id:              "d",
-				State:           provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING,
-				EngineEndpoint:  engine.URL, // satisfy forwardable's singular-endpoint gate
-				InstanceIds:     []string{"a"},
-				EngineEndpoints: []string{engine.URL},
+				Id:             "d",
+				State:          provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING,
+				EngineEndpoint: engine.URL, // satisfy forwardable's singular-endpoint gate
+				Replicas:       []*provisionerv1.ReplicaBacking{{InstanceIds: []string{"a"}, EngineEndpoint: engine.URL}},
 			}}, nil
 		},
 	}, recorder)
@@ -78,8 +77,7 @@ func TestRouter_DecisionCounter_NoReplicas(t *testing.T) {
 				Id:                   "d",
 				State:                provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING,
 				EngineEndpoint:       "http://stale:8000",
-				InstanceIds:          []string{"a", "b"},
-				EngineEndpoints:      []string{"http://a", "http://b"},
+				Replicas:             []*provisionerv1.ReplicaBacking{{InstanceIds: []string{"a"}, EngineEndpoint: "http://a"}, {InstanceIds: []string{"b"}, EngineEndpoint: "http://b"}},
 				UnhealthyInstanceIds: []string{"a", "b"},
 			}}, nil
 		},
@@ -125,11 +123,10 @@ func TestRouter_InFlightGauge_TracksRequest(t *testing.T) {
 	r := New(&fakeDeploymentClient{
 		describe: func(*provisionerv1.DescribeDeploymentRequest) (*provisionerv1.DescribeDeploymentResponse, error) {
 			return &provisionerv1.DescribeDeploymentResponse{Deployment: &provisionerv1.Deployment{
-				Id:              "d",
-				State:           provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING,
-				EngineEndpoint:  engine.URL,
-				InstanceIds:     []string{"a"},
-				EngineEndpoints: []string{engine.URL},
+				Id:             "d",
+				State:          provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING,
+				EngineEndpoint: engine.URL,
+				Replicas:       []*provisionerv1.ReplicaBacking{{InstanceIds: []string{"a"}, EngineEndpoint: engine.URL}},
 			}}, nil
 		},
 	}, recorder)
@@ -185,11 +182,10 @@ func TestRouter_InFlightCounter_OscillatesUnderConcurrency(t *testing.T) {
 	r := New(&fakeDeploymentClient{
 		describe: func(*provisionerv1.DescribeDeploymentRequest) (*provisionerv1.DescribeDeploymentResponse, error) {
 			return &provisionerv1.DescribeDeploymentResponse{Deployment: &provisionerv1.Deployment{
-				Id:              "d",
-				State:           provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING,
-				EngineEndpoint:  engine.URL,
-				InstanceIds:     []string{"a"},
-				EngineEndpoints: []string{engine.URL},
+				Id:             "d",
+				State:          provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING,
+				EngineEndpoint: engine.URL,
+				Replicas:       []*provisionerv1.ReplicaBacking{{InstanceIds: []string{"a"}, EngineEndpoint: engine.URL}},
 			}}, nil
 		},
 	}, recorder)
@@ -241,8 +237,7 @@ func TestRouter_InFlight_DoesNotTrackOnNoReplicas(t *testing.T) {
 				Id:                   "d",
 				State:                provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING,
 				EngineEndpoint:       "http://stale:8000",
-				InstanceIds:          []string{"a"},
-				EngineEndpoints:      []string{"http://a"},
+				Replicas:             []*provisionerv1.ReplicaBacking{{InstanceIds: []string{"a"}, EngineEndpoint: "http://a"}},
 				UnhealthyInstanceIds: []string{"a"},
 			}}, nil
 		},
