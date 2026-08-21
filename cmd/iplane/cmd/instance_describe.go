@@ -20,7 +20,14 @@ var instanceDescribeCmd = &cobra.Command{
 
 By default reads from the local state file. With --remote, calls the
 provider's describe endpoint and renders the live view -- useful when
-the local record is stale or the operator is reconciling.`,
+the local record is stale or the operator is reconciling.
+
+--remote also settles the case the local view cannot: a provider that
+keeps a registry and reports no such instance has told us the machine is
+gone, so the record is marked TERMINATED and every later 'instance list'
+stops claiming it is running. Any other provider failure leaves the
+record alone, since a slow or broken API is not evidence that a machine
+stopped billing.`,
 	RunE: runInstanceDescribe,
 }
 
@@ -53,5 +60,5 @@ func init() {
 	instanceCmd.AddCommand(instanceDescribeCmd)
 
 	instanceDescribeCmd.Flags().BoolVar(&describeRemote, "remote", false,
-		`query the provider directly rather than the local state file`)
+		`query the provider directly rather than the local state file; an instance the provider no longer has is recorded as TERMINATED`)
 }
