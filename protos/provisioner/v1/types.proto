@@ -1242,6 +1242,24 @@ message ReplicaSpec {
   // providers (runpod/vast/lambdalabs/local). One endpoint per replica,
   // so the multi-endpoint form expands to N one-each ReplicaSpec entries.
   string engine_endpoint = 5;
+
+  // nodes is how many machines ONE member of this group is assembled
+  // from. 0 and 1 both mean one machine, which is every deployment that
+  // existed before this field.
+  //
+  // Above one, the group's members each rent `nodes` machines and serve
+  // on a single endpoint, because a model too large for any one box is
+  // one engine spanning several rather than several engines (#212). The
+  // machines are created and destroyed as a unit: a member that gets
+  // three of its four nodes is not three-quarters of an engine, it is a
+  // failed member holding three rentals that have to go back.
+  //
+  // What iplane does NOT do is assemble the engine across them. Which
+  // node is the head, how ranks find each other, what the workers run:
+  // all of that is engine configuration passed through `engine_args`,
+  // and opening that box is the line this project does not cross. iplane
+  // rents the span, records it, and tears it down together.
+  int32 nodes = 6;
 }
 
 // Priority is the lane an inbound request joins on its way to the

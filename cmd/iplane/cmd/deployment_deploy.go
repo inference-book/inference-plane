@@ -57,6 +57,7 @@ var (
 	deployIdleTTL         time.Duration
 	deployNoIdleDestroy   bool
 	deployReplicas        int32
+	deployNodes           int32
 	deployReplicaSpecs    []string
 	deployEngineEndpoints []string
 	deployOtelEndpoint    string
@@ -255,6 +256,7 @@ func runDeploymentDeploy(cmd *cobra.Command, args []string) error {
 			Provider: deployProvider,
 			Region:   deployRegion,
 			Replicas: deployReplicas,
+			Nodes:    deployNodes,
 			Requirements: &provisionerv1.ResourceRequirements{
 				Class:         deployClass,
 				Sku:           deploySKU,
@@ -334,6 +336,10 @@ func init() {
 	f.Int32Var(&deployGPUCount, "gpu-count", 0, `number of GPUs for auto-provisioning (default 1)`)
 	f.StringVar(&deployFabric, "fabric", "", fabricFlagUsage)
 	f.StringVar(&deployArch, "arch", "", archFlagUsage)
+	f.Int32Var(&deployNodes, "nodes", 0,
+		`machines ONE replica is assembled from (default 1). Above 1, the replica rents this many machines, runs the image on all of them and serves on the first: `+
+			`the shape a model too large for any single box needs. They are created and destroyed as a unit, because a replica missing a node is not a replica. `+
+			`How the engine assembles across them is yours to say through --engine-args`)
 	f.Int32Var(&deployFabricBW, "min-fabric-gbps", 0, minFabricGbpsUsage)
 	f.Int32Var(&deployEnginePort, "engine-port", 8000, `port the engine listens on`)
 	f.StringSliceVar(&deployEngineArgs, "engine-args", nil,

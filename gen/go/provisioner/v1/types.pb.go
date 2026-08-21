@@ -3287,8 +3287,25 @@ type ReplicaSpec struct {
 	// providers (runpod/vast/lambdalabs/local). One endpoint per replica,
 	// so the multi-endpoint form expands to N one-each ReplicaSpec entries.
 	EngineEndpoint string `protobuf:"bytes,5,opt,name=engine_endpoint,json=engineEndpoint,proto3" json:"engine_endpoint,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// nodes is how many machines ONE member of this group is assembled
+	// from. 0 and 1 both mean one machine, which is every deployment that
+	// existed before this field.
+	//
+	// Above one, the group's members each rent `nodes` machines and serve
+	// on a single endpoint, because a model too large for any one box is
+	// one engine spanning several rather than several engines (#212). The
+	// machines are created and destroyed as a unit: a member that gets
+	// three of its four nodes is not three-quarters of an engine, it is a
+	// failed member holding three rentals that have to go back.
+	//
+	// What iplane does NOT do is assemble the engine across them. Which
+	// node is the head, how ranks find each other, what the workers run:
+	// all of that is engine configuration passed through `engine_args`,
+	// and opening that box is the line this project does not cross. iplane
+	// rents the span, records it, and tears it down together.
+	Nodes         int32 `protobuf:"varint,6,opt,name=nodes,proto3" json:"nodes,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ReplicaSpec) Reset() {
@@ -3354,6 +3371,13 @@ func (x *ReplicaSpec) GetEngineEndpoint() string {
 		return x.EngineEndpoint
 	}
 	return ""
+}
+
+func (x *ReplicaSpec) GetNodes() int32 {
+	if x != nil {
+		return x.Nodes
+	}
+	return 0
 }
 
 // InterconnectHealth is what one node can see about the fast links between
@@ -3890,13 +3914,14 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"\n" +
 	"mount_path\x18\a \x01(\tR\tmountPath\x129\n" +
 	"\n" +
-	"created_at\x18\b \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\"\xd0\x01\n" +
+	"created_at\x18\b \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\"\xe6\x01\n" +
 	"\vReplicaSpec\x12\x1a\n" +
 	"\bprovider\x18\x01 \x01(\tR\bprovider\x12\x16\n" +
 	"\x06region\x18\x02 \x01(\tR\x06region\x12H\n" +
 	"\frequirements\x18\x03 \x01(\v2$.provisioner.v1.ResourceRequirementsR\frequirements\x12\x1a\n" +
 	"\breplicas\x18\x04 \x01(\x05R\breplicas\x12'\n" +
-	"\x0fengine_endpoint\x18\x05 \x01(\tR\x0eengineEndpoint\"n\n" +
+	"\x0fengine_endpoint\x18\x05 \x01(\tR\x0eengineEndpoint\x12\x14\n" +
+	"\x05nodes\x18\x06 \x01(\x05R\x05nodes\"n\n" +
 	"\x12InterconnectHealth\x12\x1c\n" +
 	"\tavailable\x18\x01 \x01(\bR\tavailable\x12\x1f\n" +
 	"\vlinks_total\x18\x02 \x01(\x05R\n" +

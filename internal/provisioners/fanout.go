@@ -35,6 +35,53 @@ func replicaInstanceID(deployID string, slot, totalSlots int) string {
 	return fmt.Sprintf("%s-r%d", deployID, slot)
 }
 
+// nodeInstanceID names one machine of a member that spans several.
+//
+// A one-node member keeps the member's own id, so every deployment that
+// existed before spans were provisionable reads exactly as it did. Above
+// one, the nodes are suffixed by rank: k3-r0-n0, k3-r0-n1, and so on,
+// which keeps the member's id a prefix of its nodes' and makes ownership
+// readable off the name the way replicaInstanceID already relies on.
+func nodeInstanceID(memberID string, node, totalNodes int) string {
+	if totalNodes <= 1 {
+		return memberID
+	}
+	return fmt.Sprintf("%s-n%d", memberID, node)
+}
+
+// memberPlacement is the machines rented for one member, or the reason
+// none of it happened.
+//
+// A member is all-or-nothing, so this carries the whole set and one
+// error rather than a per-node error: three of four nodes is not a
+// partial success to be reported, it is a failure holding three rentals
+// that have to go back.
+type memberPlacement struct {
+	instances []*provisionerv1.Instance
+	err       error
+}
+
+// primary is the member's rank-0 machine, the one the engine is deployed
+// onto and the one whose id names the member.
+func (m memberPlacement) primary() *provisionerv1.Instance {
+	if len(m.instances) == 0 {
+		return nil
+	}
+	return m.instances[0]
+}
+
+// ids returns every machine in the member, skipping any that failed to
+// place. What billed, in other words.
+func (m memberPlacement) ids() []string {
+	var out []string
+	for _, inst := range m.instances {
+		if inst != nil {
+			out = append(out, inst.GetId())
+		}
+	}
+	return out
+}
+
 // ownsInstance reports whether instanceID is an Instance this deployment
 // provisioned for itself, as opposed to one the operator created separately
 // and pointed the deployment at.
@@ -473,9 +520,9 @@ func (s *Service) fanOutProvision(ctx context.Context, req *provisionerv1.Create
 // provider's Deployer (resolved via deployerFor on the per-slot
 // Instance). The SSH key per-slot is loaded by provider name; a
 // keystore failure for one provider doesn't break other slots.
-func (s *Service) provisionSlots(ctx context.Context, specs []*provisionerv1.ReplicaSpec, dep *provisionerv1.Deployment, deployID string, startingSlot, totalSlots int, recordSlots func(deployID string, placements []*provisionerv1.Instance, startingSlot int)) (int, []string) {
+func (s *Service) provisionSlots(ctx context.Context, specs []*provisionerv1.ReplicaSpec, dep *provisionerv1.Deployment, deployID string, startingSlot, totalSlots int, recordSlots func(deployID string, placements []memberPlacement, startingSlot int)) (int, []string) {
 	count := len(specs)
-	placements, placeErrs := s.placeSlots(ctx, specs, dep.GetImage(), deployID, startingSlot, totalSlots)
+	placements := s.placeSlots(ctx, specs, dep.GetImage(), deployID, startingSlot, totalSlots)
 	// Stash the per-slot specs on the Service so recordSlots can
 	// pick them up (the recordSlots signature is shared between
 	// create/scale variants; passing specs through would have meant
@@ -489,12 +536,13 @@ func (s *Service) provisionSlots(ctx context.Context, specs []*provisionerv1.Rep
 	recordSlots(deployID, placements, startingSlot)
 
 	results := make(chan fanOutResult, count)
-	for i, inst := range placements {
+	for i, member := range placements {
 		slot := startingSlot + i
+		inst := member.primary()
 		if inst == nil {
 			results <- fanOutResult{
 				instanceID: replicaInstanceID(deployID, slot, totalSlots),
-				err:        placeErrs[i],
+				err:        member.err,
 			}
 			continue
 		}
@@ -511,7 +559,7 @@ func (s *Service) provisionSlots(ctx context.Context, specs []*provisionerv1.Rep
 			}
 			continue
 		}
-		go s.launchReplica(ctx, deployID, slot, inst, key, dep, results)
+		go s.launchMember(ctx, deployID, slot, member, key, dep, results)
 	}
 
 	successes := 0
@@ -570,25 +618,69 @@ func (s *Service) replicaKey(providerName string) (*sshkeys.KeyPair, error) {
 // Idempotent: placeReplicaInstance reuses an existing Instance
 // record if one already exists at the synthesized id (re-runs of a
 // failed CreateDeployment don't double-rent).
-func (s *Service) placeSlots(ctx context.Context, specs []*provisionerv1.ReplicaSpec, baseImage, deployID string, startingSlot, totalSlots int) ([]*provisionerv1.Instance, []error) {
+func (s *Service) placeSlots(ctx context.Context, specs []*provisionerv1.ReplicaSpec, baseImage, deployID string, startingSlot, totalSlots int) []memberPlacement {
 	count := len(specs)
-	placements := make([]*provisionerv1.Instance, count)
-	placeErrs := make([]error, count)
+	out := make([]memberPlacement, count)
 	var wg sync.WaitGroup
 	for i := range count {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			inst, err := s.placeReplicaInstance(ctx, specs[i], baseImage, deployID, startingSlot+i, totalSlots)
-			if err != nil {
-				placeErrs[i] = err
-				return
-			}
-			placements[i] = inst
+			out[i] = s.placeMember(ctx, specs[i], baseImage, deployID, startingSlot+i, totalSlots)
 		}(i)
 	}
 	wg.Wait()
-	return placements, placeErrs
+	return out
+}
+
+// placeMember places every machine one member is assembled from.
+//
+// All-or-nothing, and the "nothing" half is the part that matters: a
+// member that gets three of its four nodes has rented three machines
+// that will bill until somebody notices, so the ones that succeeded are
+// returned before the failure is reported. That is the rule the
+// across-member fan-out deliberately does not follow, because three of
+// five independent replicas is a service and three of four nodes is not
+// an engine (#212).
+func (s *Service) placeMember(ctx context.Context, spec *provisionerv1.ReplicaSpec, baseImage, deployID string, slot, totalSlots int) memberPlacement {
+	nodes := int(spec.GetNodes())
+	if nodes < 1 {
+		nodes = 1
+	}
+	memberID := replicaInstanceID(deployID, slot, totalSlots)
+
+	var out memberPlacement
+	for n := range nodes {
+		inst, err := s.placeReplicaInstance(ctx, spec, baseImage, deployID, slot, totalSlots, nodeInstanceID(memberID, n, nodes))
+		if err != nil {
+			out.err = fmt.Errorf("node %d of %d: %w", n, nodes, err)
+			s.returnMember(ctx, out.instances)
+			out.instances = nil
+			return out
+		}
+		out.instances = append(out.instances, inst)
+	}
+	return out
+}
+
+// returnMember terminates machines a failed member had already rented.
+//
+// Best-effort by necessity: the provider call can fail and there is
+// nothing further to escalate to, so it logs and moves on rather than
+// masking the placement error that got us here. The instance records are
+// left in state either way, because a record of a machine we could not
+// return is what an operator needs in order to return it by hand.
+func (s *Service) returnMember(ctx context.Context, instances []*provisionerv1.Instance) {
+	for _, inst := range instances {
+		if inst == nil {
+			continue
+		}
+		if _, err := s.DestroyInstance(ctx, &provisionerv1.DestroyInstanceRequest{Id: inst.GetId()}); err != nil {
+			slog.Error("could not return a machine from a failed member; it may still be billing",
+				"instance", inst.GetId(), "provider", inst.GetProvider(),
+				"provider_id", inst.GetProviderId(), "error", err)
+		}
+	}
 }
 
 // recordCreateSlots persists the instance_ids / engine_endpoints /
@@ -602,7 +694,7 @@ func (s *Service) placeSlots(ctx context.Context, specs []*provisionerv1.Replica
 // specs on the Service for the recorder to pick up). For
 // recordCreateSlots, specs reflects the full slot table starting
 // at slot 0.
-func (s *Service) recordCreateSlots(deployID string, placements []*provisionerv1.Instance, _ int) {
+func (s *Service) recordCreateSlots(deployID string, placements []memberPlacement, _ int) {
 	specs := s.takePendingReplicaSpecs()
 	_ = s.store.Update(func(f *State) error {
 		rec, ok := f.Deployments[deployID]
@@ -610,17 +702,13 @@ func (s *Service) recordCreateSlots(deployID string, placements []*provisionerv1
 			return nil
 		}
 		count := len(placements)
-		// One member per placement, each backed by that one instance.
-		// A member whose placement failed keeps its slot with no
-		// instances, so the arrays stay index-aligned with
-		// replica_specs and #93's reconciliation knows which slot to
-		// retry.
+		// One member per placement, holding every machine it was
+		// assembled from. A member whose placement failed keeps its
+		// slot with no machines, so members stay index-aligned with
+		// replica_specs and #93's reconciliation knows which to retry.
 		rec.Replicas = make([]*provisionerv1.ReplicaBacking, count)
-		for i, inst := range placements {
-			rec.Replicas[i] = &provisionerv1.ReplicaBacking{}
-			if inst != nil {
-				rec.Replicas[i].InstanceIds = []string{inst.GetId()}
-			}
+		for i, member := range placements {
+			rec.Replicas[i] = &provisionerv1.ReplicaBacking{InstanceIds: member.ids()}
 		}
 		// Single-instance carve-out: preserve Ch 6's 1:1 mapping
 		// by also populating the singular dep.instance_id for the
@@ -629,8 +717,11 @@ func (s *Service) recordCreateSlots(deployID string, placements []*provisionerv1
 		// just mirroring the field. Multi-replica leaves
 		// dep.instance_id empty; readers consult instance_ids[]
 		// via EffectiveInstanceIDs.
-		if count == 1 && placements[0] != nil {
-			rec.InstanceId = placements[0].GetId()
+		// Single-machine, single-member deployments keep the singular
+		// field as Ch 6's shorthand. A member that spans nodes has no
+		// single instance to name, so it does not get one.
+		if count == 1 && len(placements[0].ids()) == 1 {
+			rec.InstanceId = placements[0].ids()[0]
 		}
 		// Stamp replica_specs in lockstep with the other arrays.
 		// Each slot's spec is the operator's intent for that slot
@@ -650,7 +741,7 @@ func (s *Service) recordCreateSlots(deployID string, placements []*provisionerv1
 // slots starting at startingSlot.
 // Existing slots (including DEGRADED tombstones with empty ids)
 // are untouched -- scale appends, never repairs.
-func (s *Service) recordAppendedSlots(deployID string, placements []*provisionerv1.Instance, startingSlot int) {
+func (s *Service) recordAppendedSlots(deployID string, placements []memberPlacement, startingSlot int) {
 	specs := s.takePendingReplicaSpecs()
 	_ = s.store.Update(func(f *State) error {
 		rec, ok := f.Deployments[deployID]
@@ -667,10 +758,8 @@ func (s *Service) recordAppendedSlots(deployID string, placements []*provisioner
 		for len(rec.ReplicaSpecs) < startingSlot {
 			rec.ReplicaSpecs = append(rec.ReplicaSpecs, nil)
 		}
-		for i, inst := range placements {
-			if inst != nil {
-				rec.Replicas[startingSlot+i].InstanceIds = []string{inst.GetId()}
-			}
+		for i, member := range placements {
+			rec.Replicas[startingSlot+i].InstanceIds = member.ids()
 		}
 		// Append the new slots' specs. Failed slots still get their
 		// spec recorded so #93's reconciliation can retry.
@@ -679,6 +768,61 @@ func (s *Service) recordAppendedSlots(deployID string, placements []*provisioner
 		}
 		return nil
 	})
+}
+
+// launchMember brings up every machine of one member and reports the
+// member's single outcome.
+//
+// The image goes onto every node, because that is how a multi-node
+// engine runs: the same container everywhere, ranks finding each other
+// through the arguments the operator passed, and rank 0 serving. iplane
+// still does not decide how they assemble; it puts the image on the
+// machines it rented and lets engine_args say the rest.
+//
+// All-or-nothing, which is the whole difference from the fan-out around
+// it. One node that never came up means there is no engine, so the
+// machines that did come up are handed back rather than left billing
+// against nothing (#212).
+func (s *Service) launchMember(ctx context.Context, deployID string, slot int, member memberPlacement, key *sshkeys.KeyPair, dep *provisionerv1.Deployment, results chan<- fanOutResult) {
+	nodes := member.instances
+	if len(nodes) == 1 {
+		// The ordinary case, and deliberately the same code path it has
+		// always been: one machine, one engine, one result.
+		s.launchReplica(ctx, deployID, slot, nodes[0], key, dep, results)
+		return
+	}
+
+	per := make(chan fanOutResult, len(nodes))
+	for _, inst := range nodes {
+		go s.launchReplica(ctx, deployID, slot, inst, key, dep, per)
+	}
+
+	var (
+		endpoint string
+		failures []string
+	)
+	for range nodes {
+		r := <-per
+		switch {
+		case r.err != nil:
+			failures = append(failures, fmt.Sprintf("%s: %v", r.instanceID, r.err))
+		case r.instanceID == member.primary().GetId():
+			// The member serves on its rank-0 node's address. The other
+			// nodes report their own and nothing routes to them.
+			endpoint = r.endpoint
+		}
+	}
+
+	if len(failures) > 0 {
+		s.returnMember(ctx, nodes)
+		results <- fanOutResult{
+			instanceID: member.primary().GetId(),
+			err: fmt.Errorf("member spanning %d nodes lost %d of them, so the whole span was returned: %s",
+				len(nodes), len(failures), strings.Join(failures, "; ")),
+		}
+		return
+	}
+	results <- fanOutResult{instanceID: member.primary().GetId(), endpoint: endpoint}
 }
 
 // launchReplica runs one replica's executor in a goroutine and emits
@@ -838,7 +982,14 @@ func (s *Service) patchDeploymentSlot(deployID, replicaInstanceID string, u Depl
 		if slot < 0 {
 			return nil
 		}
-		if u.EngineEndpoint != "" {
+		// Only the member's rank-0 node names the member's endpoint. On a
+		// span every node reports one and nothing routes to the others,
+		// so taking the last writer would hand traffic to a worker.
+		primary := ""
+		if ids := rec.Replicas[slot].GetInstanceIds(); len(ids) > 0 {
+			primary = ids[0]
+		}
+		if u.EngineEndpoint != "" && replicaInstanceID == primary {
 			rec.Replicas[slot].EngineEndpoint = u.EngineEndpoint
 			// Singular engine_endpoint mirrors slot 0 for backward
 			// compat: forwardable()'s precondition checks the
@@ -975,7 +1126,7 @@ func (s *Service) readSlotEndpoint(deployID string, slot int) string {
 // Idempotent: if an Instance already exists at the synthesized id,
 // reuse it (re-runs of a partially-failed CreateDeployment don't
 // double-rent the slot).
-func (s *Service) placeReplicaInstance(ctx context.Context, spec *provisionerv1.ReplicaSpec, baseImage, deployID string, slot, totalSlots int) (*provisionerv1.Instance, error) {
+func (s *Service) placeReplicaInstance(ctx context.Context, spec *provisionerv1.ReplicaSpec, baseImage, deployID string, slot, totalSlots int, instanceID string) (*provisionerv1.Instance, error) {
 	if spec == nil {
 		return nil, status.Error(codes.InvalidArgument, "replica spec is required")
 	}
@@ -999,7 +1150,6 @@ func (s *Service) placeReplicaInstance(ctx context.Context, spec *provisionerv1.
 		reqs = &provisionerv1.ResourceRequirements{}
 	}
 
-	instanceID := replicaInstanceID(deployID, slot, totalSlots)
 	if f, err := s.store.Read(); err == nil {
 		if existing, ok := f.Instances[instanceID]; ok {
 			return existing, nil
@@ -1109,6 +1259,11 @@ func resolveCreateReplicaSpecs(req *provisionerv1.CreateDeploymentRequest) ([]*p
 				Region:         g.GetRegion(),
 				Requirements:   g.GetRequirements(),
 				EngineEndpoint: g.GetEngineEndpoint(), // external attach target
+				// Carried per expanded slot: `replicas` is how many
+				// members the group asked for and `nodes` is how many
+				// machines each of them is assembled from, so the
+				// expansion divides the first and preserves the second.
+				Nodes: g.GetNodes(),
 				// replicas left zero == 1 on the persisted form.
 			})
 		}

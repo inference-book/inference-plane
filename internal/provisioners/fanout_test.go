@@ -47,11 +47,22 @@ type fanOutMockProvider struct {
 	name      string
 	deployFn  func(inst *provisionerv1.Instance, emit func(provisioners.DeployStateUpdate)) error
 	destroyFn func(inst *provisionerv1.Instance) error
+	// spawnFn refuses to rent a particular machine, which is how a test
+	// induces the half-rented member that all-or-nothing exists for.
+	spawnFn func(spec *provisionerv1.Spec) error
+	// terminated records every machine handed back, so a test can assert
+	// the ones a failed member had already rented went away.
+	terminated []string
 }
 
 func (p *fanOutMockProvider) Name() string { return p.name }
 
 func (p *fanOutMockProvider) Spawn(_ context.Context, spec *provisionerv1.Spec) (*provisionerv1.Instance, error) {
+	if p.spawnFn != nil {
+		if err := p.spawnFn(spec); err != nil {
+			return nil, err
+		}
+	}
 	return &provisionerv1.Instance{
 		Id:         spec.GetId(),
 		ProviderId: p.name + ":" + spec.GetId(),
@@ -61,7 +72,10 @@ func (p *fanOutMockProvider) Spawn(_ context.Context, spec *provisionerv1.Spec) 
 	}, nil
 }
 
-func (p *fanOutMockProvider) Terminate(_ context.Context, _ string) error { return nil }
+func (p *fanOutMockProvider) Terminate(_ context.Context, providerID string) error {
+	p.terminated = append(p.terminated, providerID)
+	return nil
+}
 func (p *fanOutMockProvider) Describe(_ context.Context, providerID string) (*provisionerv1.Instance, error) {
 	return &provisionerv1.Instance{
 		Id:         strings.TrimPrefix(providerID, p.name+":"),
@@ -553,4 +567,18 @@ func membersFrom(ids, endpoints []string) []*provisionerv1.ReplicaBacking {
 		}
 	}
 	return out
+}
+
+// fanOutSvcWith wires a Service around a provider the caller built, for
+// tests that need to program Spawn as well as Deploy.
+func fanOutSvcWith(t *testing.T, prov *fanOutMockProvider) (*provisioners.Service, *file.Store) {
+	t.Helper()
+	store, err := file.Open(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("file.Open: %v", err)
+	}
+	svc := provisioners.New([]provisioners.Provider{prov}, store, "default",
+		provisioners.WithKeyStore(newKeyStore(t)),
+	)
+	return svc, store
 }
