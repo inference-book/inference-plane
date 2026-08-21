@@ -29,6 +29,10 @@ RunPod is the only one that could, since it is the only `MountAttacher`.
 
 ## Price for eight cards
 
+> The A100 rows below cannot run GLM-5.2. See "The cards have to be Hopper
+> or newer" further down; the table is kept because the price spread across
+> providers is the point of it.
+
 | | card | $/hr |
 | --- | --- | --- |
 | Vast | 8x A100 80G | **10.67** |
@@ -124,14 +128,77 @@ The repo's own defaults are far behind this: `upDefaultImage` is `v0.7.0`
 and `pinned-versions.env` carries `ENGINE_VERSION=0.7.3`. A Part IV deploy
 has to pass `--image` explicitly and will inherit nothing usable.
 
+## The cards have to be Hopper or newer, which retires the cheap option
+
+The engine version is not the only gate. GLM-5.2's sparse attention needs
+kernels that do not exist below Hopper: vLLM's `FLASHMLA_SPARSE` backend
+and the lightning indexer's `fp8_mqa_logits` are Hopper and Blackwell only,
+and upstream has declined SM80-class patches, so Ampere support lives in a
+community Triton backend (PR 38476) rather than in a released image.
+
+So the 8x A100 boxes this document priced at $10.40-10.67 cannot serve this
+model at any download speed. That is worth stating plainly because the
+first version of this document recommended them, and a pre-flight run on
+2026-08-20 rented one, spent thirty-five minutes downloading weights and
+would have failed at engine start regardless.
+
+**Hopper narrows the field to roughly double the price.** RunPod's 8x H100
+at $21.52/hr and Vast's 8x H100 PCIe at $18.14/hr are what remain. The Vast
+box is PCIe-class rather than SXM, which for a tensor-parallel 753B model
+risks confounding the throughput numbers a chapter is drawn from, so the
+declared-fabric H100 SXM is the safer substrate despite costing more.
+
+## The checkpoint is a separate decision from the model
+
+`zai-org/GLM-5.2` is unquantized: 1506.7 GB at fp16, 753.3 GB at fp8. The
+"452 GB at four bits" figure this document sizes against is an arithmetic
+projection, not a repo you can deploy. A four-bit run needs a published
+four-bit build, and which one decides the card:
+
+| build | format | size | runs on |
+| --- | --- | --- | --- |
+| `cyankiwi/GLM-5.2-AWQ-INT4` | compressed-tensors W4A16 | 474 GB | Ampere and up (Marlin), so Hopper |
+| `amd/GLM-5.2-MXFP4` | MXFP4 | ~450 GB | Hopper and up |
+| `nvidia/GLM-5.2-NVFP4` | NVFP4 | ~450 GB | Blackwell only |
+| `zai-org/GLM-5.2-FP8` | FP8, first-party | 753 GB | Hopper and up, needs 8x H200 for the room |
+
+Eight 80 GB cards hold a four-bit build with headroom and cannot hold the
+FP8 one. The first-party checkpoint therefore implies H200s at $28.72/hr,
+which buys out the risk of trusting a third-party quantization of a
+frontier model.
+
+## A warm cache needs the cards and the volume in the same datacenter
+
+RunPod's network volumes are locked to a datacenter, so a model staged in
+the wrong one is a cache no deploy can mount. That makes "where is the
+capacity" a scheduling input rather than a detail.
+
+Measured 2026-08-21: RunPod had eight-card capacity in exactly one
+datacenter on the whole platform, AP-IN-1, and AP-IN-1 supports no volumes.
+At four cards the picture is fine, with H200s in two storage-capable
+datacenters, but a four-bit GLM-5.2 is 118 GB per card on four and does not
+fit. So the warm-cache route was unavailable that day, and the cold route
+was the only one on offer.
+
+Vast does not have this problem so much as it has a worse one: its volumes
+are machine-scoped rather than datacenter-scoped, so `iplane model pin`
+does not reach it at all (#254). Every Vast run pays the download.
+
+`iplane capacity --provider runpod` now reports the datacenter and whether
+it holds volumes (#399), so this is checkable rather than something to
+rediscover in GraphQL.
+
 ## Recommendation for #358
 
-Vast, filtered to a high-bandwidth host, at `--image
-vllm/vllm-openai:v0.27.1`. Roughly a fifth of the AWS price, measured
-fabric rather than declared, and a four-minute weight download that makes
-the absent warm cache irrelevant for a single run. Take capacity when the
-sampler shows it.
+Wait for eight-card Hopper capacity in a storage-capable datacenter, then
+pin and run warm. `hack/capacity-sample.sh` is the instrument; the question
+it answers is whether that combination appears often enough to schedule
+around, and nothing else can answer it.
 
-RunPod becomes the better answer for repeated runs, since a network volume
-turns the download into a one-off. Volumes are datacenter-locked and sized
-0-4000 GB, so 450 GB is comfortable.
+Failing that, cold on whichever Hopper box is available, at `--image
+vllm/vllm-openai:v0.27.1`, accepting a 474 GB download per attempt. Budget
+for more than one attempt: the pre-flight found three defects in the deploy
+path before it got as far as loading a model (#392, #393, #397).
+
+The engine-ready timeout, the client timeout and the server write timeout
+all have to cover the download. Thirty-five minutes was not enough.
