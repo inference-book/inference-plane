@@ -218,6 +218,17 @@ func dryRunDeploy(ctx context.Context, w io.Writer, client deploymentClient, dep
 	fmt.Fprintf(w, "[dry-run]   image:       %s\n", dep.GetImage())
 	fmt.Fprintf(w, "[dry-run]   model:       %s\n", dep.GetModel())
 	fmt.Fprintf(w, "[dry-run]   engine port: %d\n", dep.GetEnginePort())
+	// How many machines this would rent, which is the number a --nodes
+	// preview exists to show. A replica assembled from four machines
+	// bills four times over whether or not the engine ever assembles.
+	if nodes := deployNodes; nodes > 1 {
+		replicas := deployReplicas
+		if replicas < 1 {
+			replicas = 1
+		}
+		fmt.Fprintf(w, "[dry-run]   span:        %d machine(s) per replica x %d replica(s) = %d rentals, serving on %d endpoint(s)\n",
+			nodes, replicas, int(nodes)*int(replicas), replicas)
+	}
 	if len(dep.GetEngineArgs()) > 0 {
 		fmt.Fprintf(w, "[dry-run]   engine args: %v\n", dep.GetEngineArgs())
 	}

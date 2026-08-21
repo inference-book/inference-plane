@@ -157,3 +157,40 @@ way they already stamp `provider_id` from `ContainerID`; the single-instance
 one keys on the deployment's **instance id**, because that coincides with
 the deployment id only for an auto-provisioned 1:1 record and a deployment
 placed onto an existing instance otherwise prices nothing.
+
+## A member spanning nodes is all-or-nothing, and the fan-out around it is not
+
+`ReplicaSpec.nodes` above 1 makes each member of that group rent several
+machines and serve on one endpoint (#212). The two rules look
+contradictory next to each other and both are right:
+
+- **Across members**, a partial result is a service. Three of five
+  independent replicas is DEGRADED and still answering, so the fan-out
+  keeps the survivors.
+- **Within a member**, a partial result is nothing. Three of four nodes
+  is not three-quarters of an engine, so `launchMember` hands the whole
+  span back and reports one failure.
+
+The money is why the second rule exists rather than being a nicety. On an
+image-native provider the machine is rented inside `Deploy`, so a member
+that lost one node is holding N-1 live rentals against an engine that
+never started, and nothing else would ever return them.
+
+**The image goes onto every node.** That is how a multi-node engine runs:
+the same container everywhere, ranks finding each other through the
+arguments the operator passed, rank 0 serving. iplane still does not
+decide how they assemble; it puts the image on the machines and lets
+`engine_args` say the rest, which is the same boundary the engine-args
+pass-through has always drawn.
+
+**Only rank 0 names the member's endpoint.** Every node reports one and
+nothing routes to the workers, so `patchDeploymentSlot` takes the
+endpoint only from the member's first instance. Without that the last
+writer wins and traffic goes to a worker.
+
+**`returnMember` is best-effort by necessity.** It calls `DestroyInstance`
+per machine and logs what it cannot return; there is nothing to escalate
+to. A machine whose provider id was never recorded cannot be terminated
+through the API at all, which is the same hole #161 describes from the
+other side, and the instance record is deliberately left behind so an
+operator has something to act on.
