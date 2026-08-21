@@ -195,6 +195,26 @@ message ResourceRequirements {
   // shape of failure the fabric rules exist to prevent (see #283's
   // neighbourhood, and the FabricSource doctrine).
   ReclaimPolicy reclaim_policy = 9;
+
+  // CPU architecture the rented machine has to have, normalized: "amd64"
+  // or "arm64". Empty means the operator did not state one.
+  //
+  // The constraint comes from the engine image rather than from a
+  // preference. An x86 image will not start on an arm64 host, and nothing
+  // else in the deploy path notices before the container fails on a
+  // machine that is already billing.
+  //
+  // Not hypothetical: Lambda's GH200 is arm64 and every other shape it
+  // sells is x86_64, and it is the cheapest Lambda shape clearing 80 GB, so
+  // a one-card class=large request resolves it first (#390).
+  //
+  // Empty means unconstrained, which keeps every request that predates this
+  // field behaving as it did. A row or candidate whose architecture nobody
+  // reported is kept rather than excluded, because unlike a fabric this is
+  // not a capability whose absence costs the whole bill: the failure is a
+  // container that will not start, discovered in minutes rather than in a
+  // silently degraded rental.
+  string architecture = 10;
 }
 
 // ReclaimPolicy says whether capacity the provider can take back is acceptable.

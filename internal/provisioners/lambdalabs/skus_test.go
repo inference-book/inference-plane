@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
+	"github.com/inference-book/inference-plane/internal/provisioners"
 )
 
 // A whole-node request has to resolve here at all. Every catalog row was
@@ -150,4 +151,37 @@ func contains(haystack []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// Lambda's GH200 is arm64 and every other shape it sells is x86_64, which
+// the recorded response says outright. Since #380 corrected the A100 SXM4
+// to its real 40 GB, the GH200 is also the cheapest Lambda shape clearing
+// 80 GB, so a one-card class=large request resolves an arm64 box first and
+// an x86 engine image will not start on it (#390).
+func TestMatchSKUsHonoursAnArchitectureRequest(t *testing.T) {
+	amd := MatchSKUs(&provisionerv1.ResourceRequirements{MinVramGb: 80, Architecture: "amd64"})
+	if contains(amd, "gpu_1x_gh200") {
+		t.Errorf("an arm64 shape satisfied an amd64 request: %v", amd)
+	}
+	if len(amd) == 0 {
+		t.Fatal("the x86 shapes went missing too")
+	}
+
+	// Unstated stays unconstrained, so nothing that worked before changes.
+	any := MatchSKUs(&provisionerv1.ResourceRequirements{MinVramGb: 80})
+	if !contains(any, "gpu_1x_gh200") {
+		t.Errorf("gh200 dropped from an unconstrained request: %v", any)
+	}
+}
+
+// The architecture in the catalog has to match what the vendor reports,
+// for the same reason every other field does: this is a transcription.
+func TestCatalogArchitectureMatchesTheVendor(t *testing.T) {
+	fixture := loadInstanceTypes(t)
+	for _, sku := range skus {
+		want := provisioners.NormalizeArch(fixture[sku.Name].InstanceType.Architecture)
+		if sku.Architecture != want {
+			t.Errorf("%s: Architecture %q, Lambda says %q", sku.Name, sku.Architecture, want)
+		}
+	}
 }

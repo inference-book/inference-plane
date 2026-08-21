@@ -762,6 +762,25 @@ type ResourceRequirements struct {
 	// shape of failure the fabric rules exist to prevent (see #283's
 	// neighbourhood, and the FabricSource doctrine).
 	ReclaimPolicy ReclaimPolicy `protobuf:"varint,9,opt,name=reclaim_policy,json=reclaimPolicy,proto3,enum=provisioner.v1.ReclaimPolicy" json:"reclaim_policy,omitempty"`
+	// CPU architecture the rented machine has to have, normalized: "amd64"
+	// or "arm64". Empty means the operator did not state one.
+	//
+	// The constraint comes from the engine image rather than from a
+	// preference. An x86 image will not start on an arm64 host, and nothing
+	// else in the deploy path notices before the container fails on a
+	// machine that is already billing.
+	//
+	// Not hypothetical: Lambda's GH200 is arm64 and every other shape it
+	// sells is x86_64, and it is the cheapest Lambda shape clearing 80 GB, so
+	// a one-card class=large request resolves it first (#390).
+	//
+	// Empty means unconstrained, which keeps every request that predates this
+	// field behaving as it did. A row or candidate whose architecture nobody
+	// reported is kept rather than excluded, because unlike a fabric this is
+	// not a capability whose absence costs the whole bill: the failure is a
+	// container that will not start, discovered in minutes rather than in a
+	// silently degraded rental.
+	Architecture  string `protobuf:"bytes,10,opt,name=architecture,proto3" json:"architecture,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -857,6 +876,13 @@ func (x *ResourceRequirements) GetReclaimPolicy() ReclaimPolicy {
 		return x.ReclaimPolicy
 	}
 	return ReclaimPolicy_RECLAIM_POLICY_UNSPECIFIED
+}
+
+func (x *ResourceRequirements) GetArchitecture() string {
+	if x != nil {
+		return x.Architecture
+	}
+	return ""
 }
 
 // Hardware is the cross-provider physical-characteristics base for
@@ -3610,7 +3636,7 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"\x04tags\x18\x06 \x03(\v2\x1e.provisioner.v1.Spec.TagsEntryR\x04tags\x1a7\n" +
 	"\tTagsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xe7\x02\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x8b\x03\n" +
 	"\x14ResourceRequirements\x12\x1e\n" +
 	"\vmin_vram_gb\x18\x01 \x01(\x05R\tminVramGb\x12\x1e\n" +
 	"\vmin_disk_gb\x18\x02 \x01(\x05R\tminDiskGb\x12\x1c\n" +
@@ -3621,7 +3647,9 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"\x03sku\x18\x06 \x01(\tR\x03sku\x12>\n" +
 	"\ffabric_scope\x18\a \x01(\x0e2\x1b.provisioner.v1.FabricScopeR\vfabricScope\x12&\n" +
 	"\x0fmin_fabric_gbps\x18\b \x01(\x05R\rminFabricGbps\x12D\n" +
-	"\x0ereclaim_policy\x18\t \x01(\x0e2\x1d.provisioner.v1.ReclaimPolicyR\rreclaimPolicy\"\x9b\x03\n" +
+	"\x0ereclaim_policy\x18\t \x01(\x0e2\x1d.provisioner.v1.ReclaimPolicyR\rreclaimPolicy\x12\"\n" +
+	"\farchitecture\x18\n" +
+	" \x01(\tR\farchitecture\"\x9b\x03\n" +
 	"\bHardware\x12\x17\n" +
 	"\agpu_sku\x18\x01 \x01(\tR\x06gpuSku\x12\x1b\n" +
 	"\tgpu_count\x18\x02 \x01(\x05R\bgpuCount\x12\x1e\n" +
