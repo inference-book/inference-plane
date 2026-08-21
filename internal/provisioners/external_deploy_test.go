@@ -47,7 +47,7 @@ func TestExternal_Create_AttachesToBothEndpoints(t *testing.T) {
 	if dep.GetState() != provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING {
 		t.Fatalf("state = %s, want RUNNING", dep.GetState())
 	}
-	eps := dep.GetEngineEndpoints()
+	eps := provisioners.EffectiveEndpoints(dep)
 	if len(eps) != 2 || eps[0] != "http://127.0.0.1:9001" || eps[1] != "http://127.0.0.1:9002" {
 		t.Errorf("engine_endpoints = %v, want [9001 9002] both stamped in order", eps)
 	}

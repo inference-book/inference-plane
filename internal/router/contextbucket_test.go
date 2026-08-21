@@ -115,11 +115,10 @@ func TestContextBucketReachesTheTokenMetric(t *testing.T) {
 	r := New(&fakeDeploymentClient{
 		describe: func(*provisionerv1.DescribeDeploymentRequest) (*provisionerv1.DescribeDeploymentResponse, error) {
 			return &provisionerv1.DescribeDeploymentResponse{Deployment: &provisionerv1.Deployment{
-				Id:              "glm",
-				Model:           "zai-org/GLM-5.2",
-				State:           provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING,
-				InstanceIds:     []string{"i-1"},
-				EngineEndpoints: []string{engine.URL},
+				Id:       "glm",
+				Model:    "zai-org/GLM-5.2",
+				State:    provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING,
+				Replicas: []*provisionerv1.ReplicaBacking{{InstanceIds: []string{"i-1"}, EngineEndpoint: engine.URL}},
 			}}, nil
 		},
 	}, recorder)

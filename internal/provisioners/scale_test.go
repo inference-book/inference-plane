@@ -35,7 +35,7 @@ func TestScale_Up_FromOneToThree(t *testing.T) {
 	if dep.GetState() != provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING {
 		t.Errorf("state = %s, want RUNNING", dep.GetState())
 	}
-	ids := dep.GetInstanceIds()
+	ids := provisioners.EffectiveInstanceIDs(dep)
 	if len(ids) != 3 {
 		t.Fatalf("instance_ids len = %d, want 3", len(ids))
 	}
@@ -70,7 +70,7 @@ func TestScale_Up_MultiReplicaToMore(t *testing.T) {
 	if dep.GetState() != provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING {
 		t.Errorf("state = %s, want RUNNING", dep.GetState())
 	}
-	ids := dep.GetInstanceIds()
+	ids := provisioners.EffectiveInstanceIDs(dep)
 	want := []string{"scaler-r0", "scaler-r1", "scaler-r2", "scaler-r3", "scaler-r4"}
 	if len(ids) != len(want) {
 		t.Fatalf("instance_ids len = %d, want %d", len(ids), len(want))
@@ -136,7 +136,7 @@ func TestScale_NoOp_SameCount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Scale: %v", err)
 	}
-	if got := resp.GetDeployment().GetInstanceIds(); len(got) != 3 {
+	if got := provisioners.EffectiveInstanceIDs(resp.GetDeployment()); len(got) != 3 {
 		t.Errorf("noop should leave 3 slots; got %d", len(got))
 	}
 }
@@ -250,7 +250,7 @@ func TestScale_DryRun_PreviewsPlannedSlots(t *testing.T) {
 	}
 	// State unmutated -- still 2 slots.
 	dep := resp.GetDeployment()
-	if got := dep.GetInstanceIds(); len(got) != 2 {
+	if got := provisioners.EffectiveInstanceIDs(dep); len(got) != 2 {
 		t.Errorf("dry-run should not mutate; got %d slots, want 2", len(got))
 	}
 }
@@ -287,7 +287,7 @@ func TestScale_PreservesDegradedTombstones(t *testing.T) {
 		t.Fatalf("Scale: %v", err)
 	}
 	dep := resp.GetDeployment()
-	ids := dep.GetInstanceIds()
+	ids := provisioners.EffectiveInstanceIDs(dep)
 	if len(ids) != 5 {
 		t.Fatalf("len = %d, want 5", len(ids))
 	}
@@ -295,7 +295,7 @@ func TestScale_PreservesDegradedTombstones(t *testing.T) {
 	// didn't repair). The instance_id may still be set -- the Instance
 	// record exists (rent succeeded) but the engine never came up, so
 	// the router (#85) skips the slot via the empty-endpoint check.
-	eps := dep.GetEngineEndpoints()
+	eps := provisioners.EffectiveEndpoints(dep)
 	if eps[1] != "" {
 		t.Errorf("slot 1's engine_endpoint should remain tombstone (empty), got %q", eps[1])
 	}

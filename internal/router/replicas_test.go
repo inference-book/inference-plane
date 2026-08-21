@@ -20,9 +20,8 @@ import (
 func TestPickReplica_RoundRobin(t *testing.T) {
 	r := New(&fakeDeploymentClient{}, nil)
 	dep := &provisionerv1.Deployment{
-		Id:              "d",
-		InstanceIds:     []string{"a", "b", "c"},
-		EngineEndpoints: []string{"http://a", "http://b", "http://c"},
+		Id:       "d",
+		Replicas: []*provisionerv1.ReplicaBacking{{InstanceIds: []string{"a"}, EngineEndpoint: "http://a"}, {InstanceIds: []string{"b"}, EngineEndpoint: "http://b"}, {InstanceIds: []string{"c"}, EngineEndpoint: "http://c"}},
 	}
 	got := make([]string, 6)
 	for i := range got {
@@ -47,9 +46,8 @@ func TestPickReplica_RoundRobin(t *testing.T) {
 func TestPickReplica_SkipsEmptyEndpoints(t *testing.T) {
 	r := New(&fakeDeploymentClient{}, nil)
 	dep := &provisionerv1.Deployment{
-		Id:              "d",
-		InstanceIds:     []string{"a", "b", "c"},
-		EngineEndpoints: []string{"http://a", "", "http://c"},
+		Id:       "d",
+		Replicas: []*provisionerv1.ReplicaBacking{{InstanceIds: []string{"a"}, EngineEndpoint: "http://a"}, {InstanceIds: []string{"b"}}, {InstanceIds: []string{"c"}, EngineEndpoint: "http://c"}},
 	}
 	seen := map[string]int{}
 	for range 30 {
@@ -75,9 +73,8 @@ func TestPickReplica_SkipsEmptyEndpoints(t *testing.T) {
 func TestPickReplica_AllEmpty(t *testing.T) {
 	r := New(&fakeDeploymentClient{}, nil)
 	dep := &provisionerv1.Deployment{
-		Id:              "d",
-		InstanceIds:     []string{"a", "b"},
-		EngineEndpoints: []string{"", ""},
+		Id:       "d",
+		Replicas: []*provisionerv1.ReplicaBacking{{InstanceIds: []string{"a"}}, {InstanceIds: []string{"b"}}},
 	}
 	if _, _, ok := r.pickReplica(context.Background(), dep); ok {
 		t.Fatalf("pickReplica returned ok=true when all endpoints are empty")
@@ -94,8 +91,7 @@ func TestPickReplica_SkipsQuarantined(t *testing.T) {
 	r := New(&fakeDeploymentClient{}, nil)
 	dep := &provisionerv1.Deployment{
 		Id:                   "d",
-		InstanceIds:          []string{"a", "b", "c"},
-		EngineEndpoints:      []string{"http://a", "http://b", "http://c"},
+		Replicas:             []*provisionerv1.ReplicaBacking{{InstanceIds: []string{"a"}, EngineEndpoint: "http://a"}, {InstanceIds: []string{"b"}, EngineEndpoint: "http://b"}, {InstanceIds: []string{"c"}, EngineEndpoint: "http://c"}},
 		UnhealthyInstanceIds: []string{"b"},
 	}
 	seen := map[string]int{}
@@ -124,8 +120,7 @@ func TestPickReplica_AllQuarantined(t *testing.T) {
 	r := New(&fakeDeploymentClient{}, nil)
 	dep := &provisionerv1.Deployment{
 		Id:                   "d",
-		InstanceIds:          []string{"a", "b"},
-		EngineEndpoints:      []string{"http://a", "http://b"},
+		Replicas:             []*provisionerv1.ReplicaBacking{{InstanceIds: []string{"a"}, EngineEndpoint: "http://a"}, {InstanceIds: []string{"b"}, EngineEndpoint: "http://b"}},
 		UnhealthyInstanceIds: []string{"a", "b"},
 	}
 	if _, _, ok := r.pickReplica(context.Background(), dep); ok {
@@ -143,7 +138,7 @@ func TestPickReplica_QuarantinedDoesNotSkipEmptyInstanceID(t *testing.T) {
 	r := New(&fakeDeploymentClient{}, nil)
 	dep := &provisionerv1.Deployment{
 		Id:                   "d",
-		EngineEndpoints:      []string{"http://only"},
+		Replicas:             []*provisionerv1.ReplicaBacking{{EngineEndpoint: "http://only"}},
 		UnhealthyInstanceIds: []string{""}, // shouldn't match the empty padded id
 	}
 	id, ep, ok := r.pickReplica(context.Background(), dep)
@@ -197,11 +192,10 @@ func TestRouter_MultiReplica_DistributesEvenly(t *testing.T) {
 	r := New(&fakeDeploymentClient{
 		describe: func(*provisionerv1.DescribeDeploymentRequest) (*provisionerv1.DescribeDeploymentResponse, error) {
 			return &provisionerv1.DescribeDeploymentResponse{Deployment: &provisionerv1.Deployment{
-				Id:              "multi",
-				State:           provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING,
-				EngineEndpoint:  endpoints[0],
-				InstanceIds:     []string{"a", "b", "c"},
-				EngineEndpoints: endpoints,
+				Id:             "multi",
+				State:          provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING,
+				EngineEndpoint: endpoints[0],
+				Replicas:       membersFrom([]string{"a", "b", "c"}, endpoints),
 			}}, nil
 		},
 	}, nil)
@@ -239,11 +233,11 @@ func TestRouter_AllReplicasUnhealthy_503(t *testing.T) {
 	r := New(&fakeDeploymentClient{
 		describe: func(*provisionerv1.DescribeDeploymentRequest) (*provisionerv1.DescribeDeploymentResponse, error) {
 			return &provisionerv1.DescribeDeploymentResponse{Deployment: &provisionerv1.Deployment{
-				Id:              "all-down",
-				State:           provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING,
-				EngineEndpoint:  "http://stale-primary:8000", // singular survives quarantine
-				InstanceIds:     []string{"a", "b"},
-				EngineEndpoints: []string{"", ""}, // all per-replica slots empty
+				Id:             "all-down",
+				State:          provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING,
+				EngineEndpoint: "http://stale-primary:8000", // singular survives quarantine
+				// Every member's endpoint empty: all slots quarantined.
+				Replicas: []*provisionerv1.ReplicaBacking{{InstanceIds: []string{"a"}}, {InstanceIds: []string{"b"}}},
 			}}, nil
 		},
 	}, nil)
@@ -282,11 +276,10 @@ func TestRouter_ReplicaID_OnSpanAndMetric(t *testing.T) {
 	r := New(&fakeDeploymentClient{
 		describe: func(*provisionerv1.DescribeDeploymentRequest) (*provisionerv1.DescribeDeploymentResponse, error) {
 			return &provisionerv1.DescribeDeploymentResponse{Deployment: &provisionerv1.Deployment{
-				Id:              "tagged",
-				Model:           "m",
-				State:           provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING,
-				InstanceIds:     []string{"a"},
-				EngineEndpoints: []string{engine.URL},
+				Id:       "tagged",
+				Model:    "m",
+				State:    provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING,
+				Replicas: []*provisionerv1.ReplicaBacking{{InstanceIds: []string{"a"}, EngineEndpoint: engine.URL}},
 			}}, nil
 		},
 	}, recorder)
@@ -314,5 +307,71 @@ func TestRouter_ReplicaID_OnSpanAndMetric(t *testing.T) {
 	}
 	if got := attrValue(reqs[0].Attributes, "instance_id"); got != "a" {
 		t.Errorf("metric instance_id = %q, want a", got)
+	}
+}
+
+// membersFrom builds one member per (instance, endpoint) pair, which is
+// the ordinary fan-out shape. A test wanting one engine over several
+// nodes builds the ReplicaBacking directly.
+func membersFrom(ids, endpoints []string) []*provisionerv1.ReplicaBacking {
+	n := max(len(ids), len(endpoints))
+	out := make([]*provisionerv1.ReplicaBacking, n)
+	for i := range out {
+		out[i] = &provisionerv1.ReplicaBacking{}
+		if i < len(ids) && ids[i] != "" {
+			out[i].InstanceIds = []string{ids[i]}
+		}
+		if i < len(endpoints) {
+			out[i].EngineEndpoint = endpoints[i]
+		}
+	}
+	return out
+}
+
+// A member spanning four nodes is one thing to route to, not four. The
+// router picks members, and a member is one engine on one endpoint
+// however many machines it was assembled from.
+func TestRouterTreatsAMultiNodeMemberAsOneReplica(t *testing.T) {
+	dep := &provisionerv1.Deployment{
+		Id:    "k3",
+		State: provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING,
+		Replicas: []*provisionerv1.ReplicaBacking{
+			{InstanceIds: []string{"n0", "n1", "n2", "n3"}, EngineEndpoint: "http://a:8000"},
+			{InstanceIds: []string{"m0", "m1", "m2", "m3"}, EngineEndpoint: "http://b:8000"},
+		},
+	}
+
+	got := (&Router{}).eligibleReplicas(dep)
+
+	if len(got) != 2 {
+		t.Fatalf("eligible replicas = %d, want 2 (eight machines, two engines): %+v", len(got), got)
+	}
+	// The member is named by its rank-0 node, which is what metrics and
+	// affinity key on.
+	if got[0].InstanceID != "n0" || got[1].InstanceID != "m0" {
+		t.Errorf("replica ids = %q/%q, want the members' primaries n0/m0", got[0].InstanceID, got[1].InstanceID)
+	}
+}
+
+// One sick node ends the engine it belongs to. Routing to the survivors
+// of a multi-node engine is not degraded service; there is no engine at
+// the other end of that endpoint any more.
+func TestRouterDropsAMemberWhenAnyOfItsNodesIsQuarantined(t *testing.T) {
+	dep := &provisionerv1.Deployment{
+		Id:    "k3",
+		State: provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING,
+		Replicas: []*provisionerv1.ReplicaBacking{
+			{InstanceIds: []string{"n0", "n1", "n2", "n3"}, EngineEndpoint: "http://a:8000"},
+			{InstanceIds: []string{"m0", "m1", "m2", "m3"}, EngineEndpoint: "http://b:8000"},
+		},
+		// Not the primary: a non-rank-0 node is exactly the case a
+		// primary-only check would miss.
+		UnhealthyInstanceIds: []string{"n2"},
+	}
+
+	got := (&Router{}).eligibleReplicas(dep)
+
+	if len(got) != 1 || got[0].InstanceID != "m0" {
+		t.Errorf("eligible = %+v, want only the healthy member m0", got)
 	}
 }

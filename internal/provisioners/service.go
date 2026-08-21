@@ -1131,8 +1131,8 @@ func (s *Service) CreateDeployment(ctx context.Context, req *provisionerv1.Creat
 		return nil, specsErr
 	}
 	multiReplica := len(specs) > 0
-	if multiReplica && len(dep.GetInstanceIds()) > 0 {
-		return nil, status.Errorf(codes.InvalidArgument, "deployment.instance_ids cannot be combined with replicas_spec; fan-out synthesizes ids deterministically")
+	if multiReplica && len(dep.GetReplicas()) > 0 {
+		return nil, status.Errorf(codes.InvalidArgument, "deployment.replicas cannot be combined with replicas_spec; fan-out synthesizes ids deterministically")
 	}
 	if multiReplica && dep.GetInstanceId() != "" {
 		return nil, status.Errorf(codes.InvalidArgument, "deployment.instance_id cannot be combined with replicas_spec; fan-out always auto-provisions")
@@ -1317,8 +1317,8 @@ func (s *Service) CreateDeployment(ctx context.Context, req *provisionerv1.Creat
 		// EffectiveInstanceIDs (added in #84). Future operator-
 		// supplied lists (heterogeneous fleets) get respected
 		// verbatim; pre-populate from request if present.
-		if ids := dep.GetInstanceIds(); len(ids) > 0 {
-			record.InstanceIds = append(record.InstanceIds, ids...)
+		if reps := dep.GetReplicas(); len(reps) > 0 {
+			record.Replicas = append(record.Replicas, reps...)
 		}
 		f.Deployments[dep.GetId()] = record
 		return nil
@@ -1604,14 +1604,15 @@ func (s *Service) patchDeployment(id string, u DeployStateUpdate) error {
 		}
 		if u.EngineEndpoint != "" {
 			rec.EngineEndpoint = u.EngineEndpoint
-			// v0.2 ch7-beat3.2 / #84: maintain the parallel
-			// engine_endpoints list. For single-instance deployments
-			// (the only path in this scaffolding PR), the list has
-			// one slot mirroring the singular endpoint. Multi-instance
-			// fan-out (follow-up to #84) will populate each slot as
-			// per-instance deploys reach RUNNING; the router reads
-			// the list via EffectiveEndpoints.
-			rec.EngineEndpoints = []string{u.EngineEndpoint}
+			// Mirror it onto the member list the router reads. This
+			// path is the single-instance deploy, so there is exactly
+			// one member and it is backed by the deployment's own
+			// instance; the fan-out maintains its own members through
+			// patchDeploymentSlot.
+			if len(rec.GetReplicas()) == 0 {
+				rec.Replicas = []*provisionerv1.ReplicaBacking{{InstanceIds: []string{rec.GetInstanceId()}}}
+			}
+			rec.Replicas[0].EngineEndpoint = u.EngineEndpoint
 		}
 		if u.FailureReason != "" {
 			rec.FailureReason = u.FailureReason

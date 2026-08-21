@@ -31,10 +31,11 @@ func TestUpdate_ConcurrentSlotWritesDoNotLose(t *testing.T) {
 
 	const n = 8
 	seed := func(f *provisioners.State) error {
-		f.Deployments["d"] = &provisionerv1.Deployment{
-			Id:              "d",
-			EngineEndpoints: make([]string, n),
+		reps := make([]*provisionerv1.ReplicaBacking, n)
+		for i := range reps {
+			reps[i] = &provisionerv1.ReplicaBacking{}
 		}
+		f.Deployments["d"] = &provisionerv1.Deployment{Id: "d", Replicas: reps}
 		return nil
 	}
 	if err := s.Update(seed); err != nil {
@@ -47,7 +48,7 @@ func TestUpdate_ConcurrentSlotWritesDoNotLose(t *testing.T) {
 		go func(slot int) {
 			defer wg.Done()
 			_ = s.Update(func(f *provisioners.State) error {
-				f.Deployments["d"].EngineEndpoints[slot] = "ep"
+				f.Deployments["d"].GetReplicas()[slot].EngineEndpoint = "ep"
 				return nil
 			})
 		}(i)
@@ -58,7 +59,7 @@ func TestUpdate_ConcurrentSlotWritesDoNotLose(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Read: %v", err)
 	}
-	eps := got.Deployments["d"].GetEngineEndpoints()
+	eps := provisioners.EffectiveEndpoints(got.Deployments["d"])
 	for i, ep := range eps {
 		if ep == "" {
 			t.Errorf("slot %d lost its write (concurrent Update clobbered it)", i)

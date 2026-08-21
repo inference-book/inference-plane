@@ -435,6 +435,29 @@ message InstanceRef {
   google.protobuf.Timestamp created_at = 5;
 }
 
+// ReplicaBacking is the machines behind one member of a deployment, and
+// the single endpoint that member serves on.
+//
+// Length 1 is the ordinary case: one instance, one engine, one endpoint.
+// Length K is one engine assembled across K machines, which is why the
+// endpoint is singular here rather than parallel to the instances. The
+// engine decides how it spans them; the control plane only rents the
+// machines and records which ones (#212).
+//
+// Mirrors Engine.span on the fleet side, which has always modelled a
+// multi-node engine as one endpoint over many nodes. This is the
+// provisioning half of the same fact.
+message ReplicaBacking {
+  // Instances backing this member, in provisioning order. The first is
+  // the member's primary: the one whose id names the member and, for a
+  // multi-node engine, the rank-0 node.
+  repeated string instance_ids = 1;
+
+  // The one endpoint this member serves on, or empty while it is still
+  // coming up. K instances share it; that is the whole point.
+  string engine_endpoint = 2;
+}
+
 // Deployment is an engine container running on a previously-provisioned
 // Instance. Locked by docs/design/0002-deploy.md -- see that doc for
 // the rationale behind: declarative-semantics under imperative verb
@@ -546,49 +569,32 @@ message Deployment {
   // consumers to protect from slot re-use); the slots are simply
   // free for re-use if needed.
 
-  // instance_ids is the full list of Instances that back this
-  // Deployment (v0.2 ch7-beat3.1). One Deployment, N Instances --
-  // each Instance was provisioned independently and may differ in
-  // provider / GPU class / region. Beat 3 fan-out (#84) writes
-  // this list at CreateDeployment time (for the --replicas N sugar)
-  // or via the add-instance verb (for heterogeneous composition).
-  // Beat 3 router fan-out (#85) reads this list to pick which
-  // engine endpoint a request goes to.
+  // replicas is what backs this Deployment: one entry per member, in
+  // provisioning order. A member is the unit the router load-balances
+  // over, and it holds a set of instances rather than one, because the
+  // two things a deployment can be made of are not the same shape.
   //
-  // Backward-compat with v0.1's single-instance contract: when
-  // instance_ids is empty (legacy 1.2 records), readers treat the
-  // singular `instance_id` field as the only entry. The
-  // EffectiveInstanceIDs helper (added in #84) encapsulates this
-  // fallback so callers don't branch on emptiness themselves.
+  // N INDEPENDENT REPLICAS is one instance each: N engines, N endpoints,
+  // and losing one leaves the rest serving. That is the Ch 7 fan-out and
+  // it is the common case.
   //
-  // The singular `instance_id` field at slot 2 stays for v0.1
-  // backward-compat: for one-instance deployments it remains the
-  // canonical primary; for multi-instance deployments it equals
-  // instance_ids[0] (the first-provisioned instance).
-  repeated string instance_ids = 24;
-
-  // engine_endpoints is the parallel list to instance_ids: position i
-  // holds the engine endpoint URL for instance_ids[i], or empty
-  // string while that instance hasn't reached RUNNING yet (v0.2
-  // ch7-beat3.2 / #84-#85). Maintained by the Service as the single
-  // writer; the router reads it to pick which endpoint a request
-  // goes to via round-robin (and future per-replica policies).
+  // ONE MEMBER SPANNING K NODES is K instances and ONE endpoint: a single
+  // engine assembled across machines, which is what a model too large for
+  // any one box needs. Losing a node does not degrade it, it ends it, so
+  // the K instances are created and destroyed as a unit.
   //
-  // Invariant: when populated, len(engine_endpoints) ==
-  // len(instance_ids). Empty list (Beat 1+2 single-instance
-  // Deployments) means "fall back to the singular engine_endpoint
-  // field at slot 17." The EffectiveEndpoints helper encapsulates
-  // this fallback.
+  // Modelled as a list per member rather than as a flat list with a
+  // grouping key, because the flat form quietly broke the invariant three
+  // subsystems read (the router's replica picker, the health-poll source,
+  // and the fan-out aggregator all assumed instance i owned endpoint i).
+  // Making the grouping explicit means those readers fail to compile
+  // rather than fail at runtime.
   //
-  // Why denormalized on Deployment rather than fetched per-request
-  // from each Instance: the Service is the single writer of
-  // deployment state and naturally knows both the instance set and
-  // each engine's endpoint at deploy time. Snapshot-on-Deployment
-  // means the router does 1 RPC per request (DescribeDeployment)
-  // instead of 1 + N. Consistency is the Service's problem -- a
-  // future cache invalidator (#88+) layers on top without
-  // restructuring this field.
-  repeated string engine_endpoints = 25;
+  // The singular `instance_id` and `engine_endpoint` fields at slots 2
+  // and 17 remain the one-instance shorthand; EffectiveInstanceIDs and
+  // EffectiveEndpoints encapsulate the fallback so callers never branch
+  // on emptiness themselves.
+  repeated ReplicaBacking replicas = 32;
 
   // unhealthy_instance_ids is the parallel set of Instance IDs that
   // the health-poll loop has currently marked unhealthy. Position-

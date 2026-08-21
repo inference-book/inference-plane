@@ -22,7 +22,7 @@ func TestService_Quarantine_AddsToSet(t *testing.T) {
 	if got := dep.GetUnhealthyInstanceIds(); len(got) != 1 || got[0] != "a" {
 		t.Errorf("unhealthy_instance_ids = %v, want [a]", got)
 	}
-	if got := dep.GetEngineEndpoints(); len(got) != 2 || got[0] != "http://a" {
+	if got := provisioners.EffectiveEndpoints(dep); len(got) != 2 || got[0] != "http://a" {
 		t.Errorf("engine_endpoints should survive quarantine, got %v", got)
 	}
 }
@@ -111,11 +111,10 @@ func seedDeploy(t *testing.T, store storeUpdater, depID string, instanceIDs, end
 	t.Helper()
 	if err := store.Update(func(f *provisioners.State) error {
 		f.Deployments[depID] = &provisionerv1.Deployment{
-			Id:              depID,
-			State:           provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING,
-			InstanceIds:     instanceIDs,
-			EngineEndpoints: endpoints,
-			EngineEndpoint:  firstNonEmpty(endpoints),
+			Id:             depID,
+			State:          provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING,
+			Replicas:       membersFrom(instanceIDs, endpoints),
+			EngineEndpoint: firstNonEmpty(endpoints),
 		}
 		return nil
 	}); err != nil {

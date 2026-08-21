@@ -1423,7 +1423,7 @@ func TestCreateDeployment_EngineEndpoints_SnapshotPopulated(t *testing.T) {
 	if dep.GetEngineEndpoint() == "" {
 		t.Fatalf("singular engine_endpoint missing")
 	}
-	eps := dep.GetEngineEndpoints()
+	eps := provisioners.EffectiveEndpoints(dep)
 	if len(eps) != 1 {
 		t.Fatalf("engine_endpoints len = %d, want 1 (single-instance snapshot)", len(eps))
 	}
@@ -1439,7 +1439,7 @@ func TestCreateDeployment_EngineEndpoints_SnapshotPopulated(t *testing.T) {
 // instance deployments (Beat 1+2 shape); readers fall back to
 // the singular `instance_id` via EffectiveInstanceIDs (helper
 // added in #84). #83 ships the field as passive scaffolding.
-func TestCreateDeployment_InstanceIds_DefaultsEmpty(t *testing.T) {
+func TestCreateDeployment_SingleInstanceIsOneMember(t *testing.T) {
 	svc, store, _ := newSvcWithDeploy(t)
 	if _, err := svc.CreateDeployment(context.Background(), &provisionerv1.CreateDeploymentRequest{
 		Deployment: okDep(),
@@ -1448,9 +1448,12 @@ func TestCreateDeployment_InstanceIds_DefaultsEmpty(t *testing.T) {
 		t.Fatalf("CreateDeployment: %v", err)
 	}
 	f, _ := store.Read()
-	ids := f.Deployments["my-llama"].GetInstanceIds()
-	if len(ids) != 0 {
-		t.Errorf("persisted instance_ids = %v, want empty (Beat 3 fan-out not yet wired)", ids)
+	// One member, backed by the deployment's own instance. A
+	// single-instance deploy is not a special shape; it is the ordinary
+	// one with a member count of one.
+	ids := provisioners.EffectiveInstanceIDs(f.Deployments["my-llama"])
+	if len(ids) != 1 || ids[0] != "my-pod" {
+		t.Errorf("persisted members resolve to %v, want [my-pod]", ids)
 	}
 }
 
@@ -1462,7 +1465,9 @@ func TestCreateDeployment_InstanceIds_DefaultsEmpty(t *testing.T) {
 func TestCreateDeployment_InstanceIds_PreservesOperatorList(t *testing.T) {
 	svc, store, _ := newSvcWithDeploy(t)
 	dep := okDep()
-	dep.InstanceIds = []string{"runpod-a", "vast-b", "lambda-c"}
+	dep.Replicas = []*provisionerv1.ReplicaBacking{
+		{InstanceIds: []string{"runpod-a"}}, {InstanceIds: []string{"vast-b"}}, {InstanceIds: []string{"lambda-c"}},
+	}
 	if _, err := svc.CreateDeployment(context.Background(), &provisionerv1.CreateDeploymentRequest{
 		Deployment: dep,
 		Wait:       true,
@@ -1470,7 +1475,7 @@ func TestCreateDeployment_InstanceIds_PreservesOperatorList(t *testing.T) {
 		t.Fatalf("CreateDeployment: %v", err)
 	}
 	f, _ := store.Read()
-	got := f.Deployments["my-llama"].GetInstanceIds()
+	got := provisioners.EffectiveInstanceIDs(f.Deployments["my-llama"])
 	want := []string{"runpod-a", "vast-b", "lambda-c"}
 	if len(got) != len(want) {
 		t.Fatalf("persisted instance_ids = %v, want %v", got, want)

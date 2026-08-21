@@ -58,11 +58,11 @@ func TestHetero_Create_OneFromEachProvider(t *testing.T) {
 	if dep.GetState() != provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING {
 		t.Fatalf("state = %s, want RUNNING", dep.GetState())
 	}
-	ids := dep.GetInstanceIds()
+	ids := provisioners.EffectiveInstanceIDs(dep)
 	if len(ids) != 2 || ids[0] != "mixed-r0" || ids[1] != "mixed-r1" {
 		t.Errorf("instance_ids = %v, want [mixed-r0 mixed-r1]", ids)
 	}
-	eps := dep.GetEngineEndpoints()
+	eps := provisioners.EffectiveEndpoints(dep)
 	if len(eps) != 2 {
 		t.Fatalf("engine_endpoints len = %d, want 2", len(eps))
 	}
@@ -159,7 +159,7 @@ func TestHetero_Scale_AddReplicaAppendsDifferentProvider(t *testing.T) {
 	if dep.GetState() != provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING {
 		t.Errorf("state = %s, want RUNNING", dep.GetState())
 	}
-	if got := dep.GetInstanceIds(); len(got) != 2 {
+	if got := provisioners.EffectiveInstanceIDs(dep); len(got) != 2 {
 		t.Fatalf("instance_ids = %v, want 2 slots", got)
 	}
 
@@ -334,7 +334,7 @@ func TestHetero_ReplicasSpec_ExpandsCompressedForm(t *testing.T) {
 	}
 	state, _ := store.Read()
 	dep := state.Deployments["compressed"]
-	ids := dep.GetInstanceIds()
+	ids := provisioners.EffectiveInstanceIDs(dep)
 	if len(ids) != 3 {
 		t.Fatalf("instance_ids len = %d, want 3 (expanded from 1 entry x replicas=3)", len(ids))
 	}

@@ -38,9 +38,8 @@ func TestLocateEngineNodeJoinsInstanceAndSlot(t *testing.T) {
 			},
 		}
 		s.Deployments["dep-1"] = &provisionerv1.Deployment{
-			Id:              "dep-1",
-			InstanceIds:     []string{"dep-1-r0", "dep-1-r1"},
-			EngineEndpoints: []string{"https://r0.example.com", "https://r1.example.com"},
+			Id:       "dep-1",
+			Replicas: []*provisionerv1.ReplicaBacking{{InstanceIds: []string{"dep-1-r0"}, EngineEndpoint: "https://r0.example.com"}, {InstanceIds: []string{"dep-1-r1"}, EngineEndpoint: "https://r1.example.com"}},
 		}
 	})
 
@@ -121,7 +120,7 @@ func TestLocateEngineNodeFallsBackToSingularEndpoint(t *testing.T) {
 		s.Instances["dep-4"] = &provisionerv1.Instance{Id: "dep-4", Provider: "runpod"}
 		s.Deployments["dep-4"] = &provisionerv1.Deployment{
 			Id:             "dep-4",
-			InstanceIds:    []string{"dep-4"},
+			Replicas:       []*provisionerv1.ReplicaBacking{{InstanceIds: []string{"dep-4"}}},
 			EngineEndpoint: "https://legacy-singular.example.com",
 		}
 	})

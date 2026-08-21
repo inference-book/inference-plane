@@ -28,10 +28,10 @@ func migrateFixture(t *testing.T, model string, volumes ...*provisionerv1.Volume
 		f.Instances["dep-r0"] = &provisionerv1.Instance{Id: "dep-r0", Provider: "vast"}
 		f.Instances["dep-r1"] = &provisionerv1.Instance{Id: "dep-r1", Provider: "vast"}
 		f.Deployments["dep"] = &provisionerv1.Deployment{
-			Id:          "dep",
-			Model:       model,
-			State:       provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING,
-			InstanceIds: []string{"dep-r0", "dep-r1"},
+			Id:       "dep",
+			Model:    model,
+			State:    provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING,
+			Replicas: []*provisionerv1.ReplicaBacking{{InstanceIds: []string{"dep-r0"}}, {InstanceIds: []string{"dep-r1"}}},
 			ReplicaSpecs: []*provisionerv1.ReplicaSpec{
 				{Provider: "vast", Requirements: &provisionerv1.ResourceRequirements{MinVramGb: 80}},
 			},
@@ -203,9 +203,9 @@ func TestMigrateRefusesADeploymentThatIsNotServing(t *testing.T) {
 	}
 	_ = store.Update(func(f *provisioners.State) error {
 		f.Deployments["dep"] = &provisionerv1.Deployment{
-			Id:          "dep",
-			State:       provisionerv1.DeploymentState_DEPLOYMENT_STATE_FAILED,
-			InstanceIds: []string{"dep-r0"},
+			Id:       "dep",
+			State:    provisionerv1.DeploymentState_DEPLOYMENT_STATE_FAILED,
+			Replicas: []*provisionerv1.ReplicaBacking{{InstanceIds: []string{"dep-r0"}}},
 		}
 		return nil
 	})
@@ -285,8 +285,8 @@ func TestMigrateLeavesTheSourceServingWhenTheDestinationFails(t *testing.T) {
 		t.Fatalf("DescribeDeployment: %v", derr)
 	}
 	dep := got.GetDeployment()
-	if len(dep.GetInstanceIds()) != 2 {
-		t.Errorf("instance_ids = %v, want the original two still present", dep.GetInstanceIds())
+	if len(provisioners.EffectiveInstanceIDs(dep)) != 2 {
+		t.Errorf("instance_ids = %v, want the original two still present", provisioners.EffectiveInstanceIDs(dep))
 	}
 	if len(dep.GetUnhealthyInstanceIds()) != 0 {
 		t.Errorf("source replicas were quarantined despite the destination failing: %v",

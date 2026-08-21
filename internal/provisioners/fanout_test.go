@@ -143,13 +143,13 @@ func TestFanOut_AllSucceed(t *testing.T) {
 	if dep.GetState() != provisionerv1.DeploymentState_DEPLOYMENT_STATE_RUNNING {
 		t.Errorf("state = %s, want RUNNING", dep.GetState())
 	}
-	if got := dep.GetInstanceIds(); len(got) != 3 || got[0] != "my-llama-r0" || got[1] != "my-llama-r1" || got[2] != "my-llama-r2" {
+	if got := provisioners.EffectiveInstanceIDs(dep); len(got) != 3 || got[0] != "my-llama-r0" || got[1] != "my-llama-r1" || got[2] != "my-llama-r2" {
 		t.Errorf("instance_ids = %v, want [my-llama-r0 my-llama-r1 my-llama-r2]", got)
 	}
-	if got := dep.GetEngineEndpoints(); len(got) != 3 {
+	if got := provisioners.EffectiveEndpoints(dep); len(got) != 3 {
 		t.Fatalf("engine_endpoints len = %d, want 3", len(got))
 	}
-	for i, ep := range dep.GetEngineEndpoints() {
+	for i, ep := range provisioners.EffectiveEndpoints(dep) {
 		want := "http://my-llama-r" + string(rune('0'+i)) + ":8000"
 		if ep != want {
 			t.Errorf("engine_endpoints[%d] = %q, want %q", i, ep, want)
@@ -336,7 +336,7 @@ func TestFanOut_OneExecutorFails(t *testing.T) {
 	if dep.GetState() != provisionerv1.DeploymentState_DEPLOYMENT_STATE_DEGRADED {
 		t.Errorf("state = %s, want DEGRADED", dep.GetState())
 	}
-	eps := dep.GetEngineEndpoints()
+	eps := provisioners.EffectiveEndpoints(dep)
 	if len(eps) != 3 {
 		t.Fatalf("expected 3 endpoint slots, got %d", len(eps))
 	}
@@ -369,7 +369,7 @@ func TestFanOut_AllExecutorsFail(t *testing.T) {
 	if dep.GetState() != provisionerv1.DeploymentState_DEPLOYMENT_STATE_FAILED {
 		t.Errorf("state = %s, want FAILED", dep.GetState())
 	}
-	for i, ep := range dep.GetEngineEndpoints() {
+	for i, ep := range provisioners.EffectiveEndpoints(dep) {
 		if ep != "" {
 			t.Errorf("slot %d should be empty on all-fail, got %q", i, ep)
 		}
@@ -437,15 +437,17 @@ func TestFanOut_RejectsInstanceIdWithReplicas(t *testing.T) {
 // (heterogeneous-fleet specification) + replicas>1 -- the fan-out
 // synthesizes ids deterministically, operator-supplied lists land
 // in #143.
-func TestFanOut_RejectsInstanceIdsWithReplicas(t *testing.T) {
+func TestFanOut_RejectsSuppliedMembersWithReplicas(t *testing.T) {
 	svc, _ := fanOutMultiReplicaSvc(t, nil)
 	req := multiReplicaCreateReq("bad", 3)
-	req.Deployment.InstanceIds = []string{"a", "b", "c"}
+	req.Deployment.Replicas = []*provisionerv1.ReplicaBacking{
+		{InstanceIds: []string{"a"}}, {InstanceIds: []string{"b"}}, {InstanceIds: []string{"c"}},
+	}
 	_, err := svc.CreateDeployment(context.Background(), req)
 	if err == nil {
-		t.Fatal("expected InvalidArgument for instance_ids + replicas>1")
+		t.Fatal("expected InvalidArgument for operator-supplied members + replicas>1")
 	}
-	if !strings.Contains(err.Error(), "instance_ids cannot be combined") {
+	if !strings.Contains(err.Error(), "replicas cannot be combined") {
 		t.Errorf("error should explain the conflict: %v", err)
 	}
 }
@@ -471,7 +473,7 @@ func TestFanOut_Replicas1_UsesSingleInstancePath(t *testing.T) {
 	// The single-instance path populates engine_endpoints as a 1-slot
 	// list via patchDeployment (Beat 3.1 / #84 behavior). The list
 	// should match the singular engine_endpoint.
-	if eps := dep.GetEngineEndpoints(); len(eps) != 1 || eps[0] == "" {
+	if eps := provisioners.EffectiveEndpoints(dep); len(eps) != 1 || eps[0] == "" {
 		t.Errorf("expected 1-slot engine_endpoints, got %v", eps)
 	}
 	// No -r0 Instance record.
@@ -522,7 +524,7 @@ func TestFanOutContainsAProviderPanic(t *testing.T) {
 	if dep.GetState() != provisionerv1.DeploymentState_DEPLOYMENT_STATE_DEGRADED {
 		t.Errorf("state = %s, want DEGRADED", dep.GetState())
 	}
-	if eps := dep.GetEngineEndpoints(); len(eps) != 3 || eps[1] != "" {
+	if eps := provisioners.EffectiveEndpoints(dep); len(eps) != 3 || eps[1] != "" {
 		t.Errorf("slots wrong: %v", eps)
 	}
 	// And the operator is told which replica died and that it panicked,
@@ -533,4 +535,22 @@ func TestFanOutContainsAProviderPanic(t *testing.T) {
 	if !strings.Contains(dep.GetFailureReason(), "panic") {
 		t.Errorf("failure_reason should say it panicked: %q", dep.GetFailureReason())
 	}
+}
+
+// membersFrom builds one member per (instance, endpoint) pair, the
+// ordinary fan-out shape. A test wanting one engine over several nodes
+// builds the ReplicaBacking directly.
+func membersFrom(ids, endpoints []string) []*provisionerv1.ReplicaBacking {
+	n := max(len(ids), len(endpoints))
+	out := make([]*provisionerv1.ReplicaBacking, n)
+	for i := range out {
+		out[i] = &provisionerv1.ReplicaBacking{}
+		if i < len(ids) && ids[i] != "" {
+			out[i].InstanceIds = []string{ids[i]}
+		}
+		if i < len(endpoints) {
+			out[i].EngineEndpoint = endpoints[i]
+		}
+	}
+	return out
 }

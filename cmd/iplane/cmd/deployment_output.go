@@ -98,13 +98,25 @@ func writeDeploymentDetail(w io.Writer, dep *provisionerv1.Deployment) {
 	if dep.GetNoIdleDestroy() {
 		fmt.Fprintf(w, "pinned:          true (no idle destroy)\n")
 	}
-	// v0.2 ch7-beat3.1: surface the full instance list when it's
-	// populated (multi-instance Deployments after #84 fan-out lands).
-	// For single-instance Deployments the `instance:` line above
-	// already shows the only one; we only print the list when it's
-	// > 1 entry so describe stays compact in the common case.
-	if ids := dep.GetInstanceIds(); len(ids) > 1 {
-		fmt.Fprintf(w, "instances:       %v\n", ids)
+	// Members, and what each is made of. The single-instance case is
+	// already covered by the `instance:` line above, so this only
+	// prints once there is more than one machine to name.
+	//
+	// A member holding several instances is one engine spanning them,
+	// which is a different thing from several members holding one
+	// each, and an operator reading a bill needs to tell them apart.
+	if reps := dep.GetReplicas(); len(reps) > 1 || (len(reps) == 1 && len(reps[0].GetInstanceIds()) > 1) {
+		for i, r := range reps {
+			ids := r.GetInstanceIds()
+			switch {
+			case len(ids) > 1:
+				fmt.Fprintf(w, "member %-9d %v  (one engine over %d nodes)\n", i, ids, len(ids))
+			case len(ids) == 1:
+				fmt.Fprintf(w, "member %-9d %s\n", i, ids[0])
+			default:
+				fmt.Fprintf(w, "member %-9d -\n", i)
+			}
+		}
 	}
 	if reason := dep.GetFailureReason(); reason != "" {
 		fmt.Fprintf(w, "failure:         %s\n", reason)

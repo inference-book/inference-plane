@@ -69,7 +69,7 @@ func (r *Router) eligibleReplicas(dep *provisionerv1.Deployment) []policy.Replic
 	if len(eps) == 0 {
 		return nil
 	}
-	ids := effectiveInstanceIDs(dep)
+	members := memberInstanceIDs(dep)
 	quarantined := quarantinedSet(dep)
 
 	out := make([]policy.Replica, 0, len(eps))
@@ -77,11 +77,19 @@ func (r *Router) eligibleReplicas(dep *provisionerv1.Deployment) []policy.Replic
 		if ep == "" {
 			continue
 		}
-		instanceID := ""
-		if i < len(ids) {
-			instanceID = ids[i]
+		var nodes []string
+		if i < len(members) {
+			nodes = members[i]
 		}
-		if _, isQuarantined := quarantined[instanceID]; isQuarantined && instanceID != "" {
+		instanceID := ""
+		if len(nodes) > 0 {
+			instanceID = nodes[0]
+		}
+		// A member is one engine, so one quarantined node takes the
+		// whole member out of rotation. Routing to the survivors of a
+		// multi-node engine is not degraded service, it is service to
+		// an engine that is not there.
+		if anyQuarantined(quarantined, nodes) {
 			continue
 		}
 		out = append(out, policy.Replica{
@@ -127,19 +135,45 @@ func quarantinedSet(dep *provisionerv1.Deployment) map[string]struct{} {
 	return out
 }
 
-// effectiveInstanceIDs returns the canonical list of Instance IDs
-// backing a Deployment. Mirrors the helper in internal/provisioners
-// (which the router can't import per CP/DP-1). Duplicated rather
-// than shared via a new package: the function is 8 lines and the
-// duplication is cheaper than a fourth package for two callers.
-func effectiveInstanceIDs(dep *provisionerv1.Deployment) []string {
-	if ids := dep.GetInstanceIds(); len(ids) > 0 {
-		return ids
+// memberInstanceIDs returns each member's instances, in member order,
+// so position i lines up with effectiveEndpoints(dep)[i].
+//
+// A slice per member rather than one id per member, because a member
+// can span several machines and the quarantine set names machines. The
+// router needs both halves: the first id identifies the member for
+// metrics and affinity, and the whole set decides whether it is
+// healthy.
+//
+// Mirrors the helpers in internal/provisioners (which the router
+// cannot import per CP/DP-1). Duplicated rather than shared via a
+// fourth package, same call as before.
+func memberInstanceIDs(dep *provisionerv1.Deployment) [][]string {
+	if reps := dep.GetReplicas(); len(reps) > 0 {
+		out := make([][]string, len(reps))
+		for i, r := range reps {
+			out[i] = r.GetInstanceIds()
+		}
+		return out
 	}
 	if id := dep.GetInstanceId(); id != "" {
-		return []string{id}
+		return [][]string{{id}}
 	}
 	return nil
+}
+
+// anyQuarantined reports whether any of a member's nodes is in the
+// quarantine set. An empty node list is not quarantined: a legacy
+// record with no instance id still routes on its endpoint.
+func anyQuarantined(quarantined map[string]struct{}, nodes []string) bool {
+	for _, id := range nodes {
+		if id == "" {
+			continue
+		}
+		if _, ok := quarantined[id]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // hasStampedEndpoint reports whether the deployment has at least one
@@ -152,22 +186,26 @@ func hasStampedEndpoint(dep *provisionerv1.Deployment) bool {
 	if dep.GetEngineEndpoint() != "" {
 		return true
 	}
-	for _, ep := range dep.GetEngineEndpoints() {
-		if ep != "" {
+	for _, r := range dep.GetReplicas() {
+		if r.GetEngineEndpoint() != "" {
 			return true
 		}
 	}
 	return false
 }
 
-// effectiveEndpoints is the parallel helper for engine endpoint URLs.
-// engine_endpoints[i] corresponds to instance_ids[i]; empty string
-// means "instance still provisioning or quarantined." Beat 1+2
-// single-instance Deployments fall back to the singular
+// effectiveEndpoints returns one endpoint per member, in member order.
+// Position i is the endpoint of the member whose nodes are
+// memberInstanceIDs(dep)[i]; empty means that member is still coming
+// up. A single-instance record falls back to the singular
 // engine_endpoint.
 func effectiveEndpoints(dep *provisionerv1.Deployment) []string {
-	if eps := dep.GetEngineEndpoints(); len(eps) > 0 {
-		return eps
+	if reps := dep.GetReplicas(); len(reps) > 0 {
+		out := make([]string, len(reps))
+		for i, r := range reps {
+			out[i] = r.GetEngineEndpoint()
+		}
+		return out
 	}
 	if ep := dep.GetEngineEndpoint(); ep != "" {
 		return []string{ep}
