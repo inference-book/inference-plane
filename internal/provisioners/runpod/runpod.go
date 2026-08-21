@@ -958,3 +958,8 @@ func (r *podV2Runtime) containerStarted() bool {
 
 // Compile-time check.
 var _ provisioners.Provider = (*Provider)(nil)
+
+// TracksInstances implements provisioners.InstanceTracker: this provider
+// keeps a registry of what it rents, so a not-found from Describe is
+// evidence the instance is gone rather than evidence it was never tracked.
+func (p *Provider) TracksInstances() bool { return true }

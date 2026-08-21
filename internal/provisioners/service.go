@@ -489,6 +489,23 @@ func (s *Service) DescribeInstance(ctx context.Context, req *provisionerv1.Descr
 	}
 	refreshed, err := provider.Describe(ctx, existing.GetProviderId())
 	if err != nil {
+		// A provider that keeps a registry and says it has no such instance
+		// has told us the machine is gone, which is an answer rather than a
+		// failure. Recording it is the point: the state file is what
+		// `instance list` reads, and a stale ACTIVE row is how an operator
+		// checking for abandoned rentals after a crash gets told a machine
+		// is running when it stopped in June (#396).
+		//
+		// Everything else leaves the record alone. A provider API that is
+		// slow, rate-limiting or briefly broken must never be read as
+		// evidence that a machine stopped billing.
+		if errors.Is(err, ErrNotFound) && TracksInstances(provider) {
+			gone := s.markVanished(existing)
+			if patchErr := s.patchRecord(id, gone); patchErr != nil {
+				return nil, status.Error(codes.Internal, patchErr.Error())
+			}
+			return &provisionerv1.DescribeInstanceResponse{Instance: gone}, nil
+		}
 		return nil, status.Error(codes.Unknown, err.Error())
 	}
 	refreshed = s.finalizeActive(refreshed, existing.GetSpec(), provider.Name(), existing.GetCreatedAt())
@@ -1363,6 +1380,25 @@ func (s *Service) launchDeploy(ctx context.Context, dep *provisionerv1.Deploymen
 		}
 	}()
 	return done
+}
+
+// markVanished records that the provider no longer has this instance.
+//
+// TERMINATED rather than FAILED: the machine is not broken, it is gone, and
+// the two read differently to anyone deciding whether to retry. terminated_at
+// is stamped with the moment we learned rather than the moment it happened,
+// which is the only honest figure available and is why the uptime series is
+// billed from created_at rather than from this.
+func (s *Service) markVanished(existing *provisionerv1.Instance) *provisionerv1.Instance {
+	gone, ok := proto.Clone(existing).(*provisionerv1.Instance)
+	if !ok {
+		gone = existing
+	}
+	gone.State = provisionerv1.InstanceState_INSTANCE_STATE_TERMINATED
+	if gone.GetTerminatedAt() == nil {
+		gone.TerminatedAt = timestamppb.New(s.clock())
+	}
+	return gone
 }
 
 // finalizeInstanceAfterDeploy promotes an auto-provisioned instance

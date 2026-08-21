@@ -435,6 +435,33 @@ const ReservedIDPrefix = "iplane-"
 // errors.Is(err, ErrNotFound).
 var ErrNotFound = errors.New("provider: instance not found")
 
+// InstanceTracker is an optional Provider capability: the provider keeps a
+// registry of the instances it rents, so its Describe answering ErrNotFound
+// is evidence the instance is gone.
+//
+// The distinction is not pedantic. `local` and `external` return ErrNotFound
+// from every Describe, because neither has a provider-side registry to
+// consult, and reading that as absence would terminate every record they
+// own. Same shape as MountAttacher: declaring it is required rather than
+// optional, so an adapter that stays silent is treated as unable to report
+// absence, and the record is left alone instead of being wrongly buried.
+type InstanceTracker interface {
+	// TracksInstances reports whether ErrNotFound from this provider's
+	// Describe means the instance no longer exists.
+	TracksInstances() bool
+}
+
+// TracksInstances asks whether a provider's not-found is evidence of
+// absence, returning false for providers that never said.
+//
+// The assertion lives here so every caller treats a silent provider the same
+// way, rather than each one growing its own opinion about what a missing
+// registry means. Same reason TerminalFailure is a free function.
+func TracksInstances(p Provider) bool {
+	t, ok := p.(InstanceTracker)
+	return ok && t.TracksInstances()
+}
+
 // ProviderError wraps a provider SDK or HTTP error so callers can
 // errors.As to the cause and surface the raw provider message. Adapters
 // SHOULD return this for every failure mode so the Service can attach
