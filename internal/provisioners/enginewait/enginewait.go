@@ -25,6 +25,7 @@ package enginewait
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
@@ -88,6 +89,22 @@ type Config struct {
 	// a short description of what came back otherwise.
 	Probe func(ctx context.Context, endpoint string) (ok bool, detail string)
 	Emit  func(provisioners.DeployStateUpdate)
+	// Logs returns whatever the engine has printed, or "" when this
+	// provider cannot say. Called only when the wait is about to fail,
+	// and called BEFORE the caller tears anything down, because a
+	// destroyed machine has no logs left to give (measured: the fetch
+	// after teardown returns "No such container").
+	//
+	// Optional, because providers differ on whether they can answer.
+	// Vast uploads instance logs on request; RunPod's REST API exposes
+	// none at all, so it leaves this nil and the failure reads exactly as
+	// it did before (#47).
+	//
+	// A wait that ends without the engine's own words costs the whole
+	// rental and teaches nothing, which is not hypothetical: the GLM-5.2
+	// run spent sixty minutes and $23 timing out at engine:init with no
+	// record of what vLLM was doing.
+	Logs func(ctx context.Context) string
 }
 
 // Wait polls until the engine answers, the deadline passes, the caller
@@ -125,7 +142,7 @@ func Wait(ctx context.Context, c Config) (string, error) {
 
 		obs := c.Observe(ctx, phase)
 		if obs.Fatal != nil {
-			return endpoint, obs.Fatal
+			return endpoint, withEngineLogs(ctx, c, obs.Fatal)
 		}
 		if obs.Endpoint != "" {
 			endpoint = obs.Endpoint
@@ -161,10 +178,32 @@ func Wait(ctx context.Context, c Config) (string, error) {
 		case <-time.After(c.Interval):
 		}
 		if time.Now().After(deadline) {
-			return endpoint, fmt.Errorf("engine did not answer /health within %s, still at %s; last: %s",
-				c.Timeout, phase, describe(last))
+			return endpoint, withEngineLogs(ctx, c, fmt.Errorf(
+				"engine did not answer /health within %s, still at %s; last: %s",
+				c.Timeout, phase, describe(last)))
 		}
 	}
+}
+
+// withEngineLogs appends whatever the engine printed to a failing wait.
+//
+// Only on the way out, and only on failure: a successful wait has nothing
+// to explain, and fetching logs per tick would pay a provider round trip
+// for output nobody reads. The cost of being wrong here is one extra
+// request on a deploy that has already failed.
+//
+// A provider that cannot report logs leaves the error exactly as it was,
+// because an empty "engine said:" section reads as an engine that printed
+// nothing, which is a different and wronger claim than silence.
+func withEngineLogs(ctx context.Context, c Config, err error) error {
+	if c.Logs == nil {
+		return err
+	}
+	tail := strings.TrimSpace(c.Logs(ctx))
+	if tail == "" {
+		return err
+	}
+	return fmt.Errorf("%w\n--- engine said ---\n%s", err, tail)
 }
 
 // provisionerv1Update builds the per-tick progress update.
