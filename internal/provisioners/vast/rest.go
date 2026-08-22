@@ -24,10 +24,13 @@ const DefaultBaseURL = "https://console.vast.ai"
 // Versioned path segments. Held as constants so the call sites read
 // like the documented endpoints rather than carrying inline literals.
 const (
-	pathBundles      = "/api/v0/bundles/"
-	pathAskPrefix    = "/api/v0/asks/"
-	pathInstancesV0  = "/api/v0/instances/"
-	pathInstancesV1  = "/api/v1/instances/"
+	pathBundles     = "/api/v0/bundles/"
+	pathAskPrefix   = "/api/v0/asks/"
+	pathInstancesV0 = "/api/v0/instances/"
+	pathInstancesV1 = "/api/v1/instances/"
+	// pathRequestLogs asks Vast to publish one instance's container
+	// output; the id and a trailing slash complete it.
+	pathRequestLogs = "/api/v0/instances/request_logs/"
 )
 
 // EnvHTTPDebug enables the wire-level debug transport when set to any
@@ -127,6 +130,18 @@ func (c *Client) newReq(method, path string, query url.Values, body any) (*http.
 // callOpts returns the servicekit options to apply. Tests inject a
 // custom *http.Client; production lets servicekit's secure default
 // apply (TLS verification on).
+// do sends a request with whatever transport the client was built with.
+//
+// The typed helpers decode into a shape; log retrieval wants the raw body
+// and a status code, including the 403 that means "the upload has not
+// landed yet" rather than a refusal.
+func (c *Client) do(req *http.Request) (*http.Response, error) {
+	if c.httpClient != nil {
+		return c.httpClient.Do(req)
+	}
+	return http.DefaultClient.Do(req)
+}
+
 func (c *Client) callOpts() []skhttp.CallOption {
 	if c.httpClient != nil {
 		return []skhttp.CallOption{skhttp.WithClient(c.httpClient)}

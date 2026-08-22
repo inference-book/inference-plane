@@ -296,6 +296,12 @@ func (p *Provider) waitForEngineReady(ctx context.Context, contractID int, engin
 			Ordinal:     enginePhaseOrdinal,
 			Description: enginePhaseDescription,
 		},
+		// Vast publishes a container's output on request, so a wait that
+		// fails can say what the engine was actually doing rather than
+		// only that it never answered. Fetched here, before the caller
+		// tears anything down, because a destroyed instance has no logs
+		// left to give (#47).
+		Logs: func(ctx context.Context) string { return p.instanceLogs(ctx, id) },
 		Observe: func(ctx context.Context, _ string) enginewait.Observation {
 			api, derr := p.describeContract(ctx, contractID)
 			if derr != nil {
