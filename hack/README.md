@@ -220,6 +220,19 @@ expensive way: a run reached `engine:init` on a $54/hr box and reported
 booting rather than one that will never answer. `--no-debug-shell` opts out
 and accepts a blind run.
 
+**It runs on its own port and its own state dir.** Sharing `:8080` and
+`~/.iplane` with every other iplane on the machine is how a paid run gets
+killed by a stray `freeport 8080`, and how it ends up adopting whatever
+deployments happen to be lying around: one run spent itself quarantining the
+replicas of an unrelated `demo` deployment. `--port` overrides (default
+18080).
+
+**A dead daemon ends the run.** Without `serve` nothing can drive the
+deployment, so polling on is just billing with no way to notice. The check
+matters more than it sounds: the heartbeat proves the *script* is alive, not
+that the run is healthy, so a script looping around a dead daemon keeps the
+watchdog passive while the meter runs. Exiting is what re-arms it.
+
 **It runs `deploy-watch.sh` alongside the deploy**, so a run that times out
 still says how fast the weights were arriving and how far they got. That is
 the property all three GLM-5.2 attempts lacked: two of them cost about $22
@@ -236,7 +249,11 @@ already earned itself once, catching that an ISO-style timestamp made the
 deployment id non-DNS-safe and would have been rejected the moment the real
 deploy started.
 
-Flags: `--model` and `--heartbeat` (both required), `--sku`, `--gpus`, `--tp`,
+`--provider local` runs the whole path against the mock engine at zero cost,
+which is how the poll loop, the teardown and the serve-liveness check are
+exercised without renting anything.
+
+Flags: `--model` and `--heartbeat` (both required), `--provider`, `--port`, `--sku`, `--gpus`, `--tp`,
 `--image`, `--engine-args`, `--ladder`, `--prompt-tokens`, `--min-disk-gb`, `--min-vram-gb`,
 `--out`, `--dry-run`, `--no-watchdog-check`. `DEPLOY_TIMEOUT` defaults to 75m,
 deliberately longer than `IPLANE_ENGINE_READY_TIMEOUT` so the engine-ready

@@ -31,7 +31,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "${HERE}/.." && pwd)"
 IPLANE="${IPLANE_BIN:-${REPO}/bin/iplane}"
 
-MODEL=""; HEARTBEAT=""; SKU="H100_SXM"; GPUS=8; TP=8
+MODEL=""; HEARTBEAT=""; SKU="H100_SXM"; GPUS=8; TP=8; PROVIDER="vast"
 IMAGE="vllm/vllm-openai:v0.27.1"
 MIN_DISK_GB=700; MIN_VRAM_GB=80; FABRIC=""
 ENGINE_ARGS="--max-model-len,131072,--max-num-seqs,32"
@@ -51,7 +51,13 @@ DEPLOY_TIMEOUT="${DEPLOY_TIMEOUT:-75m}"
 ABORT_MIN_WINDOW=90       # seconds of download observed before judging
 ABORT_CONSECUTIVE=3       # readings in a row that must agree
 ABORT_SLACK=1.5           # projection must overshoot the remaining time by this
-SERVICE_URL="http://localhost:8080"
+# A port of its own, not 8080. A paid run must not share a port with every
+# other iplane on the machine: one `freeport 8080` reached in and killed the
+# daemon mid-download, and because the script itself stayed alive the
+# heartbeat kept beating and the watchdog stayed passive while a $54/hr box
+# went on billing with nothing able to drive it.
+PORT="${MEASURE_RUN_PORT:-18080}"
+SERVICE_URL=""
 SKIP_WATCHDOG_CHECK=0; DRY_RUN=0; DEBUG_SHELL=1
 OUT=""
 
@@ -70,6 +76,8 @@ while [ $# -gt 0 ]; do
     --min-vram-gb)   MIN_VRAM_GB="$2"; shift 2 ;;
     --fabric)        FABRIC="$2"; shift 2 ;;
     --out)           OUT="$2"; shift 2 ;;
+    --port)          PORT="$2"; shift 2 ;;
+    --provider)      PROVIDER="$2"; shift 2 ;;
     --no-watchdog-check) SKIP_WATCHDOG_CHECK=1; shift ;;
     --dry-run)       DRY_RUN=1; SKIP_WATCHDOG_CHECK=1; shift ;;
     --no-debug-shell) DEBUG_SHELL=0; shift ;;
@@ -150,9 +158,20 @@ trap cleanup EXIT INT TERM
 # acts on, and it is deliberately not something the teardown path writes.
 ( while :; do date +%s > "$HEARTBEAT"; sleep 20; done ) & BEAT_PID=$!
 
-lsof -iTCP:8080 -sTCP:LISTEN >/dev/null 2>&1 && fail ":8080 busy (another iplane serve?)"
-log "starting serve"
-env -u IPLANE_SERVICE_URL "$IPLANE" serve > "${OUT}/serve.log" 2>&1 & SERVE_PID=$!
+SERVICE_URL="http://localhost:${PORT}"
+lsof -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1 && fail ":${PORT} busy (another iplane serve? pass --port)"
+
+# A state dir of its own, for the same reason capacity-sample.sh takes one.
+# Sharing ~/.iplane means a measurement run loads whatever deployments happen
+# to be on the machine: the last one adopted a stale "demo" deployment and
+# spent the run quarantining its replicas, which is noise at best and a
+# teardown aimed at the wrong record at worst.
+RUN_STATE="${OUT}/state"; mkdir -p "$RUN_STATE"
+sed "s|addr: \":8080\"|addr: \":${PORT}\"|" "${REPO}/deploy/config.yaml" > "${OUT}/config.yaml"
+
+log "starting serve on :${PORT} with its own state dir"
+env -u IPLANE_SERVICE_URL "$IPLANE" serve --config "${OUT}/config.yaml" --state-dir "$RUN_STATE" \
+  > "${OUT}/serve.log" 2>&1 & SERVE_PID=$!
 # Readiness is "the RPC we are about to use answers", not an HTTP health
 # path: `serve` exposes no /healthz, and a probe against a route that does
 # not exist waits forever on a daemon that came up fine.
@@ -189,12 +208,12 @@ fi
 # card and iplane refuses it: "fabric_scope needs gpu_count >= 2". Defaulting
 # it unconditionally made every single-GPU rehearsal fail at provision, which
 # is a safe failure but a useless one. Default it by width instead.
-if [ -z "$FABRIC" ] && [ "$GPUS" -ge 2 ]; then FABRIC="intra-node"; fi
+if [ -z "$FABRIC" ] && [ "$GPUS" -ge 2 ] && [ "$PROVIDER" != "local" ]; then FABRIC="intra-node"; fi
 FABRIC_FLAG=()
 [ -n "$FABRIC" ] && FABRIC_FLAG=(--fabric "$FABRIC")
 
 DEBUG_FLAG=()
-if [ "$DEBUG_SHELL" = 1 ]; then
+if [ "$DEBUG_SHELL" = 1 ] && [ "$PROVIDER" != "local" ]; then
   DEBUG_FLAG=(--debug-shell)
   log "deploying with --debug-shell (deploy-watch needs SSH; --no-debug-shell to opt out)"
 else
@@ -203,7 +222,7 @@ fi
 log "deploying $DEP_ID"
 DEPLOY_ISSUED=1
 "$IPLANE" deployment deploy "$DEP_ID" \
-  --provider vast --sku "$SKU" --gpu-count "$GPUS" --min-vram-gb "$MIN_VRAM_GB" \
+  --provider "$PROVIDER" --sku "$SKU" --gpu-count "$GPUS" --min-vram-gb "$MIN_VRAM_GB" \
   ${FABRIC_FLAG[@]+"${FABRIC_FLAG[@]}"} --min-disk-gb "$MIN_DISK_GB" --tp "$TP" \
   ${DEBUG_FLAG[@]+"${DEBUG_FLAG[@]}"} \
   --engine-entrypoint python3 --engine-entrypoint=-m \
@@ -223,15 +242,32 @@ DEADLINE=$(( $(date +%s) + $(python3 -c "
 import re,sys
 s='$DEPLOY_TIMEOUT'; m=re.match(r'^(\d+)([smh])$', s)
 print({'s':1,'m':60,'h':3600}[m.group(2)]*int(m.group(1)) if m else 4500)") ))
-STATE=""; HOPELESS=0; DOWNLOAD_FIRST_SEEN=""; ABORTED=""
+STATE=""; HOPELESS=0; DOWNLOAD_FIRST_SEEN=""; ABORTED=""; SERVE_DIED=0
 while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+  # A dead daemon is a dead run, and must stop it rather than be polled
+  # through. Nothing can drive the deployment without serve: no sweep, no
+  # destroy, no way to notice. Exiting is also what re-arms the watchdog,
+  # since the heartbeat stops with this script; a run that keeps looping
+  # keeps beating and tells the watchdog all is well while the box bills.
+  if ! kill -0 "$SERVE_PID" 2>/dev/null; then
+    log "=== serve died; the deployment cannot be driven. tearing down ==="
+    tail -5 "${OUT}/serve.log" 2>/dev/null | sed 's/^/  /'
+    SERVE_DIED=1
+    break
+  fi
   STATE=$("$IPLANE" deployment describe "$DEP_ID" --service-url "$SERVICE_URL" 2>/dev/null | awk '/^state:/{print $2}')
   case "$STATE" in RUNNING|FAILED|TERMINATED) break ;; esac
 
   # The judgement the control plane would make if the agent were running.
   # Reads the newest watcher row and asks whether this download can still
   # finish before DEADLINE.
-  VERDICT=$(NOW="$(date +%s)" DEADLINE="$DEADLINE" SLACK="$ABORT_SLACK"     tail -1 "${OUT}/deploy-watch.jsonl" 2>/dev/null | python3 -c '
+  # Exported, not prefixed. `NOW=x DEADLINE=y tail ... | python3` applies the
+  # assignments to `tail`, and python3 on the far side of the pipe never sees
+  # them: every tick threw KeyError and the abort was dead for a whole paid
+  # run while looking armed.
+  export NOW DEADLINE SLACK
+  NOW="$(date +%s)"; SLACK="$ABORT_SLACK"
+  VERDICT=$(tail -1 "${OUT}/deploy-watch.jsonl" 2>/dev/null | python3 -c '
 import json, os, sys
 line = sys.stdin.read().strip()
 if not line:
@@ -286,6 +322,11 @@ else:
   sleep 20
 done
 log "deployment state: ${STATE:-unknown}"
+
+if [ "$SERVE_DIED" = 1 ]; then
+  tail -5 "${OUT}/deploy-watch.jsonl" 2>/dev/null | sed 's/^/  /'
+  exit 1
+fi
 
 if [ -n "$ABORTED" ]; then
   log "run abandoned before the deadline; teardown follows"
