@@ -25,6 +25,7 @@ var (
 	engineAgentHealthURL  string
 	engineAgentProvider   string
 	engineAgentHostID     string
+	engineAgentCacheDir   string
 	engineAgentNodeIndex  int
 	engineAgentInterval   time.Duration
 )
@@ -80,6 +81,8 @@ func init() {
 		"local engine health endpoint separating ASSEMBLING from SERVING")
 	f.StringVar(&engineAgentProvider, "provider", os.Getenv(engineagent.EnvProvider),
 		"provider that rented this box; qualifies --host-id so two providers' ids cannot collide")
+	f.StringVar(&engineAgentCacheDir, "cache-dir", os.Getenv(engineagent.EnvCacheDir),
+		"directory to measure weight staging in (default: the usual HuggingFace cache locations)")
 	f.StringVar(&engineAgentHostID, "host-id", os.Getenv(engineagent.EnvHostID),
 		"provider machine id for this node (RunPod machineId, Vast machine_id, EC2 instance id). Unreadable from inside the container, so it must be injected")
 	f.IntVar(&engineAgentNodeIndex, "node-index", envInt(engineagent.EnvNodeIndex, 0),
@@ -143,6 +146,18 @@ func runEngineAgent(ctx context.Context) error {
 			"hint", "expected on a PCIe-only box, or where nvidia-smi is not reachable in this container")
 	}
 
+	// Weight staging. A nil sensor reads as "no cache to watch", which is the
+	// honest answer for an engine mounting a pre-staged volume: it stages
+	// nothing, and reporting an unavailable reading every renewal would say
+	// the sensor failed rather than that there was nothing to sense.
+	staging := engineagent.NewStagingSensor(engineAgentCacheDir)
+	if staging == nil {
+		log.Info("no model cache found; weight staging will not be reported",
+			"hint", "expected on a warm-volume deploy, or pass --cache-dir")
+	} else {
+		log.Info("watching weight staging", "dir", staging.Dir())
+	}
+
 	agent, err := engineagent.New(
 		provisionerv1connect.NewEngineRegistryServiceClient(http.DefaultClient, engineAgentServiceURL),
 		ident,
@@ -151,6 +166,7 @@ func runEngineAgent(ctx context.Context) error {
 			engineagent.InterconnectProbe(interconnect),
 		)),
 		engineagent.WithInterconnect(interconnect),
+		engineagent.WithStaging(staging.ReadOrNil()),
 		engineagent.WithCards(cards),
 		engineagent.WithInterval(engineAgentInterval),
 		engineagent.WithLogger(log),

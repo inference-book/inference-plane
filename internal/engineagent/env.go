@@ -39,6 +39,12 @@ const (
 	// registration instead. Honoured when something does know it.
 	EnvEndpoint = "IPLANE_ENGINE_ENDPOINT"
 
+	// EnvCacheDir is the directory the staging sensor measures. Left unset,
+	// the sensor looks for a Hugging Face cache in the usual places and
+	// reports nothing if it finds none. Set it when the engine was pointed
+	// somewhere else (vLLM's --download-dir, a mounted warm volume).
+	EnvCacheDir = "IPLANE_ENGINE_CACHE_DIR"
+
 	// EnvHostID is the provider's machine id. Also normally unstamped, for
 	// the same timing reason, and unreadable from inside the container in
 	// any case (docs/design/0007 finding 4).

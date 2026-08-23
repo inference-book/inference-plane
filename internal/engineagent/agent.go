@@ -144,6 +144,12 @@ type Agent struct {
 	// built before this existed did.
 	interconnect func(context.Context) *provisionerv1.InterconnectHealth
 
+	// staging reads how fast weights are landing on this node. Nil means the
+	// agent makes no staging claim, which is right for an engine handed a
+	// warm volume: it stages nothing, and a rate of zero would read as a
+	// stall rather than as an absence.
+	staging func() *provisionerv1.StagingProgress
+
 	// interval is the renewal cadence. Seeded with a conservative default
 	// and replaced by whatever the control plane returns, so detection
 	// latency stays tunable in one place rather than per agent.
@@ -219,6 +225,22 @@ func WithInterconnect(read func(context.Context) *provisionerv1.InterconnectHeal
 	return func(a *Agent) {
 		if read != nil {
 			a.interconnect = read
+		}
+	}
+}
+
+// WithStaging supplies the sensor that reports weights arriving on this node.
+//
+// Injectable for the same reasons WithInterconnect is. A test needs to drive a
+// download that is not happening, the mock engine has no cache to watch, and
+// an engine mounting a pre-staged volume should say nothing here rather than
+// reporting that nothing is arriving.
+//
+// Left unset, the agent makes no staging claim at all.
+func WithStaging(read func() *provisionerv1.StagingProgress) Option {
+	return func(a *Agent) {
+		if read != nil {
+			a.staging = read
 		}
 	}
 }
@@ -364,6 +386,16 @@ func (a *Agent) snapshot(ctx context.Context) *provisionerv1.Engine {
 		}
 	}
 
+	// Read staging fresh each tick, and read it whatever the state says.
+	// Gating it on ASSEMBLING would be assuming the two agree: an engine can
+	// answer /health while a second model is still arriving, and an engine
+	// can be ASSEMBLING for reasons that have nothing to do with the disk.
+	// The reading describes the disk, so let it describe the disk.
+	var staging *provisionerv1.StagingProgress
+	if a.staging != nil {
+		staging = a.staging()
+	}
+
 	return &provisionerv1.Engine{
 		Id:           a.ident.EngineID,
 		DeploymentId: a.ident.DeploymentID,
@@ -371,6 +403,7 @@ func (a *Agent) snapshot(ctx context.Context) *provisionerv1.Engine {
 		Endpoint:     a.ident.Endpoint,
 		State:        state,
 		Span:         span,
+		Staging:      staging,
 	}
 }
 
