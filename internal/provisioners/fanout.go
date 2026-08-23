@@ -867,7 +867,13 @@ func (s *Service) launchReplica(ctx context.Context, deployID string, slot, node
 func (s *Service) runReplicaDeploy(ctx context.Context, deployID string, slot, nodeIndex int, inst *provisionerv1.Instance, key *sshkeys.KeyPair, dep *provisionerv1.Deployment) (endpoint string, err error) {
 	replicaID := inst.GetId()
 	obs := s.newDeployObserver(ctx, deployKindProvision, deployID, inst, storageTierForDeployment(dep))
+	// Refine before observing, so the phase histogram buckets the split
+	// rungs rather than one opaque engine:init. The refiner is per-replica
+	// because its no-regression latch is, and it is nil-safe when no engine
+	// registry is wired.
+	refiner := s.newPhaseRefiner(replicaID)
 	emit := func(u DeployStateUpdate) {
+		u = refiner.refine(ctx, u)
 		obs.observe(u)
 		_ = s.patchDeploymentSlot(deployID, replicaID, u)
 	}

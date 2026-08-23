@@ -24,6 +24,7 @@ import (
 	skmw "github.com/panyam/servicekit/middleware"
 
 	inferencev1 "github.com/inference-book/inference-plane/gen/go/inferenceplane/v1"
+	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
 	"github.com/inference-book/inference-plane/gen/go/provisioner/v1/provisionerv1connect"
 	"github.com/inference-book/inference-plane/internal/backends"
 	"github.com/inference-book/inference-plane/internal/config"
@@ -284,12 +285,32 @@ func runServe(parent context.Context) error {
 	}
 	defer releaseLock()
 
+	// Built before the Service, which is the reverse of the dependency
+	// everything else here has, because the Service takes a reader over it
+	// as a construction option. The registry needs only the state store, so
+	// it can be built this early; the pieces that genuinely need the Service
+	// (the sweeper's drainer, the locator) are wired further down once both
+	// exist.
+	engineRegistry := engines.New(engines.NewStateStore(stateStore))
+
 	provisionerSvc, err := buildLocalService(stateStore, "default",
 		provisioners.WithTouchDebounceInterval(cfg.Router.TouchDebounceInterval),
 		provisioners.WithRecorder(recorder),
 		// Overrides buildLocalService's default HF store with the
 		// warm-cache wrap when model_cache is set (no-op otherwise).
 		provisioners.WithModelStore(modelStoreFromConfig(cfg.ModelCache)),
+		// Lets the deploy path tell a weight download from a load during
+		// engine:init. internal/engines imports internal/provisioners, so
+		// the dependency can only run this way: a reader injected here
+		// rather than provisioners reaching for the registry itself. The
+		// mirror of engines.WithDrainer(provisionerSvc) below.
+		provisioners.WithStagingReader(func(_ context.Context, engineID string) (*provisionerv1.StagingProgress, bool) {
+			e, err := engineRegistry.Get(engineID)
+			if err != nil || e == nil {
+				return nil, false
+			}
+			return e.GetStaging(), e.GetStaging() != nil
+		}),
 	)
 	if err != nil {
 		return fmt.Errorf("build provisioner service: %w", err)
@@ -355,7 +376,6 @@ func runServe(parent context.Context) error {
 	// the data path's correctness rides on; the registry carries membership,
 	// group composition and liveness, which no probe can report. Removing
 	// either leaves a hole the other does not cover.
-	engineRegistry := engines.New(engines.NewStateStore(stateStore))
 	engineSweeper := engines.NewSweeper(engineRegistry, engines.WithLogger(logger))
 	go engineSweeper.Run(healthCtx)
 	logger.Info("engine registry started",

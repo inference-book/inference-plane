@@ -65,6 +65,12 @@ type Service struct {
 	// WithAgentServiceURL.
 	agentServiceURL string
 
+	// stagingReader tells a weight download from a load during engine:init,
+	// by asking what the replica's agent last reported about its disk.
+	// Injected because internal/engines imports this package and cannot be
+	// imported back; nil means engine:init stays unrefined.
+	stagingReader StagingReader
+
 	// pendingReplicaSpecs is the per-fan-out stash that
 	// provisionSlots writes and recordCreateSlots / recordAppendedSlots
 	// reads. Threading the specs through every recordSlots variant
