@@ -1030,6 +1030,15 @@ func (s *Service) patchDeploymentSlot(deployID, replicaInstanceID string, u Depl
 				inst.ProviderId = u.ContainerID
 			}
 		}
+		// Not set-once, unlike ProviderId. A provider assigns the address
+		// after the rent call returns and may reassign it, so the latest
+		// report wins: a stale endpoint sends an operator to a machine
+		// that is no longer theirs, which is worse than having none.
+		if ssh := u.SSH; ssh.GetHost() != "" {
+			if inst, ok := f.Instances[replicaInstanceID]; ok {
+				inst.Ssh = ssh
+			}
+		}
 		// Per replica, because a heterogeneous fleet spans providers and
 		// prices inside one deployment, and spend is a join on the
 		// instance rather than a figure the deployment carries.

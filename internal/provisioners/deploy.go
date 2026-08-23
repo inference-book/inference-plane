@@ -37,6 +37,11 @@ type DeployStateUpdate struct {
 	// (#397).
 	HourlyRateUSD float64
 
+	// SSH is where the provider says this replica can be shelled into, or
+	// nil when it has not said. Providers report it once it exists, which
+	// is generally after the rent call has already returned.
+	SSH *provisionerv1.SshTarget
+
 	// Deadline is when the wait producing this update gives up, or the zero
 	// time when the emitter has no deadline to report.
 	//

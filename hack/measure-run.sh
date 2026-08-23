@@ -33,7 +33,7 @@ IPLANE="${IPLANE_BIN:-${REPO}/bin/iplane}"
 
 MODEL=""; HEARTBEAT=""; SKU="H100_SXM"; GPUS=8; TP=8
 IMAGE="vllm/vllm-openai:v0.27.1"
-MIN_DISK_GB=700; MIN_VRAM_GB=80
+MIN_DISK_GB=700; MIN_VRAM_GB=80; FABRIC=""
 ENGINE_ARGS="--max-model-len,131072,--max-num-seqs,32"
 LADDER="1,2,4,8"; PROMPT_TOKENS="8192"
 DEPLOY_TIMEOUT="${DEPLOY_TIMEOUT:-75m}"
@@ -68,6 +68,7 @@ while [ $# -gt 0 ]; do
     --prompt-tokens) PROMPT_TOKENS="$2"; shift 2 ;;
     --min-disk-gb)   MIN_DISK_GB="$2"; shift 2 ;;
     --min-vram-gb)   MIN_VRAM_GB="$2"; shift 2 ;;
+    --fabric)        FABRIC="$2"; shift 2 ;;
     --out)           OUT="$2"; shift 2 ;;
     --no-watchdog-check) SKIP_WATCHDOG_CHECK=1; shift ;;
     --dry-run)       DRY_RUN=1; SKIP_WATCHDOG_CHECK=1; shift ;;
@@ -184,6 +185,14 @@ fi
 # endpoint, which means deploy-watch can never read them and the run is blind
 # for exactly the phase it exists to observe. It narrows placement and costs
 # a routable IP; being unable to see an hour of engine:init costs more.
+# A fabric describes how cards reach each other, so it is meaningless on one
+# card and iplane refuses it: "fabric_scope needs gpu_count >= 2". Defaulting
+# it unconditionally made every single-GPU rehearsal fail at provision, which
+# is a safe failure but a useless one. Default it by width instead.
+if [ -z "$FABRIC" ] && [ "$GPUS" -ge 2 ]; then FABRIC="intra-node"; fi
+FABRIC_FLAG=()
+[ -n "$FABRIC" ] && FABRIC_FLAG=(--fabric "$FABRIC")
+
 DEBUG_FLAG=()
 if [ "$DEBUG_SHELL" = 1 ]; then
   DEBUG_FLAG=(--debug-shell)
@@ -195,8 +204,8 @@ log "deploying $DEP_ID"
 DEPLOY_ISSUED=1
 "$IPLANE" deployment deploy "$DEP_ID" \
   --provider vast --sku "$SKU" --gpu-count "$GPUS" --min-vram-gb "$MIN_VRAM_GB" \
-  --fabric intra-node --min-disk-gb "$MIN_DISK_GB" --tp "$TP" \
-  "${DEBUG_FLAG[@]}" \
+  ${FABRIC_FLAG[@]+"${FABRIC_FLAG[@]}"} --min-disk-gb "$MIN_DISK_GB" --tp "$TP" \
+  ${DEBUG_FLAG[@]+"${DEBUG_FLAG[@]}"} \
   --engine-entrypoint python3 --engine-entrypoint=-m \
   --engine-entrypoint vllm.entrypoints.openai.api_server \
   --image "$IMAGE" --model "$MODEL" --engine-args "$ENGINE_ARGS" \

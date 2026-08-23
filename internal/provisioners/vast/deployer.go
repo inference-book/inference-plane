@@ -337,6 +337,12 @@ func (p *Provider) waitForEngineReady(ctx context.Context, contractID int, engin
 				Endpoint: endpoint,
 				Phase:    classifyEnginePhase(api.ActualStatus, endpoint != ""),
 				Detail:   pullProgress(api.StatusMsg),
+				// Vast runs sshd on every deploy (the rent call asks for
+				// runtype "ssh" unconditionally), so the address is a fact
+				// about the box rather than something to opt into. It just
+				// does not exist yet when the contract is created, which is
+				// why it is reported here rather than at rent time.
+				SSH: sshTargetFrom(api),
 			}
 		},
 		Probe: func(ctx context.Context, endpoint string) (bool, string) {
@@ -397,4 +403,21 @@ func deployFailed(emit func(provisioners.DeployStateUpdate), phase string, err e
 		FailureReason: err.Error(),
 	})
 	return fmt.Errorf("%s: %w", phase, err)
+}
+
+// sshTargetFrom builds the shell address from an instance record, or nil
+// when the provider has not assigned one.
+//
+// nil rather than a zero-valued target, because "no address yet" and "an
+// address that is the empty string" reach a caller identically otherwise,
+// and one of them is a machine that will be reachable in thirty seconds.
+func sshTargetFrom(api *apiInstance) *provisionerv1.SshTarget {
+	if api == nil || api.SSHHost == "" {
+		return nil
+	}
+	return &provisionerv1.SshTarget{
+		Host: api.SSHHost,
+		Port: int32(api.SSHPort),
+		User: "root",
+	}
 }
