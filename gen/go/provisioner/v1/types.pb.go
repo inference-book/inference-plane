@@ -3455,6 +3455,104 @@ func (x *InterconnectHealth) GetLinksUp() int32 {
 	return 0
 }
 
+// StagingProgress is what the agent can see of the model's weights arriving
+// on this node, while the engine is still too busy starting to be asked
+// anything.
+//
+// It exists because that window is opaque and expensive. vLLM suppresses the
+// download progress bar (it passes a disabled tqdm to snapshot_download), so a
+// container pulling 474 GB prints nothing at all until it finishes, and two
+// GLM-5.2 deploys spent an hour each in that silence before timing out. The
+// agent is already running through it: AgentPrelude starts it backgrounded
+// before the engine execs, and it registers as ASSEMBLING on a cadence
+// throughout.
+//
+// The `available` flag carries the same weight it does on InterconnectHealth,
+// for the same reason. A node whose cache directory cannot be read and a node
+// that has downloaded nothing yet are different facts, and a rate of zero
+// means "not moving" only when somebody actually measured it. Collapsing them
+// would make every node without a sensor look stalled.
+//
+// Deliberately local-only. The agent reports what it can see on its own disk
+// and does not know the model's total size; the control plane read that from
+// the hub at deploy time and is the one place that can turn these into a
+// fraction or an estimate. Teaching the agent the total would put the same
+// fact in two places and let them disagree.
+type StagingProgress struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// False means no reading. Every field below is meaningless when unset.
+	Available bool `protobuf:"varint,1,opt,name=available,proto3" json:"available,omitempty"`
+	// Bytes of model weights present on this node's disk.
+	BytesLocal int64 `protobuf:"varint,2,opt,name=bytes_local,json=bytesLocal,proto3" json:"bytes_local,omitempty"`
+	// Rate over the most recent sampling interval. Zero is a real measurement
+	// (nothing arrived) whenever available is true, which is how a stalled
+	// download is told apart from an unmeasured one.
+	BytesPerSecond float64 `protobuf:"fixed64,3,opt,name=bytes_per_second,json=bytesPerSecond,proto3" json:"bytes_per_second,omitempty"`
+	// Seconds the rate was measured over, so a consumer can tell a reading
+	// taken across one tick from one taken across a longer gap.
+	IntervalSeconds float64 `protobuf:"fixed64,4,opt,name=interval_seconds,json=intervalSeconds,proto3" json:"interval_seconds,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *StagingProgress) Reset() {
+	*x = StagingProgress{}
+	mi := &file_provisioner_v1_types_proto_msgTypes[22]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StagingProgress) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StagingProgress) ProtoMessage() {}
+
+func (x *StagingProgress) ProtoReflect() protoreflect.Message {
+	mi := &file_provisioner_v1_types_proto_msgTypes[22]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StagingProgress.ProtoReflect.Descriptor instead.
+func (*StagingProgress) Descriptor() ([]byte, []int) {
+	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{22}
+}
+
+func (x *StagingProgress) GetAvailable() bool {
+	if x != nil {
+		return x.Available
+	}
+	return false
+}
+
+func (x *StagingProgress) GetBytesLocal() int64 {
+	if x != nil {
+		return x.BytesLocal
+	}
+	return 0
+}
+
+func (x *StagingProgress) GetBytesPerSecond() float64 {
+	if x != nil {
+		return x.BytesPerSecond
+	}
+	return 0
+}
+
+func (x *StagingProgress) GetIntervalSeconds() float64 {
+	if x != nil {
+		return x.IntervalSeconds
+	}
+	return 0
+}
+
 // EngineNode is one machine an engine spans. The fact no probe can report,
 // and the input failure attribution needs: when a member dies, which node
 // took it down (issue 214).
@@ -3483,7 +3581,7 @@ type EngineNode struct {
 
 func (x *EngineNode) Reset() {
 	*x = EngineNode{}
-	mi := &file_provisioner_v1_types_proto_msgTypes[22]
+	mi := &file_provisioner_v1_types_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3495,7 +3593,7 @@ func (x *EngineNode) String() string {
 func (*EngineNode) ProtoMessage() {}
 
 func (x *EngineNode) ProtoReflect() protoreflect.Message {
-	mi := &file_provisioner_v1_types_proto_msgTypes[22]
+	mi := &file_provisioner_v1_types_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3508,7 +3606,7 @@ func (x *EngineNode) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EngineNode.ProtoReflect.Descriptor instead.
 func (*EngineNode) Descriptor() ([]byte, []int) {
-	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{22}
+	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *EngineNode) GetHostId() string {
@@ -3573,10 +3671,16 @@ type Engine struct {
 	// routing decisions must not consume these. The router keeps its own
 	// in-flight counts precisely so a routing decision never depends on an
 	// observation pipeline being up.
-	InFlight         int32                  `protobuf:"varint,7,opt,name=in_flight,json=inFlight,proto3" json:"in_flight,omitempty"`
-	CacheUtilization float64                `protobuf:"fixed64,8,opt,name=cache_utilization,json=cacheUtilization,proto3" json:"cache_utilization,omitempty"`
-	RegisteredAt     *timestamppb.Timestamp `protobuf:"bytes,20,opt,name=registered_at,json=registeredAt,proto3" json:"registered_at,omitempty"`
-	LastSeenAt       *timestamppb.Timestamp `protobuf:"bytes,21,opt,name=last_seen_at,json=lastSeenAt,proto3" json:"last_seen_at,omitempty"`
+	InFlight         int32   `protobuf:"varint,7,opt,name=in_flight,json=inFlight,proto3" json:"in_flight,omitempty"`
+	CacheUtilization float64 `protobuf:"fixed64,8,opt,name=cache_utilization,json=cacheUtilization,proto3" json:"cache_utilization,omitempty"`
+	// Weights arriving on this node. Set while the engine is ASSEMBLING and
+	// stale-but-harmless once it serves, since nothing downloads after that.
+	// Reported per engine rather than per node because the agent that reports
+	// it is the rank-0 node's, which is the one holding the cache the engine
+	// loads from.
+	Staging      *StagingProgress       `protobuf:"bytes,9,opt,name=staging,proto3" json:"staging,omitempty"`
+	RegisteredAt *timestamppb.Timestamp `protobuf:"bytes,20,opt,name=registered_at,json=registeredAt,proto3" json:"registered_at,omitempty"`
+	LastSeenAt   *timestamppb.Timestamp `protobuf:"bytes,21,opt,name=last_seen_at,json=lastSeenAt,proto3" json:"last_seen_at,omitempty"`
 	// When the current lease runs out. Past this with no renewal, the sweeper
 	// moves the engine to LOST.
 	LeaseExpiresAt *timestamppb.Timestamp `protobuf:"bytes,22,opt,name=lease_expires_at,json=leaseExpiresAt,proto3" json:"lease_expires_at,omitempty"`
@@ -3586,7 +3690,7 @@ type Engine struct {
 
 func (x *Engine) Reset() {
 	*x = Engine{}
-	mi := &file_provisioner_v1_types_proto_msgTypes[23]
+	mi := &file_provisioner_v1_types_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3598,7 +3702,7 @@ func (x *Engine) String() string {
 func (*Engine) ProtoMessage() {}
 
 func (x *Engine) ProtoReflect() protoreflect.Message {
-	mi := &file_provisioner_v1_types_proto_msgTypes[23]
+	mi := &file_provisioner_v1_types_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3611,7 +3715,7 @@ func (x *Engine) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Engine.ProtoReflect.Descriptor instead.
 func (*Engine) Descriptor() ([]byte, []int) {
-	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{23}
+	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *Engine) GetId() string {
@@ -3668,6 +3772,13 @@ func (x *Engine) GetCacheUtilization() float64 {
 		return x.CacheUtilization
 	}
 	return 0
+}
+
+func (x *Engine) GetStaging() *StagingProgress {
+	if x != nil {
+		return x.Staging
+	}
+	return nil
 }
 
 func (x *Engine) GetRegisteredAt() *timestamppb.Timestamp {
@@ -3926,7 +4037,13 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"\tavailable\x18\x01 \x01(\bR\tavailable\x12\x1f\n" +
 	"\vlinks_total\x18\x02 \x01(\x05R\n" +
 	"linksTotal\x12\x19\n" +
-	"\blinks_up\x18\x03 \x01(\x05R\alinksUp\"\xc5\x01\n" +
+	"\blinks_up\x18\x03 \x01(\x05R\alinksUp\"\xa5\x01\n" +
+	"\x0fStagingProgress\x12\x1c\n" +
+	"\tavailable\x18\x01 \x01(\bR\tavailable\x12\x1f\n" +
+	"\vbytes_local\x18\x02 \x01(\x03R\n" +
+	"bytesLocal\x12(\n" +
+	"\x10bytes_per_second\x18\x03 \x01(\x01R\x0ebytesPerSecond\x12)\n" +
+	"\x10interval_seconds\x18\x04 \x01(\x01R\x0fintervalSeconds\"\xc5\x01\n" +
 	"\n" +
 	"EngineNode\x12\x17\n" +
 	"\ahost_id\x18\x01 \x01(\tR\x06hostId\x12\x1a\n" +
@@ -3934,7 +4051,7 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"\n" +
 	"node_index\x18\x03 \x01(\x05R\tnodeIndex\x12\x1b\n" +
 	"\tgpu_count\x18\x04 \x01(\x05R\bgpuCount\x12F\n" +
-	"\finterconnect\x18\x05 \x01(\v2\".provisioner.v1.InterconnectHealthR\finterconnect\"\xe1\x03\n" +
+	"\finterconnect\x18\x05 \x01(\v2\".provisioner.v1.InterconnectHealthR\finterconnect\"\x9c\x04\n" +
 	"\x06Engine\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12#\n" +
 	"\rdeployment_id\x18\x02 \x01(\tR\fdeploymentId\x12\x14\n" +
@@ -3943,7 +4060,8 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"\x05state\x18\x05 \x01(\x0e2\x1b.provisioner.v1.EngineStateR\x05state\x12.\n" +
 	"\x04span\x18\x06 \x03(\v2\x1a.provisioner.v1.EngineNodeR\x04span\x12\x1b\n" +
 	"\tin_flight\x18\a \x01(\x05R\binFlight\x12+\n" +
-	"\x11cache_utilization\x18\b \x01(\x01R\x10cacheUtilization\x12?\n" +
+	"\x11cache_utilization\x18\b \x01(\x01R\x10cacheUtilization\x129\n" +
+	"\astaging\x18\t \x01(\v2\x1f.provisioner.v1.StagingProgressR\astaging\x12?\n" +
 	"\rregistered_at\x18\x14 \x01(\v2\x1a.google.protobuf.TimestampR\fregisteredAt\x12<\n" +
 	"\flast_seen_at\x18\x15 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
 	"lastSeenAt\x12D\n" +
@@ -4012,7 +4130,7 @@ func file_provisioner_v1_types_proto_rawDescGZIP() []byte {
 }
 
 var file_provisioner_v1_types_proto_enumTypes = make([]protoimpl.EnumInfo, 8)
-var file_provisioner_v1_types_proto_msgTypes = make([]protoimpl.MessageInfo, 29)
+var file_provisioner_v1_types_proto_msgTypes = make([]protoimpl.MessageInfo, 30)
 var file_provisioner_v1_types_proto_goTypes = []any{
 	(FabricScope)(0),              // 0: provisioner.v1.FabricScope
 	(FabricSource)(0),             // 1: provisioner.v1.FabricSource
@@ -4044,19 +4162,20 @@ var file_provisioner_v1_types_proto_goTypes = []any{
 	(*Volume)(nil),                // 27: provisioner.v1.Volume
 	(*ReplicaSpec)(nil),           // 28: provisioner.v1.ReplicaSpec
 	(*InterconnectHealth)(nil),    // 29: provisioner.v1.InterconnectHealth
-	(*EngineNode)(nil),            // 30: provisioner.v1.EngineNode
-	(*Engine)(nil),                // 31: provisioner.v1.Engine
-	nil,                           // 32: provisioner.v1.Spec.TagsEntry
-	nil,                           // 33: provisioner.v1.Instance.MetadataEntry
-	nil,                           // 34: provisioner.v1.InstanceRef.TagsEntry
-	nil,                           // 35: provisioner.v1.Deployment.EnvEntry
-	nil,                           // 36: provisioner.v1.Candidate.AttrsEntry
-	(*timestamppb.Timestamp)(nil), // 37: google.protobuf.Timestamp
-	(*structpb.Value)(nil),        // 38: google.protobuf.Value
+	(*StagingProgress)(nil),       // 30: provisioner.v1.StagingProgress
+	(*EngineNode)(nil),            // 31: provisioner.v1.EngineNode
+	(*Engine)(nil),                // 32: provisioner.v1.Engine
+	nil,                           // 33: provisioner.v1.Spec.TagsEntry
+	nil,                           // 34: provisioner.v1.Instance.MetadataEntry
+	nil,                           // 35: provisioner.v1.InstanceRef.TagsEntry
+	nil,                           // 36: provisioner.v1.Deployment.EnvEntry
+	nil,                           // 37: provisioner.v1.Candidate.AttrsEntry
+	(*timestamppb.Timestamp)(nil), // 38: google.protobuf.Timestamp
+	(*structpb.Value)(nil),        // 39: google.protobuf.Value
 }
 var file_provisioner_v1_types_proto_depIdxs = []int32{
 	9,  // 0: provisioner.v1.Spec.requirements:type_name -> provisioner.v1.ResourceRequirements
-	32, // 1: provisioner.v1.Spec.tags:type_name -> provisioner.v1.Spec.TagsEntry
+	33, // 1: provisioner.v1.Spec.tags:type_name -> provisioner.v1.Spec.TagsEntry
 	0,  // 2: provisioner.v1.ResourceRequirements.fabric_scope:type_name -> provisioner.v1.FabricScope
 	2,  // 3: provisioner.v1.ResourceRequirements.reclaim_policy:type_name -> provisioner.v1.ReclaimPolicy
 	0,  // 4: provisioner.v1.Hardware.fabric_scope:type_name -> provisioner.v1.FabricScope
@@ -4064,20 +4183,20 @@ var file_provisioner_v1_types_proto_depIdxs = []int32{
 	8,  // 6: provisioner.v1.Instance.spec:type_name -> provisioner.v1.Spec
 	10, // 7: provisioner.v1.Instance.hardware:type_name -> provisioner.v1.Hardware
 	3,  // 8: provisioner.v1.Instance.state:type_name -> provisioner.v1.InstanceState
-	37, // 9: provisioner.v1.Instance.created_at:type_name -> google.protobuf.Timestamp
-	37, // 10: provisioner.v1.Instance.activated_at:type_name -> google.protobuf.Timestamp
-	37, // 11: provisioner.v1.Instance.terminated_at:type_name -> google.protobuf.Timestamp
+	38, // 9: provisioner.v1.Instance.created_at:type_name -> google.protobuf.Timestamp
+	38, // 10: provisioner.v1.Instance.activated_at:type_name -> google.protobuf.Timestamp
+	38, // 11: provisioner.v1.Instance.terminated_at:type_name -> google.protobuf.Timestamp
 	11, // 12: provisioner.v1.Instance.ssh:type_name -> provisioner.v1.SshTarget
-	33, // 13: provisioner.v1.Instance.metadata:type_name -> provisioner.v1.Instance.MetadataEntry
-	34, // 14: provisioner.v1.InstanceRef.tags:type_name -> provisioner.v1.InstanceRef.TagsEntry
-	37, // 15: provisioner.v1.InstanceRef.created_at:type_name -> google.protobuf.Timestamp
-	35, // 16: provisioner.v1.Deployment.env:type_name -> provisioner.v1.Deployment.EnvEntry
+	34, // 13: provisioner.v1.Instance.metadata:type_name -> provisioner.v1.Instance.MetadataEntry
+	35, // 14: provisioner.v1.InstanceRef.tags:type_name -> provisioner.v1.InstanceRef.TagsEntry
+	38, // 15: provisioner.v1.InstanceRef.created_at:type_name -> google.protobuf.Timestamp
+	36, // 16: provisioner.v1.Deployment.env:type_name -> provisioner.v1.Deployment.EnvEntry
 	6,  // 17: provisioner.v1.Deployment.state:type_name -> provisioner.v1.DeploymentState
-	37, // 18: provisioner.v1.Deployment.created_at:type_name -> google.protobuf.Timestamp
-	37, // 19: provisioner.v1.Deployment.started_at:type_name -> google.protobuf.Timestamp
-	37, // 20: provisioner.v1.Deployment.ready_at:type_name -> google.protobuf.Timestamp
-	37, // 21: provisioner.v1.Deployment.terminated_at:type_name -> google.protobuf.Timestamp
-	37, // 22: provisioner.v1.Deployment.last_activity_at:type_name -> google.protobuf.Timestamp
+	38, // 18: provisioner.v1.Deployment.created_at:type_name -> google.protobuf.Timestamp
+	38, // 19: provisioner.v1.Deployment.started_at:type_name -> google.protobuf.Timestamp
+	38, // 20: provisioner.v1.Deployment.ready_at:type_name -> google.protobuf.Timestamp
+	38, // 21: provisioner.v1.Deployment.terminated_at:type_name -> google.protobuf.Timestamp
+	38, // 22: provisioner.v1.Deployment.last_activity_at:type_name -> google.protobuf.Timestamp
 	14, // 23: provisioner.v1.Deployment.replicas:type_name -> provisioner.v1.ReplicaBacking
 	23, // 24: provisioner.v1.Deployment.upstream_auth:type_name -> provisioner.v1.UpstreamAuth
 	22, // 25: provisioner.v1.Deployment.parallelism:type_name -> provisioner.v1.Parallelism
@@ -4085,7 +4204,7 @@ var file_provisioner_v1_types_proto_depIdxs = []int32{
 	16, // 27: provisioner.v1.Deployment.mounts:type_name -> provisioner.v1.VolumeMount
 	0,  // 28: provisioner.v1.Candidate.fabric_scope:type_name -> provisioner.v1.FabricScope
 	1,  // 29: provisioner.v1.Candidate.fabric_source:type_name -> provisioner.v1.FabricSource
-	36, // 30: provisioner.v1.Candidate.attrs:type_name -> provisioner.v1.Candidate.AttrsEntry
+	37, // 30: provisioner.v1.Candidate.attrs:type_name -> provisioner.v1.Candidate.AttrsEntry
 	4,  // 31: provisioner.v1.ProviderAnswer.outcome:type_name -> provisioner.v1.AnswerOutcome
 	17, // 32: provisioner.v1.ProviderAnswer.candidates:type_name -> provisioner.v1.Candidate
 	19, // 33: provisioner.v1.Comparability.gaps:type_name -> provisioner.v1.FactGap
@@ -4094,20 +4213,21 @@ var file_provisioner_v1_types_proto_depIdxs = []int32{
 	18, // 36: provisioner.v1.Placement.answers:type_name -> provisioner.v1.ProviderAnswer
 	20, // 37: provisioner.v1.Placement.comparability:type_name -> provisioner.v1.Comparability
 	24, // 38: provisioner.v1.DescribeModelResponse.architecture:type_name -> provisioner.v1.ModelArchitecture
-	37, // 39: provisioner.v1.Volume.created_at:type_name -> google.protobuf.Timestamp
+	38, // 39: provisioner.v1.Volume.created_at:type_name -> google.protobuf.Timestamp
 	9,  // 40: provisioner.v1.ReplicaSpec.requirements:type_name -> provisioner.v1.ResourceRequirements
 	29, // 41: provisioner.v1.EngineNode.interconnect:type_name -> provisioner.v1.InterconnectHealth
 	7,  // 42: provisioner.v1.Engine.state:type_name -> provisioner.v1.EngineState
-	30, // 43: provisioner.v1.Engine.span:type_name -> provisioner.v1.EngineNode
-	37, // 44: provisioner.v1.Engine.registered_at:type_name -> google.protobuf.Timestamp
-	37, // 45: provisioner.v1.Engine.last_seen_at:type_name -> google.protobuf.Timestamp
-	37, // 46: provisioner.v1.Engine.lease_expires_at:type_name -> google.protobuf.Timestamp
-	38, // 47: provisioner.v1.Instance.MetadataEntry.value:type_name -> google.protobuf.Value
-	48, // [48:48] is the sub-list for method output_type
-	48, // [48:48] is the sub-list for method input_type
-	48, // [48:48] is the sub-list for extension type_name
-	48, // [48:48] is the sub-list for extension extendee
-	0,  // [0:48] is the sub-list for field type_name
+	31, // 43: provisioner.v1.Engine.span:type_name -> provisioner.v1.EngineNode
+	30, // 44: provisioner.v1.Engine.staging:type_name -> provisioner.v1.StagingProgress
+	38, // 45: provisioner.v1.Engine.registered_at:type_name -> google.protobuf.Timestamp
+	38, // 46: provisioner.v1.Engine.last_seen_at:type_name -> google.protobuf.Timestamp
+	38, // 47: provisioner.v1.Engine.lease_expires_at:type_name -> google.protobuf.Timestamp
+	39, // 48: provisioner.v1.Instance.MetadataEntry.value:type_name -> google.protobuf.Value
+	49, // [49:49] is the sub-list for method output_type
+	49, // [49:49] is the sub-list for method input_type
+	49, // [49:49] is the sub-list for extension type_name
+	49, // [49:49] is the sub-list for extension extendee
+	0,  // [0:49] is the sub-list for field type_name
 }
 
 func init() { file_provisioner_v1_types_proto_init() }
@@ -4121,7 +4241,7 @@ func file_provisioner_v1_types_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_provisioner_v1_types_proto_rawDesc), len(file_provisioner_v1_types_proto_rawDesc)),
 			NumEnums:      8,
-			NumMessages:   29,
+			NumMessages:   30,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

@@ -344,3 +344,54 @@ func TestHTTPProbeUnreachableIsNotServing(t *testing.T) {
 		t.Errorf("probe against a closed listener = %v, want not-ready", got)
 	}
 }
+
+// An agent with no staging sensor must report no staging field at all. An
+// engine handed a pre-staged volume stages nothing, and a present-but-empty
+// reading would say the sensor ran and found nothing arriving.
+func TestSnapshotOmitsStagingWhenUnset(t *testing.T) {
+	a, err := New(nil, Identity{EngineID: "e1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := a.snapshot(context.Background()); got.GetStaging() != nil {
+		t.Fatalf("agent with no sensor reported staging: %+v", got.GetStaging())
+	}
+}
+
+// The reading describes the disk, so it is reported whatever the engine's
+// readiness says. Gating it on ASSEMBLING would assume the two always agree.
+func TestSnapshotCarriesStagingWhileServing(t *testing.T) {
+	a, err := New(nil, Identity{EngineID: "e1"},
+		WithProbe(func(context.Context) Readiness { return Ready }),
+		WithStaging(func() *provisionerv1.StagingProgress {
+			return &provisionerv1.StagingProgress{Available: true, BytesLocal: 42, BytesPerSecond: 7}
+		}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := a.snapshot(context.Background())
+	if got.GetState() != provisionerv1.EngineState_ENGINE_STATE_SERVING {
+		t.Fatalf("state = %v, want SERVING", got.GetState())
+	}
+	if got.GetStaging().GetBytesLocal() != 42 {
+		t.Fatalf("staging dropped on a serving engine: %+v", got.GetStaging())
+	}
+}
+
+// Read fresh each tick, like state and link health, so a rate that changes
+// between renewals is actually reported rather than latched at first read.
+func TestSnapshotReadsStagingEveryTick(t *testing.T) {
+	calls := 0
+	a, err := New(nil, Identity{EngineID: "e1"},
+		WithStaging(func() *provisionerv1.StagingProgress {
+			calls++
+			return &provisionerv1.StagingProgress{Available: true, BytesLocal: int64(calls)}
+		}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.snapshot(context.Background())
+	if got := a.snapshot(context.Background()); got.GetStaging().GetBytesLocal() != 2 {
+		t.Fatalf("staging latched at %d; want a fresh read each tick", got.GetStaging().GetBytesLocal())
+	}
+}

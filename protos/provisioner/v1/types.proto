@@ -1359,6 +1359,43 @@ message InterconnectHealth {
   int32 links_up = 3;
 }
 
+// StagingProgress is what the agent can see of the model's weights arriving
+// on this node, while the engine is still too busy starting to be asked
+// anything.
+//
+// It exists because that window is opaque and expensive. vLLM suppresses the
+// download progress bar (it passes a disabled tqdm to snapshot_download), so a
+// container pulling 474 GB prints nothing at all until it finishes, and two
+// GLM-5.2 deploys spent an hour each in that silence before timing out. The
+// agent is already running through it: AgentPrelude starts it backgrounded
+// before the engine execs, and it registers as ASSEMBLING on a cadence
+// throughout.
+//
+// The `available` flag carries the same weight it does on InterconnectHealth,
+// for the same reason. A node whose cache directory cannot be read and a node
+// that has downloaded nothing yet are different facts, and a rate of zero
+// means "not moving" only when somebody actually measured it. Collapsing them
+// would make every node without a sensor look stalled.
+//
+// Deliberately local-only. The agent reports what it can see on its own disk
+// and does not know the model's total size; the control plane read that from
+// the hub at deploy time and is the one place that can turn these into a
+// fraction or an estimate. Teaching the agent the total would put the same
+// fact in two places and let them disagree.
+message StagingProgress {
+  // False means no reading. Every field below is meaningless when unset.
+  bool available = 1;
+  // Bytes of model weights present on this node's disk.
+  int64 bytes_local = 2;
+  // Rate over the most recent sampling interval. Zero is a real measurement
+  // (nothing arrived) whenever available is true, which is how a stalled
+  // download is told apart from an unmeasured one.
+  double bytes_per_second = 3;
+  // Seconds the rate was measured over, so a consumer can tell a reading
+  // taken across one tick from one taken across a longer gap.
+  double interval_seconds = 4;
+}
+
 // EngineNode is one machine an engine spans. The fact no probe can report,
 // and the input failure attribution needs: when a member dies, which node
 // took it down (issue 214).
@@ -1412,6 +1449,12 @@ message Engine {
   // observation pipeline being up.
   int32 in_flight = 7;
   double cache_utilization = 8;
+  // Weights arriving on this node. Set while the engine is ASSEMBLING and
+  // stale-but-harmless once it serves, since nothing downloads after that.
+  // Reported per engine rather than per node because the agent that reports
+  // it is the rank-0 node's, which is the one holding the cache the engine
+  // loads from.
+  StagingProgress staging = 9;
 
   google.protobuf.Timestamp registered_at = 20;
   google.protobuf.Timestamp last_seen_at = 21;
