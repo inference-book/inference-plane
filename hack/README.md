@@ -190,3 +190,46 @@ a real deploy. SSH is already there.
 Verified against a live Vast box: it resolved Qwen2.5-7B-Instruct at 15.2 GB
 and tracked a real download at 7-8 MB/s with a 27-minute ETA. That host was
 slow enough to be worth knowing about, which is the point.
+
+## measure-run.sh
+
+Drives one paid measurement run end to end, and records what happened
+whether or not it works.
+
+```sh
+make build
+hack/vast-watchdog.sh --heartbeat /tmp/run.hb --max-stale 300 --max-lifetime 21600 &
+hack/measure-run.sh --heartbeat /tmp/run.hb --model cyankiwi/GLM-5.2-AWQ-INT4
+```
+
+**It refuses to start unless a watchdog is already running.** Not a
+suggestion: a teardown living in the process that can be killed is not a
+teardown, and a script launched with a stray `&` was reaped as an orphan and
+leaked a rental exactly that way. `--no-watchdog-check` overrides and accepts
+the consequence.
+
+**It runs `deploy-watch.sh` alongside the deploy**, so a run that times out
+still says how fast the weights were arriving and how far they got. That is
+the property all three GLM-5.2 attempts lacked: two of them cost about $22
+each and ended in a guess.
+
+**Teardown verifies against `/api/v1/instances/`.** The previous script asked
+`/api/v0/instances/`, which is deprecated and answers with an error object
+that parses as an empty list, so it printed "nothing is billing"
+unconditionally, including when something was.
+
+`--dry-run` does everything except rent: serve startup, readiness, the
+download-size read, and teardown verification. Use it after editing. It has
+already earned itself once, catching that an ISO-style timestamp made the
+deployment id non-DNS-safe and would have been rejected the moment the real
+deploy started.
+
+Flags: `--model` and `--heartbeat` (both required), `--sku`, `--gpus`, `--tp`,
+`--image`, `--engine-args`, `--ladder`, `--prompt-tokens`, `--min-disk-gb`,
+`--out`, `--dry-run`, `--no-watchdog-check`. `DEPLOY_TIMEOUT` defaults to 75m,
+deliberately longer than `IPLANE_ENGINE_READY_TIMEOUT` so the engine-ready
+wait loses the race and its log-carrying error actually fires.
+
+Artifacts land in `measure-runs/run-<stamp>/` (gitignored): `serve.log`,
+`model.txt`, `deploy.log`, `deploy-watch.jsonl`, and one `sweep-<tokens>.csv`
+per context. The distilled csv is what gets committed, not the run directory.

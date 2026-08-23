@@ -63,3 +63,7 @@ HANDOFF_*.md
 # Raw provider capacity samples (hack/capacity-sample.sh). The log grows
 # per run; a distilled artifact gets committed, the raw series does not.
 capacity-samples.jsonl
+
+# Paid measurement-run artifacts (hack/measure-run.sh). The distilled
+# csv is what gets committed, not the raw run directory.
+measure-runs/
