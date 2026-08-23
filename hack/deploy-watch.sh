@@ -112,13 +112,18 @@ try:
     d = json.load(sys.stdin)
 except Exception:
     sys.exit(0)
+# Both spellings. iplane marshals with protojson UseProtoNames, so the wire
+# form is snake_case (instance_ids); camelCase is the protojson default and
+# what a future marshaller change would emit. Accepting both stops this
+# silently reporting a deployment as having no replicas, which is exactly
+# what it did when it knew only the camelCase name.
 for r in (d.get("replicas") or []):
-    for i in (r.get("instanceIds") or []):
+    for i in (r.get("instance_ids") or r.get("instanceIds") or []):
         print(i)
 ' 2>/dev/null
 }
 
-PREV_BYTES=""; PREV_AT=""
+PREV_BYTES=""; PREV_AT=""; NO_SSH_WARNED=0
 echo "deploy-watch: polling every ${INTERVAL}s -> $OUT"
 while :; do
   NOW=$(date +%s)
@@ -126,9 +131,28 @@ while :; do
   PHASE=$( [ -n "$DEPLOYMENT" ] && ip deployment describe "$DEPLOYMENT" 2>/dev/null | awk '/^phase:/{print $2}' )
 
   for R in $(replicas); do
+    ERRFILE=$(mktemp)
     RAW=$("$IPLANE" instance ssh "$R" "${IPFLAGS[@]}" -- \
-            -o BatchMode=yes -o ConnectTimeout=15 "$REMOTE" 2>/dev/null \
+            -o BatchMode=yes -o ConnectTimeout=15 "$REMOTE" 2>"$ERRFILE" \
           | grep -o '{.*}' | tail -1)
+    # A replica with no SSH endpoint will NEVER become reachable, and saying
+    # "unreachable" every 30s reads exactly like a box still booting. That
+    # cost a $54/hr deploy six blind minutes before anyone noticed the
+    # difference, so it is called out once and loudly rather than left to be
+    # inferred from a run of identical rows.
+    if [ -z "$RAW" ] && grep -q 'no SSH endpoint' "$ERRFILE" 2>/dev/null; then
+      if [ "$NO_SSH_WARNED" = 0 ]; then
+        NO_SSH_WARNED=1
+        echo "deploy-watch: replica $R has NO SSH ENDPOINT, so nothing here can ever read it." >&2
+        echo "deploy-watch: deployments are proxy-only by default; redeploy with --debug-shell" >&2
+        echo "deploy-watch: (hack/measure-run.sh passes it unless --no-debug-shell)" >&2
+      fi
+      printf '{"ts":%s,"replica":"%s","state":"%s","phase":"%s","reachable":false,"reason":"no-ssh-endpoint"}\n' \
+        "$NOW" "$R" "${STATE:-}" "${PHASE:-}" | tee -a "$OUT"
+      rm -f "$ERRFILE"
+      continue
+    fi
+    rm -f "$ERRFILE"
     if [ -z "$RAW" ]; then
       # Unreachable is a reading in its own right: a box mid-boot and a box
       # whose sshd died look the same from here, and recording the gap keeps

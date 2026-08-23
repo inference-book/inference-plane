@@ -52,7 +52,7 @@ ABORT_MIN_WINDOW=90       # seconds of download observed before judging
 ABORT_CONSECUTIVE=3       # readings in a row that must agree
 ABORT_SLACK=1.5           # projection must overshoot the remaining time by this
 SERVICE_URL="http://localhost:8080"
-SKIP_WATCHDOG_CHECK=0; DRY_RUN=0
+SKIP_WATCHDOG_CHECK=0; DRY_RUN=0; DEBUG_SHELL=1
 OUT=""
 
 while [ $# -gt 0 ]; do
@@ -67,9 +67,11 @@ while [ $# -gt 0 ]; do
     --ladder)        LADDER="$2"; shift 2 ;;
     --prompt-tokens) PROMPT_TOKENS="$2"; shift 2 ;;
     --min-disk-gb)   MIN_DISK_GB="$2"; shift 2 ;;
+    --min-vram-gb)   MIN_VRAM_GB="$2"; shift 2 ;;
     --out)           OUT="$2"; shift 2 ;;
     --no-watchdog-check) SKIP_WATCHDOG_CHECK=1; shift ;;
     --dry-run)       DRY_RUN=1; SKIP_WATCHDOG_CHECK=1; shift ;;
+    --no-debug-shell) DEBUG_SHELL=0; shift ;;
     -h|--help)       sed -n '2,30p' "$0"; exit 0 ;;
     *) echo "unknown flag: $1" >&2; exit 2 ;;
   esac
@@ -177,11 +179,24 @@ if [ "$DRY_RUN" = 1 ]; then
   exit 0
 fi
 
+# --debug-shell by default, and this is not a debugging nicety. A deployment
+# is proxy-only unless it is asked for, which means its replicas have no SSH
+# endpoint, which means deploy-watch can never read them and the run is blind
+# for exactly the phase it exists to observe. It narrows placement and costs
+# a routable IP; being unable to see an hour of engine:init costs more.
+DEBUG_FLAG=()
+if [ "$DEBUG_SHELL" = 1 ]; then
+  DEBUG_FLAG=(--debug-shell)
+  log "deploying with --debug-shell (deploy-watch needs SSH; --no-debug-shell to opt out)"
+else
+  log "NO --debug-shell: replicas will have no SSH, so deploy-watch can see nothing"
+fi
 log "deploying $DEP_ID"
 DEPLOY_ISSUED=1
 "$IPLANE" deployment deploy "$DEP_ID" \
   --provider vast --sku "$SKU" --gpu-count "$GPUS" --min-vram-gb "$MIN_VRAM_GB" \
   --fabric intra-node --min-disk-gb "$MIN_DISK_GB" --tp "$TP" \
+  "${DEBUG_FLAG[@]}" \
   --engine-entrypoint python3 --engine-entrypoint=-m \
   --engine-entrypoint vllm.entrypoints.openai.api_server \
   --image "$IMAGE" --model "$MODEL" --engine-args "$ENGINE_ARGS" \

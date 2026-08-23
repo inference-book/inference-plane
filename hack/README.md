@@ -161,6 +161,10 @@ row per replica per tick.
 **Free.** The instance is rented regardless and each reading is a shell
 command on a machine already being paid for.
 
+**A replica with no SSH endpoint is called out once, loudly**, and its rows
+carry `"reason": "no-ssh-endpoint"`. That state never resolves, so reporting
+it identically to a box mid-boot buries the one difference that matters.
+
 **Unreachable is recorded, not skipped.** A box mid-boot and a box whose sshd
 died look identical from here, and a hole in the series would read as "nobody
 sampled" rather than "nobody answered".
@@ -208,6 +212,14 @@ teardown, and a script launched with a stray `&` was reaped as an orphan and
 leaked a rental exactly that way. `--no-watchdog-check` overrides and accepts
 the consequence.
 
+**It deploys with `--debug-shell` by default**, and that is not a debugging
+nicety. A deployment is proxy-only unless asked otherwise, so its replicas
+have no SSH endpoint at all, so `deploy-watch` can never read them. Found the
+expensive way: a run reached `engine:init` on a $54/hr box and reported
+`reachable: false` every 30 seconds, which reads exactly like a machine still
+booting rather than one that will never answer. `--no-debug-shell` opts out
+and accepts a blind run.
+
 **It runs `deploy-watch.sh` alongside the deploy**, so a run that times out
 still says how fast the weights were arriving and how far they got. That is
 the property all three GLM-5.2 attempts lacked: two of them cost about $22
@@ -225,7 +237,7 @@ deployment id non-DNS-safe and would have been rejected the moment the real
 deploy started.
 
 Flags: `--model` and `--heartbeat` (both required), `--sku`, `--gpus`, `--tp`,
-`--image`, `--engine-args`, `--ladder`, `--prompt-tokens`, `--min-disk-gb`,
+`--image`, `--engine-args`, `--ladder`, `--prompt-tokens`, `--min-disk-gb`, `--min-vram-gb`,
 `--out`, `--dry-run`, `--no-watchdog-check`. `DEPLOY_TIMEOUT` defaults to 75m,
 deliberately longer than `IPLANE_ENGINE_READY_TIMEOUT` so the engine-ready
 wait loses the race and its log-carrying error actually fires.
