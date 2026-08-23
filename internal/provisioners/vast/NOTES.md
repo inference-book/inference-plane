@@ -160,6 +160,15 @@ and `patchDeploymentSlot` writes it. Not set-once, unlike `ProviderId`: the
 provider may reassign, and a stale address sends an operator to a machine that
 is no longer theirs.
 
+**The address was only half of it.** Recording it fixed a deployment whose
+keystore already held a key the account had seen; a run given a keystore of
+its own was still refused, because the deploy path generated a keypair and
+never registered it. `EnsurePublicKey` was reached only from `CreateInstance`
+(the `KeyRegistrar` doc says so in as many words), so SSH into a deployed
+replica had always been borrowing a key that an earlier `instance create`
+happened to leave in `~/.iplane`. Isolating a run's state dir removed the
+inheritance and exposed it. The deploy path now registers before it rents.
+
 **`--debug-shell` does nothing on Vast.** It is a RunPod concept (`SupportPublicIP`,
 `enginePodPorts`); nothing in this package reads `DebugShell` and the rent call
 asks for `runtype: "ssh"` unconditionally, so sshd is always there. The flag

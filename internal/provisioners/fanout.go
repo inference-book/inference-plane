@@ -551,7 +551,7 @@ func (s *Service) provisionSlots(ctx context.Context, specs []*provisionerv1.Rep
 		// break other slots -- the failure for that slot is recorded
 		// as a fanOutResult with err set, and the aggregator counts
 		// it like any other failed replica.
-		key, keyErr := s.replicaKey(specs[i].GetProvider())
+		key, keyErr := s.replicaKey(ctx, specs[i].GetProvider())
 		if keyErr != nil {
 			results <- fanOutResult{
 				instanceID: inst.GetId(),
@@ -593,13 +593,27 @@ func (s *Service) takePendingReplicaSpecs() []*provisionerv1.ReplicaSpec {
 // entry. Returns a non-nil error if the keystore is unconfigured or
 // the load fails -- the caller treats this as a per-slot failure
 // (the other slots in the fan-out can still succeed).
-func (s *Service) replicaKey(providerName string) (*sshkeys.KeyPair, error) {
+func (s *Service) replicaKey(ctx context.Context, providerName string) (*sshkeys.KeyPair, error) {
 	if s.keyStore == nil {
 		return nil, fmt.Errorf("keystore unconfigured (use provisioners.WithKeyStore)")
 	}
 	key, err := s.keyStore.EnsureKeyPair(s.operatorID, providerName)
 	if err != nil {
 		return nil, fmt.Errorf("load ssh key for provider %q: %v", providerName, err)
+	}
+	// Registering it with the provider is the half this used to skip. A
+	// keypair on disk that the provider has never seen boots a box with no
+	// way in, and the failure is silent because nothing on the deploy path
+	// needs SSH to succeed: the engine answers over HTTP either way. It
+	// surfaces much later, as a replica nothing can look inside.
+	//
+	// Per slot, because a heterogeneous fan-out spans providers and each
+	// keeps its own key. The call is idempotent, so the repeat for a
+	// homogeneous fan-out costs a listing.
+	if p, ok := s.providers[providerName]; ok {
+		if _, err := s.ensureProviderKey(ctx, p); err != nil {
+			return nil, fmt.Errorf("register ssh key with provider %q: %v", providerName, err)
+		}
 	}
 	return key, nil
 }

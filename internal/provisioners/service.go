@@ -337,24 +337,56 @@ func (s *Service) CreateInstance(ctx context.Context, req *provisionerv1.CreateI
 // races the machine's boot, and a machine the executor cannot log into is
 // one the operator pays for and cannot use.
 //
+// ensureProviderKey loads this operator's keypair for a provider and makes
+// sure the provider has the public half on file, returning the pair so a
+// caller that also needs the private key does not load it twice.
+//
+// Both halves are optional and skipping either is a success: a Service with
+// no keystore has nothing to register, and a provider that is not a
+// KeyRegistrar installs keys some other way or needs none (local, external).
+// A nil pair with a nil error means exactly that, and callers must not read
+// it without checking.
+//
+// It has to run before ANYTHING is rented, on every path that rents. That is
+// the part that was wrong: the register step lived inside
+// registerKeyAndSpawn, which only CreateInstance reaches, so a deployment
+// generated a keypair locally and rented a box that never heard about it.
+// SSH into a deployed replica worked only when an earlier CreateInstance had
+// left a registered key in the same keystore, and stopped the moment a run
+// was given a keystore of its own.
+//
+// Registration is not gated on debug_shell. It costs one idempotent call,
+// Vast runs sshd on every deploy whatever the flag says, and gating it means
+// a deploy nobody thought to flag is one nothing can ever look inside. That
+// is how the last blind hour happened.
+func (s *Service) ensureProviderKey(ctx context.Context, provider Provider) (*sshkeys.KeyPair, error) {
+	if s.keyStore == nil {
+		return nil, nil
+	}
+	reg, ok := provider.(KeyRegistrar)
+	if !ok {
+		return nil, nil
+	}
+	kp, err := s.keyStore.EnsureKeyPair(s.operatorID, provider.Name())
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "ensure ssh key for %s: %v", provider.Name(), err)
+	}
+	pubLine, err := kp.MarshalAuthorizedKey()
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "marshal ssh public key: %v", err)
+	}
+	if err := reg.EnsurePublicKey(ctx, pubLine, kp.Comment); err != nil {
+		return nil, status.Errorf(codes.FailedPrecondition, "register ssh public key with %s: %v", provider.Name(), err)
+	}
+	return kp, nil
+}
+
 // A Spawn failure is recorded on the instance before the error is returned,
 // so a failed slot leaves a FAILED record with the provider's reason rather
 // than a PENDING one that looks like it is still coming.
 func (s *Service) registerKeyAndSpawn(ctx context.Context, provider Provider, spec *provisionerv1.Spec, record *provisionerv1.Instance) (*provisionerv1.Instance, error) {
-	if s.keyStore != nil {
-		if reg, ok := provider.(KeyRegistrar); ok {
-			kp, err := s.keyStore.EnsureKeyPair(s.operatorID, provider.Name())
-			if err != nil {
-				return nil, status.Errorf(codes.Internal, "ensure ssh key for %s: %v", provider.Name(), err)
-			}
-			pubLine, err := kp.MarshalAuthorizedKey()
-			if err != nil {
-				return nil, status.Errorf(codes.Internal, "marshal ssh public key: %v", err)
-			}
-			if err := reg.EnsurePublicKey(ctx, pubLine, kp.Comment); err != nil {
-				return nil, status.Errorf(codes.FailedPrecondition, "register ssh public key with %s: %v", provider.Name(), err)
-			}
-		}
+	if _, err := s.ensureProviderKey(ctx, provider); err != nil {
+		return nil, err
 	}
 
 	stampedSpec := withSystemTags(spec, s.operatorID)
