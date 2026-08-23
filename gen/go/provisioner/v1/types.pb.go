@@ -1189,7 +1189,11 @@ type Instance struct {
 	// field the chapter doesn't surface yet but might want later.
 	// Fields with cross-provider patterns graduate into `Hardware`;
 	// metadata is the staging ground.
-	Metadata      map[string]*structpb.Value `protobuf:"bytes,15,rep,name=metadata,proto3" json:"metadata,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	Metadata map[string]*structpb.Value `protobuf:"bytes,15,rep,name=metadata,proto3" json:"metadata,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	// What the provider reports about this box right now. Absent when the
+	// provider does not report it, or when nothing has asked recently; it is
+	// refreshed by the status reads the deploy path already makes.
+	Usage         *ResourceUsage `protobuf:"bytes,40,opt,name=usage,proto3" json:"usage,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1325,6 +1329,13 @@ func (x *Instance) GetProviderData() []byte {
 func (x *Instance) GetMetadata() map[string]*structpb.Value {
 	if x != nil {
 		return x.Metadata
+	}
+	return nil
+}
+
+func (x *Instance) GetUsage() *ResourceUsage {
+	if x != nil {
+		return x.Usage
 	}
 	return nil
 }
@@ -3554,6 +3565,101 @@ func (x *InterconnectHealth) GetLinksUp() int32 {
 	return 0
 }
 
+// ResourceUsage is what the PROVIDER can see of a rented box, as opposed to
+// what an agent inside it reports. Two different vantage points, and this one
+// needs no credential, no agent and no shell: it rides on the status read the
+// deploy path already makes every tick.
+//
+// It exists because the readings that diagnose a stuck deploy were sitting
+// unread in that response. A GLM-5.2 deploy spent half an hour in
+// engine:init with 188 MB on a 900 GB disk, 5.7 GB of inbound traffic (the
+// container image, not 474 GB of weights) and eight GPUs pinned at 86%. Busy
+// cards with a flat disk is not a slow download, it is a collective that
+// never completed, and nothing in iplane could say so because the SSH path
+// it depended on had no key.
+//
+// The `available` flag carries the same weight it does on InterconnectHealth
+// and StagingProgress. A provider that reports none of this and a box that
+// has used nothing are different facts. A provider that can report only some
+// of these fields should leave the whole message unset rather than
+// half-filling it, because a zero in one field is indistinguishable from an
+// unsupported one and these are read together or not at all.
+type ResourceUsage struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// False means no reading. Every field below is meaningless when unset.
+	Available bool `protobuf:"varint,1,opt,name=available,proto3" json:"available,omitempty"`
+	// Bytes on the instance's disk. Compared against a model's download size,
+	// this says how far a fetch has got without asking anything inside the box.
+	DiskUsedBytes int64 `protobuf:"varint,2,opt,name=disk_used_bytes,json=diskUsedBytes,proto3" json:"disk_used_bytes,omitempty"`
+	// Percent, 0-100, across the instance's cards. High utilisation with a
+	// disk that is not growing is the signature of a hung collective, and is
+	// the reading that separates it from a download running slowly.
+	GpuUtilization float64 `protobuf:"fixed64,3,opt,name=gpu_utilization,json=gpuUtilization,proto3" json:"gpu_utilization,omitempty"`
+	// Bytes the provider has billed as inbound. A coarse second opinion on
+	// disk_used_bytes: weights that arrived are bytes that crossed the wire.
+	NetworkRxBytes int64 `protobuf:"varint,4,opt,name=network_rx_bytes,json=networkRxBytes,proto3" json:"network_rx_bytes,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *ResourceUsage) Reset() {
+	*x = ResourceUsage{}
+	mi := &file_provisioner_v1_types_proto_msgTypes[23]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ResourceUsage) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResourceUsage) ProtoMessage() {}
+
+func (x *ResourceUsage) ProtoReflect() protoreflect.Message {
+	mi := &file_provisioner_v1_types_proto_msgTypes[23]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResourceUsage.ProtoReflect.Descriptor instead.
+func (*ResourceUsage) Descriptor() ([]byte, []int) {
+	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{23}
+}
+
+func (x *ResourceUsage) GetAvailable() bool {
+	if x != nil {
+		return x.Available
+	}
+	return false
+}
+
+func (x *ResourceUsage) GetDiskUsedBytes() int64 {
+	if x != nil {
+		return x.DiskUsedBytes
+	}
+	return 0
+}
+
+func (x *ResourceUsage) GetGpuUtilization() float64 {
+	if x != nil {
+		return x.GpuUtilization
+	}
+	return 0
+}
+
+func (x *ResourceUsage) GetNetworkRxBytes() int64 {
+	if x != nil {
+		return x.NetworkRxBytes
+	}
+	return 0
+}
+
 // StagingProgress is what the agent can see of the model's weights arriving
 // on this node, while the engine is still too busy starting to be asked
 // anything.
@@ -3596,7 +3702,7 @@ type StagingProgress struct {
 
 func (x *StagingProgress) Reset() {
 	*x = StagingProgress{}
-	mi := &file_provisioner_v1_types_proto_msgTypes[23]
+	mi := &file_provisioner_v1_types_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3608,7 +3714,7 @@ func (x *StagingProgress) String() string {
 func (*StagingProgress) ProtoMessage() {}
 
 func (x *StagingProgress) ProtoReflect() protoreflect.Message {
-	mi := &file_provisioner_v1_types_proto_msgTypes[23]
+	mi := &file_provisioner_v1_types_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3621,7 +3727,7 @@ func (x *StagingProgress) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StagingProgress.ProtoReflect.Descriptor instead.
 func (*StagingProgress) Descriptor() ([]byte, []int) {
-	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{23}
+	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *StagingProgress) GetAvailable() bool {
@@ -3680,7 +3786,7 @@ type EngineNode struct {
 
 func (x *EngineNode) Reset() {
 	*x = EngineNode{}
-	mi := &file_provisioner_v1_types_proto_msgTypes[24]
+	mi := &file_provisioner_v1_types_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3692,7 +3798,7 @@ func (x *EngineNode) String() string {
 func (*EngineNode) ProtoMessage() {}
 
 func (x *EngineNode) ProtoReflect() protoreflect.Message {
-	mi := &file_provisioner_v1_types_proto_msgTypes[24]
+	mi := &file_provisioner_v1_types_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3705,7 +3811,7 @@ func (x *EngineNode) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EngineNode.ProtoReflect.Descriptor instead.
 func (*EngineNode) Descriptor() ([]byte, []int) {
-	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{24}
+	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *EngineNode) GetHostId() string {
@@ -3789,7 +3895,7 @@ type Engine struct {
 
 func (x *Engine) Reset() {
 	*x = Engine{}
-	mi := &file_provisioner_v1_types_proto_msgTypes[25]
+	mi := &file_provisioner_v1_types_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3801,7 +3907,7 @@ func (x *Engine) String() string {
 func (*Engine) ProtoMessage() {}
 
 func (x *Engine) ProtoReflect() protoreflect.Message {
-	mi := &file_provisioner_v1_types_proto_msgTypes[25]
+	mi := &file_provisioner_v1_types_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3814,7 +3920,7 @@ func (x *Engine) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Engine.ProtoReflect.Descriptor instead.
 func (*Engine) Descriptor() ([]byte, []int) {
-	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{25}
+	return file_provisioner_v1_types_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *Engine) GetId() string {
@@ -3948,7 +4054,7 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"\tSshTarget\x12\x12\n" +
 	"\x04host\x18\x01 \x01(\tR\x04host\x12\x12\n" +
 	"\x04port\x18\x02 \x01(\x05R\x04port\x12\x12\n" +
-	"\x04user\x18\x03 \x01(\tR\x04user\"\xf9\x05\n" +
+	"\x04user\x18\x03 \x01(\tR\x04user\"\xae\x06\n" +
 	"\bInstance\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1f\n" +
 	"\vprovider_id\x18\x02 \x01(\tR\n" +
@@ -3967,7 +4073,8 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"\x03ssh\x18\f \x01(\v2\x19.provisioner.v1.SshTargetR\x03ssh\x12%\n" +
 	"\x0efailure_reason\x18\r \x01(\tR\rfailureReason\x12#\n" +
 	"\rprovider_data\x18\x0e \x01(\fR\fproviderData\x12B\n" +
-	"\bmetadata\x18\x0f \x03(\v2&.provisioner.v1.Instance.MetadataEntryR\bmetadata\x1aS\n" +
+	"\bmetadata\x18\x0f \x03(\v2&.provisioner.v1.Instance.MetadataEntryR\bmetadata\x123\n" +
+	"\x05usage\x18( \x01(\v2\x1d.provisioner.v1.ResourceUsageR\x05usage\x1aS\n" +
 	"\rMetadataEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12,\n" +
 	"\x05value\x18\x02 \x01(\v2\x16.google.protobuf.ValueR\x05value:\x028\x01\"\xac\x02\n" +
@@ -4144,7 +4251,12 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"\tavailable\x18\x01 \x01(\bR\tavailable\x12\x1f\n" +
 	"\vlinks_total\x18\x02 \x01(\x05R\n" +
 	"linksTotal\x12\x19\n" +
-	"\blinks_up\x18\x03 \x01(\x05R\alinksUp\"\xa5\x01\n" +
+	"\blinks_up\x18\x03 \x01(\x05R\alinksUp\"\xa8\x01\n" +
+	"\rResourceUsage\x12\x1c\n" +
+	"\tavailable\x18\x01 \x01(\bR\tavailable\x12&\n" +
+	"\x0fdisk_used_bytes\x18\x02 \x01(\x03R\rdiskUsedBytes\x12'\n" +
+	"\x0fgpu_utilization\x18\x03 \x01(\x01R\x0egpuUtilization\x12(\n" +
+	"\x10network_rx_bytes\x18\x04 \x01(\x03R\x0enetworkRxBytes\"\xa5\x01\n" +
 	"\x0fStagingProgress\x12\x1c\n" +
 	"\tavailable\x18\x01 \x01(\bR\tavailable\x12\x1f\n" +
 	"\vbytes_local\x18\x02 \x01(\x03R\n" +
@@ -4237,7 +4349,7 @@ func file_provisioner_v1_types_proto_rawDescGZIP() []byte {
 }
 
 var file_provisioner_v1_types_proto_enumTypes = make([]protoimpl.EnumInfo, 8)
-var file_provisioner_v1_types_proto_msgTypes = make([]protoimpl.MessageInfo, 31)
+var file_provisioner_v1_types_proto_msgTypes = make([]protoimpl.MessageInfo, 32)
 var file_provisioner_v1_types_proto_goTypes = []any{
 	(FabricScope)(0),              // 0: provisioner.v1.FabricScope
 	(FabricSource)(0),             // 1: provisioner.v1.FabricSource
@@ -4270,20 +4382,21 @@ var file_provisioner_v1_types_proto_goTypes = []any{
 	(*Volume)(nil),                // 28: provisioner.v1.Volume
 	(*ReplicaSpec)(nil),           // 29: provisioner.v1.ReplicaSpec
 	(*InterconnectHealth)(nil),    // 30: provisioner.v1.InterconnectHealth
-	(*StagingProgress)(nil),       // 31: provisioner.v1.StagingProgress
-	(*EngineNode)(nil),            // 32: provisioner.v1.EngineNode
-	(*Engine)(nil),                // 33: provisioner.v1.Engine
-	nil,                           // 34: provisioner.v1.Spec.TagsEntry
-	nil,                           // 35: provisioner.v1.Instance.MetadataEntry
-	nil,                           // 36: provisioner.v1.InstanceRef.TagsEntry
-	nil,                           // 37: provisioner.v1.Deployment.EnvEntry
-	nil,                           // 38: provisioner.v1.Candidate.AttrsEntry
-	(*timestamppb.Timestamp)(nil), // 39: google.protobuf.Timestamp
-	(*structpb.Value)(nil),        // 40: google.protobuf.Value
+	(*ResourceUsage)(nil),         // 31: provisioner.v1.ResourceUsage
+	(*StagingProgress)(nil),       // 32: provisioner.v1.StagingProgress
+	(*EngineNode)(nil),            // 33: provisioner.v1.EngineNode
+	(*Engine)(nil),                // 34: provisioner.v1.Engine
+	nil,                           // 35: provisioner.v1.Spec.TagsEntry
+	nil,                           // 36: provisioner.v1.Instance.MetadataEntry
+	nil,                           // 37: provisioner.v1.InstanceRef.TagsEntry
+	nil,                           // 38: provisioner.v1.Deployment.EnvEntry
+	nil,                           // 39: provisioner.v1.Candidate.AttrsEntry
+	(*timestamppb.Timestamp)(nil), // 40: google.protobuf.Timestamp
+	(*structpb.Value)(nil),        // 41: google.protobuf.Value
 }
 var file_provisioner_v1_types_proto_depIdxs = []int32{
 	9,  // 0: provisioner.v1.Spec.requirements:type_name -> provisioner.v1.ResourceRequirements
-	34, // 1: provisioner.v1.Spec.tags:type_name -> provisioner.v1.Spec.TagsEntry
+	35, // 1: provisioner.v1.Spec.tags:type_name -> provisioner.v1.Spec.TagsEntry
 	0,  // 2: provisioner.v1.ResourceRequirements.fabric_scope:type_name -> provisioner.v1.FabricScope
 	2,  // 3: provisioner.v1.ResourceRequirements.reclaim_policy:type_name -> provisioner.v1.ReclaimPolicy
 	0,  // 4: provisioner.v1.Hardware.fabric_scope:type_name -> provisioner.v1.FabricScope
@@ -4291,52 +4404,53 @@ var file_provisioner_v1_types_proto_depIdxs = []int32{
 	8,  // 6: provisioner.v1.Instance.spec:type_name -> provisioner.v1.Spec
 	10, // 7: provisioner.v1.Instance.hardware:type_name -> provisioner.v1.Hardware
 	3,  // 8: provisioner.v1.Instance.state:type_name -> provisioner.v1.InstanceState
-	39, // 9: provisioner.v1.Instance.created_at:type_name -> google.protobuf.Timestamp
-	39, // 10: provisioner.v1.Instance.activated_at:type_name -> google.protobuf.Timestamp
-	39, // 11: provisioner.v1.Instance.terminated_at:type_name -> google.protobuf.Timestamp
+	40, // 9: provisioner.v1.Instance.created_at:type_name -> google.protobuf.Timestamp
+	40, // 10: provisioner.v1.Instance.activated_at:type_name -> google.protobuf.Timestamp
+	40, // 11: provisioner.v1.Instance.terminated_at:type_name -> google.protobuf.Timestamp
 	11, // 12: provisioner.v1.Instance.ssh:type_name -> provisioner.v1.SshTarget
-	35, // 13: provisioner.v1.Instance.metadata:type_name -> provisioner.v1.Instance.MetadataEntry
-	36, // 14: provisioner.v1.InstanceRef.tags:type_name -> provisioner.v1.InstanceRef.TagsEntry
-	39, // 15: provisioner.v1.InstanceRef.created_at:type_name -> google.protobuf.Timestamp
-	37, // 16: provisioner.v1.Deployment.env:type_name -> provisioner.v1.Deployment.EnvEntry
-	6,  // 17: provisioner.v1.Deployment.state:type_name -> provisioner.v1.DeploymentState
-	39, // 18: provisioner.v1.Deployment.created_at:type_name -> google.protobuf.Timestamp
-	39, // 19: provisioner.v1.Deployment.started_at:type_name -> google.protobuf.Timestamp
-	39, // 20: provisioner.v1.Deployment.ready_at:type_name -> google.protobuf.Timestamp
-	39, // 21: provisioner.v1.Deployment.terminated_at:type_name -> google.protobuf.Timestamp
-	39, // 22: provisioner.v1.Deployment.last_activity_at:type_name -> google.protobuf.Timestamp
-	14, // 23: provisioner.v1.Deployment.replicas:type_name -> provisioner.v1.ReplicaBacking
-	23, // 24: provisioner.v1.Deployment.upstream_auth:type_name -> provisioner.v1.UpstreamAuth
-	22, // 25: provisioner.v1.Deployment.parallelism:type_name -> provisioner.v1.Parallelism
-	29, // 26: provisioner.v1.Deployment.replica_specs:type_name -> provisioner.v1.ReplicaSpec
-	16, // 27: provisioner.v1.Deployment.mounts:type_name -> provisioner.v1.VolumeMount
-	0,  // 28: provisioner.v1.Candidate.fabric_scope:type_name -> provisioner.v1.FabricScope
-	1,  // 29: provisioner.v1.Candidate.fabric_source:type_name -> provisioner.v1.FabricSource
-	38, // 30: provisioner.v1.Candidate.attrs:type_name -> provisioner.v1.Candidate.AttrsEntry
-	4,  // 31: provisioner.v1.ProviderAnswer.outcome:type_name -> provisioner.v1.AnswerOutcome
-	17, // 32: provisioner.v1.ProviderAnswer.candidates:type_name -> provisioner.v1.Candidate
-	19, // 33: provisioner.v1.Comparability.gaps:type_name -> provisioner.v1.FactGap
-	17, // 34: provisioner.v1.Placement.winner:type_name -> provisioner.v1.Candidate
-	17, // 35: provisioner.v1.Placement.runners:type_name -> provisioner.v1.Candidate
-	18, // 36: provisioner.v1.Placement.answers:type_name -> provisioner.v1.ProviderAnswer
-	20, // 37: provisioner.v1.Placement.comparability:type_name -> provisioner.v1.Comparability
-	24, // 38: provisioner.v1.DescribeModelResponse.architecture:type_name -> provisioner.v1.ModelArchitecture
-	26, // 39: provisioner.v1.DescribeModelResponse.checkpoint:type_name -> provisioner.v1.ModelCheckpoint
-	39, // 40: provisioner.v1.Volume.created_at:type_name -> google.protobuf.Timestamp
-	9,  // 41: provisioner.v1.ReplicaSpec.requirements:type_name -> provisioner.v1.ResourceRequirements
-	30, // 42: provisioner.v1.EngineNode.interconnect:type_name -> provisioner.v1.InterconnectHealth
-	7,  // 43: provisioner.v1.Engine.state:type_name -> provisioner.v1.EngineState
-	32, // 44: provisioner.v1.Engine.span:type_name -> provisioner.v1.EngineNode
-	31, // 45: provisioner.v1.Engine.staging:type_name -> provisioner.v1.StagingProgress
-	39, // 46: provisioner.v1.Engine.registered_at:type_name -> google.protobuf.Timestamp
-	39, // 47: provisioner.v1.Engine.last_seen_at:type_name -> google.protobuf.Timestamp
-	39, // 48: provisioner.v1.Engine.lease_expires_at:type_name -> google.protobuf.Timestamp
-	40, // 49: provisioner.v1.Instance.MetadataEntry.value:type_name -> google.protobuf.Value
-	50, // [50:50] is the sub-list for method output_type
-	50, // [50:50] is the sub-list for method input_type
-	50, // [50:50] is the sub-list for extension type_name
-	50, // [50:50] is the sub-list for extension extendee
-	0,  // [0:50] is the sub-list for field type_name
+	36, // 13: provisioner.v1.Instance.metadata:type_name -> provisioner.v1.Instance.MetadataEntry
+	31, // 14: provisioner.v1.Instance.usage:type_name -> provisioner.v1.ResourceUsage
+	37, // 15: provisioner.v1.InstanceRef.tags:type_name -> provisioner.v1.InstanceRef.TagsEntry
+	40, // 16: provisioner.v1.InstanceRef.created_at:type_name -> google.protobuf.Timestamp
+	38, // 17: provisioner.v1.Deployment.env:type_name -> provisioner.v1.Deployment.EnvEntry
+	6,  // 18: provisioner.v1.Deployment.state:type_name -> provisioner.v1.DeploymentState
+	40, // 19: provisioner.v1.Deployment.created_at:type_name -> google.protobuf.Timestamp
+	40, // 20: provisioner.v1.Deployment.started_at:type_name -> google.protobuf.Timestamp
+	40, // 21: provisioner.v1.Deployment.ready_at:type_name -> google.protobuf.Timestamp
+	40, // 22: provisioner.v1.Deployment.terminated_at:type_name -> google.protobuf.Timestamp
+	40, // 23: provisioner.v1.Deployment.last_activity_at:type_name -> google.protobuf.Timestamp
+	14, // 24: provisioner.v1.Deployment.replicas:type_name -> provisioner.v1.ReplicaBacking
+	23, // 25: provisioner.v1.Deployment.upstream_auth:type_name -> provisioner.v1.UpstreamAuth
+	22, // 26: provisioner.v1.Deployment.parallelism:type_name -> provisioner.v1.Parallelism
+	29, // 27: provisioner.v1.Deployment.replica_specs:type_name -> provisioner.v1.ReplicaSpec
+	16, // 28: provisioner.v1.Deployment.mounts:type_name -> provisioner.v1.VolumeMount
+	0,  // 29: provisioner.v1.Candidate.fabric_scope:type_name -> provisioner.v1.FabricScope
+	1,  // 30: provisioner.v1.Candidate.fabric_source:type_name -> provisioner.v1.FabricSource
+	39, // 31: provisioner.v1.Candidate.attrs:type_name -> provisioner.v1.Candidate.AttrsEntry
+	4,  // 32: provisioner.v1.ProviderAnswer.outcome:type_name -> provisioner.v1.AnswerOutcome
+	17, // 33: provisioner.v1.ProviderAnswer.candidates:type_name -> provisioner.v1.Candidate
+	19, // 34: provisioner.v1.Comparability.gaps:type_name -> provisioner.v1.FactGap
+	17, // 35: provisioner.v1.Placement.winner:type_name -> provisioner.v1.Candidate
+	17, // 36: provisioner.v1.Placement.runners:type_name -> provisioner.v1.Candidate
+	18, // 37: provisioner.v1.Placement.answers:type_name -> provisioner.v1.ProviderAnswer
+	20, // 38: provisioner.v1.Placement.comparability:type_name -> provisioner.v1.Comparability
+	24, // 39: provisioner.v1.DescribeModelResponse.architecture:type_name -> provisioner.v1.ModelArchitecture
+	26, // 40: provisioner.v1.DescribeModelResponse.checkpoint:type_name -> provisioner.v1.ModelCheckpoint
+	40, // 41: provisioner.v1.Volume.created_at:type_name -> google.protobuf.Timestamp
+	9,  // 42: provisioner.v1.ReplicaSpec.requirements:type_name -> provisioner.v1.ResourceRequirements
+	30, // 43: provisioner.v1.EngineNode.interconnect:type_name -> provisioner.v1.InterconnectHealth
+	7,  // 44: provisioner.v1.Engine.state:type_name -> provisioner.v1.EngineState
+	33, // 45: provisioner.v1.Engine.span:type_name -> provisioner.v1.EngineNode
+	32, // 46: provisioner.v1.Engine.staging:type_name -> provisioner.v1.StagingProgress
+	40, // 47: provisioner.v1.Engine.registered_at:type_name -> google.protobuf.Timestamp
+	40, // 48: provisioner.v1.Engine.last_seen_at:type_name -> google.protobuf.Timestamp
+	40, // 49: provisioner.v1.Engine.lease_expires_at:type_name -> google.protobuf.Timestamp
+	41, // 50: provisioner.v1.Instance.MetadataEntry.value:type_name -> google.protobuf.Value
+	51, // [51:51] is the sub-list for method output_type
+	51, // [51:51] is the sub-list for method input_type
+	51, // [51:51] is the sub-list for extension type_name
+	51, // [51:51] is the sub-list for extension extendee
+	0,  // [0:51] is the sub-list for field type_name
 }
 
 func init() { file_provisioner_v1_types_proto_init() }
@@ -4350,7 +4464,7 @@ func file_provisioner_v1_types_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_provisioner_v1_types_proto_rawDesc), len(file_provisioner_v1_types_proto_rawDesc)),
 			NumEnums:      8,
-			NumMessages:   31,
+			NumMessages:   32,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

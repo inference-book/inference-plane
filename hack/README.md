@@ -161,6 +161,14 @@ row per replica per tick.
 **Free.** The instance is rented regardless and each reading is a shell
 command on a machine already being paid for.
 
+**The provider's own view comes first.** Every row carries
+`provider_disk_bytes`, `provider_gpu_util` and `provider_rx_bytes` when the
+provider reports them, read from the status call the deploy path already
+makes. No key, no agent, no shell, and it works on deploys where SSH does
+not. SSH enriches this rather than being the only way in, which is the
+lesson from a run that reported `reachable: false` for half an hour while
+the provider was holding the answer.
+
 **A replica with no SSH endpoint is called out once, loudly**, and its rows
 carry `"reason": "no-ssh-endpoint"`. That state never resolves, so reporting
 it identically to a box mid-boot buries the one difference that matters.

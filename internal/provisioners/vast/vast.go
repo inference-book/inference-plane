@@ -836,6 +836,7 @@ func (p *Provider) instanceFromAPI(api *apiInstance, originalSpec *provisionerv1
 		}(),
 		Metadata: vastMetadata(api),
 	}
+	inst.Usage = usageFrom(api)
 	if api.SSHHost != "" {
 		inst.Ssh = &provisionerv1.SshTarget{
 			Host: api.SSHHost,
@@ -1020,16 +1021,22 @@ type apiInstance struct {
 	// Host details -- populated by both the bundles search
 	// response and the instance record. Used to fill Hardware and
 	// metadata.
-	CPUName      string   `json:"cpu_name"`
-	CPUCores     int      `json:"cpu_cores"`
-	CPURam       int      `json:"cpu_ram"`    // MB
-	DiskSpace    float64  `json:"disk_space"` // GB
-	HostID       int      `json:"host_id"`
-	MachineID    int      `json:"machine_id"`
-	BwNvlink     *float64 `json:"bw_nvlink"` // see offerSummary.BwNvlink
-	Reliability2 float64  `json:"reliability2"`
-	Verification string   `json:"verification"`
-	IsBid        bool     `json:"is_bid"`
+	CPUName   string  `json:"cpu_name"`
+	CPUCores  int     `json:"cpu_cores"`
+	CPURam    int     `json:"cpu_ram"`    // MB
+	DiskSpace float64 `json:"disk_space"` // GB
+	// Live utilisation, reported by the host rather than the container.
+	// Vast gives these on the same record the phase ladder already reads,
+	// so they cost nothing extra and work with no key on the box.
+	DiskUsage      float64  `json:"disk_usage"`       // GB in use
+	GPUUtil        float64  `json:"gpu_util"`         // percent, across the instance's cards
+	InetDownBilled float64  `json:"inet_down_billed"` // MB billed inbound
+	HostID         int      `json:"host_id"`
+	MachineID      int      `json:"machine_id"`
+	BwNvlink       *float64 `json:"bw_nvlink"` // see offerSummary.BwNvlink
+	Reliability2   float64  `json:"reliability2"`
+	Verification   string   `json:"verification"`
+	IsBid          bool     `json:"is_bid"`
 }
 
 type instanceResponse struct {
@@ -1143,3 +1150,31 @@ func (p *Provider) WaitForSSHReady(ctx context.Context, providerID string) (*pro
 // keeps a registry of what it rents, so a not-found from Describe is
 // evidence the instance is gone rather than evidence it was never tracked.
 func (p *Provider) TracksInstances() bool { return true }
+
+// usageFrom reports what the host says about a rented box, or nil when it
+// says nothing.
+//
+// nil rather than a zeroed message, because a box that has used no disk and
+// a provider that does not report disk reach a caller identically otherwise,
+// and only one of them is worth acting on. Vast reports all three fields
+// together, so the whole message is present or absent rather than partly
+// filled.
+//
+// A scheduled-but-not-yet-running contract reports zeros for all three,
+// which is indistinguishable from a running box that has done nothing. That
+// is why this reports availability and leaves the interpretation to whoever
+// also knows the phase.
+func usageFrom(api *apiInstance) *provisionerv1.ResourceUsage {
+	if api == nil {
+		return nil
+	}
+	if api.DiskUsage == 0 && api.GPUUtil == 0 && api.InetDownBilled == 0 {
+		return nil
+	}
+	return &provisionerv1.ResourceUsage{
+		Available:      true,
+		DiskUsedBytes:  int64(api.DiskUsage * 1e9),
+		GpuUtilization: api.GPUUtil,
+		NetworkRxBytes: int64(api.InetDownBilled * 1e6),
+	}
+}
