@@ -57,29 +57,14 @@ func TestBuildSSHArgv_PassThroughArgsBetweenOptionsAndDestination(t *testing.T) 
 	}
 }
 
-func TestBuildSSHArgv_RemoteCommandAfterDestination(t *testing.T) {
-	// Operator wants to run a remote command:
-	// `iplane instance ssh my-pod -- ls /workspace`
-	// The "ls /workspace" tokens land AFTER everything in extraArgs.
-	// We don't try to be clever about reordering -- the operator gets
-	// the same semantics they'd get with raw ssh: pass-through args
-	// come before destination, destination terminates option parsing,
-	// trailing tokens become the remote command.
-	//
-	// But the current buildSSHArgv puts ALL extraArgs before the
-	// destination. That means `ls /workspace` would land before the
-	// destination, which ssh would treat as more options -> error.
-	//
-	// Documented limitation: remote commands need to be quoted into a
-	// single arg or executed via -- after the destination by the
-	// operator. This test pins the current behavior so any change is
-	// deliberate.
-	got := buildSSHArgv("ssh", "/k", "u", "h", 22, []string{"ls", "/workspace"})
-	last := got[len(got)-1]
-	if last != "u@h" {
-		t.Errorf("destination should be last; got %q at end, full argv %v", last, got)
-	}
-}
+// Replaces a characterization test that asserted the destination was always
+// last, which pinned the defect rather than the contract: it meant the
+// `-- ls /workspace` form in this command's own help could never work. That
+// test's comment called it a "documented limitation" and asked that any
+// change be deliberate. This is that change, made deliberately.
+//
+// The behaviour it protected (forwarding flags reaching ssh before the
+// destination) is asserted by the two tests below it and is unchanged.
 
 func TestBuildSSHArgv_AlwaysSetsStrictHostKeyOptions(t *testing.T) {
 	// These three options are required for the chapter beat: an
@@ -153,4 +138,85 @@ func equalStrings(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// The form the command's own help documents. It used to fail with "Could not
+// resolve hostname ls", because every pass-through word went before the
+// destination and ssh read the command's first word as the machine.
+func TestBuildSSHArgvPutsARemoteCommandAfterTheDestination(t *testing.T) {
+	argv := buildSSHArgv("ssh", "/k", "root", "h", 22, []string{"ls", "/workspace"})
+	dest := indexOf(argv, "root@h")
+	if dest < 0 {
+		t.Fatalf("no destination in %v", argv)
+	}
+	if got := argv[len(argv)-2:]; got[0] != "ls" || got[1] != "/workspace" {
+		t.Fatalf("command is %v, want it last", got)
+	}
+	if indexOf(argv, "ls") < dest {
+		t.Fatalf("command precedes the destination: %v", argv)
+	}
+}
+
+// Forwarding flags must still precede it, which is the ordering the old code
+// was written for and must not be regressed.
+func TestBuildSSHArgvKeepsOptionsBeforeTheDestination(t *testing.T) {
+	argv := buildSSHArgv("ssh", "/k", "root", "h", 22, []string{"-A", "-L", "8080:localhost:8000"})
+	dest := indexOf(argv, "root@h")
+	for _, opt := range []string{"-A", "-L", "8080:localhost:8000"} {
+		if i := indexOf(argv, opt); i < 0 || i > dest {
+			t.Fatalf("%q is not before the destination: %v", opt, argv)
+		}
+	}
+	if argv[len(argv)-1] != "root@h" {
+		t.Fatalf("argv does not end at the destination: %v", argv)
+	}
+}
+
+// A value-taking flag carries its value across with it, or ssh reads the
+// value as the host.
+func TestBuildSSHArgvMixesOptionsAndACommand(t *testing.T) {
+	argv := buildSSHArgv("ssh", "/k", "root", "h", 22,
+		[]string{"-o", "BatchMode=yes", "-L", "9:localhost:9", "du", "-sb", "/root"})
+	dest := indexOf(argv, "root@h")
+	for _, before := range []string{"-o", "BatchMode=yes", "-L", "9:localhost:9"} {
+		if i := indexOf(argv, before); i < 0 || i > dest {
+			t.Fatalf("%q should precede the destination: %v", before, argv)
+		}
+	}
+	if got := argv[dest+1:]; len(got) != 3 || got[0] != "du" {
+		t.Fatalf("command after the destination is %v, want [du -sb /root]", got)
+	}
+}
+
+func TestSplitSSHArgs(t *testing.T) {
+	cases := []struct {
+		in      []string
+		opts    []string
+		command []string
+		whatFor string
+	}{
+		{nil, nil, nil, "nothing"},
+		{[]string{"-A"}, []string{"-A"}, nil, "a bare flag"},
+		{[]string{"ls"}, nil, []string{"ls"}, "a bare command"},
+		{[]string{"-L", "8080:x", "ls"}, []string{"-L", "8080:x"}, []string{"ls"}, "value flag then command"},
+		{[]string{"-o", "-A", "ls"}, []string{"-o", "-A"}, []string{"ls"}, "a flag is not swallowed as a value"},
+		{[]string{"--", "ls", "-la"}, nil, []string{"ls", "-la"}, "an explicit separator"},
+		{[]string{"-p2222", "uptime"}, []string{"-p2222"}, []string{"uptime"}, "a combined flag"},
+	}
+	for _, c := range cases {
+		opts, command := splitSSHArgs(c.in)
+		if !equalStrings(opts, c.opts) || !equalStrings(command, c.command) {
+			t.Fatalf("%s: splitSSHArgs(%v) = (%v, %v), want (%v, %v)",
+				c.whatFor, c.in, opts, command, c.opts, c.command)
+		}
+	}
+}
+
+func indexOf(hay []string, needle string) int {
+	for i, s := range hay {
+		if s == needle {
+			return i
+		}
+	}
+	return -1
 }

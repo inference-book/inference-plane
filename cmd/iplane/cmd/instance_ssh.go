@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -121,11 +122,22 @@ func runInstanceSSH(cmd *cobra.Command, args []string) error {
 
 // buildSSHArgv assembles the argv passed to syscall.Exec. The first
 // element is argv[0] (program name as seen by ssh, conventionally the
-// basename of the binary). Order matters: ssh options come BEFORE
-// the operator's pass-through args so the operator can override
-// anything iplane sets (e.g., add -i for an additional identity).
-// The user@host destination always comes last because ssh treats
-// everything after it as a remote command.
+// basename of the binary).
+//
+// Two orderings are required at once and they pull in opposite directions.
+// ssh options must come BEFORE the destination, because ssh stops parsing
+// options at the first non-option word; a remote command must come AFTER
+// it, because that word is where the command starts. The pass-through list
+// holds both, so it is split rather than placed wholesale at either end.
+//
+// Putting all of it before the destination is what this used to do, and it
+// made the documented `iplane instance ssh my-pod -- ls /workspace` fail
+// with "Could not resolve hostname ls": ssh read the command's first word
+// as the machine to connect to. The comment here even explained the
+// reasoning, which was sound for the forwarding flags it was written for
+// and exactly backwards for a command.
+//
+// iplane's own options stay first so an operator can override them.
 //
 // Pure function so tests can assert the shape without invoking ssh.
 func buildSSHArgv(progName, keyPath, user, host string, port int, extraArgs []string) []string {
@@ -137,9 +149,53 @@ func buildSSHArgv(progName, keyPath, user, host string, port int, extraArgs []st
 		"-o", "UserKnownHostsFile=/dev/null",
 		"-o", "LogLevel=ERROR",
 	}
-	argv = append(argv, extraArgs...)
+	opts, command := splitSSHArgs(extraArgs)
+	argv = append(argv, opts...)
 	argv = append(argv, fmt.Sprintf("%s@%s", user, host))
-	return argv
+	return append(argv, command...)
+}
+
+// sshValueFlags are the ssh short options whose value is a separate word, so
+// "-L" must carry "8080:localhost:8000" across the destination with it.
+// Taken from ssh(1); the combined spellings ("-p22", "-oFoo=bar") need no
+// entry because they are already one word.
+var sshValueFlags = map[string]bool{
+	"-B": true, "-b": true, "-c": true, "-D": true, "-E": true, "-e": true,
+	"-F": true, "-I": true, "-i": true, "-J": true, "-L": true, "-l": true,
+	"-m": true, "-O": true, "-o": true, "-p": true, "-Q": true, "-R": true,
+	"-S": true, "-W": true, "-w": true,
+}
+
+// splitSSHArgs divides pass-through args into ssh options and the remote
+// command, at the first word that is not an option or an option's value.
+//
+// That split point is not a heuristic about what the words mean: it is
+// where ssh itself stops reading options, so the two agree by construction.
+// "-A -L 8080:x ls /tmp" gives options "-A -L 8080:x" and command "ls /tmp",
+// and a bare "ls /tmp" gives no options at all.
+//
+// A lone "--" is dropped, so an operator who writes a second one to be
+// explicit about where their command starts gets what they meant rather
+// than ssh trying to run it.
+func splitSSHArgs(args []string) (opts, command []string) {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--" {
+			return opts, args[i+1:]
+		}
+		if !strings.HasPrefix(a, "-") || a == "-" {
+			return opts, args[i:]
+		}
+		opts = append(opts, a)
+		// A value-taking flag carries the next word only when that word is
+		// not itself a flag; "-o -A" is a malformed invocation ssh should
+		// complain about, not one to paper over by swallowing the -A.
+		if sshValueFlags[a] && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+			i++
+			opts = append(opts, args[i])
+		}
+	}
+	return opts, nil
 }
 
 // materializeKey writes the supplied PEM bytes to a tmpfs-backed
