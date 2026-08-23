@@ -245,3 +245,21 @@ only wrongly exclude.
 Same shape as the disk floor, and the same lesson as #281. The conversion is
 1000 rather than 1024, matching `gpu_ram`, because hosts report round decimal
 figures and a binary conversion rejects machines that are fine.
+
+## A pass-through remote command over `instance ssh` used to be impossible
+
+`buildSSHArgv` placed every pass-through argument before the `user@host`
+destination, so `iplane instance ssh <id> -- ls /workspace` (the form its own
+help documents) failed with "Could not resolve hostname ls": ssh stops reading
+options at the first non-option word, and that word was the command's first.
+
+The two orderings genuinely conflict. Forwarding flags must precede the
+destination; a remote command must follow it. The split point is not a guess
+about meaning, it is where ssh itself stops parsing options, so
+`splitSSHArgs` walks the leading options (carrying the value of a
+value-taking flag like `-L` across with it) and treats the first remaining
+word as the start of the command.
+
+This mattered beyond tidiness because every SSH-based way of watching a
+deploy runs a remote command, so the whole approach read as unreachable
+hosts until the argv was fixed.

@@ -143,3 +143,50 @@ into a 59-minute one that hit the engine-ready timeout and cost $22. An
 earlier run on a different host had done the same fetch several times
 faster. Three runs is three anecdotes; the point of a log is a
 distribution, and the reading arrives before the meter has run two minutes.
+
+## deploy-watch.sh
+
+Watches what a deploy is actually doing, over SSH, while it is doing it.
+
+```sh
+make build
+hack/deploy-watch.sh --deployment glm52-run --model cyankiwi/GLM-5.2-AWQ-INT4
+```
+
+Every 30s it asks each replica for the bytes in its model cache, free disk,
+GPU memory in use, and whether an engine process is alive, then derives a
+rate, a percentage and an ETA against the model's download size. One JSONL
+row per replica per tick.
+
+**Free.** The instance is rented regardless and each reading is a shell
+command on a machine already being paid for.
+
+**Unreachable is recorded, not skipped.** A box mid-boot and a box whose sshd
+died look identical from here, and a hole in the series would read as "nobody
+sampled" rather than "nobody answered".
+
+**It measures `$HF_HOME` as resolved on the box**, not an assumed path, because
+a warm-volume deploy points it at the mount and measuring the wrong directory
+reports a download that never starts.
+
+Flags: `--deployment` / `--instance`, `--model` (or `--total-bytes`),
+`--interval`, `--out`, `--service-url`, `--state-dir`.
+
+**Pass `--service-url ""` explicitly for an in-process run.** The CLI defaults
+it to `http://localhost:8080`, so a script using `${VAR:+--service-url "$VAR"}`
+drops the flag in exactly the case that needs it and silently talks to
+whatever daemon is up. That bug produced a full run of `"reachable": false`
+against a box that was answering fine.
+
+### Why this rather than the agent
+
+The agent reports the same thing properly (issue 413) and does not need SSH.
+But it only starts when the daemon has an externally reachable URL to stamp
+(`IPLANE_AGENT_SERVICE_URL`) and the box can fetch an agent binary
+(`IPLANE_AGENT_BINARY_URL`, or a released version). Neither has been true on
+any run so far, so `agentPrelude` returned empty and no agent has ever run on
+a real deploy. SSH is already there.
+
+Verified against a live Vast box: it resolved Qwen2.5-7B-Instruct at 15.2 GB
+and tracked a real download at 7-8 MB/s with a 27-minute ETA. That host was
+slow enough to be worth knowing about, which is the point.
