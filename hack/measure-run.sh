@@ -35,6 +35,27 @@ MODEL=""; HEARTBEAT=""; SKU="H100_SXM"; GPUS=8; TP=8; PROVIDER="vast"
 IMAGE="vllm/vllm-openai:v0.27.1"
 MIN_DISK_GB=700; MIN_VRAM_GB=80; FABRIC=""
 ENGINE_ARGS="--max-model-len,131072,--max-num-seqs,32"
+
+# NCCL_DEBUG=INFO, because a hung collective is otherwise one log line and
+# then nothing. A GLM-5.2 deploy stopped after "vLLM is using nccl==2.30.7"
+# and sat there for half an hour; with this, NCCL narrates topology detection
+# and ring construction, so the silence has a last known position (P2P,
+# InfiniBand, socket interface) instead of being undifferentiated.
+#
+# It is the only NCCL knob here that changes anything. Torch's watchdog is
+# already on by default in the version this image ships (torch 2.13.0:
+# TORCH_NCCL_ASYNC_ERROR_HANDLING=3, ENABLE_MONITORING=true,
+# HEARTBEAT_TIMEOUT_SEC=480) and it did not fire on a 23-minute hang, because
+# it watches collectives in flight and there was no work item yet. NCCL
+# communicators are created blocking by default, so initialisation itself has
+# no timeout to set. Setting those variables would have been cargo.
+#
+# The avoidance knobs (NCCL_P2P_DISABLE, NCCL_IB_DISABLE) are deliberately
+# NOT set. Each costs real bandwidth on a healthy host, and paying that on
+# every run to dodge a fault seen once is the wrong trade. Turn the debug
+# output on, catch the next one with a diagnosis, then set the specific knob
+# the log names.
+ENGINE_ENV="${MEASURE_RUN_ENGINE_ENV:-NCCL_DEBUG=INFO}"
 LADDER="1,2,4,8"; PROMPT_TOKENS="8192"
 DEPLOY_TIMEOUT="${DEPLOY_TIMEOUT:-75m}"
 
@@ -86,6 +107,7 @@ while [ $# -gt 0 ]; do
     --tp)            TP="$2"; shift 2 ;;
     --image)         IMAGE="$2"; shift 2 ;;
     --engine-args)   ENGINE_ARGS="$2"; shift 2 ;;
+    --engine-env)    ENGINE_ENV="$2"; shift 2 ;;
     --ladder)        LADDER="$2"; shift 2 ;;
     --prompt-tokens) PROMPT_TOKENS="$2"; shift 2 ;;
     --min-disk-gb)   MIN_DISK_GB="$2"; shift 2 ;;
@@ -228,6 +250,9 @@ if [ -z "$FABRIC" ] && [ "$GPUS" -ge 2 ] && [ "$PROVIDER" != "local" ]; then FAB
 FABRIC_FLAG=()
 [ -n "$FABRIC" ] && FABRIC_FLAG=(--fabric "$FABRIC")
 
+ENGINE_ENV_FLAG=()
+[ -n "$ENGINE_ENV" ] && ENGINE_ENV_FLAG=(--env "$ENGINE_ENV")
+
 DEBUG_FLAG=()
 if [ "$DEBUG_SHELL" = 1 ] && [ "$PROVIDER" != "local" ]; then
   DEBUG_FLAG=(--debug-shell)
@@ -244,6 +269,7 @@ DEPLOY_ISSUED=1
   --engine-entrypoint python3 --engine-entrypoint=-m \
   --engine-entrypoint vllm.entrypoints.openai.api_server \
   --image "$IMAGE" --model "$MODEL" --engine-args "$ENGINE_ARGS" \
+  ${ENGINE_ENV_FLAG[@]+"${ENGINE_ENV_FLAG[@]}"} \
   --wait=false --service-url "$SERVICE_URL" 2>&1 | tee "${OUT}/deploy.log"
 
 # The whole reason this script exists. Runs for the life of the deploy and
