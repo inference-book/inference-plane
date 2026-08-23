@@ -37,6 +37,20 @@ MIN_DISK_GB=700; MIN_VRAM_GB=80
 ENGINE_ARGS="--max-model-len,131072,--max-num-seqs,32"
 LADDER="1,2,4,8"; PROMPT_TOKENS="8192"
 DEPLOY_TIMEOUT="${DEPLOY_TIMEOUT:-75m}"
+
+# Abort thresholds, MIRRORING internal/provisioners/staging.go. The control
+# plane makes the same judgement from the agent's reading; this makes it from
+# deploy-watch's, because the agent does not run on any deploy we have driven
+# (agentPrelude needs both a stamped service URL and a fetchable binary, and
+# no run has had either). Two implementations of one policy is a drift risk,
+# so tests/constraints asserts these three numbers still match the Go ones.
+#
+# The zero-rate rule carries across unchanged and is the important one: a
+# stalled download projects to infinity, so only a MEASURED POSITIVE rate may
+# end a run. A download that has died is left to the deadline.
+ABORT_MIN_WINDOW=90       # seconds of download observed before judging
+ABORT_CONSECUTIVE=3       # readings in a row that must agree
+ABORT_SLACK=1.5           # projection must overshoot the remaining time by this
 SERVICE_URL="http://localhost:8080"
 SKIP_WATCHDOG_CHECK=0; DRY_RUN=0
 OUT=""
@@ -185,13 +199,76 @@ DEADLINE=$(( $(date +%s) + $(python3 -c "
 import re,sys
 s='$DEPLOY_TIMEOUT'; m=re.match(r'^(\d+)([smh])$', s)
 print({'s':1,'m':60,'h':3600}[m.group(2)]*int(m.group(1)) if m else 4500)") ))
-STATE=""
+STATE=""; HOPELESS=0; DOWNLOAD_FIRST_SEEN=""; ABORTED=""
 while [ "$(date +%s)" -lt "$DEADLINE" ]; do
   STATE=$("$IPLANE" deployment describe "$DEP_ID" --service-url "$SERVICE_URL" 2>/dev/null | awk '/^state:/{print $2}')
   case "$STATE" in RUNNING|FAILED|TERMINATED) break ;; esac
+
+  # The judgement the control plane would make if the agent were running.
+  # Reads the newest watcher row and asks whether this download can still
+  # finish before DEADLINE.
+  VERDICT=$(NOW="$(date +%s)" DEADLINE="$DEADLINE" SLACK="$ABORT_SLACK"     tail -1 "${OUT}/deploy-watch.jsonl" 2>/dev/null | python3 -c '
+import json, os, sys
+line = sys.stdin.read().strip()
+if not line:
+    print("SKIP no reading"); raise SystemExit
+try:
+    r = json.loads(line)
+except Exception:
+    print("SKIP unparseable"); raise SystemExit
+if not r.get("reachable"):
+    print("SKIP unreachable"); raise SystemExit
+rate = r.get("bytes_per_s") or 0
+# THE guard. A stall projects to infinity and would abort every download
+# that paused between shards, hardest on the biggest checkpoints.
+if rate <= 0:
+    print("SKIP no positive rate"); raise SystemExit
+eta = r.get("eta_minutes")
+if eta is None:
+    print("SKIP no eta"); raise SystemExit
+left = (int(os.environ["DEADLINE"]) - int(os.environ["NOW"])) / 60.0
+if left <= 0:
+    print("SKIP past deadline"); raise SystemExit
+if eta > left * float(os.environ["SLACK"]):
+    print("HOPELESS needs %.0f min, %.0f min left, %.1f%% done at %.1f MB/s"
+          % (eta, left, r.get("percent") or 0, r.get("mb_per_s") or 0))
+else:
+    print("OK eta %.0f min within %.0f min left" % (eta, left))
+')
+  case "$VERDICT" in
+    HOPELESS*)
+      [ -z "$DOWNLOAD_FIRST_SEEN" ] && DOWNLOAD_FIRST_SEEN=$(date +%s)
+      OBSERVED=$(( $(date +%s) - DOWNLOAD_FIRST_SEEN ))
+      if [ "$OBSERVED" -lt "$ABORT_MIN_WINDOW" ]; then
+        log "slow, but only ${OBSERVED}s observed (need ${ABORT_MIN_WINDOW}s): ${VERDICT#HOPELESS }"
+      else
+        HOPELESS=$(( HOPELESS + 1 ))
+        log "hopeless ${HOPELESS}/${ABORT_CONSECUTIVE}: ${VERDICT#HOPELESS }"
+        if [ "$HOPELESS" -ge "$ABORT_CONSECUTIVE" ]; then
+          ABORTED="${VERDICT#HOPELESS }"
+          log "=== ABANDONING: $ABORTED ==="
+          log "    retry on a faster host, or raise DEPLOY_TIMEOUT"
+          break
+        fi
+      fi
+      ;;
+    OK*)
+      # Any reading that is not hopeless clears the count, so "slow three
+      # times ever" is never mistaken for "slow three times running".
+      [ "$HOPELESS" != 0 ] && log "recovered: ${VERDICT#OK }"
+      HOPELESS=0; DOWNLOAD_FIRST_SEEN=""
+      ;;
+  esac
   sleep 20
 done
 log "deployment state: ${STATE:-unknown}"
+
+if [ -n "$ABORTED" ]; then
+  log "run abandoned before the deadline; teardown follows"
+  echo "$ABORTED" > "${OUT}/aborted.txt"
+  tail -5 "${OUT}/deploy-watch.jsonl" 2>/dev/null | sed 's/^/  /'
+  exit 1
+fi
 
 if [ "$STATE" != "RUNNING" ]; then
   log "did not reach RUNNING. what the watcher saw, last 5 readings:"
