@@ -62,6 +62,17 @@ type Observation struct {
 	// has one. It wins over the health probe's answer, because a host
 	// saying "Retrying" is telling you something the probe cannot.
 	Detail string
+	// SSH is where the provider says the box can be shelled into, or nil
+	// when it has not assigned one (yet, or at all).
+	//
+	// Reported per tick rather than once at rent time because the address
+	// does not exist at rent time. Vast assigns ssh_host seconds to
+	// minutes after the contract is created, so a record written when the
+	// deploy started carries nothing and nothing ever revisited it: the
+	// instance was reachable and iplane said it had no SSH endpoint, which
+	// is what made deploy-watch structurally unable to observe a deploy.
+	SSH *provisionerv1.SshTarget
+
 	// Fatal, when set, stops the wait immediately. This is how a
 	// provider that can tell a container will never run stops billing
 	// the rest of the timeout. A provider that cannot tell leaves it nil
@@ -171,7 +182,7 @@ func Wait(ctx context.Context, c Config) (string, error) {
 			}
 		}
 
-		c.Emit(update(c, phase, last, time.Since(started), deadline))
+		c.Emit(update(c, phase, last, time.Since(started), deadline, obs.SSH))
 
 		select {
 		case <-ctx.Done():
@@ -222,7 +233,7 @@ func withEngineLogs(ctx context.Context, c Config, err error) error {
 }
 
 // provisionerv1Update builds the per-tick progress update.
-func update(c Config, phase, detail string, elapsed time.Duration, deadline time.Time) provisioners.DeployStateUpdate {
+func update(c Config, phase, detail string, elapsed time.Duration, deadline time.Time, ssh *provisionerv1.SshTarget) provisioners.DeployStateUpdate {
 	msg := c.Ladder.Description(phase)
 	if detail != "" {
 		msg = fmt.Sprintf("%s: %s", msg, detail)
@@ -233,6 +244,7 @@ func update(c Config, phase, detail string, elapsed time.Duration, deadline time
 		ProgressMessage: fmt.Sprintf("%s (%s elapsed)", msg, elapsed.Round(time.Second)),
 		ContainerID:     c.ContainerID,
 		Deadline:        deadline,
+		SSH:             ssh,
 	}
 }
 

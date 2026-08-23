@@ -145,6 +145,31 @@ meter starts later than the rental does. That was observed on containers that
 failed to start rather than healthy ones mid-pull, so it is not established for
 the case that matters.
 
+## A deployed instance had no recorded SSH address, and the box had one
+
+`Spawn` populates `inst.Ssh` from the offer record. The deploy path did not,
+because at rent time there is nothing to populate it with: Vast assigns
+`ssh_host` seconds to minutes after the contract is created, and nothing ever
+went back to look. So a running, reachable box carried `ssh: null` and
+`iplane instance ssh` refused with "has no SSH endpoint", which reads as a
+policy decision rather than a stale record.
+
+The wait already fetches the instance record every tick to classify the phase,
+so the address is in hand; it now rides out on `enginewait.Observation.SSH`
+and `patchDeploymentSlot` writes it. Not set-once, unlike `ProviderId`: the
+provider may reassign, and a stale address sends an operator to a machine that
+is no longer theirs.
+
+**`--debug-shell` does nothing on Vast.** It is a RunPod concept (`SupportPublicIP`,
+`enginePodPorts`); nothing in this package reads `DebugShell` and the rent call
+asks for `runtype: "ssh"` unconditionally, so sshd is always there. The flag
+looked like the cause when a deploy could not be shelled into, and passing it
+changed nothing because the defect was the unrecorded address.
+
+Cost of finding this: a $54/hr deploy watched six blind minutes before anyone
+noticed the difference between "no SSH yet" and "no SSH ever", then two 1.5-cent
+rehearsals on a single-GPU box that settled it.
+
 ## Cold-start phases
 
 `actual_status` walks `created -> loading -> running`, and that is the whole

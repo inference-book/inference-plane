@@ -58,7 +58,7 @@ if [ "$SERVICE_URL_SET" = 1 ]; then IPFLAGS+=(--service-url "$SERVICE_URL")
 elif [ -n "${IPLANE_SERVICE_URL-}" ]; then IPFLAGS+=(--service-url "$IPLANE_SERVICE_URL"); fi
 [ "$STATE_DIR_SET" = 1 ] && IPFLAGS+=(--state-dir "$STATE_DIR")
 
-ip() { "$IPLANE" "$@" "${IPFLAGS[@]}"; }
+ip() { "$IPLANE" "$@" ${IPFLAGS[@]+"${IPFLAGS[@]}"}; }
 
 # The download size, so a rate becomes an answer rather than a number.
 # Read from the hub rather than through `iplane model describe`, which has no
@@ -132,7 +132,7 @@ while :; do
 
   for R in $(replicas); do
     ERRFILE=$(mktemp)
-    RAW=$("$IPLANE" instance ssh "$R" "${IPFLAGS[@]}" -- \
+    RAW=$("$IPLANE" instance ssh "$R" ${IPFLAGS[@]+"${IPFLAGS[@]}"} -- \
             -o BatchMode=yes -o ConnectTimeout=15 "$REMOTE" 2>"$ERRFILE" \
           | grep -o '{.*}' | tail -1)
     # A replica with no SSH endpoint will NEVER become reachable, and saying
