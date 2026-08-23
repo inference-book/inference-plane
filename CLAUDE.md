@@ -106,6 +106,7 @@ flatten to underscore (so `backend.engine` → `IPLANE_BACKEND_ENGINE`).
 | `IPLANE_RUNPOD_DEBUG`              | `1` logs RunPod HTTP request/response bytes (sans Authorization) to stderr |
 | `IPLANE_RUNPOD_PHASE_TRACE`        | `1` prints one TSV line per engine-readiness tick with the raw cold-start signals (`elapsed`, `phase`, `machine`, `createdAt`, `lastStartedAt`, `health`) and keeps probing pod status past engine-init. Diagnostic for issue 208; observability-only, never changes phase emission or readiness |
 | `IPLANE_ENGINE_READY_TIMEOUT`       | Go duration overriding how long ANY deploy path waits for the engine to answer `/health`. Applies to the sshdocker (Vast, Lambda) path as well as RunPod. Default 10m on both |
+| `IPLANE_ENGINE_ABORT_ON_SLOW_DOWNLOAD` | `0` stops a deploy abandoning itself when the agent's measured download rate projects past the engine-ready deadline. On by default. Only ever fires on a positive, sustained, clearly-too-slow rate; a stalled download runs to the deadline as before |
 | `IPLANE_RUNPOD_ENGINE_READY_TIMEOUT` | Same, scoped to RunPod, and wins over the generic one when both are set. Kept for operators who already export it |
 | `IPLANE_SKIP_MODEL_VALIDATION`     | `1` bypasses the HF pre-flight check on `CreateDeployment` (offline / firewalled / non-HF models) |
 | `IPLANE_OTEL_ENDPOINT`             | OTLP URL **propagated to the engine pod** as `OTEL_EXPORTER_OTLP_ENDPOINT`. Either a hosted OTLP URL or `$(iplane telemetry url)` for the cloudflared tunnel. |

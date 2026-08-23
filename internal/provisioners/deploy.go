@@ -2,6 +2,7 @@ package provisioners
 
 import (
 	"context"
+	"time"
 
 	provisionerv1 "github.com/inference-book/inference-plane/gen/go/provisioner/v1"
 	"github.com/inference-book/inference-plane/internal/sshkeys"
@@ -35,6 +36,16 @@ type DeployStateUpdate struct {
 	// and spend, which is a join on instance_id, silently lost the box
 	// (#397).
 	HourlyRateUSD float64
+
+	// Deadline is when the wait producing this update gives up, or the zero
+	// time when the emitter has no deadline to report.
+	//
+	// Carried so a consumer can reason about the time left rather than only
+	// about the time spent. The engine-ready timeout belongs to the provider
+	// (it is per-adapter and IPLANE_ENGINE_READY_TIMEOUT overrides it), so
+	// nothing upstream could otherwise tell whether an hour of downloading
+	// has fifty minutes left or five.
+	Deadline time.Time
 }
 
 // Deployer is an optional Provider capability for image-native

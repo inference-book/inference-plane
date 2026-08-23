@@ -871,9 +871,24 @@ func (s *Service) runReplicaDeploy(ctx context.Context, deployID string, slot, n
 	// rungs rather than one opaque engine:init. The refiner is per-replica
 	// because its no-regression latch is, and it is nil-safe when no engine
 	// registry is wired.
-	refiner := s.newPhaseRefiner(replicaID)
+	// A download that cannot finish before the engine-ready deadline ends
+	// its own deploy, through a cancellation carrying why. The provider is
+	// already waiting on this context, so nothing in the adapters has to
+	// learn about any of it, and enginewait reports context.Cause so the
+	// failure says "abandoning this deploy" rather than "caller stopped
+	// waiting".
+	// Derived from the observer's context, not the bare one, so the
+	// provider keeps the trace span the deploy is recorded under. Cancelling
+	// a sibling would have left the span intact and the provider untraced.
+	deployCtx, abort := context.WithCancelCause(obs.ctx())
+	defer abort(nil)
+	refiner := s.newPhaseRefiner(replicaID, s.checkpointBytes(ctx, dep), func(reason error) {
+		slog.Warn("abandoning a deploy whose download cannot finish in time",
+			"deployment", deployID, "replica", replicaID, "reason", reason)
+		abort(reason)
+	})
 	emit := func(u DeployStateUpdate) {
-		u = refiner.refine(ctx, u)
+		u = refiner.refine(deployCtx, u)
 		obs.observe(u)
 		_ = s.patchDeploymentSlot(deployID, replicaID, u)
 	}
@@ -906,7 +921,7 @@ func (s *Service) runReplicaDeploy(ctx context.Context, deployID string, slot, n
 	// registration back to the slot that produced it with a lookup instead
 	// of a parse.
 	slotDep := withAgentEnv(dep, replicaID, nodeIndex, inst.GetProvider(), s.agentServiceURL)
-	err = s.deployerFor(inst).Deploy(obs.ctx(), slotDep, inst, key, emit)
+	err = s.deployerFor(inst).Deploy(deployCtx, slotDep, inst, key, emit)
 	obs.finish(err)
 	endpoint = s.readSlotEndpoint(deployID, slot)
 	if err == nil {
