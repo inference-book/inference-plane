@@ -102,6 +102,49 @@ on boards that are physically always NVLinked. A bridge-capable card reading
 zero therefore resolves to `FABRIC_SOURCE_UNKNOWN`, not `NONE`. Settling it
 needs an on-box reading (`internal/engineagent`'s interconnect sensor).
 
+## Bandwidth: the offer measures the link, not the path to the model
+
+`inet_down` is an advertised link speed and it does not predict throughput to
+Hugging Face. The GLM-5.2 run landed on a host advertising 5,813 Mbps (726
+MB/s) and achieved about 134 MB/s against the checkpoint's CDN, a 5.4x
+shortfall, which turned an 11-minute download of 474.3 GB into a 59-minute one
+that hit the engine-ready timeout. A different host had done the same fetch
+several times faster. Both readings are legitimate; the link is not the
+bottleneck, the path to the CDN is, and only one end of that path is ours.
+
+Disk is not the alternative explanation, and the offer says so for free.
+Offers carry `disk_bw`, a measured per-host figure, and on 8-GPU Hopper-class
+hosts it ran 4,813 to 47,104 MB/s across the market (median 20,780), which
+writes 474.3 GB in under two minutes. On the cheap end of the market it is
+genuinely slow, 151 to 464 MB/s, which is the range that made it worth ruling
+out rather than assuming.
+
+Filtering offers on `disk_bw` would not break the rule that only bounded facts
+belong in a filter (`skucatalog.go`). That rule is about catalog rows, which
+describe a card model and cannot speak for the box it lands in. `disk_bw` is a
+measurement of one specific machine, which is the kind of claim an offer is
+entitled to make. Nothing filters on it today because nothing has needed to.
+
+`hack/hf-throughput-probe.sh` is the reading that settles it per host, timing
+one shard before committing to the rest.
+
+## Billing is proportional, and the balance lags it
+
+Measured directly over 206 seconds: no hourly minimum, no rounding. The
+deduction tracked elapsed time to within 1.4% of the computed rate, settling in
+ticks of roughly 40 seconds. So handing a bad host back after 90 seconds costs
+90 seconds, which is what makes probe-then-abandon cheaper than riding a slow
+host to a timeout.
+
+Two things that reading does not say. Charges kept draining for minutes after
+every instance was destroyed, while `current.charges` read 0 throughout, so the
+credit balance is a lagging indicator and a poor leak detector; poll
+`/api/v1/instances/` instead. And an instance whose container never reached
+`running` was billed for its disk and never for its GPU, which suggests the GPU
+meter starts later than the rental does. That was observed on containers that
+failed to start rather than healthy ones mid-pull, so it is not established for
+the case that matters.
+
 ## Cold-start phases
 
 `actual_status` walks `created -> loading -> running`, and that is the whole

@@ -43,3 +43,103 @@ size is actually like.
 The raw log is gitignored. A distilled artifact is what gets committed,
 the same way `iplane load --sweep --output csv` carries provenance rather
 than a terminal paste (#347).
+
+## vast-watchdog.sh
+
+Destroys Vast instances whose creator has died or which have outlived a
+deadline. Runs as its own process, because that is the whole point: a
+teardown that lives inside the run it protects dies with it.
+
+```sh
+date +%s > run.hb
+hack/vast-watchdog.sh --heartbeat run.hb --max-stale 300 --max-lifetime 5400 &
+# the run touches run.hb on a cadence, and writes DONE into it on clean exit
+```
+
+It destroys an instance for one of two reasons: the heartbeat file has
+stopped being touched (the creator is gone), or the instance is older than
+`--max-lifetime` (the creator is alive and wrong). Flags: `--heartbeat`,
+`--registry`, `--label-prefix` (default `iplane-`), `--max-stale`,
+`--max-lifetime`, `--interval`, `--max-runtime`, `--dry-run`.
+
+**Ownership is positive-only.** A candidate is an instance whose label
+carries the prefix, which is what `internal/provisioners/vast` stamps
+(`iplane-<deployment-id>`), or whose id was appended to `--registry`. The
+registry is there for scripts that call the Vast API directly and so never
+get a label stamped for them. Anything unmatched is left running: the
+account also holds boxes this project did not create, and destroying one
+of those is worse than leaking one of ours.
+
+**Every uncertainty resolves to "leave it running".** An API read that
+fails, a response that will not parse, an instance with no `start_date`,
+a heartbeat that has not appeared yet. The watchdog arms on first sight of
+the heartbeat file rather than at startup, because before that "not
+started yet" and "died" are the same observation and only one of them is
+worth a teardown.
+
+### Why this exists
+
+A billing probe was launched as `./run.sh &` from inside an already
+backgrounded call. The wrapper returned immediately, the harness recorded
+the task as complete, and the script was killed as an orphan. A bash EXIT
+trap does not run on that kill, so the teardown never fired and the box
+billed until somebody happened to poll `/api/v1/instances/`.
+
+Two things follow, and the second is the one that generalises. Never pair
+`&` with an already-backgrounded invocation. And never let the only
+teardown live in the process that can be killed.
+
+Note also that the credit balance is a lagging indicator: charges kept
+draining for several minutes after both test instances were destroyed and
+`charges` read 0 throughout. Watching the balance would not have caught
+this. Polling `/api/v1/instances/` did. Use `/api/v1/`, never `/api/v0/instances/`,
+which is deprecated and answers with an error object that parses as an
+empty list.
+
+## hf-throughput-probe.sh
+
+Measures how fast one rented box actually pulls weights from Hugging Face,
+and appends the reading to a JSONL log.
+
+```sh
+make build
+hack/hf-throughput-probe.sh --instance probe-box --model cyankiwi/GLM-5.2-AWQ-INT4
+```
+
+It picks the largest file under `--max-file-gb` (default 6), times a single
+`hf_hub_download` of it on the box, and reports MB/s plus what the whole
+repo would take at that rate. Flags: `--instance`, `--model`, `--file`,
+`--out`, `--max-file-gb`, `--timeout`.
+
+**The probed file is not wasted.** It lands in the same HF cache layout the
+engine reads, so the shard counts toward the real download and vLLM's
+`snapshot_download` skips it. On a host you keep, the only cost is the
+seconds spent knowing.
+
+**It times `hf_hub_download`, not curl**, and refuses rather than falling
+back if `huggingface_hub` will not import. The GLM checkpoint is Xet-backed
+(every shard redirects to `xet-bridge-us` carrying an `x-xet-hash`), so
+plain HTTPS and the Xet chunked path are different code paths, and a curl
+number would not predict what the engine sees.
+
+**It neither rents nor destroys**, and the box bills for as long as it
+takes. Arm `vast-watchdog.sh` first.
+
+`iplane instance ssh` honours `IPLANE_SERVICE_URL`; unset it (or pass
+`--service-url ""` to the CLI directly) when driving a local state dir
+rather than a running daemon, or the probe dials `localhost:8080` and
+reports a connection refused instead of a reading.
+
+**The remote half has not been run on hardware.** The hub side is exercised
+against the real 474.3 GB GLM repo; the on-box fetch is not. The first real
+invocation is the test.
+
+### Why measure at all
+
+A host's advertised link speed does not predict what it achieves against
+Hugging Face. The GLM-5.2 run landed on a Vast host advertising 5,813 Mbps
+(726 MB/s) that delivered about 134 MB/s, turning an 11-minute download
+into a 59-minute one that hit the engine-ready timeout and cost $22. An
+earlier run on a different host had done the same fetch several times
+faster. Three runs is three anecdotes; the point of a log is a
+distribution, and the reading arrives before the meter has run two minutes.
