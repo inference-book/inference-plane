@@ -124,6 +124,22 @@ for r in (d.get("replicas") or []):
 }
 
 PREV_BYTES=""; PREV_AT=""; NO_SSH_WARNED=0
+
+# usage_fragment turns $USAGE into a JSON tail for the rows printf builds,
+# or nothing when the provider reported nothing. Emitting nothing rather than
+# zeros keeps "the provider does not say" distinguishable from "the box has
+# used nothing", which is the distinction the whole reading turns on.
+usage_fragment() {
+  [ -z "${USAGE:-}" ] && return
+  printf '%s' "$USAGE" | python3 -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    raise SystemExit
+print("".join(",\"%s\":%s" % (k, json.dumps(v)) for k, v in d.items()))
+' 2>/dev/null
+}
 echo "deploy-watch: polling every ${INTERVAL}s -> $OUT"
 while :; do
   NOW=$(date +%s)
@@ -131,6 +147,27 @@ while :; do
   PHASE=$( [ -n "$DEPLOYMENT" ] && ip deployment describe "$DEPLOYMENT" 2>/dev/null | awk '/^phase:/{print $2}' )
 
   for R in $(replicas); do
+    # The provider's own view first, because it needs no key, no agent and no
+    # shell, and it is available on deploys where SSH is not. It is also the
+    # reading that separates a hung collective from a slow download: busy
+    # cards with a flat disk is not a fetch running late. SSH enriches this
+    # when it works rather than being the only way in.
+    USAGE=$(ip instance describe "$R" --output json 2>/dev/null | python3 -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    raise SystemExit
+u = d.get("usage") or {}
+if not u.get("available"):
+    raise SystemExit
+print(json.dumps({
+    "provider_disk_bytes": u.get("disk_used_bytes") or u.get("diskUsedBytes") or 0,
+    "provider_gpu_util": u.get("gpu_utilization") or u.get("gpuUtilization") or 0,
+    "provider_rx_bytes": u.get("network_rx_bytes") or u.get("networkRxBytes") or 0,
+}))
+' 2>/dev/null)
+
     ERRFILE=$(mktemp)
     RAW=$("$IPLANE" instance ssh "$R" ${IPFLAGS[@]+"${IPFLAGS[@]}"} -- \
             -o BatchMode=yes -o ConnectTimeout=15 "$REMOTE" 2>"$ERRFILE" \
@@ -147,8 +184,8 @@ while :; do
         echo "deploy-watch: deployments are proxy-only by default; redeploy with --debug-shell" >&2
         echo "deploy-watch: (hack/measure-run.sh passes it unless --no-debug-shell)" >&2
       fi
-      printf '{"ts":%s,"replica":"%s","state":"%s","phase":"%s","reachable":false,"reason":"no-ssh-endpoint"}\n' \
-        "$NOW" "$R" "${STATE:-}" "${PHASE:-}" | tee -a "$OUT"
+      printf '{"ts":%s,"replica":"%s","state":"%s","phase":"%s","reachable":false,"reason":"no-ssh-endpoint"%s}\n' \
+        "$NOW" "$R" "${STATE:-}" "${PHASE:-}" "$(usage_fragment)" | tee -a "$OUT"
       rm -f "$ERRFILE"
       continue
     fi
@@ -158,12 +195,12 @@ while :; do
       # whose sshd died look the same from here, and recording the gap keeps
       # the series honest rather than leaving a hole that reads as "nobody
       # sampled".
-      printf '{"ts":%s,"replica":"%s","state":"%s","phase":"%s","reachable":false}\n' \
-        "$NOW" "$R" "${STATE:-}" "${PHASE:-}" | tee -a "$OUT"
+      printf '{"ts":%s,"replica":"%s","state":"%s","phase":"%s","reachable":false%s}\n' \
+        "$NOW" "$R" "${STATE:-}" "${PHASE:-}" "$(usage_fragment)" | tee -a "$OUT"
       continue
     fi
     printf '%s' "$RAW" | TS="$NOW" R="$R" STATE="${STATE:-}" PHASE="${PHASE:-}" TOTAL="$TOTAL" \
-      PREV_BYTES="$PREV_BYTES" PREV_AT="$PREV_AT" python3 -c '
+      PREV_BYTES="$PREV_BYTES" PREV_AT="$PREV_AT" USAGE="$USAGE" python3 -c '
 import json, os, sys
 r = json.load(sys.stdin)
 row = {"ts": int(os.environ["TS"]), "replica": os.environ["R"],
@@ -181,6 +218,12 @@ if b >= 0 and pb and pa:
             row["eta_minutes"] = round((total - b) / rate / 60, 1)
 if total and b >= 0:
     row["percent"] = round(100.0 * b / total, 1)
+u = os.environ.get("USAGE") or ""
+if u:
+    try:
+        row.update(json.loads(u))
+    except Exception:
+        pass
 print(json.dumps(row))
 ' | tee -a "$OUT"
     NB=$(printf '%s' "$RAW" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("cache_bytes",-1))' 2>/dev/null)

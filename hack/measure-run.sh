@@ -51,6 +51,22 @@ DEPLOY_TIMEOUT="${DEPLOY_TIMEOUT:-75m}"
 ABORT_MIN_WINDOW=90       # seconds of download observed before judging
 ABORT_CONSECUTIVE=3       # readings in a row that must agree
 ABORT_SLACK=1.5           # projection must overshoot the remaining time by this
+
+# A hung collective looks nothing like a slow download and must be told apart.
+# vLLM initialises NCCL across the ranks, then loads weights; if the collective
+# never completes, the cards sit spinning in a busy-wait while the disk stays
+# flat and the engine prints nothing further. A GLM-5.2 deploy did exactly
+# that for half an hour: 188 MB on a 900 GB disk, 5.7 GB inbound (the image,
+# not 474 GB of weights) and eight GPUs pinned at 86%.
+#
+# Deliberately stricter than the slow-download abort. A download that pauses
+# between shards also shows a flat disk, so the GPU floor is what separates
+# "waiting on the network" from "spinning on a collective", and the window is
+# long enough that weight loading (busy cards, flat disk, legitimately) does
+# not trip it.
+STALL_GPU_BUSY_PCT=50     # cards this busy...
+STALL_DISK_GROWTH_BYTES=$((512 * 1024 * 1024))   # ...while the disk grows less than this...
+STALL_WINDOW=600          # ...for this long, is a hang rather than a fetch
 # A port of its own, not 8080. A paid run must not share a port with every
 # other iplane on the machine: one `freeport 8080` reached in and killed the
 # daemon mid-download, and because the script itself stayed alive the
@@ -295,6 +311,41 @@ if eta > left * float(os.environ["SLACK"]):
 else:
     print("OK eta %.0f min within %.0f min left" % (eta, left))
 ')
+  # The provider's view, which needs no key and works where SSH does not.
+  STALL=$(NOW="$(date +%s)" GPU_MIN="$STALL_GPU_BUSY_PCT" GROWTH="$STALL_DISK_GROWTH_BYTES" \
+    WINDOW="$STALL_WINDOW" python3 - "${OUT}/deploy-watch.jsonl" <<'PYSTALL'
+import json, os, sys
+try:
+    rows = [json.loads(l) for l in open(sys.argv[1]) if l.strip().startswith("{")]
+except Exception:
+    print("SKIP"); raise SystemExit
+rows = [r for r in rows if r.get("provider_gpu_util") is not None]
+if len(rows) < 2:
+    print("SKIP no provider readings"); raise SystemExit
+now, window = int(os.environ["NOW"]), int(os.environ["WINDOW"])
+recent = [r for r in rows if now - int(r.get("ts", 0)) <= window]
+if len(recent) < 2 or (int(recent[-1]["ts"]) - int(recent[0]["ts"])) < window * 0.8:
+    print("SKIP window not covered"); raise SystemExit
+gpus = [float(r.get("provider_gpu_util") or 0) for r in recent]
+disks = [int(r.get("provider_disk_bytes") or 0) for r in recent]
+growth = max(disks) - min(disks)
+if min(gpus) < float(os.environ["GPU_MIN"]):
+    print("SKIP cards not consistently busy"); raise SystemExit
+if growth >= int(os.environ["GROWTH"]):
+    print("SKIP disk still growing"); raise SystemExit
+print("STALLED cards at %.0f%% for %ds with the disk flat (%.2f GB growth): a collective that never completed, not a download"
+      % (min(gpus), int(recent[-1]["ts"]) - int(recent[0]["ts"]), growth / 1e9))
+PYSTALL
+)
+  case "$STALL" in
+    STALLED*)
+      ABORTED="${STALL#STALLED }"
+      log "=== ABANDONING: $ABORTED ==="
+      log "    retry elsewhere; this host will not finish"
+      break
+      ;;
+  esac
+
   case "$VERDICT" in
     HOPELESS*)
       [ -z "$DOWNLOAD_FIRST_SEEN" ] && DOWNLOAD_FIRST_SEEN=$(date +%s)

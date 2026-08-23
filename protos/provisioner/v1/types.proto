@@ -416,6 +416,10 @@ message Instance {
   // Fields with cross-provider patterns graduate into `Hardware`;
   // metadata is the staging ground.
   map<string, google.protobuf.Value> metadata = 15;
+  // What the provider reports about this box right now. Absent when the
+  // provider does not report it, or when nothing has asked recently; it is
+  // refreshed by the status reads the deploy path already makes.
+  ResourceUsage usage = 40;
 }
 
 // InstanceRef is the lighter-weight record returned by the underlying
@@ -1395,6 +1399,40 @@ message InterconnectHealth {
   // healthy board; up < total is the impairment the chapter is about.
   int32 links_total = 2;
   int32 links_up = 3;
+}
+
+// ResourceUsage is what the PROVIDER can see of a rented box, as opposed to
+// what an agent inside it reports. Two different vantage points, and this one
+// needs no credential, no agent and no shell: it rides on the status read the
+// deploy path already makes every tick.
+//
+// It exists because the readings that diagnose a stuck deploy were sitting
+// unread in that response. A GLM-5.2 deploy spent half an hour in
+// engine:init with 188 MB on a 900 GB disk, 5.7 GB of inbound traffic (the
+// container image, not 474 GB of weights) and eight GPUs pinned at 86%. Busy
+// cards with a flat disk is not a slow download, it is a collective that
+// never completed, and nothing in iplane could say so because the SSH path
+// it depended on had no key.
+//
+// The `available` flag carries the same weight it does on InterconnectHealth
+// and StagingProgress. A provider that reports none of this and a box that
+// has used nothing are different facts. A provider that can report only some
+// of these fields should leave the whole message unset rather than
+// half-filling it, because a zero in one field is indistinguishable from an
+// unsupported one and these are read together or not at all.
+message ResourceUsage {
+  // False means no reading. Every field below is meaningless when unset.
+  bool available = 1;
+  // Bytes on the instance's disk. Compared against a model's download size,
+  // this says how far a fetch has got without asking anything inside the box.
+  int64 disk_used_bytes = 2;
+  // Percent, 0-100, across the instance's cards. High utilisation with a
+  // disk that is not growing is the signature of a hung collective, and is
+  // the reading that separates it from a download running slowly.
+  double gpu_utilization = 3;
+  // Bytes the provider has billed as inbound. A coarse second opinion on
+  // disk_used_bytes: weights that arrived are bytes that crossed the wire.
+  int64 network_rx_bytes = 4;
 }
 
 // StagingProgress is what the agent can see of the model's weights arriving
