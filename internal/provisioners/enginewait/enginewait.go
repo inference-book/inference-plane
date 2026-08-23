@@ -24,6 +24,7 @@ package enginewait
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -170,11 +171,25 @@ func Wait(ctx context.Context, c Config) (string, error) {
 			}
 		}
 
-		c.Emit(update(c, phase, last, time.Since(started)))
+		c.Emit(update(c, phase, last, time.Since(started), deadline))
 
 		select {
 		case <-ctx.Done():
-			return endpoint, fmt.Errorf("caller stopped waiting during %s; last: %s", phase, describe(last))
+			// Cause rather than Err, because a cancellation now carries a
+			// reason worth reading. A deploy abandoned because its download
+			// could never finish in time is a different event from an
+			// operator pressing ctrl-c, and reporting both as "caller
+			// stopped waiting" hides the one that cost money.
+			//
+			// Logs on this path too. It was the deadline's alone, on the
+			// reasoning that a cancelled wait has an operator watching who
+			// already knows why. An abort has no such operator.
+			reason := "caller stopped waiting"
+			if cause := context.Cause(ctx); cause != nil && !errors.Is(cause, ctx.Err()) {
+				reason = cause.Error()
+			}
+			return endpoint, withEngineLogs(ctx, c, fmt.Errorf(
+				"%s during %s; last: %s", reason, phase, describe(last)))
 		case <-time.After(c.Interval):
 		}
 		if time.Now().After(deadline) {
@@ -207,7 +222,7 @@ func withEngineLogs(ctx context.Context, c Config, err error) error {
 }
 
 // provisionerv1Update builds the per-tick progress update.
-func update(c Config, phase, detail string, elapsed time.Duration) provisioners.DeployStateUpdate {
+func update(c Config, phase, detail string, elapsed time.Duration, deadline time.Time) provisioners.DeployStateUpdate {
 	msg := c.Ladder.Description(phase)
 	if detail != "" {
 		msg = fmt.Sprintf("%s: %s", msg, detail)
@@ -217,6 +232,7 @@ func update(c Config, phase, detail string, elapsed time.Duration) provisioners.
 		Phase:           phase,
 		ProgressMessage: fmt.Sprintf("%s (%s elapsed)", msg, elapsed.Round(time.Second)),
 		ContainerID:     c.ContainerID,
+		Deadline:        deadline,
 	}
 }
 
