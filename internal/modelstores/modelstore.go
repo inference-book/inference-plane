@@ -54,6 +54,21 @@ type ArchitectureSource interface {
 	Architecture(ctx context.Context, req *provisionerv1.DescribeModelRequest) (*provisionerv1.DescribeModelResponse, error)
 }
 
+// CheckpointSource is an optional capability a ModelStore may also satisfy:
+// reporting how many bytes an engine will download for a model.
+//
+// Separate from ArchitectureSource, and separately optional, because it
+// answers a different question and costs a different amount. A shape is read
+// from one config file; a download size means listing the repository's files,
+// which is another hub round trip. Folding it into Architecture would put
+// that call on the create path of every deploy for a number most of them
+// never look at.
+//
+// Absent is "cannot estimate", never "nothing to download".
+type CheckpointSource interface {
+	Checkpoint(ctx context.Context, req *provisionerv1.DescribeModelRequest) (*provisionerv1.ModelCheckpoint, error)
+}
+
 // ErrNoArchitectureSource means the store cannot report a shape at all,
 // as opposed to being unable to report this model's.
 //

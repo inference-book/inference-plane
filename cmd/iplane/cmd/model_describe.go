@@ -44,13 +44,13 @@ while the weights do not.`,
 		if err != nil {
 			return err
 		}
-		return renderModelArchitecture(cmd.OutOrStdout(), args[0], resp.GetArchitecture())
+		return renderModelArchitecture(cmd.OutOrStdout(), args[0], resp.GetArchitecture(), resp.GetCheckpoint())
 	},
 }
 
 // renderModelArchitecture prints the shape and the two derived rows that
 // make it actionable.
-func renderModelArchitecture(w interface{ Write([]byte) (int, error) }, spec string, a *provisionerv1.ModelArchitecture) error {
+func renderModelArchitecture(w interface{ Write([]byte) (int, error) }, spec string, a *provisionerv1.ModelArchitecture, cp *provisionerv1.ModelCheckpoint) error {
 	if err := vrambudget.ValidateArch(a); err != nil {
 		return err
 	}
@@ -128,7 +128,13 @@ func renderModelArchitecture(w interface{ Write([]byte) (int, error) }, spec str
 	// the packing did (#382).
 	if q := a.GetQuantization(); q != "" {
 		fmt.Fprintf(tw, "\n  weights\tpublished at %s; no ladder, this checkpoint already chose\n", q)
-		fmt.Fprintf(tw, "  \tsize it from the repo's own files, or from the unquantized model\n")
+		if cp.GetFileCount() > 0 {
+			// The repo's own files, which is what the advice used to send
+			// an operator off to work out by hand.
+			fmt.Fprintf(tw, "  \t%s on the hub is the real weight size\n", formatGB(cp.GetDownloadBytes()))
+		} else {
+			fmt.Fprintf(tw, "  \tsize it from the repo's own files, or from the unquantized model\n")
+		}
 	} else {
 		var weights []string
 		for _, p := range []struct {
@@ -146,6 +152,14 @@ func renderModelArchitecture(w interface{ Write([]byte) (int, error) }, spec str
 			weights = append(weights, fmt.Sprintf("%s %s", formatGB(b.WeightBytes), p.label))
 		}
 		fmt.Fprintf(tw, "\n  weights\t%s\n", strings.Join(weights, "   "))
+	}
+
+	// What has to cross a network before any of the above matters. Absent
+	// when the hub's file listing could not be read, and printed as nothing
+	// rather than as zero, because a zero here reads as "no download".
+	if cp.GetFileCount() > 0 {
+		fmt.Fprintf(tw, "  download\t%s across %d safetensors, largest %s\n",
+			formatGB(cp.GetDownloadBytes()), cp.GetFileCount(), formatGB(cp.GetLargestFileBytes()))
 	}
 
 	// The cache, per token and then at three context lengths. One

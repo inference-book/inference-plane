@@ -127,3 +127,47 @@ Deriving a true parameter count wants a format-by-format reading of how
 each packer stores scales, zero-points and group metadata, and a wrong
 correction is worse than a refusal because it looks like an answer.
 
+
+## Three numbers claim to be the download size and two of them are wrong
+
+A deploy that wants to know how long a download will take needs bytes, and the
+hub offers three ways to get them. They agree on a safetensors-only repository
+and diverge by more than an order of magnitude on one that is not.
+
+| repository | `usedStorage` | tree on main | safetensors on main |
+| --- | --- | --- | --- |
+| cyankiwi/GLM-5.2-AWQ-INT4 | 485.35 GB | 474.27 GB | 474.22 GB |
+| openai-community/gpt2 | 11.98 GB | 5.63 GB | **0.55 GB** |
+| Qwen/Qwen2.5-7B-Instruct | 15.23 GB | 15.24 GB | 15.23 GB |
+
+`usedStorage` arrives free on the model-info response this package already
+fetches, and counts every revision the repository has ever had. The tree
+listing counts one revision but every format in it, and `gpt2` publishes the
+same weights as PyTorch, TensorFlow, Flax and Rust alongside the safetensors.
+
+The engine fetches safetensors alone: vLLM's `download_weights_from_hf`
+derives `allow_patterns` and takes them. So the third column is the answer and
+the other two overstate by 20x and 10x respectively on that row. The trap is
+that the frontier checkpoints anyone tests against are safetensors-only, where
+all three agree, so the free wrong number looks correct for as long as anyone
+is likely to check.
+
+Two smaller things the listing gets wrong if read carelessly. `recursive=true`
+is required or the walk stops at the top level and a repository keeping shards
+in a subdirectory reports no weights at all. And a file's size appears twice:
+the outer `size` is the git-lfs pointer, a couple of hundred bytes, while the
+real figure is under `lfs.size`. Every weight file is lfs-backed, so reading
+the outer field sizes a 474 GB checkpoint at about 20 kB.
+
+## The shape and the size fail independently
+
+`Architecture` and `Checkpoint` are separate optional capabilities because
+they answer different questions at different costs, and because one can
+succeed where the other cannot. `openai-community/gpt2` is the live example:
+its config uses the old `n_layer` spelling, so the shape read fails with
+"layer count must be positive", while its file listing reads perfectly well.
+
+`DescribeModel` currently returns the architecture error before it ever asks
+for the size, so such a model reports neither. That is worth revisiting when
+something depends on the size for a model whose shape cannot be parsed, since
+a download is a download whatever the config is called.
