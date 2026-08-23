@@ -22,6 +22,10 @@ Reference implementation of the control plane for *Inference Is All You Need* (A
 | `make check-names` | Verify generated names match `metric-names.yaml`       |
 | `make check-constraints` | Verify architectural constraints (CP/DP-1, ...)  |
 | `hack/capacity-sample.sh` | Sample what every provider would rent, appended to JSONL. Free and read-only; see [hack/README.md](hack/README.md) |
+| `hack/vast-watchdog.sh` | Destroys rentals whose creator died or which outlived a deadline. **Arm it before anything can be rented**; see [hack/README.md](hack/README.md) |
+| `hack/measure-run.sh` | Drives one paid measurement run end to end and records why it failed. Refuses to start without a watchdog; `--dry-run` and `--provider local` exercise it for nothing |
+| `hack/deploy-watch.sh` | Watches a live deploy over SSH: cache bytes, rate, ETA, GPU memory, per replica per tick |
+| `hack/hf-throughput-probe.sh` | Times one shard on a rented box, so a slow host is handed back in a minute rather than an hour |
 | `make gen-names`   | Regenerate `internal/telemetry/names.go` + book `.tex` |
 | `cd protos && make gen` | Regenerate proto code into `gen/`                 |
 
@@ -63,6 +67,8 @@ Reference implementation of the control plane for *Inference Is All You Need* (A
 - **Only filter on facts a catalog row genuinely bounds.** VRAM and fabric yes; disk, system RAM and reclaimability are properties of the rented shape rather than the card, so filtering on them can only wrongly exclude. Learned three times (#281, #283, #288); the rule and all three receipts are in `internal/provisioners/skucatalog/skucatalog.go`.
 
 
+- **`iplane`'s JSON output is snake_case, not camelCase.** It marshals with protojson's `UseProtoNames`, so `deployment describe --output json` emits `instance_ids` and `replica_specs`. Confirming that `writeProtoJSON` is used and inferring camelCase from protojson's *default* is wrong, and a parser built on the guess reports a deployment as having no replicas rather than failing: `deploy-watch` was silent for the first five minutes of a $54/hr run that way. Read the marshaller's options, not its name.
+- **A heartbeat proves the script is alive, not that the run is healthy.** They come apart the moment a daemon dies under a script that keeps looping: the beat stays fresh, the watchdog stays passive, and the box bills with nothing able to drive it. Any liveness signal guarding money has to check the thing that actually does the work. See [hack/README.md](hack/README.md).
 - **Format only what you touch.** `gofmt -l` flags roughly 25 pre-existing files including generated code, so `gofmt -w <dir>` silently reformats files the change has nothing to do with and they land in the diff. Run it per-file. (Walked into twice in one session; `git diff --cached --name-only` before committing catches it.)
 - **The mock engine is not a capacity model unless you configure one.** By default it admits everything and a concurrency sweep against it is a straight line. `--kv-budget-tokens` gives it a ceiling and `--token-latency` makes inter-token latency measurable. See [internal/backends/NOTES.md](internal/backends/NOTES.md).
 - **Open loop and closed loop answer different questions.** `iplane load --rps` fixes the arrival rate; `--sweep` holds N in flight and makes the rate an output. Method, steady-state detection, the committed artifact format and cost per token are all in [docs/load-measurement.md](docs/load-measurement.md).
@@ -106,6 +112,7 @@ flatten to underscore (so `backend.engine` → `IPLANE_BACKEND_ENGINE`).
 | `IPLANE_RUNPOD_DEBUG`              | `1` logs RunPod HTTP request/response bytes (sans Authorization) to stderr |
 | `IPLANE_RUNPOD_PHASE_TRACE`        | `1` prints one TSV line per engine-readiness tick with the raw cold-start signals (`elapsed`, `phase`, `machine`, `createdAt`, `lastStartedAt`, `health`) and keeps probing pod status past engine-init. Diagnostic for issue 208; observability-only, never changes phase emission or readiness |
 | `IPLANE_ENGINE_READY_TIMEOUT`       | Go duration overriding how long ANY deploy path waits for the engine to answer `/health`. Applies to the sshdocker (Vast, Lambda) path as well as RunPod. Default 10m on both |
+| `MEASURE_RUN_PORT`                 | Port `hack/measure-run.sh` runs its own daemon on (default 18080). It is deliberately not 8080: a paid run must not be reachable by a `freeport 8080` aimed at something else |
 | `IPLANE_ENGINE_ABORT_ON_SLOW_DOWNLOAD` | `0` stops a deploy abandoning itself when the agent's measured download rate projects past the engine-ready deadline. On by default. Only ever fires on a positive, sustained, clearly-too-slow rate; a stalled download runs to the deadline as before |
 | `IPLANE_RUNPOD_ENGINE_READY_TIMEOUT` | Same, scoped to RunPod, and wins over the generic one when both are set. Kept for operators who already export it |
 | `IPLANE_SKIP_MODEL_VALIDATION`     | `1` bypasses the HF pre-flight check on `CreateDeployment` (offline / firewalled / non-HF models) |

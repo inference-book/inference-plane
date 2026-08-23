@@ -87,6 +87,31 @@ differs by the same factor:
 At $10.67/hr that is $0.71 against $5.07 for GLM, and $2.52 against
 $17.83 for K3.
 
+**The table above is optimistic, and now measurably so.** It divides the
+advertised link speed straight into the download size, which assumes a host
+achieves its link against Hugging Face. Two runs say otherwise:
+
+| advertised | achieved | shortfall |
+| --- | --- | --- |
+| 5,813 Mbps (727 MB/s) | ~134 MB/s | 5.4x |
+| 63,520 Mbps (7,940 MB/s) | ~1,030 MB/s | 7.7x |
+
+So the 4.0-minute row is really 22 to 31 minutes, and the 28.5-minute row is
+most of a working day. The ordering survives, which is what the argument
+rests on, but the absolute figures do not: budget a run against achieved
+throughput, and treat advertised bandwidth as a filter for picking hosts
+rather than a number to plan with.
+
+The second measurement is the important one. At 63.5 Gbps advertised, GLM-5.2
+downloaded 474.2 GB at a sustained ~1.03 GB/s, which is about eight minutes.
+That is the difference between a deploy that fits inside any sane timeout and
+the two that spent an hour in `engine:init` and were killed by one.
+
+Neither figure was available when this doc was written, because nothing could
+see inside `engine:init`. `hack/deploy-watch.sh` is what produced them, and
+`hack/hf-throughput-probe.sh` gets the same reading before committing to a
+full download.
+
 So "stage the weights closer" is conditional advice, and the condition is
 a number nobody checks when choosing a GPU host.
 `IPLANE_VAST_MIN_INET_DOWN_MBPS` already exists and defaults to 1000;

@@ -262,3 +262,19 @@ wait loses the race and its log-carrying error actually fires.
 Artifacts land in `measure-runs/run-<stamp>/` (gitignored): `serve.log`,
 `model.txt`, `deploy.log`, `deploy-watch.jsonl`, and one `sweep-<tokens>.csv`
 per context. The distilled csv is what gets committed, not the run directory.
+
+## Shell gotchas these scripts have already hit
+
+- **macOS ships bash 3.2, where `"${ARR[@]}"` on an *empty* array is an
+  unbound variable.** Under `set -u` that is a hard exit. Use
+  `${ARR[@]+"${ARR[@]}"}` for any array that can be empty; the plain form
+  killed a run at the deploy line, after the daemon was up and the watchdog
+  armed.
+- **`VAR=x cmd | python3` gives `VAR` to `cmd`, not to python3.** The
+  assignment is a prefix on the left-hand command only, and the far side of
+  the pipe never sees it. That made the abort throw `KeyError` on every tick
+  of a paid run while looking perfectly armed. `export` it.
+- **`${VAR:+--flag "$VAR"}` drops the flag when `VAR` is empty**, which is
+  exactly the case `--service-url ""` needs in order to suppress the
+  `localhost:8080` default. Track "was it given" separately and build an
+  argument array.

@@ -196,9 +196,32 @@ everything else, which the budget now computes rather than dividing the
 whole model by one number (#376).
 
 **What is left is #358, the measurement run**, which is the first thing in
-Part IV that spends money. `iplane model budget` still cannot express an
-expert-parallel plan, so it disagrees with the deploy path (#387), and
-that is worth closing before sizing a rental by hand.
+Part IV that spends money. #387 closed, so the budget and the deploy path
+agree on an expert-parallel plan.
+
+**Four attempts, no sweep yet, and the reason was never the model.** Every
+failure was in observing the run rather than in GLM-5.2: two hour-long
+`engine:init` timeouts at about $22 each with no record of what was
+happening, one deploy that could not be watched because a deployment's
+replicas carry no SSH address until something records it (#421), and one
+that lost its daemon to an unrelated `freeport 8080` and kept looping while
+the box billed (#422).
+
+What came out of it is a run harness that produces a diagnosis whether or
+not it succeeds: `hack/vast-watchdog.sh` (teardown that survives its
+creator), `hack/deploy-watch.sh` (bytes, rate, ETA per replica per tick),
+`hack/measure-run.sh` (refuses to start unarmed, dies with its daemon,
+abandons a hopeless download), and the `engine:download` / `engine:load`
+split behind them (#413).
+
+**The number that matters is now measured.** On a B200 advertising 63.5
+Gbps, GLM-5.2's 474.2 GB checkpoint downloads at a sustained ~1.03 GB/s,
+about eight minutes. The hosts behind the two timeouts were doing ~134
+MB/s. Picking a host on hourly rate rather than achieved bandwidth is what
+made this expensive, and
+[docs/design/0009](docs/design/0009-provider-economics.md) now carries the
+advertised-versus-achieved shortfall rather than dividing link speed into
+download size.
 
 **Provider economics audited the same day**, free, in
 [docs/design/0009-provider-economics.md](docs/design/0009-provider-economics.md):

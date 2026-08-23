@@ -34,7 +34,25 @@ container-runtime state, v2 has the runtime block.
 | `runpod:scheduling`  | v1 `machineId` empty and `machine` empty             | RunPod finding capacity for the SKU set   |
 | `runpod:image-pull`  | v1 host assigned, v2 `runtime` null                  | host assigned, pulling the engine image   |
 | `engine:init`        | v2 `runtime` populated                               | container up, model download + weight load |
+| `engine:download`    | agent reports the model cache growing                | weights arriving; refines `engine:init`   |
+| `engine:load`        | cache present and no longer growing                  | weights loading into VRAM + graph capture |
 | `engine:serving`     | `/health` 2xx                                        | engine answering; deploy is RUNNING        |
+
+`engine:init` splits into the two rungs above **only when something reports
+the disk**. That refinement is the Service's, not a provider's: it happens in
+the emit wrapper where the replica id is already in scope, so RunPod and Vast
+get it without either adapter knowing. Absent a reading the phase stays
+`engine:init`, exactly as before.
+
+The split exists because one rung covered the download, the load and graph
+capture, and the histogram could not say which was slow. Two GLM-5.2 deploys
+spent an hour each in it and the record still cannot attribute either. See
+`internal/provisioners/staging.go`.
+
+The engine itself cannot help here: vLLM hands `snapshot_download` a disabled
+tqdm, so a container pulling a 474 GB checkpoint prints nothing at all until
+the fetch completes. Streaming its logs harder buys the load half and shows a
+blank screen through the download.
 
 Both signals are **state**, never timestamps. v1's `lastStartedAt` looks
 like a container-start signal and is not one; see the history below.
