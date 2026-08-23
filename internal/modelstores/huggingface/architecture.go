@@ -169,13 +169,9 @@ func (s *Store) Architecture(ctx context.Context, req *provisionerv1.DescribeMod
 	if spec == "" {
 		return nil, fmt.Errorf("model spec is required")
 	}
-	if !hfModelSpec.MatchString(spec) {
-		return nil, fmt.Errorf("model spec %q is not a valid HF id (want <org>/<name> with optional :<revision>)", spec)
-	}
-
-	id, revision := spec, "main"
-	if i := strings.IndexByte(spec, ':'); i >= 0 {
-		id, revision = spec[:i], spec[i+1:]
+	id, revision, err := splitModelSpec(spec)
+	if err != nil {
+		return nil, err
 	}
 
 	info, err := s.fetchModelInfo(ctx, id)
@@ -364,3 +360,24 @@ func (s *Store) fetchConfig(ctx context.Context, id, revision string) (*modelCon
 
 // Ensure Store satisfies the optional capability.
 var _ modelstores.ArchitectureSource = (*Store)(nil)
+
+// splitModelSpec parses "<org>/<name>" or "<org>/<name>:<revision>" into its
+// two halves, defaulting the revision to main.
+//
+// Shared by the architecture and checkpoint reads rather than written twice.
+// They must resolve the same spec to the same revision or they describe two
+// different checkpoints while appearing to describe one, and a size read
+// against the wrong revision is worse than no size at all.
+func splitModelSpec(spec string) (id, revision string, err error) {
+	if spec == "" {
+		return "", "", fmt.Errorf("model spec is required")
+	}
+	if !hfModelSpec.MatchString(spec) {
+		return "", "", fmt.Errorf("model spec %q is not a valid HF id (want <org>/<name> with optional :<revision>)", spec)
+	}
+	id, revision = spec, "main"
+	if i := strings.IndexByte(spec, ':'); i >= 0 {
+		id, revision = spec[:i], spec[i+1:]
+	}
+	return id, revision, nil
+}

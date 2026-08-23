@@ -3,6 +3,7 @@ package provisioners
 import (
 	"context"
 	"errors"
+	"log/slog"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -54,6 +55,24 @@ func (s *Service) DescribeModel(ctx context.Context, req *provisionerv1.Describe
 		// returns here is about the spec or about what the hub publishes
 		// for it, and both are the caller's to fix.
 		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+
+	// The download size is best-effort and never fails the call. It costs a
+	// second hub round trip, it is absent for any store without a file
+	// listing behind it, and the shape is what a caller asked for; failing a
+	// describe because the byte count could not be had would trade the
+	// answer for the footnote.
+	//
+	// Left absent on error rather than zeroed, because a consumer estimating
+	// a download reads zero bytes as "already finished" and no field at all
+	// as "cannot estimate", and only one of those is true.
+	if cs, ok := s.modelStore.(modelstores.CheckpointSource); ok {
+		if cp, err := cs.Checkpoint(ctx, req); err == nil {
+			resp.Checkpoint = cp
+		} else {
+			slog.Info("model download size unavailable",
+				"model", req.GetModelSpec(), "reason", err)
+		}
 	}
 	return resp, nil
 }

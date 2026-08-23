@@ -1162,8 +1162,46 @@ message DescribeModelRequest {
 }
 
 // DescribeModelResponse carries what the hub published about a model.
+// ModelCheckpoint is the published artifact's size on the hub, as opposed to
+// ModelArchitecture's account of the trained shape. Two different facts about
+// one model: how big the tensors are, and how many bytes have to cross a
+// network before any of them can be loaded.
+//
+// It exists so a deploy can turn a measured download rate into an estimate of
+// when the download finishes, which is what lets a wait give up on a slow host
+// instead of paying its whole timeout to reach the same answer.
+//
+// Absent rather than zero when the hub could not be asked. Zero bytes is a
+// claim about an empty repository and would make every unreadable model look
+// instantly downloadable.
+message ModelCheckpoint {
+  // Bytes the engine will actually fetch: the safetensors on the resolved
+  // revision, not the repository's whole contents.
+  //
+  // The distinction is not pedantry, it is a factor of ten. vLLM's
+  // download_weights_from_hf passes allow_patterns and takes safetensors
+  // alone, while a repository may publish the same weights several times
+  // over. openai-community/gpt2 carries PyTorch, TensorFlow, Flax and Rust
+  // copies alongside them: 0.55 GB of safetensors inside 5.63 GB of tree,
+  // with the hub's own usedStorage field reporting 11.98 GB because it counts
+  // every revision as well. Sizing a download off either of the larger
+  // numbers overstates it by 10x or 20x, and a repository that publishes only
+  // safetensors (GLM-5.2-AWQ-INT4, Qwen2.5) hides the bug because all three
+  // agree there.
+  int64 download_bytes = 1;
+  // How many files those bytes are spread across, and the largest single one.
+  // A download's tail is set by its biggest shard, so these are what say
+  // whether a transfer can be parallelised into a useful shape or is going to
+  // be gated on one 26 GB file.
+  int32 file_count = 2;
+  int64 largest_file_bytes = 3;
+}
+
 message DescribeModelResponse {
   ModelArchitecture architecture = 1;
+  // Absent when the store cannot read the hub's file listing. Every consumer
+  // treats that as "cannot estimate" rather than as a small download.
+  ModelCheckpoint checkpoint = 2;
 }
 
 message Volume {
