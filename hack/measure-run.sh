@@ -57,6 +57,37 @@ ENGINE_ARGS="--max-model-len,131072,--max-num-seqs,32"
 # the log names.
 ENGINE_ENV="${MEASURE_RUN_ENGINE_ENV:-NCCL_DEBUG=INFO}"
 LADDER="1,2,4,8"; PROMPT_TOKENS="8192"
+
+# Sweep sizing, against the numbers the first GLM-5.2 run produced rather than
+# against the defaults. That run served correctly and the measurement was
+# still not publishable:
+#
+#   - `--sweep-window` 3s while a request took 22s, so a "settled window" held
+#     0.13 of one request and the steady-state detector was reading noise
+#   - 45s of measurement gave 5 to 28 requests per level, making p95 the
+#     second-highest of 28 observations rather than a percentile
+#   - `--sweep-warmup-max` 90s expired at concurrency 4, which was then
+#     measured anyway and reported 28 tok/s against concurrency 2's 91
+#   - streaming off, so ttft_samples and itl_samples were both 0, and TTFT and
+#     ITL are the numbers that separate prefill cost from decode cost
+#   - 256 max tokens against an 8k prompt is a 40:1 prefill:decode ratio, so
+#     the run measured prefill and said almost nothing about decode
+#
+# A window has to be longer than one request or it cannot detect anything.
+SWEEP_WINDOW="${SWEEP_WINDOW:-30s}"
+SWEEP_STABLE_WINDOWS="${SWEEP_STABLE_WINDOWS:-3}"
+# Per context, comma-matched to --prompt-tokens (a single value applies to
+# all). Long context needs longer, because a slower request yields fewer
+# samples per second and percentile grade follows sample count. At 120k a
+# request can take 45s, so even ten minutes buys tens of requests rather than
+# hundreds: those rows are p50-grade and the validity check says so instead of
+# pretending otherwise.
+SWEEP_DURATION="${SWEEP_DURATION:-180s}"
+SWEEP_WARMUP_MAX="${SWEEP_WARMUP_MAX:-8m}"
+SWEEP_MAX_TOKENS="${SWEEP_MAX_TOKENS:-512}"
+# Below this many successes a percentile is an extremum. Rows under it are
+# reported as unpublishable rather than quietly charted.
+SWEEP_MIN_SAMPLES="${SWEEP_MIN_SAMPLES:-100}"
 DEPLOY_TIMEOUT="${DEPLOY_TIMEOUT:-75m}"
 
 # Abort thresholds, MIRRORING internal/provisioners/staging.go. The control
@@ -420,12 +451,62 @@ if [ "$STATE" != "RUNNING" ]; then
 fi
 
 kill "$WATCH_PID" 2>/dev/null; WATCH_PID=""
+# A weak measurement has to announce itself. The first GLM-5.2 run charted a
+# level that never settled and percentiles drawn from 28 samples, and neither
+# was visible without reading the CSV by hand.
+sweep_validity() {
+  [ -s "$1" ] || { log "  no sweep artifact at $1"; return; }
+  MIN="$SWEEP_MIN_SAMPLES" CTX="$2" python3 - "$1" <<'PYV'
+import csv, os, sys
+rows = [r for r in csv.DictReader(l for l in open(sys.argv[1]) if not l.startswith("#"))]
+if not rows:
+    print("  VALIDITY: no rows"); raise SystemExit
+minimum = int(os.environ["MIN"])
+# Grades, not a pass mark. A percentile needs samples behind it, and at long
+# context enough samples for a p95 costs more than the answer is worth. Saying
+# which rows support which statistic beats calling most of a sweep a failure.
+def grade(succ, settled):
+    if not settled:
+        return "UNUSABLE", "never settled"
+    if succ >= minimum:
+        return "p95", "%d samples" % succ
+    if succ >= 30:
+        return "p50", "%d samples: p50 holds, p95 is the %.0fth of %d" % (succ, 0.95 * succ, succ)
+    return "UNUSABLE", "%d samples: too few for any percentile" % succ
+
+counts = {}
+lines = []
+for r in rows:
+    succ = int(r["successes"])
+    g, why = grade(succ, r["steady_state"].lower() == "true")
+    if int(r["ttft_samples"]) == 0:
+        g, why = "UNUSABLE", why + "; no TTFT (streaming off?)"
+    counts[g] = counts.get(g, 0) + 1
+    lines.append("    N=%-3s %-8s %s" % (r["concurrency"], g, why))
+print("  VALIDITY at %s tokens: %s" % (
+    os.environ["CTX"], ", ".join("%d %s" % (v, k) for k, v in sorted(counts.items()))))
+for l in lines:
+    print(l)
+if counts.get("UNUSABLE"):
+    print("    ^ UNUSABLE rows must not be charted: lengthen this context's --sweep-duration or drop the level")
+PYV
+}
+
 log "=== ENGINE IS SERVING ==="
 log "sweeping: ladder=$LADDER prompt-tokens=$PROMPT_TOKENS"
+CTX_INDEX=0
 for pt in $(echo "$PROMPT_TOKENS" | tr ',' ' '); do
-  log "  context ${pt}"
+  # Nth duration for the Nth context, or the last one given, so a single
+  # value still applies everywhere.
+  THIS_DURATION=$(echo "$SWEEP_DURATION" | tr ',' ' ' | awk -v i=$((CTX_INDEX + 1)) '{print (i <= NF) ? $i : $NF}')
+  CTX_INDEX=$((CTX_INDEX + 1))
+  log "  context ${pt} (measuring ${THIS_DURATION} per level)"
   "$IPLANE" load --sweep "$LADDER" --prompt-tokens "$pt" --model "$MODEL" \
+    --stream --max-tokens "$SWEEP_MAX_TOKENS" \
+    --sweep-window "$SWEEP_WINDOW" --sweep-stable-windows "$SWEEP_STABLE_WINDOWS" \
+    --sweep-duration "$THIS_DURATION" --sweep-warmup-max "$SWEEP_WARMUP_MAX" \
     --output csv > "${OUT}/sweep-${pt}.csv" 2> "${OUT}/sweep-${pt}.log" \
     || log "  sweep at ${pt} failed; see sweep-${pt}.log"
+  sweep_validity "${OUT}/sweep-${pt}.csv" "$pt"
 done
 log "=== done; artifacts in $OUT ==="
