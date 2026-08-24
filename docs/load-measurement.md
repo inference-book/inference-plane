@@ -237,3 +237,40 @@ explicit column.
 ceiling from arithmetic; `--sweep` measures one. Pointing them at each
 other is the interesting experiment, and against the mock it only tests
 the mock's own budget against itself. It wants a real engine (#358).
+
+## Sizing a sweep so its numbers survive review
+
+The first GLM-5.2 sweep deployed correctly, served correctly, and produced
+nothing publishable. Every fault was in how the measurement was asked for, and
+all of them are flags rather than hardware:
+
+| what was set | what it meant |
+| --- | --- |
+| `--sweep-window 3s` while a request took 22s | a "settled window" held 0.13 of one request, so the steady-state detector was reading noise |
+| `--sweep-duration 45s` | 5 to 28 requests per level, making p95 the second-highest of 28 observations |
+| `--sweep-warmup-max 90s` | expired at one level, which was then measured anyway and reported a third of the throughput of a lower concurrency |
+| streaming off | `ttft_samples` and `itl_samples` both 0 |
+| `--max-tokens 256` against an 8k prompt | a 40:1 prefill:decode ratio, so the run measured prefill |
+
+Three rules come out of it.
+
+**A window has to be longer than one request.** Steady state cannot be
+detected on a timescale shorter than the thing being measured. Set
+`--sweep-window` from the latency you expect, not from the default.
+
+**Percentile grade follows sample count, and long context cannot afford a
+p95.** At 120k a request can take 45 seconds, so even ten minutes at four-way
+concurrency buys tens of requests. Those rows support a median and not a tail,
+and saying so is better than printing a number that will not reproduce.
+`hack/measure-run.sh` grades every row (`p95` at 100+ successes, `p50` at 30+,
+`UNUSABLE` below that or when a level never settled) so a thin measurement
+announces itself.
+
+**Stream, or the two most useful latencies do not exist.** TTFT and ITL are
+what separate prefill cost from decode cost, and that separation is the whole
+amortisation argument. They also carry the statistical power: end-to-end
+percentiles stay thin at low concurrency, while every request contributes one
+TTFT and hundreds of ITLs. Measured against `iplane mock-engine --latency
+200ms --token-latency 8ms`, a streamed sweep reports TTFT p50 201ms and ITL
+p50 9.97ms from 20,572 inter-token samples at four-way concurrency, against
+zero samples for both with streaming off.
