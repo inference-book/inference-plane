@@ -121,11 +121,13 @@ Flags match the Vast guard except for two: `--name-prefix` (default
 `iplane-`) instead of `--label-prefix`, and `--state`, which is where
 first-sight ages are kept.
 
-**Ownership reads `name`.** Lambda has a first-class `tags` array now, but
-`internal/provisioners/lambdalabs` stamps ownership into the instance's
-`name` field as `iplane-<deployment-id>`, so that is what a guard has to
-match. `--registry` claims ids by hand for anything that called Lambda
-directly and so never had a name stamped for it.
+**Ownership reads the tags and the `name`.** The adapter stamps both
+(#431): an `iplane-id` tag, and the instance `name` as
+`iplane-<deployment-id>`. Either one claims an instance, because `name` is a
+display field an operator can change from the console and a rental made
+before the adapter stamped tags carries nothing else. `--registry` claims ids
+by hand for anything that called Lambda directly and so never had either
+stamped for it.
 
 **Age is measured from first sight.** Lambda's instance record carries no
 `created_at`, `launched_at` or `start_date`; the whole schema is `id`,
