@@ -103,21 +103,36 @@ Key specifics:
   just to download. RunPod stages on a ~$0.06/hr CPU pod; the Lambda
   equivalent is a GPU instance. Staging cost is one-time (amortized over
   warm deploys) but higher.
-- **Lambda's base deploy path is unvalidated live, and the prediction paid
-  out.** The adapter (`internal/provisioners/lambdalabs/`) implements the
-  compute Provisioner (Spawn/Describe/Terminate/List, HTTP-Basic) and deploys
-  via the shared sshdocker executor, and has still never run against a live
-  Lambda VM. The RunPod warm-cache path shipped "done" and had seven live
-  defects, and this doc guessed Lambda's would too.
+- **Lambda's base deploy path is validated live now, and the prediction paid
+  out in full.** This doc guessed that the adapter, which had never been
+  pointed at a Lambda VM, would carry defects the way the RunPod warm-cache
+  path did when it shipped "done". It carried seven.
 
   Three were found by reading rather than by renting (#427, PR 429), and the
-  first one alone means the path could not have worked: the adapter had no
+  first alone means the path could not have worked: the adapter had no
   `KeyRegistrar` despite the package doc claiming one, so the VM booted
-  holding whichever key the account listed first while the deploy path
-  presented iplane's own. `WaitForSSHReady` was configured and never
-  implemented. `preempted` mapped to PENDING, so a reclaimed box would have
-  been waited out for the full engine-ready deadline. The rental itself is
-  still owed, and #427 tracks what only hardware can settle.
+  holding whichever key the account listed first while the deploy presented
+  iplane's own. `WaitForSSHReady` was configured and never implemented.
+  `preempted` mapped to PENDING.
+
+  Four more came out of the rental itself on 2026-08-24, and three of those
+  are on the shared VM-style path rather than in the adapter, so **AWS and GCP
+  inherit them** (#428). `sshdocker` assumed a root SSH user; Lambda logs in
+  as `ubuntu`, which is the stock cloud-image shape. `CreateInstance`'s
+  idempotency lookup adopted a different deployment's machine. A retried
+  auto-provisioned deploy rents a second machine (#439). And the one that
+  matters most here: **a deployed VM-style deployment could not be destroyed
+  at all**, because the endpoint a teardown needs was erased after the deploy
+  used it.
+
+  What works now: a Lambda box rents, deploys through `sshdocker`, serves
+  tokens, and tears down. Cold start launch to serving is 4m30s. Full account
+  in [0010](0010-lambda-validation-findings.md).
+
+  For the warm cache specifically, the useful consequence is that the VM path
+  this doc's Lambda column depends on is real rather than assumed. The mount
+  seam is still unverified: nobody has looked at `/lambda/nfs/<name>` from
+  inside a running container, which is what #436 needs.
 
 ## Why big clouds are the real answer
 
