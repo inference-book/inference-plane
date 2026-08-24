@@ -299,9 +299,23 @@ already earned itself once, catching that an ISO-style timestamp made the
 deployment id non-DNS-safe and would have been rejected the moment the real
 deploy started.
 
-`--provider local` runs the whole path against the mock engine at zero cost,
-which is how the poll loop, the teardown and the serve-liveness check are
-exercised without renting anything.
+`--provider local` reaches the deploy and stops there. A deployment requires
+an SSH-reachable instance, so the local provider cannot complete one and the
+sweep is never reached. It exercises the poll loop, the teardown and the
+serve-liveness check; it does **not** exercise the sweep, and #422 claimed
+otherwise.
+
+That gap has now cost money once. The sweep was firing at `localhost:8080`
+while the daemon served on `$PORT`, because `iplane load` defaults `--url` to
+8080 and this script passed neither `--url` nor `--service-url`. Nothing
+caught it: the sizing work in #426 verified `iplane load` against
+`iplane mock-engine` directly, with an explicit URL, rather than through this
+script. Thirteen minutes at $32.88/hr bought an empty csv.
+
+**Nothing exercises this script end to end against a serving engine.** Until
+something does, treat every edit to the sweep invocation as unverified, and
+watch the first minute of a real sweep for traffic rather than trusting the
+log line that prints the URL.
 
 Flags: `--model` and `--heartbeat` (both required), `--provider`, `--port`, `--sku`, `--gpus`, `--tp`,
 `--image`, `--engine-args`, `--ladder`, `--prompt-tokens`, `--min-disk-gb`, `--min-vram-gb`,

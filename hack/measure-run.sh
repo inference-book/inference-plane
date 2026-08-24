@@ -493,6 +493,27 @@ PYV
 }
 
 log "=== ENGINE IS SERVING ==="
+
+# One real request through the exact URL the sweep will use, before spending
+# an hour of rental on it. "The engine is serving" and "the sweep can reach
+# the engine" are different claims, and the gap between them is where a whole
+# measurement was lost: the deploy was healthy, the daemon was healthy, and
+# every request went to a closed port because the sweep defaulted its --url.
+#
+# Deliberately checks the path rather than the port. A listener on the right
+# port proves nothing about whether a completion round-trips, and a 200 here
+# is the same call the sweep makes.
+log "pre-flight: one completion through ${SERVICE_URL}"
+PREFLIGHT=$(curl -s -o /dev/null -w '%{http_code}' --max-time 120 \
+  -H 'Content-Type: application/json' \
+  -d "{\"model\":\"${MODEL}\",\"prompt\":\"hello\",\"max_tokens\":1}" \
+  "${SERVICE_URL}/v1/completions" 2>/dev/null)
+if [ "$PREFLIGHT" != "200" ]; then
+  fail "pre-flight got HTTP '${PREFLIGHT}' from ${SERVICE_URL}/v1/completions.
+  The engine is serving but the sweep cannot reach it, so every level would
+  measure nothing while the box bills. Teardown follows."
+fi
+log "pre-flight ok"
 log "sweeping: ladder=$LADDER prompt-tokens=$PROMPT_TOKENS"
 CTX_INDEX=0
 for pt in $(echo "$PROMPT_TOKENS" | tr ',' ' '); do
@@ -501,7 +522,14 @@ for pt in $(echo "$PROMPT_TOKENS" | tr ',' ' '); do
   THIS_DURATION=$(echo "$SWEEP_DURATION" | tr ',' ' ' | awk -v i=$((CTX_INDEX + 1)) '{print (i <= NF) ? $i : $NF}')
   CTX_INDEX=$((CTX_INDEX + 1))
   log "  context ${pt} (measuring ${THIS_DURATION} per level)"
+  # --url, explicitly. `iplane load` defaults it to localhost:8080 and this
+  # script deliberately serves on $PORT (18080), so omitting it fires the
+  # whole sweep at a closed port: an empty csv, no traffic, and a rented box
+  # billing through all of it. Cost 13 minutes at $32.88/hr to find, because
+  # the failure is invisible from the log -- the sweep header prints the URL
+  # it is about to use and then simply never reports a level.
   "$IPLANE" load --sweep "$LADDER" --prompt-tokens "$pt" --model "$MODEL" \
+    --url "$SERVICE_URL" \
     --stream --max-tokens "$SWEEP_MAX_TOKENS" \
     --sweep-window "$SWEEP_WINDOW" --sweep-stable-windows "$SWEEP_STABLE_WINDOWS" \
     --sweep-duration "$THIS_DURATION" --sweep-warmup-max "$SWEEP_WARMUP_MAX" \
