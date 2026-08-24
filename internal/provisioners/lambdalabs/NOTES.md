@@ -134,6 +134,37 @@ an assigned address says the VM exists and says nothing about sshd. Both
 stages share `sshReadyTimeout` so the caller waits one budget rather than two
 that compound.
 
+## What the first live rental measured
+
+Driven 2026-08-24 on `gpu_1x_a10` in `us-east-1`, $1.29/hr. Full write-up in
+[docs/design/0010](../../../docs/design/0010-lambda-validation-findings.md);
+the numbers worth having to hand:
+
+**Boot is slow and the address arrives well before the box does.** Launch
+returned in 8.9s with status `booting` and no address. The public IP appeared
+71 seconds later. The status did not reach `active` for another **2m53s**.
+That gap is the whole reason `WaitForSSHReady` exists, and it is wide enough
+that the two-stage wait matters rather than being a formality.
+
+**Cold start, launch to engine serving: 4m30s**, covering boot, a 10.5 GB
+vLLM image pull and engine start on a 0.5B model. Lambda's bandwidth is good;
+the image pull was not the slow part.
+
+**The SSH user is `ubuntu`, not root, and it is not in the `docker` group.**
+That broke the shared executor on its first contact with the provider. The
+lore is in [internal/deployments/sshdocker/NOTES.md](../../deployments/sshdocker/NOTES.md)
+rather than here, because it is a property of stock cloud images rather than
+of Lambda.
+
+**`actions.terminate.available` is `false` for the first few seconds** after
+launch and true from then on. Nothing reads it yet; worth knowing before
+something does.
+
+**The live record carries `is_reserved` and `workspace_id`, and the published
+OpenAPI document declares neither.** `testdata/openapi-shapes.json` is
+therefore a floor rather than a complete picture: the drift test checks that
+everything the adapter decodes is declared, and the reverse does not hold.
+
 ## Ownership moved onto the tags, and the name stayed
 
 The adapter stamped `name` as `iplane-<id>` and read it back by prefix, which

@@ -79,7 +79,11 @@ func (d *Docker) RunAgent(ctx context.Context, spec AgentSpec) (string, error) {
 	engine := ContainerName(spec.DeploymentID)
 
 	var args []string
-	args = append(args, "docker run -d")
+	dockerBin, err := d.dockerCmd(ctx)
+	if err != nil {
+		return "", err
+	}
+	args = append(args, dockerBin+" run -d")
 	args = append(args, "--name", shellEscape(name))
 	// Share the engine's network namespace so 127.0.0.1 is the engine.
 	// This also means the sidecar publishes no ports of its own.

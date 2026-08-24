@@ -102,6 +102,25 @@ priciest cards. The B300 is the measured case: it reports 275040 MiB against a
 `CreateDeployment` and placement, the only other place a resolved `Candidate`
 exists, runs asynchronously after the RPC has returned.
 
+## Adopting an instance is riskier than reporting one, so it re-checks
+
+`CreateInstance` asks the provider whether it already has an instance under
+this id, and adopts the first ACTIVE ref it gets back rather than renting.
+That lookup used to trust the adapter's filtering completely.
+
+On a live Lambda run (#427) it adopted the wrong machine. Creating
+`lambda-auto` while `lambda-probe` was running returned `AlreadyExisted` with
+lambda-probe's provider id, and the state file ended up with two iplane ids
+pointing at one machine while a second machine had no record at all.
+Destroying either id would have terminated the wrong box and leaked the other.
+
+The adapter fix in #431 stops the bad list, and this site now re-filters
+locally as well, the same way the self-heal does. Two belts, for a reason that
+is about consequence rather than tidiness: the self-heal reading a bad list
+marks a record wrongly, and a later verb can still correct it. This one binds
+a deployment to somebody else's machine and reports success, so nothing is
+rented, nothing is corrected, and the operator has no signal at all.
+
 ## An adapter that drops a filter answers a question nobody asked
 
 `Provider.List(ctx, filter)` is documented as match-all over tags, and it was

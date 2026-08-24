@@ -294,10 +294,21 @@ func (s *Service) CreateInstance(ctx context.Context, req *provisionerv1.CreateI
 	// Step 2: remote lookup by iplane-id tag on the target provider.
 	// Listing failures are non-fatal: log into the failure path only if
 	// we cannot Spawn either.
-	refs, _ := provider.List(ctx, map[string]string{
-		TagID:       spec.GetId(),
-		TagOperator: s.operatorID,
-	})
+	// Filter on iplane-id alone, then re-check locally. Both halves are
+	// load-bearing and a live run cost a rental proving it (#427).
+	//
+	// No adapter recovers iplane-operator, so asking for it makes a
+	// match-all adapter answer empty for every id. And an adapter that
+	// drops the filter returns the whole account, which is far worse here
+	// than in the self-heal: this loop adopts the first ACTIVE ref and
+	// returns AlreadyExisted, so iplane binds this id to somebody else's
+	// machine and never rents the one it was asked for. That is exactly
+	// what happened on Lambda before #431: creating `lambda-auto` adopted
+	// the running `lambda-probe`, and the state file ended up with two ids
+	// pointing at one provider id, where destroying either would have
+	// terminated the wrong box.
+	refs, _ := provider.List(ctx, map[string]string{TagID: spec.GetId()})
+	refs = FilterRefs(refs, map[string]string{TagID: spec.GetId()})
 	for _, ref := range refs {
 		if !providerSaysActive(provider, ref.GetProviderState()) {
 			continue
@@ -1516,11 +1527,20 @@ func (s *Service) finalizeInstanceAfterDeploy(ctx context.Context, inst *provisi
 	if described, derr := provider.Describe(ctx, podID); derr == nil {
 		finalized := s.finalizeActive(described, cur.GetSpec(), cur.GetProvider(), cur.GetCreatedAt())
 		finalized.ProviderId = podID
-		// Leave Ssh unset: Describe's publicIp+portMapping is unverified
-		// (the engine /health proved port 8000, not port 22). The operator
-		// drives wait_for_instance_ready next, which dials sshd to confirm
-		// reachability before stamping the verified endpoint into state.
-		finalized.Ssh = nil
+		// Keep whatever endpoint the record already holds, and never adopt
+		// Describe's. Describe reports publicIp + portMapping, which the
+		// deploy has not verified (engine /health proved port 8000, not port
+		// 22), so on an image-native provider this stays nil and the operator
+		// drives wait_for_instance_ready to stamp a dialled one.
+		//
+		// On a VM-style provider the record already has a dialled endpoint:
+		// provisionReplica ran WaitForSSHReady and the executor then SSHed in
+		// to start the container. Clearing it here erased the one thing a
+		// later teardown needs, so `deployment destroy` failed with "instance
+		// has no SSH endpoint" and the machine could not be released at all
+		// (#427, found on a rented A10 after the engine was serving).
+		// patchRecord replaces the whole record, so unset means erased.
+		finalized.Ssh = cur.GetSsh()
 		_ = s.patchRecord(cur.GetId(), finalized)
 		return
 	}

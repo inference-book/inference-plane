@@ -24,6 +24,13 @@ type listRecordingProvider struct {
 	strict bool
 }
 
+// IsActiveProviderState satisfies provisioners.ActiveStateChecker. Without
+// it the idempotency lookup's adopt branch never fires at all, so a test
+// double that omits it silently passes every adoption test.
+func (p *listRecordingProvider) IsActiveProviderState(state string) bool {
+	return state == "ACTIVE" || state == "running"
+}
+
 func (p *listRecordingProvider) List(_ context.Context, filter map[string]string) ([]*provisionerv1.InstanceRef, error) {
 	p.seenFilters = append(p.seenFilters, filter)
 	if !p.strict {
@@ -156,5 +163,86 @@ func TestListInstancesRemoteReturnsOnlyIplaneInstances(t *testing.T) {
 	}
 	if got := resp.GetInstances()[0].GetProviderId(); got != "mock:mine" {
 		t.Errorf("returned %q, want mock:mine", got)
+	}
+}
+
+// The idempotency lookup adopts the first ACTIVE ref it is handed and returns
+// AlreadyExisted, so a wrong ref here binds this id to somebody else's
+// machine and never rents the one that was asked for.
+//
+// A live Lambda run produced exactly that: creating `lambda-auto` while
+// `lambda-probe` was running adopted lambda-probe's box, and the state file
+// ended up with two ids on one provider id, where destroying either would
+// have terminated the wrong machine and leaked the other (#427).
+func TestCreateInstanceDoesNotAdoptAnotherInstancesMachine(t *testing.T) {
+	svc, store, prov := svcWithAccount(t, false, &provisionerv1.InstanceRef{
+		ProviderId:    "mock:someone-else",
+		ProviderState: "ACTIVE",
+		Tags:          map[string]string{provisioners.TagID: "someone-else"},
+	})
+	// Describe has to succeed, or the adopt branch bails for an unrelated
+	// reason and the test passes without exercising anything.
+	prov.mockProvider.describe = func(_ context.Context, providerID string) (*provisionerv1.Instance, error) {
+		return &provisionerv1.Instance{
+			Id: "someone-else", Provider: "mock", ProviderId: providerID,
+			State: provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE,
+		}, nil
+	}
+
+	resp, err := svc.CreateInstance(context.Background(), &provisionerv1.CreateInstanceRequest{
+		Spec: &provisionerv1.Spec{
+			Id:           "my-pod",
+			Provider:     "mock",
+			Requirements: &provisionerv1.ResourceRequirements{Class: provisioners.GPUClassSmall, GpuCount: 1},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateInstance: %v", err)
+	}
+	if resp.GetAlreadyExisted() {
+		t.Fatal("adopted an existing instance; nothing on the account carries this id")
+	}
+	if got := resp.GetInstance().GetProviderId(); got == "mock:someone-else" {
+		t.Errorf("adopted provider id %q, which belongs to another instance", got)
+	}
+	if prov.spawnCalls != 1 {
+		t.Errorf("spawn calls = %d, want 1; the instance was never actually rented", prov.spawnCalls)
+	}
+	f, _ := store.Read()
+	if got := f.Instances["my-pod"].GetProviderId(); got == "mock:someone-else" {
+		t.Errorf("state file records provider id %q, which belongs to another instance", got)
+	}
+}
+
+// The same lookup must still do its job: an instance the provider genuinely
+// has under this id is adopted rather than rented twice.
+func TestCreateInstanceStillAdoptsItsOwnMachine(t *testing.T) {
+	svc, _, prov := svcWithAccount(t, false, &provisionerv1.InstanceRef{
+		ProviderId:    "mock:my-pod",
+		ProviderState: "ACTIVE",
+		Tags:          map[string]string{provisioners.TagID: "my-pod"},
+	})
+	prov.mockProvider.describe = func(_ context.Context, providerID string) (*provisionerv1.Instance, error) {
+		return &provisionerv1.Instance{
+			Id: "my-pod", Provider: "mock", ProviderId: providerID,
+			State: provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE,
+		}, nil
+	}
+
+	resp, err := svc.CreateInstance(context.Background(), &provisionerv1.CreateInstanceRequest{
+		Spec: &provisionerv1.Spec{
+			Id:           "my-pod",
+			Provider:     "mock",
+			Requirements: &provisionerv1.ResourceRequirements{Class: provisioners.GPUClassSmall, GpuCount: 1},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateInstance: %v", err)
+	}
+	if !resp.GetAlreadyExisted() {
+		t.Error("did not adopt an instance the provider has under this exact id")
+	}
+	if prov.spawnCalls != 0 {
+		t.Errorf("spawn calls = %d, want 0; the instance already existed", prov.spawnCalls)
 	}
 }
