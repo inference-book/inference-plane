@@ -161,6 +161,43 @@ to implement, so nothing compared them. Each adapter declares the tags it can
 genuinely recover and the suite builds its cases from that, which is how one
 suite holds three providers with different wire formats to the same contract.
 
+## The image knows which hosts it can run on, so ask it rather than the operator
+
+`ResourceRequirements.architecture` and `--arch` fixed the arm64 trap for an
+operator who already knows their image's platforms (#390). The operator who
+does not know still rented Lambda's arm64 GH200 for an x86 image and found
+out when the container would not start on a machine that was already billing.
+
+That gap was never a missing filter. `skucatalog.Match` has always dropped a
+shape whose architecture the requirements refuse, and `FilterArchitecture` has
+always dropped a candidate that reports an incompatible one. Neither had any
+way to learn what the image needed. `internal/imagearch` reads it from the
+registry that holds the image, and `inferImageArchitecture` fills it in for a
+replica spec that stated none (#405).
+
+Two shapes, and the older one is the common one here. A modern tag is a
+manifest index and the platforms are on it. An older tag is a single manifest
+with no platform block, and the architecture is in the config blob it points
+at, which is a second request. `vllm/vllm-openai:v0.7.0` is the second shape
+and is the tag most of this repo's examples name.
+
+**It fails open, and the reason is logged.** An unreadable registry, a rate
+limit and a private image are one outcome: nothing was learned. Refusing there
+would block deploys that work today over a network call that is new. Same
+doctrine as `budgetCheck`, which skips when an input is missing and says which
+one.
+
+**A multi-arch image is treated as silence rather than as a list**, because
+the requirements field holds one value and an image that runs on everything
+constrains nothing. Recording one of its two architectures would exclude
+hosts that would have worked.
+
+**A stated `--arch` and an explicit `--gpu-sku` both win.** The first is a
+claim about the operator's own image that may be better informed than a
+manifest, since cross-built images exist. The second is documented as the
+escape hatch that bypasses the resolver, and overriding it would contradict
+the only thing the flag promises.
+
 ## Attaching a volume is a provisioning-time act for a VM-style provider
 
 `Deployment.mounts` is provider-agnostic and each deploy path maps it onto
