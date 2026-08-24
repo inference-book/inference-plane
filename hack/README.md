@@ -77,6 +77,16 @@ the heartbeat file rather than at startup, because before that "not
 started yet" and "died" are the same observation and only one of them is
 worth a teardown.
 
+`tests/watchdog` drives the script against a stand-in for Vast's API and
+asserts what it destroys, through the `VAST_API_BASE` / `VAST_API_V1_BASE`
+seams. Ownership by label and by registry, the fail-safe on an unreadable
+API, `--dry-run`, `--max-lifetime` against a real `start_date`, an instance
+with no `start_date` at all, and the Bearer header are each covered, and each
+was checked against a deliberate break of the branch it guards. Vast reads
+its list from `/api/v1` and destroys through `/api/v0`, and the auth is a
+Bearer token where Lambda's is HTTP Basic, so a guard copied between the two
+and edited 401s on every call.
+
 ### Why this exists
 
 A billing probe was launched as `./run.sh &` from inside an already
