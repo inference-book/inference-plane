@@ -176,10 +176,16 @@ corpus and `mock-engine --kv-budget-tokens` gives the mock a ceiling that
 falls as context rises, so the wall is demonstrable GPU-free (#345).
 Method is in [docs/load-measurement.md](docs/load-measurement.md).
 
-**Still open in Phase 1:** cost per token as a derived series (#346, the
-one that turns the curve into the book's economic result), sweep output
-as a committed data artifact (#347), the cost-versus-concurrency Grafana
-panel (#348), `--ep` (#342) and the expert-divisibility check (#343).
+**Phase 1 is complete.** Group B closed out with cost per token as a
+derived series (#346), which is the one that turns the curve into the
+book's economic result: `instance.cost.usd.total` joins tokens against
+spend on `instance_id`, and zero rate reports unknown rather than free.
+Sweep output became a committed artifact with `--output json|csv` (#347),
+carrying schema version, capture time, iplane build, model, endpoint,
+fleet provenance, request shape and method parameters, so a figure
+regenerates from a file rather than from numbers retyped out of a
+terminal. The cost-versus-concurrency panel (#348), `--ep` (#342) and the
+expert-divisibility check (#343) closed alongside them.
 
 ### Phase 2 — GLM-5.2, single node
 
