@@ -57,7 +57,14 @@ func (s *Service) resolveWarmMount(model, provider, region string) *provisionerv
 	for _, v := range state.Volumes {
 		if v.GetProvider() == provider && v.GetRegion() == region && slices.Contains(v.GetModels(), model) {
 			return &provisionerv1.VolumeMount{
-				VolumeId:  v.GetId(),
+				VolumeId: v.GetId(),
+				// Carried through rather than derived. A VM-style
+				// provider's volume lands on the host, and the sshdocker
+				// executor binds host paths; the adapter recorded where at
+				// EnsureVolume time so this path needs to know nothing
+				// about any provider's directory layout. Empty for an
+				// image-native provider, whose Deployer attaches by id.
+				HostPath:  v.GetHostPath(),
 				MountPath: v.GetMountPath(),
 				Provider:  v.GetProvider(),
 			}
@@ -169,6 +176,7 @@ func (s *Service) PinModel(ctx context.Context, req PinModelRequest) (*PinModelR
 				Name:      ref.Name,
 				SizeGb:    int32(ref.SizeGB),
 				MountPath: DefaultCacheMountPath,
+				HostPath:  ref.HostPath,
 				CreatedAt: timestamppb.New(s.clock()),
 			}
 			f.Volumes[ref.ID] = v

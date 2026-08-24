@@ -610,7 +610,24 @@ type Spec struct {
 	// Operator-supplied labels (cost attribution, owner, cluster
 	// membership). The adapter merges them with the iplane-id and
 	// iplane-operator tags it stamps automatically.
-	Tags          map[string]string `protobuf:"bytes,6,rep,name=tags,proto3" json:"tags,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	Tags map[string]string `protobuf:"bytes,6,rep,name=tags,proto3" json:"tags,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	// Provider volume handles to attach while the machine is being
+	// provisioned, from VolumeMount.volume_id on the deployment this
+	// instance backs.
+	//
+	// Only VM-style providers read this, and only because their mount is
+	// two-stage. An image-native provider attaches a volume when it starts
+	// the container, which is one call, so its Deployer reads
+	// Deployment.mounts and this stays empty. Lambda Labs has to name the
+	// filesystem in the launch request before the directory exists on the
+	// host, and only then can the sshdocker executor bind it into the
+	// container. By the time the deploy runs it is far too late to ask.
+	//
+	// Handles are opaque and provider-scoped: whatever that provider's
+	// EnsureVolume returned as VolumeRef.ID. The Service never interprets
+	// them and passes only the ones whose mount names the same provider
+	// the replica is landing on.
+	VolumeIds     []string `protobuf:"bytes,7,rep,name=volume_ids,json=volumeIds,proto3" json:"volume_ids,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -683,6 +700,13 @@ func (x *Spec) GetBaseImage() string {
 func (x *Spec) GetTags() map[string]string {
 	if x != nil {
 		return x.Tags
+	}
+	return nil
+}
+
+func (x *Spec) GetVolumeIds() []string {
+	if x != nil {
+		return x.VolumeIds
 	}
 	return nil
 }
@@ -3252,7 +3276,18 @@ type Volume struct {
 	Models []string `protobuf:"bytes,6,rep,name=models,proto3" json:"models,omitempty"`
 	// mount_path is where the volume attaches in a pod and where HF_HOME
 	// points (the staged HuggingFace cache lives under mount_path/hf).
-	MountPath     string                 `protobuf:"bytes,7,opt,name=mount_path,json=mountPath,proto3" json:"mount_path,omitempty"`
+	MountPath string `protobuf:"bytes,7,opt,name=mount_path,json=mountPath,proto3" json:"mount_path,omitempty"`
+	// host_path is where the volume appears on the machine's own
+	// filesystem, for providers that surface it there rather than
+	// attaching it straight to a container. Lambda Labs mounts a
+	// filesystem at /lambda/nfs/<name> on the VM, and the sshdocker
+	// executor bind-mounts that into the engine container.
+	//
+	// Empty for a provider whose volume never touches a host filesystem
+	// iplane can see, which is every image-native one. Recorded here so
+	// resolveWarmMount can stamp it onto a deployment's mount without the
+	// shared path knowing any provider's directory layout.
+	HostPath      string                 `protobuf:"bytes,9,opt,name=host_path,json=hostPath,proto3" json:"host_path,omitempty"`
 	CreatedAt     *timestamppb.Timestamp `protobuf:"bytes,8,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -3333,6 +3368,13 @@ func (x *Volume) GetModels() []string {
 func (x *Volume) GetMountPath() string {
 	if x != nil {
 		return x.MountPath
+	}
+	return ""
+}
+
+func (x *Volume) GetHostPath() string {
+	if x != nil {
+		return x.HostPath
 	}
 	return ""
 }
@@ -4011,7 +4053,7 @@ var File_provisioner_v1_types_proto protoreflect.FileDescriptor
 
 const file_provisioner_v1_types_proto_rawDesc = "" +
 	"\n" +
-	"\x1aprovisioner/v1/types.proto\x12\x0eprovisioner.v1\x1a\x1cgoogle/protobuf/struct.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\xa0\x02\n" +
+	"\x1aprovisioner/v1/types.proto\x12\x0eprovisioner.v1\x1a\x1cgoogle/protobuf/struct.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\xbf\x02\n" +
 	"\x04Spec\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1a\n" +
 	"\bprovider\x18\x02 \x01(\tR\bprovider\x12\x16\n" +
@@ -4019,7 +4061,9 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"\frequirements\x18\x04 \x01(\v2$.provisioner.v1.ResourceRequirementsR\frequirements\x12\x1d\n" +
 	"\n" +
 	"base_image\x18\x05 \x01(\tR\tbaseImage\x122\n" +
-	"\x04tags\x18\x06 \x03(\v2\x1e.provisioner.v1.Spec.TagsEntryR\x04tags\x1a7\n" +
+	"\x04tags\x18\x06 \x03(\v2\x1e.provisioner.v1.Spec.TagsEntryR\x04tags\x12\x1d\n" +
+	"\n" +
+	"volume_ids\x18\a \x03(\tR\tvolumeIds\x1a7\n" +
 	"\tTagsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x8b\x03\n" +
@@ -4228,7 +4272,7 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"\farchitecture\x18\x01 \x01(\v2!.provisioner.v1.ModelArchitectureR\farchitecture\x12?\n" +
 	"\n" +
 	"checkpoint\x18\x02 \x01(\v2\x1f.provisioner.v1.ModelCheckpointR\n" +
-	"checkpoint\"\xeb\x01\n" +
+	"checkpoint\"\x88\x02\n" +
 	"\x06Volume\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1a\n" +
 	"\bprovider\x18\x02 \x01(\tR\bprovider\x12\x16\n" +
@@ -4237,7 +4281,8 @@ const file_provisioner_v1_types_proto_rawDesc = "" +
 	"\asize_gb\x18\x05 \x01(\x05R\x06sizeGb\x12\x16\n" +
 	"\x06models\x18\x06 \x03(\tR\x06models\x12\x1d\n" +
 	"\n" +
-	"mount_path\x18\a \x01(\tR\tmountPath\x129\n" +
+	"mount_path\x18\a \x01(\tR\tmountPath\x12\x1b\n" +
+	"\thost_path\x18\t \x01(\tR\bhostPath\x129\n" +
 	"\n" +
 	"created_at\x18\b \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\"\xe6\x01\n" +
 	"\vReplicaSpec\x12\x1a\n" +

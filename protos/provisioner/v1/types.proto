@@ -37,6 +37,24 @@ message Spec {
   // membership). The adapter merges them with the iplane-id and
   // iplane-operator tags it stamps automatically.
   map<string, string> tags = 6;
+
+  // Provider volume handles to attach while the machine is being
+  // provisioned, from VolumeMount.volume_id on the deployment this
+  // instance backs.
+  //
+  // Only VM-style providers read this, and only because their mount is
+  // two-stage. An image-native provider attaches a volume when it starts
+  // the container, which is one call, so its Deployer reads
+  // Deployment.mounts and this stays empty. Lambda Labs has to name the
+  // filesystem in the launch request before the directory exists on the
+  // host, and only then can the sshdocker executor bind it into the
+  // container. By the time the deploy runs it is far too late to ask.
+  //
+  // Handles are opaque and provider-scoped: whatever that provider's
+  // EnsureVolume returned as VolumeRef.ID. The Service never interprets
+  // them and passes only the ones whose mount names the same provider
+  // the replica is landing on.
+  repeated string volume_ids = 7;
 }
 
 // FabricScope is how far an instance's fast GPU interconnect reaches.
@@ -1228,6 +1246,17 @@ message Volume {
   // mount_path is where the volume attaches in a pod and where HF_HOME
   // points (the staged HuggingFace cache lives under mount_path/hf).
   string mount_path = 7;
+  // host_path is where the volume appears on the machine's own
+  // filesystem, for providers that surface it there rather than
+  // attaching it straight to a container. Lambda Labs mounts a
+  // filesystem at /lambda/nfs/<name> on the VM, and the sshdocker
+  // executor bind-mounts that into the engine container.
+  //
+  // Empty for a provider whose volume never touches a host filesystem
+  // iplane can see, which is every image-native one. Recorded here so
+  // resolveWarmMount can stamp it onto a deployment's mount without the
+  // shared path knowing any provider's directory layout.
+  string host_path = 9;
   google.protobuf.Timestamp created_at = 8;
 }
 

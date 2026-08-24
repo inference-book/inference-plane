@@ -161,6 +161,31 @@ to implement, so nothing compared them. Each adapter declares the tags it can
 genuinely recover and the suite builds its cases from that, which is how one
 suite holds three providers with different wire formats to the same contract.
 
+## Attaching a volume is a provisioning-time act for a VM-style provider
+
+`Deployment.mounts` is provider-agnostic and each deploy path maps it onto
+its own primitive, which worked while every provider attached a volume in
+the same call that started the container. RunPod does: `networkVolumeId` on
+pod-create. A VM-style provider cannot.
+
+A Lambda filesystem is named in the **launch** request. The host directory
+`/lambda/nfs/<name>` does not exist until it is, and the sshdocker executor
+binds host paths when it starts the engine, minutes later. By then there is
+nothing left to ask, so a mount that only reaches the deploy path is a mount
+that silently never happens.
+
+`Spec.volume_ids` carries the handles into provisioning, filtered by
+`volumesForProvider` to the ones the replica's own provider issued, for the
+same reason `checkMountProviders` exists: a handle means nothing to anyone
+else, and a heterogeneous fleet carries one deployment-level mount across
+replicas that need not share a provider. An image-native adapter never reads
+the field.
+
+`Volume.host_path` is the other half. The adapter records where its volume
+lands at `EnsureVolume` time and `resolveWarmMount` carries it onto the
+mount, so the shared path never learns that Lambda uses `/lambda/nfs`. Empty
+for a provider whose volume never touches a host filesystem iplane can see.
+
 ## Destroy releases the container; Terminate releases the rental
 
 Two calls that look like one, and the gap between them was a billing leak
