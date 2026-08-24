@@ -102,6 +102,46 @@ priciest cards. The B300 is the measured case: it reports 275040 MiB against a
 `CreateDeployment` and placement, the only other place a resolved `Candidate`
 exists, runs asynchronously after the RPC has returned.
 
+## An adapter that drops a filter answers a question nobody asked
+
+`Provider.List(ctx, filter)` is documented as match-all over tags, and it was
+honoured by one adapter in three (#431). RunPod matched every key. Vast read
+`label-prefix` and Lambda read `name-prefix`, and neither of those is a key
+the Service ever passes, so both dropped the tag filter and returned the whole
+account.
+
+The Service then read the length of that answer as evidence. `ListInstances`'
+self-heal calls `List({iplane-id: id})` and treats an empty result as "the
+provider does not have this instance", which converges a record stuck in
+TERMINATING. Against a lenient adapter the result is never empty, so the sweep
+never converged. Against a strict one it was worse: the old call also passed
+`iplane-operator`, which **no adapter can recover**, so every instance matched
+nothing and every TERMINATING record was declared TERMINATED, alive or dead,
+with nothing left to retry a terminate that had failed.
+
+Three things changed and the third is the one that lasts.
+
+`provisioners.MatchesTags` and `FilterRefs` are the one implementation, and
+every adapter applies them over the tags it recovered. A filter key an adapter
+cannot recover now excludes the instance. That is not a good answer, but it is
+the shape of a real one: an ignored filter returns everything and reads as
+confirmation, which cannot be told apart from a measurement.
+
+The Service stopped asking a question no provider can answer. The self-heal
+filters on `iplane-id` alone, and `--remote` passes no tag filter at all,
+since the API key already scopes the account. Ownership is decided here
+instead, on the one tag every adapter recovers: a ref with no `iplane-id` is a
+box the operator rented themselves and is not rendered as an iplane Instance.
+The self-heal also re-filters locally rather than trusting the adapter, which
+is cheap and keeps the branch correct if an adapter regresses.
+
+`internal/provisioners/providertest` is the conformance suite all three
+adapter test packages call. It was written because every adapter's own tests
+passed throughout: each was written against the filter that adapter happened
+to implement, so nothing compared them. Each adapter declares the tags it can
+genuinely recover and the suite builds its cases from that, which is how one
+suite holds three providers with different wire formats to the same contract.
+
 ## Destroy releases the container; Terminate releases the rental
 
 Two calls that look like one, and the gap between them was a billing leak
