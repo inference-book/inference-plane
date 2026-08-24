@@ -36,31 +36,69 @@ persistent-volume primitive to hang them on.
 | provider | persistent volume | create via API | stage | mount | verdict |
 | --- | --- | --- | --- | --- | --- |
 | **RunPod** | network volumes | yes (`POST /networkvolumes`) | CPU pod + v2 logs | `networkVolumeId` | **works today** |
-| **Lambda** | persistent filesystems (region-locked) | **UNVERIFIED — the 405 was on the wrong path, see #432** | GPU instance (no CPU tier) + SSH | sshdocker `-v` | find-only, manual pre-create |
+| **Lambda** | persistent filesystems (region-locked) | **YES — `POST /api/v1/filesystems`**, unhyphenated (#432) | GPU instance (no CPU tier) + SSH | `file_system_names` at launch | create + find |
 | **AWS / GCP** | EBS / persistent disks + EFS/Filestore + **S3 / GCS** | yes, fully programmatic | cheap instance or bucket-native | block or object | **ideal, no adapter yet** (v0.3) |
 | **Vast** | host-local disk, mostly ephemeral | n/a | n/a | n/a | genuinely weak (marketplace) |
 
 Key specifics:
 
-- **Lambda filesystem create is not in the API. Superseded 2026-08-24; see
-  #432 before relying on this.** The finding was that `GET /file-systems`
-  works (200) and `POST /file-systems` returns 405, so a Lambda
-  `VolumeManager` could only implement `EnsureVolume` as **find-by-name**
-  and would have to error with "create the filesystem in the Lambda console
-  first" when absent.
+- **Lambda filesystem create IS in the API. Corrected 2026-08-24 (#432).** The
+  original finding was that `GET /file-systems` works (200) and `POST
+  /file-systems` returns 405, so a Lambda `VolumeManager` could only implement
+  `EnsureVolume` as find-by-name and would have to error with "create the
+  filesystem in the Lambda console first" when absent. That conclusion stood
+  for four weeks and it is wrong.
 
-  Lambda's published OpenAPI document (v1.10.0, read 2026-08-24) lists both
-  spellings and only one of them is hyphenated: `GET /api/v1/file-systems`,
-  `POST /api/v1/filesystems`, `DELETE /api/v1/filesystems/{id}`. The 405 was
-  therefore fired at a path that has never had a POST, and the create verb
-  lives at the unhyphenated sibling. Nothing has been created through either,
-  so the conclusion may still hold for a reason nobody has looked for. What is
-  certain is that the evidence recorded for it was the wrong request. #432
-  probes it.
+  Lambda spells the collection two ways and only one of them takes a POST:
 
-  Every other seam (stage, mount) is buildable either way: Lambda has a
-  fitting GPU (`gpu_1x_gh200`, 96 GB, FP8-native, `us-east-3` had capacity)
-  and the sshdocker `-v` mount already exists.
+  ```
+  GET    /api/v1/file-systems      list      (hyphenated)
+  POST   /api/v1/filesystems       create    (not hyphenated)
+  DELETE /api/v1/filesystems/{id}  delete    (not hyphenated)
+  ```
+
+  The 405 was fired at the read path. Probed live 2026-08-24, creating and
+  deleting a filesystem in `us-east-1`:
+
+  ```
+  POST /api/v1/filesystems {"name":"iplane-probe-fs","region":"us-east-1"}  -> 200
+  {"id":"641142fb...","name":"iplane-probe-fs",
+   "mount_point":"/lambda/nfs/iplane-probe-fs",
+   "is_in_use":false,"region":{"name":"us-east-1"}}
+
+  DELETE /api/v1/filesystems/641142fb...  -> 200  {"deleted_ids":["641142fb..."]}
+  ```
+
+  Four things follow, and they are what a `VolumeManager` needs.
+
+  **The mount path is derived, not chosen.** `/lambda/nfs/<name>`, returned on
+  the record. `VolumeRef` can carry it rather than the adapter guessing.
+
+  **A filesystem outlives every instance.** The one above existed with zero
+  instances on the account, which is the property a warm cache is entirely
+  about. `is_in_use` reports whether anything currently has it mounted.
+
+  **`file_system_names` is honoured at launch, and validated before capacity
+  is checked.** Launching into the wrong region with a real filesystem name
+  returns `global/object-does-not-exist` naming both the filesystem and the
+  region, and rents nothing:
+
+  ```
+  "Filesystem with name 'iplane-probe-fs' does not exist in region 'us-west-1',
+   or you do not have permission to access it."
+  ```
+
+  Failing before the rent rather than after is the useful half. A wrong
+  volume name costs an error rather than a billed box that mounts nothing.
+
+  **Region-locking is enforced by the vendor**, so the datacenter-locked rule
+  this doc already carries for RunPod holds on Lambda too and does not need
+  to be re-imposed in iplane.
+
+  Still unverified, and it needs hardware: whether the mount actually appears
+  inside the engine container at that path. Folded into #427's rental rather
+  than costing a second one.
+
 - **Lambda has no CPU-only instance tier**, so staging rents a GPU box
   just to download. RunPod stages on a ~$0.06/hr CPU pod; the Lambda
   equivalent is a GPU instance. Staging cost is one-time (amortized over
