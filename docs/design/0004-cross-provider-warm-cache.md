@@ -95,9 +95,23 @@ Key specifics:
   this doc already carries for RunPod holds on Lambda too and does not need
   to be re-imposed in iplane.
 
-  Still unverified, and it needs hardware: whether the mount actually appears
-  inside the engine container at that path. Folded into #427's rental rather
-  than costing a second one.
+  **Verified on hardware 2026-08-24** (#436, two rentals, $0.24). The
+  filesystem attaches when it is named in the launch request, appears on the
+  host at `/lambda/nfs/<name>` as **virtiofs** owned by `ubuntu`, and a
+  container binds it with plain `docker run -v`, reading host writes and
+  writing back. Both files survived the instance: a second machine launched
+  against the same filesystem read what the first one left. That is the warm
+  cache, demonstrated rather than assumed.
+
+  Two facts that change the shape of a Lambda `VolumeManager`, both measured.
+  Lambda takes **no size** at create and the guest reports 8.0E, so
+  `VolumeSpec.SizeGB` has nothing to map onto. And a filesystem **cannot be
+  deleted while an instance holds it, including one merely terminating**, so
+  `DeleteVolume` reports a wait rather than a failure.
+
+  Shipped in PR 444: `EnsureVolume` / `ListVolumes` / `DeleteVolume`, plus
+  `Spec.volume_ids` so a VM-style provider can attach at rent time, which is
+  the only moment it can. `StageModel` is the remaining half (#436).
 
 - **Lambda has no CPU-only instance tier**, so staging rents a GPU box
   just to download. RunPod stages on a ~$0.06/hr CPU pod; the Lambda
