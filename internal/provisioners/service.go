@@ -1963,6 +1963,10 @@ func (s *Service) DestroyDeployment(ctx context.Context, req *provisionerv1.Dest
 			failures = append(failures, fmt.Sprintf("%s: %v", instID, destroyErr))
 			continue
 		}
+		if relErr := s.releaseRental(ctx, id, inst); relErr != nil {
+			failures = append(failures, fmt.Sprintf("%s: release rental: %v", instID, relErr))
+			continue
+		}
 		s.markInstanceTerminated(id, instID)
 	}
 
@@ -1992,6 +1996,45 @@ func (s *Service) DestroyDeployment(ctx context.Context, req *provisionerv1.Dest
 
 	final, _ := s.store.Read()
 	return &provisionerv1.DestroyDeploymentResponse{Deployment: final.Deployments[id]}, nil
+}
+
+// releaseRental hands the machine behind a destroyed replica back to the
+// provider, and is what stops the meter.
+//
+// Destroy and Terminate answer different questions, and issue 161 was the
+// gap between them. Destroy releases whatever the deployer got hold of:
+// for an image-native provider that is the pod, which is also the rental,
+// so the two coincide. For a VM-style provider the deployer is sshdocker
+// and all it did was stop a container over SSH, so the machine underneath
+// is still rented and still billing after a teardown the operator was
+// told was clean.
+//
+// The call fires for every provider rather than only the VM-style ones.
+// Terminate is idempotent by contract, so the image-native second call
+// costs one request and returns success, and a future adapter whose
+// Destroy quietly does not release its machine leaks nothing.
+//
+// The ownership guard is the same one markInstanceTerminated carries: an
+// auto-provisioned replica exists only to back this deployment, while an
+// instance the operator placed by hand may be shared and is theirs to
+// destroy through `iplane instance destroy`.
+//
+// An instance with no provider_id is skipped rather than failed, matching
+// DestroyInstance. There is nothing to name in the call, and the backfill
+// for records written before provider_id was stamped lives on that verb.
+func (s *Service) releaseRental(ctx context.Context, deployID string, inst *provisionerv1.Instance) error {
+	if !ownsInstance(deployID, inst.GetId()) {
+		return nil
+	}
+	providerID := inst.GetProviderId()
+	if providerID == "" {
+		return nil
+	}
+	provider, ok := s.providers[inst.GetProvider()]
+	if !ok {
+		return fmt.Errorf("provider %q not configured", inst.GetProvider())
+	}
+	return provider.Terminate(ctx, providerID)
 }
 
 // markInstanceTerminated marks a destroyed replica's Instance record

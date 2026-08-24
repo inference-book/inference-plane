@@ -102,6 +102,37 @@ priciest cards. The B300 is the measured case: it reports 275040 MiB against a
 `CreateDeployment` and placement, the only other place a resolved `Candidate`
 exists, runs asynchronously after the RPC has returned.
 
+## Destroy releases the container; Terminate releases the rental
+
+Two calls that look like one, and the gap between them was a billing leak
+(#161). `DestroyDeployment` runs `deployerFor(inst).Destroy` per replica.
+For an image-native provider the deployer *is* the provider and the pod it
+tears down is also the rental, so the two coincide. For a VM-style provider
+the deployer is `sshdocker`, and all it did was stop a container over SSH:
+the machine underneath is still rented, still billing, and the state file now
+says TERMINATED. The operator sees a clean teardown and keeps paying.
+`internal/provisioners/lambdalabs` is the adapter that shape applies to;
+Vast stopped being affected when it went image-native in #252.
+
+`releaseRental` closes it by calling `provider.Terminate` after a successful
+`Destroy`, and it fires **for every provider rather than only the VM-style
+ones**. Terminate is idempotent by contract, so the image-native second call
+costs one request and returns success, and a future adapter whose Destroy
+quietly does not release its machine leaks nothing. Making the call
+conditional on a capability check would mean the leak comes back the moment
+somebody's assumption about their own adapter is wrong.
+
+That uniformity is load-bearing on the adapters holding up their end.
+RunPod already mapped a 404 to success; Vast and Lambda both returned
+`ErrNotFound` and now do the same. A terminate that fails for any other
+reason is appended to `failures`, which leaves the deployment TERMINATING
+with the reason attached rather than reporting a teardown over a live
+machine. The reaper retries from there.
+
+The ownership guard is the one `markInstanceTerminated` already carried: an
+auto-provisioned replica exists only to back this deployment, while an
+instance the operator placed by hand may be shared and is theirs to destroy.
+
 ## External is a non-owning provider, and its hollow lifecycle methods are deliberate
 
 `internal/provisioners/external` registers a RUNNING deployment pointing at an
