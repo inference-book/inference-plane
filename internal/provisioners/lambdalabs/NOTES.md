@@ -197,16 +197,34 @@ API-provisionable nor on-demand, and a weekly invoice is a different
 commercial shape from the per-second rentals the cost model is built on.
 Checked 2026-08-21; see the comment on #352.
 
-**No API-creatable filesystems, and this one wants re-checking.** `POST
-/file-systems` returns 405, which is what the warm-cache design recorded. But
-the published OpenAPI document (read 2026-08-24, v1.10.0) lists `POST
-/api/v1/filesystems` and `DELETE /api/v1/filesystems/{id}` **without the
-hyphen**, alongside the hyphenated `GET /api/v1/file-systems` the 405 came
-from. So the 405 may have been the wrong path rather than a missing
-capability. Nothing has been created through it and the claim below is
-unverified either way; Lambda still has no `VolumeManager` and the warm-cache
-path still cannot reach it. See
-`docs/design/0004-cross-provider-warm-cache.md`.
+**Filesystems ARE API-creatable, and the four weeks we believed otherwise are
+worth the paragraph.** `docs/design/0004` recorded that `POST /file-systems`
+returns 405 and concluded Lambda has no API-creatable filesystems, which is
+why this adapter has no `VolumeManager` and why the warm-cache path cannot
+reach it.
+
+Lambda spells the collection two ways. `GET /api/v1/file-systems` is
+hyphenated and `POST /api/v1/filesystems` is not, and only the second takes a
+create. The 405 was fired at the read path, and the wrong conclusion held
+because a 405 is a confident-sounding answer: it says the method is not
+allowed here, which reads as "the vendor does not offer this" rather than
+"you knocked on the wrong door".
+
+Probed live 2026-08-24. Creating and deleting a filesystem both work, the
+record carries `mount_point: /lambda/nfs/<name>` derived from the name, and a
+filesystem exists independently of any instance. `file_system_names` is
+accepted by the launch call and validated **before** capacity is checked, so
+a wrong volume name costs an error rather than a billed box that mounts
+nothing. Region-locking is the vendor's own rule and its error names both the
+filesystem and the region.
+
+What is still unverified is whether the mount appears inside the engine
+container at that path, which needs a rented box and is folded into #427.
+
+The general lesson is the one worth keeping: **a 4xx tells you about the
+request, not about the vendor.** Reading a 405 as a capability statement is
+how a whole feature stayed written off. Check the published path list before
+concluding an API does not do something.
 
 ## min_ram_gb is unenforced here
 
