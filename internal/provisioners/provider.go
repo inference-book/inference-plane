@@ -299,11 +299,22 @@ type VolumeSpec struct {
 }
 
 // VolumeRef identifies a provider cache volume.
+//
+// ID is the handle the same provider is handed back later, on
+// Spec.volume_ids at provision time and on VolumeMount.volume_id at
+// deploy time. Opaque to everything except the adapter that issued it,
+// so an adapter is free to use whichever of its own identifiers the
+// rest of its API actually accepts.
+//
+// HostPath is where the volume appears on the machine's own filesystem,
+// for a provider that surfaces it there rather than attaching it
+// straight to a container. Empty for every image-native provider.
 type VolumeRef struct {
-	ID     string
-	Name   string
-	Region string
-	SizeGB int
+	ID       string
+	Name     string
+	Region   string
+	SizeGB   int
+	HostPath string
 }
 
 // StageSpec requests a model download onto a volume. MountPath is where

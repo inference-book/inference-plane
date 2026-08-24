@@ -1196,10 +1196,12 @@ func (s *Service) placeReplicaInstance(ctx context.Context, spec *provisionerv1.
 		reqs = &provisionerv1.ResourceRequirements{}
 	}
 
+	var volumeIDs []string
 	if f, err := s.store.Read(); err == nil {
 		if existing, ok := f.Instances[instanceID]; ok {
 			return existing, nil
 		}
+		volumeIDs = volumesForProvider(f.Deployments[deployID].GetMounts(), providerName)
 	}
 	pspec := &provisionerv1.Spec{
 		Id:           instanceID,
@@ -1207,6 +1209,7 @@ func (s *Service) placeReplicaInstance(ctx context.Context, spec *provisionerv1.
 		Region:       spec.GetRegion(),
 		BaseImage:    baseImage,
 		Requirements: reqs,
+		VolumeIds:    volumeIDs,
 	}
 	if isExternal {
 		endpoint := spec.GetEngineEndpoint()
@@ -1252,6 +1255,35 @@ func (s *Service) placeReplicaInstance(ctx context.Context, spec *provisionerv1.
 		}
 	}
 	return spawned, nil
+}
+
+// volumesForProvider returns the volume handles from a deployment's mounts
+// that this replica's provider issued.
+//
+// Provisioning is the only chance a VM-style provider gets. Its mount is
+// two-stage: the volume has to be named while the machine is being rented,
+// because the host directory does not exist until it is, and the sshdocker
+// executor binds host paths at deploy time. An image-native provider does
+// both in one call and reads Deployment.mounts in its Deployer, so this is
+// empty for it and no adapter has to care which kind it is.
+//
+// Filtered by provider for the same reason checkMountProviders exists: a
+// handle only means something to whoever issued it, and a heterogeneous
+// fleet carries one deployment-level mount across replicas that may not
+// share a provider. Handing RunPod a Lambda filesystem name would be a
+// silent cold fallback at best.
+func volumesForProvider(mounts []*provisionerv1.VolumeMount, provider string) []string {
+	var out []string
+	for _, m := range mounts {
+		if m.GetVolumeId() == "" {
+			continue
+		}
+		if m.GetProvider() != "" && m.GetProvider() != provider {
+			continue
+		}
+		out = append(out, m.GetVolumeId())
+	}
+	return out
 }
 
 // resolveCreateReplicaSpecs expands a CreateDeploymentRequest's
