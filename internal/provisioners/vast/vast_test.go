@@ -173,21 +173,33 @@ func TestTerminate_OK(t *testing.T) {
 	}
 }
 
-// TestTerminate_NotFound: a 404 response surfaces as a ProviderError
-// wrapping provisioners.ErrNotFound. The Service treats this as
-// success for the terminate verb (idempotent destroy).
-func TestTerminate_NotFound(t *testing.T) {
+// A rental Vast no longer has is the end state Terminate exists to reach,
+// so a 404 is success. The Provider contract says Terminate is idempotent,
+// and issue 161's coupled teardown now calls it on every replica.
+func TestTerminate_NotFoundIsSuccess(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v0/instances/missing/", func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, `{"msg":"not found"}`, http.StatusNotFound)
 	})
 	p, _ := newTestProvider(t, mux)
-	err := p.Terminate(context.Background(), "missing")
-	if err == nil {
-		t.Fatal("expected NotFound error")
+	if err := p.Terminate(context.Background(), "missing"); err != nil {
+		t.Fatalf("Terminate on an already-gone instance = %v, want nil", err)
 	}
-	if !errors.Is(err, provisioners.ErrNotFound) {
-		t.Errorf("error should wrap ErrNotFound: %v", err)
+}
+
+// The idempotency carve-out is not-found and nothing else.
+func TestTerminate_OtherErrorsStillSurface(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v0/instances/100/", func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, `{"msg":"forbidden"}`, http.StatusForbidden)
+	})
+	p, _ := newTestProvider(t, mux)
+	err := p.Terminate(context.Background(), "100")
+	if err == nil {
+		t.Fatal("expected a 403 to surface as an error")
+	}
+	if errors.Is(err, provisioners.ErrNotFound) {
+		t.Errorf("a 403 must not be mapped to ErrNotFound: %v", err)
 	}
 }
 
