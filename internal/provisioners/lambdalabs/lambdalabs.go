@@ -44,6 +44,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"google.golang.org/protobuf/types/known/structpb"
@@ -75,6 +76,13 @@ const (
 type Provider struct {
 	client *Client
 	clock  func() time.Time
+
+	// registeredKeyName is the stored-key name EnsurePublicKey last put
+	// iplane's public half under, so Spawn attaches that key rather than
+	// guessing from the account. Guarded because a fan-out spawns replicas
+	// concurrently against one Provider.
+	keyMu             sync.Mutex
+	registeredKeyName string
 
 	// SSH readiness gap is shorter on Lambda than on RunPod or
 	// Vast -- usually under 60s. 3 min default is comfortable.
@@ -360,19 +368,33 @@ func (p *Provider) describeOne(ctx context.Context, providerID string) (*apiInst
 
 // launchSSHKeyName picks the key the launch call attaches to the VM.
 //
-// iplane's own key wins when it is on the account, because that is the one
-// whose private half the deploy path holds. Anything else and the VM boots
-// with a key sshdocker cannot present, which is a rental that bills and
-// cannot be reached.
+// Three sources, narrowest first, because attaching the wrong one produces a
+// rental that bills and cannot be reached.
 //
-// The account's first key stays the fallback for an operator driving the
-// adapter by hand, who has never run EnsurePublicKey and wants their own
-// key attached. Returns "" with a nil error when the account has no keys at
-// all; the caller tells that apart from an API failure.
+// The name EnsurePublicKey registered wins, since that is the key whose
+// private half the deploy path holds. It is the only reliable answer once an
+// account can hold several iplane keys, which it can since #442 stopped
+// deleting them.
+//
+// Failing that, any iplane-prefixed key. Ambiguous when there are several,
+// and better than the last resort.
+//
+// Failing that, the account's first key, for an operator driving the adapter
+// by hand who never ran EnsurePublicKey and wants their own key attached.
+//
+// Returns "" with a nil error when the account has no keys at all; the caller
+// tells that apart from an API failure.
 func (p *Provider) launchSSHKeyName(ctx context.Context) (string, error) {
 	keys, err := p.listSSHKeys(ctx)
 	if err != nil {
 		return "", err
+	}
+	if want := p.registeredKey(); want != "" {
+		for _, k := range keys {
+			if k.Name == want {
+				return k.Name, nil
+			}
+		}
 	}
 	for _, k := range keys {
 		if strings.HasPrefix(k.Name, provisioners.ReservedIDPrefix) {

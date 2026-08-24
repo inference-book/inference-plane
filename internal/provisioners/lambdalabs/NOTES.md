@@ -106,17 +106,33 @@ RunPod's single `authorized_keys` blob, so the shape is list, compare,
 replace, and the comparison is on parsed key material so a differing comment
 is not a differing key.
 
-**The stored name deliberately drops the timestamp.** iplane's key comment is
-`iplane-<operator>-<provider>-<rfc3339>`, and keeping the timestamp would
-give every regenerated keypair a new name, so a wiped keystore would leave
-the account accumulating `iplane-` keys with no way to tell which one the
-current private half matches. The derived name is stable per operator and
-provider, which turns re-registration into a replace. Lambda bounds the field
-at 1..64 characters, so it is sanitized and truncated.
+**The stored name drops the comment's timestamp and adds a digest of the
+key**, and both halves were paid for.
 
-`Spawn` prefers the `iplane-` key and falls back to the account's first key,
-which keeps an operator driving the adapter by hand working the way it always
-did.
+Dropping the timestamp came first: keeping it would give every
+re-registration of the same key a new name, so one key would accumulate
+entries. That made the name stable per operator and provider, and
+re-registration a replace.
+
+The digest came from the replace going wrong. **Lambda refuses to delete a key
+any running instance references** ("Key is currently in use, cannot delete"),
+so a second keystore claiming the shared name could not register, and
+therefore could not rent at all, for as long as the first machine was up.
+Two people on one account, or CI and a laptop, is enough. Hit live on the
+second #427 rental, and it had been named as the open risk when the registrar
+landed. With a digest in the name, nothing is ever deleted: an unchanged key
+finds its own name, and a regenerated keypair is simply a second entry.
+
+The cost is that an account can now hold several `iplane-` keys, so a prefix
+scan cannot tell which private half the caller holds. The Provider remembers
+the name it registered, and `Spawn` prefers that, falling back to the prefix
+scan and then to the account's first key for an operator driving the adapter
+by hand. The memo is reliable because `ensureProviderKey` runs immediately
+before `Spawn` on every path that rents.
+
+Lambda bounds the field at 1..64 characters, and the readable half is
+truncated to make room rather than the digest being shortened, so two long
+operator ids still get distinct names.
 
 ## The SSH readiness gap was measured and then not waited for
 

@@ -8,8 +8,8 @@
 ## What this settles
 
 The Lambda adapter had never been pointed at hardware. It has now.
-**`gpu_1x_a10` in `us-east-1`, $1.29/hr, four rentals across 40 minutes,
-$0.86 total.** Zero instances left running, verified against the vendor API
+**`gpu_1x_a10` in `us-east-1`, $1.29/hr. Six rentals across two sessions,
+$1.07 total.** Zero instances left running, verified against the vendor API
 afterwards. `hack/lambda-watchdog.sh` was armed before the first rental.
 
 The run confirmed three fixes that had only ever been exercised against
@@ -17,11 +17,14 @@ stubs, and found four defects that no unit test could have found. Three of
 the four are on the shared VM-style deploy path rather than in the Lambda
 adapter, so they apply to raw AWS and GCP the moment those land (#428).
 
-**The headline is that `deployment destroy` did not work at all on this
-path.** Not the way #161 described, where the container stops and the machine
-survives. It failed before doing anything, on every attempt, and the machine
-could only be released by a different verb. #161's fix is correct and was
-unreachable.
+**The headline of the first rental is that `deployment destroy` did not work at
+all on this path.** Not the way #161 described, where the container stops and
+the machine survives. It failed before doing anything, on every attempt, and
+the machine could only be released by a different verb. #161's fix was correct
+and unreachable.
+
+A second rental, after that was fixed, settled #161 itself: confirmed, and the
+fix confirmed with it.
 
 ## Confirmed on hardware
 
@@ -196,10 +199,74 @@ trusting the document as exhaustive.
 | ee18741 lambda-auto, try 1 | 18:43:41 | 18:44:30 | 0.8 | $0.02 |
 | 996db8a lambda-auto, try 2 | 18:47:50 | 18:53:30 | 5.7 | $0.12 |
 | 7106df2 lambda-auto, try 3 | 18:52:34 | 18:58:58 | 6.4 | $0.14 |
-| **total** | | | **40.1** | **$0.86** |
+| **first session** | | | **40.1** | **$0.86** |
+| dc2c020e lam-leak, second session | 19:15:44 | 19:20:42 | 5.0 | $0.11 |
+| 65e59de5 lam-fixed, second session | 19:20:51 | 19:25:30 | 4.7 | $0.10 |
+| **all in** | | | **49.8** | **$1.07** |
 
 Three of the four rentals were the run finding its own defects rather than the
 plan. That is what the money bought.
+
+## #161 on hardware, second rental
+
+The first rental could not reach the coupled teardown, because the teardown
+failed earlier. With that fixed, a second rental on 2026-08-24 settled it.
+
+An auto-provisioned 1:1 deployment (`ownsInstance` true), destroyed with a
+binary identical to merged main except that the `releaseRental` call is
+removed, so nothing else differs:
+
+```
+=== 19:20:08Z deployment destroy, binary WITHOUT releaseRental ===
+Destroyed deployment "lam-leak" (final state: TERMINATED)
+
+  iplane:  deployment lam-leak -> DEPLOYMENT_STATE_TERMINATED
+           instance   lam-leak -> INSTANCE_STATE_TERMINATED
+  Lambda:  status booting
+           STILL BILLING AT $1.29/hr: True
+```
+
+**#161 is confirmed.** iplane reported a clean teardown of both records while
+the machine was still there and still charging. The operator's only recourse
+at that point is the vendor API, because every iplane verb now believes the
+instance is gone.
+
+Then the same deployment shape on a fresh machine, destroyed with merged main,
+where the only difference is that the `releaseRental` call is present:
+
+```
+=== 19:25:24Z deployment destroy, merged main (releaseRental present) ===
+Destroyed deployment "lam-fixed" (final state: TERMINATED)
+
+  iplane:  deployment lam-fixed -> DEPLOYMENT_STATE_TERMINATED
+           instance   lam-fixed -> INSTANCE_STATE_TERMINATED
+  Lambda:  status terminating
+           STILL BILLING AT $1.29/hr: False
+```
+
+Same command, same account, same 1:1 auto-provisioned shape, two binaries that
+differ in one call. Reported state is identical in both; the machine is not.
+
+Worth noting what this cost to observe rather than to assert. The unit tests
+have proved the missing `Terminate` call since PR 429, and they proved it
+against a double. What they could not show is that the reported state is
+*indistinguishable* between the two cases, which is the property that makes
+the bug expensive: an operator reading iplane has no signal at all, and finds
+out from an invoice.
+
+**A third defect surfaced on this rental**, from running the two boxes in
+parallel out of separate state directories. `EnsurePublicKey` named the stored
+key per operator and deleted a key already under that name, and Lambda refuses
+that while a running instance references it:
+
+```
+ensure-key:delete-stale failed (http 400): Key is currently in use, cannot delete
+```
+
+The second keystore could not register, so it could not rent at all. This was
+named as the open risk when the registrar landed and it paid out on the second
+rental. The stored name now carries a digest of the key and nothing is ever
+deleted (#442).
 
 ## What is still not settled
 
@@ -211,7 +278,5 @@ running container, which is what #436 needs.
 **The multi-replica and multi-node shapes.** One replica, one card. Nothing
 here says anything about a Lambda deployment spanning machines.
 
-**Whether #161's coupled teardown works on Lambda.** It could not be reached,
-because the teardown failed earlier. The fix is unit-tested in both directions
-and now has a path to run on, but the hardware confirmation the ticket asked
-for is still owed and needs another rental.
+**Whether a Lambda deployment survives being scaled, migrated or drained.**
+None of those verbs were driven here.

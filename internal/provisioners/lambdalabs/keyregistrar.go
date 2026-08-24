@@ -2,6 +2,8 @@ package lambdalabs
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -27,11 +29,19 @@ import (
 //
 //   - a stored key whose material matches ours is success, whatever it is
 //     named. That covers an operator who added iplane's key by hand.
-//   - a stored key under our derived name whose material differs is stale,
-//     left behind by a keystore that was regenerated. It is deleted before
-//     the new one is added, because two keys under iplane's name would make
-//     the launch-time lookup a coin toss.
-//   - otherwise the key is POSTed.
+//   - otherwise the key is POSTed under a name that identifies the key.
+//
+// **Nothing is ever deleted.** An earlier version replaced a key stored under
+// iplane's derived name, so the name stayed one-to-one and Spawn could find
+// it by prefix. Lambda refuses to delete a key any running instance
+// references ("Key is currently in use, cannot delete"), which turned a
+// second keystore into a total inability to rent for as long as the first
+// machine was up (#442). Two people on one account, or CI and a laptop, is
+// all it takes.
+//
+// So the name carries a digest of the key rather than identifying the
+// operator alone, several iplane keys may coexist, and the Provider remembers
+// which one it registered. See sshKeyName.
 //
 // Comparison is on the parsed key material, so a differing comment or
 // trailing whitespace does not read as a different key.
@@ -47,22 +57,13 @@ func (p *Provider) EnsurePublicKey(ctx context.Context, publicKey []byte, commen
 		return wrapErr("ensure-key:list", err)
 	}
 
-	name := sshKeyName(comment)
-	var staleID string
+	name := sshKeyName(comment, publicKey)
 	for _, k := range keys {
 		if parsed, _, _, _, perr := ssh.ParseAuthorizedKey([]byte(k.PublicKey)); perr == nil {
 			if string(ssh.MarshalAuthorizedKey(parsed)) == string(wantLine) {
+				p.rememberKeyName(k.Name)
 				return nil
 			}
-		}
-		if k.Name == name {
-			staleID = k.ID
-		}
-	}
-
-	if staleID != "" {
-		if err := p.deleteSSHKey(ctx, staleID); err != nil {
-			return wrapErr("ensure-key:delete-stale", err)
 		}
 	}
 
@@ -77,7 +78,33 @@ func (p *Provider) EnsurePublicKey(ctx context.Context, publicKey []byte, commen
 	if err := skhttp.CallVoid(ctx, req, p.client.callOpts()...); err != nil {
 		return wrapErr("ensure-key:add", err)
 	}
+	p.rememberKeyName(name)
 	return nil
+}
+
+// rememberKeyName records which stored key holds the public half of the pair
+// this operator will SSH with, so Spawn attaches that one.
+//
+// The memo is what pays for dropping the delete. With one key per keypair
+// rather than one per operator, an account can hold several `iplane-` keys
+// and a prefix scan can no longer tell which private half the caller holds.
+//
+// It is reliable because the Service calls EnsurePublicKey immediately before
+// Spawn on every path that rents (registerKeyAndSpawn, and the fan-out's
+// pre-flight). A Spawn that somehow arrives without it falls back to the
+// prefix scan and then to the account's first key, which is what an operator
+// driving the adapter by hand has always got.
+func (p *Provider) rememberKeyName(name string) {
+	p.keyMu.Lock()
+	defer p.keyMu.Unlock()
+	p.registeredKeyName = name
+}
+
+// registeredKey returns the name EnsurePublicKey last registered, if any.
+func (p *Provider) registeredKey() string {
+	p.keyMu.Lock()
+	defer p.keyMu.Unlock()
+	return p.registeredKeyName
 }
 
 // rfc3339Suffix matches the timestamp sshkeys.FormatComment appends, so the
@@ -89,29 +116,40 @@ var rfc3339Suffix = regexp.MustCompile(`-\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(Z|[
 // kept here is the conservative one.
 var unsafeForKeyName = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
 
-// sshKeyName derives the name a key is stored under from iplane's key
-// comment (`iplane-<operator>-<provider>-<rfc3339>`).
+// sshKeyName derives the name a key is stored under: iplane's key comment
+// with the RFC3339 timestamp dropped, plus a short digest of the public key.
 //
-// The timestamp is dropped deliberately. Keeping it would give every
-// regenerated keypair a new name, so a wiped keystore would leave the
-// account accumulating iplane-prefixed keys and Spawn would have no way to
-// tell which one the current private half matches. Dropping it makes the
-// name stable per operator and provider, which turns re-registration into a
-// replace.
+// Two forces pull on this name and the digest satisfies both.
 //
-// Lambda bounds the field at 1..64 characters, so the result is sanitized
-// and truncated, and an empty comment falls back to a fixed name rather
-// than an empty one the API would reject.
-func sshKeyName(comment string) string {
+// The timestamp goes, because keeping it would give every re-registration of
+// the *same* key a new name and the account would accumulate duplicates of
+// one key. The digest arrives, because without it two *different* keypairs
+// collide on one name, and resolving that collision means deleting, which
+// Lambda refuses while a running instance references the key (#442). With the
+// digest, re-registering an unchanged key is a no-op and a regenerated
+// keypair is simply a second entry.
+//
+// The tradeoff is that the name no longer identifies the operator on its own,
+// so Spawn cannot pick by prefix and the Provider remembers what it
+// registered. See rememberKeyName.
+//
+// Lambda bounds the field at 1..64 characters. The readable half is truncated
+// to make room rather than the digest being shortened: two operators whose
+// ids share a long prefix still get distinct names, where a truncated digest
+// would put them back in collision.
+func sshKeyName(comment string, publicKey []byte) string {
+	sum := sha256.Sum256(publicKey)
+	digest := hex.EncodeToString(sum[:4])
+
 	base := rfc3339Suffix.ReplaceAllString(strings.TrimSpace(comment), "")
 	base = strings.Trim(unsafeForKeyName.ReplaceAllString(base, "-"), "-")
 	if base == "" {
-		return "iplane-key"
+		base = "iplane-key"
 	}
-	if len(base) > 64 {
-		base = strings.TrimRight(base[:64], "-")
+	if limit := 64 - len(digest) - 1; len(base) > limit {
+		base = strings.TrimRight(base[:limit], "-")
 	}
-	return base
+	return base + "-" + digest
 }
 
 // listSSHKeys returns every key stored on the operator's Lambda account.
@@ -125,13 +163,4 @@ func (p *Provider) listSSHKeys(ctx context.Context) ([]apiSSHKey, error) {
 		return nil, err
 	}
 	return resp.Data, nil
-}
-
-// deleteSSHKey removes one stored key by id.
-func (p *Provider) deleteSSHKey(ctx context.Context, id string) error {
-	req, err := p.client.newReq(http.MethodDelete, pathSSHKeys+"/"+id, nil, nil)
-	if err != nil {
-		return err
-	}
-	return skhttp.CallVoid(ctx, req, p.client.callOpts()...)
 }
