@@ -57,13 +57,20 @@ it: display name, card count, price, and the card memory parsed out of
 `gpu_description`. Refreshing the catalog means re-recording the fixture
 and moving both together, which is the point.
 
-**A consequence worth knowing.** With the A100 SXM4 correctly at 40 GB,
-the cheapest Lambda shape clearing 80 GB is the GH200, and the GH200 is
-arm64. A one-card `class: large` request therefore resolves an arm64 box
-first, and an x86 engine image will not start on it. Nothing in
-`ResourceRequirements` carries architecture, so the resolver cannot filter
-on it yet; `Candidate.Architecture` reports the fact and an operator has
-to read it.
+**A consequence worth knowing, and the reason two tickets exist.** With the
+A100 SXM4 correctly at 40 GB, the cheapest Lambda shape clearing 80 GB is
+the GH200, and the GH200 is arm64. A one-card `class: large` request
+therefore resolves an arm64 box first, and an x86 engine image will not
+start on it.
+
+`ResourceRequirements.architecture` and `--arch` closed that for an operator
+who knows their image's platforms (#390), and the deploy path now reads them
+off the image's registry so an operator who does not is covered too (#405).
+`archtrap_test.go` pins both halves against this catalog: it asserts that the
+cheapest 80 GB shape is still the arm64 GH200, and that stating amd64 keeps
+it out. **If a catalog refresh moves that, the test goes red on purpose** and
+somebody should re-derive whether the trap still exists here rather than
+updating the expectation.
 
 ## Multi-GPU shapes, and the two that stay out
 
