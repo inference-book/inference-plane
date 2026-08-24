@@ -55,6 +55,7 @@ type Service struct {
 	keyStore   keyEnsurer
 	executor   DeploymentExecutor
 	modelStore modelstores.ModelStore
+	imageArch  ImageArchSource
 	operatorID string
 	clock      func() time.Time
 
@@ -160,6 +161,17 @@ func WithKeyStore(k keyEnsurer) Option {
 // so typos / gated-access errors surface BEFORE a pod is provisioned.
 func WithModelStore(ms modelstores.ModelStore) Option {
 	return func(s *Service) { s.modelStore = ms }
+}
+
+// WithImageArchSource configures the reader that answers which CPU
+// architectures an engine image supports, so a deployment that stated no
+// --arch is still kept off a host the image cannot run on (#405).
+//
+// Optional. Unset means the Service behaves as it did before: the operator's
+// stated architecture is the only one it knows, and an unaware operator can
+// still rent an arm64 host for an x86 image.
+func WithImageArchSource(src ImageArchSource) Option {
+	return func(s *Service) { s.imageArch = src }
 }
 
 // WithTouchDebounceInterval overrides the minimum wall-clock gap
@@ -1273,6 +1285,14 @@ func (s *Service) CreateDeployment(ctx context.Context, req *provisionerv1.Creat
 	if err := s.expertShapeCheck(ctx, req); err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
+
+	// Ask the registry what the engine image can run on, and fill it in for
+	// any replica whose requirements did not say (#405). Nothing downstream
+	// changes: the SKU resolver and the candidate filter already drop an
+	// incompatible shape, and this supplies the input neither could obtain.
+	// Before budgetCheck because it costs a network call and a refused
+	// budget makes the answer moot.
+	s.inferImageArchitecture(ctx, req)
 
 	// Ch 12: read the plan back out of the arguments the engine is about
 	// to be given, and refuse one the cards cannot hold. After the

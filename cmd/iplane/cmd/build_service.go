@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/inference-book/inference-plane/internal/deployments/sshdocker"
+	"github.com/inference-book/inference-plane/internal/imagearch"
 	"github.com/inference-book/inference-plane/internal/provisioners"
 	"github.com/inference-book/inference-plane/internal/provisioners/external"
 	"github.com/inference-book/inference-plane/internal/provisioners/lambdalabs"
@@ -93,6 +94,12 @@ func buildLocalService(store *file.Store, operatorID string, extra ...provisione
 		provisioners.WithKeyStore(keyStore),
 		provisioners.WithDeploymentExecutor(executor),
 		provisioners.WithModelStore(modelStoreForCLI()),
+		// Reads the engine image's supported architectures from its
+		// registry, so a deploy that stated no --arch is still kept off a
+		// host the image cannot run on (#405). Fails open: an unreachable
+		// or rate-limited registry leaves provisioning exactly as it was.
+		// IPLANE_SKIP_IMAGE_ARCH=1 turns it off for an air-gapped run.
+		provisioners.WithImageArchSource(imageArchSourceForCLI()),
 	}
 	// Where an engine's agent should register. Not inferred from the listen
 	// address: a daemon on :8080 behind NAT cannot see its own reachable
@@ -104,6 +111,20 @@ func buildLocalService(store *file.Store, operatorID string, extra ...provisione
 	}
 	opts = append(opts, extra...)
 	return provisioners.New(providers, store, operatorID, opts...), nil
+}
+
+// imageArchSourceForCLI builds the registry reader, or nil when the operator
+// has turned it off.
+//
+// The opt-out exists for the same reason IPLANE_SKIP_MODEL_VALIDATION does:
+// an offline or firewalled run should not have to wait out a network call
+// whose answer it will not get. Without the flag the reader is still safe
+// there, since it fails open, but it costs a timeout per deploy.
+func imageArchSourceForCLI() provisioners.ImageArchSource {
+	if os.Getenv("IPLANE_SKIP_IMAGE_ARCH") == "1" {
+		return nil
+	}
+	return imagearch.New()
 }
 
 // engineReadyTimeout resolves how long a deploy may take to start serving.
