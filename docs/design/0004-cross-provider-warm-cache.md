@@ -36,31 +36,50 @@ persistent-volume primitive to hang them on.
 | provider | persistent volume | create via API | stage | mount | verdict |
 | --- | --- | --- | --- | --- | --- |
 | **RunPod** | network volumes | yes (`POST /networkvolumes`) | CPU pod + v2 logs | `networkVolumeId` | **works today** |
-| **Lambda** | persistent filesystems (region-locked) | **NO — `POST /file-systems` → 405**, dashboard-only | GPU instance (no CPU tier) + SSH | sshdocker `-v` | find-only, manual pre-create |
+| **Lambda** | persistent filesystems (region-locked) | **UNVERIFIED — the 405 was on the wrong path, see #432** | GPU instance (no CPU tier) + SSH | sshdocker `-v` | find-only, manual pre-create |
 | **AWS / GCP** | EBS / persistent disks + EFS/Filestore + **S3 / GCS** | yes, fully programmatic | cheap instance or bucket-native | block or object | **ideal, no adapter yet** (v0.3) |
 | **Vast** | host-local disk, mostly ephemeral | n/a | n/a | n/a | genuinely weak (marketplace) |
 
 Key specifics:
 
-- **Lambda filesystem create is not in the API.** `GET /file-systems`
-  works (200), `POST /file-systems` returns 405. Lambda's docs list
-  *instance* create/terminate as programmatic but filesystems as
-  console-managed. So a Lambda `VolumeManager` can only implement
-  `EnsureVolume` as **find-by-name** and must error with "create the
-  filesystem in the Lambda console first" when absent. Every other seam
-  (stage, mount) is buildable: Lambda has a fitting GPU (`gpu_1x_gh200`,
-  96 GB, FP8-native, `us-east-3` had capacity) and the sshdocker `-v`
-  mount already exists.
+- **Lambda filesystem create is not in the API. Superseded 2026-08-24; see
+  #432 before relying on this.** The finding was that `GET /file-systems`
+  works (200) and `POST /file-systems` returns 405, so a Lambda
+  `VolumeManager` could only implement `EnsureVolume` as **find-by-name**
+  and would have to error with "create the filesystem in the Lambda console
+  first" when absent.
+
+  Lambda's published OpenAPI document (v1.10.0, read 2026-08-24) lists both
+  spellings and only one of them is hyphenated: `GET /api/v1/file-systems`,
+  `POST /api/v1/filesystems`, `DELETE /api/v1/filesystems/{id}`. The 405 was
+  therefore fired at a path that has never had a POST, and the create verb
+  lives at the unhyphenated sibling. Nothing has been created through either,
+  so the conclusion may still hold for a reason nobody has looked for. What is
+  certain is that the evidence recorded for it was the wrong request. #432
+  probes it.
+
+  Every other seam (stage, mount) is buildable either way: Lambda has a
+  fitting GPU (`gpu_1x_gh200`, 96 GB, FP8-native, `us-east-3` had capacity)
+  and the sshdocker `-v` mount already exists.
 - **Lambda has no CPU-only instance tier**, so staging rents a GPU box
   just to download. RunPod stages on a ~$0.06/hr CPU pod; the Lambda
   equivalent is a GPU instance. Staging cost is one-time (amortized over
   warm deploys) but higher.
-- **Lambda's base deploy path is unvalidated live.** The adapter
-  (`internal/provisioners/lambdalabs/`) implements the compute Provisioner
-  (Spawn/Describe/Terminate/List, HTTP-Basic) and deploys via the shared
-  sshdocker executor, but has almost certainly never run against a live
-  Lambda VM. The RunPod warm-cache path shipped "done" and still had seven
-  live defects this session; assume Lambda's does too.
+- **Lambda's base deploy path is unvalidated live, and the prediction paid
+  out.** The adapter (`internal/provisioners/lambdalabs/`) implements the
+  compute Provisioner (Spawn/Describe/Terminate/List, HTTP-Basic) and deploys
+  via the shared sshdocker executor, and has still never run against a live
+  Lambda VM. The RunPod warm-cache path shipped "done" and had seven live
+  defects, and this doc guessed Lambda's would too.
+
+  Three were found by reading rather than by renting (#427, PR 429), and the
+  first one alone means the path could not have worked: the adapter had no
+  `KeyRegistrar` despite the package doc claiming one, so the VM booted
+  holding whichever key the account listed first while the deploy path
+  presented iplane's own. `WaitForSSHReady` was configured and never
+  implemented. `preempted` mapped to PENDING, so a reclaimed box would have
+  been waited out for the full engine-ready deadline. The rental itself is
+  still owed, and #427 tracks what only hardware can settle.
 
 ## Why big clouds are the real answer
 
