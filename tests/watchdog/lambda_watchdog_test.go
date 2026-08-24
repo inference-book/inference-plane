@@ -28,10 +28,16 @@ import (
 	"time"
 )
 
+type lambdaTag struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
+}
+
 type lambdaInstance struct {
-	ID     string `json:"id"`
-	Name   string `json:"name"`
-	Status string `json:"status"`
+	ID     string      `json:"id"`
+	Name   string      `json:"name"`
+	Status string      `json:"status"`
+	Tags   []lambdaTag `json:"tags"`
 }
 
 // fakeLambda serves the two endpoints the guard calls and records every
@@ -273,5 +279,33 @@ func TestGuardTerminatesPastMaxLifetime(t *testing.T) {
 	}
 	if got := f.terminations(); len(got) != 1 || got[0] != "i-1" {
 		t.Errorf("terminated = %v, want [i-1]\n%s", got, out)
+	}
+}
+
+// The instance name is a display field an operator can change from the
+// console. A box renamed after it was rented is still ours, and the tag is
+// what says so.
+func TestGuardClaimsARenamedInstanceByItsTag(t *testing.T) {
+	f, out := runGuard(t, &fakeLambda{instances: []lambdaInstance{
+		{ID: "i-1", Name: "renamed-by-hand", Status: "active", Tags: []lambdaTag{
+			{Key: "iplane-id", Value: "lambda-probe"},
+		}},
+	}}, 5*time.Minute)
+	if got := f.terminations(); len(got) != 1 || got[0] != "i-1" {
+		t.Errorf("terminated = %v, want [i-1]\n%s", got, out)
+	}
+}
+
+// A tag that is not ours claims nothing, and neither does an iplane-id tag
+// with an empty value. Positive-only cuts both ways.
+func TestGuardDoesNotClaimAForeignTag(t *testing.T) {
+	f, out := runGuard(t, &fakeLambda{instances: []lambdaInstance{
+		{ID: "i-theirs", Name: "research-cluster", Status: "active", Tags: []lambdaTag{
+			{Key: "team", Value: "platform"},
+			{Key: "iplane-id", Value: ""},
+		}},
+	}}, 5*time.Minute)
+	if got := f.terminations(); len(got) != 0 {
+		t.Errorf("terminated %v on a tag that is not ours\n%s", got, out)
 	}
 }

@@ -41,6 +41,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -188,6 +190,14 @@ func (p *Provider) Spawn(ctx context.Context, spec *provisionerv1.Spec) (*provis
 		"quantity":           1,
 		"name":               instanceNamePrefix + spec.GetId(),
 	}
+	// Ownership goes on the tags as well as the name. The name is a display
+	// field an operator can change from the console, and changing it used to
+	// be enough to hide a rented box from List and from the watchdog.
+	// The name stamp stays because rentals made before this carry nothing
+	// else, and because hack/lambda-watchdog.sh matches on it.
+	if tags := launchTags(spec.GetTags()); len(tags) > 0 {
+		launchBody["tags"] = tags
+	}
 	req, err := p.client.newReq(http.MethodPost, pathInstanceLaunch, nil, launchBody)
 	if err != nil {
 		return nil, wrapErr("spawn:launch", err)
@@ -273,6 +283,19 @@ func (p *Provider) Describe(ctx context.Context, providerID string) (*provisione
 }
 
 // List returns the operator's currently-running instances.
+//
+// Tag keys are applied match-all over the tags recovered below, which comes
+// from two places. Lambda's own `tags` array carries whatever Spawn stamped,
+// and the instance `name` still yields an id for a rental made before this
+// adapter stamped tags at all. Tags win where both answer, because the name
+// is a display field an operator can change from the console and the tags
+// are not.
+//
+// A filter key neither source recovers matches nothing, which is the honest
+// answer to a question this adapter cannot answer. Dropping such a key
+// instead returned the whole account, and the Service read the length of
+// that as evidence about one instance (#431).
+//
 // Filter keys honored:
 //   - "name-prefix" -> client-side filter for instances whose
 //     `name` field starts with this prefix. Lambda's list endpoint
@@ -297,16 +320,27 @@ func (p *Provider) List(ctx context.Context, filter map[string]string) ([]*provi
 		if prefix != "" && !strings.HasPrefix(a.Name, prefix) {
 			continue
 		}
-		iplaneID := strings.TrimPrefix(a.Name, instanceNamePrefix)
+		// Stamped only when the name actually carried the prefix.
+		// TrimPrefix returns the string unchanged when it does not, so a box
+		// the operator launched from the console used to come back wearing
+		// its own name as an iplane id, and the Service's ownership check
+		// reads exactly this tag.
+		tags := map[string]string{}
+		if id, ok := strings.CutPrefix(a.Name, instanceNamePrefix); ok && id != "" {
+			tags[provisioners.TagID] = id
+		}
+		// Tags win over the name-derived id: they are what the instance was
+		// stamped with, and the name may have been changed since.
+		for _, tag := range a.Tags {
+			tags[tag.Key] = tag.Value
+		}
 		out = append(out, &provisionerv1.InstanceRef{
 			ProviderId:    a.ID,
 			ProviderState: a.Status,
-			Tags: map[string]string{
-				provisioners.TagID: iplaneID,
-			},
+			Tags:          tags,
 		})
 	}
-	return out, nil
+	return provisioners.FilterRefs(out, provisioners.TagsOnly(filter, "name-prefix")), nil
 }
 
 // describeOne is the single-instance describe helper, shared by
@@ -410,6 +444,38 @@ func (p *Provider) instanceFromAPI(api *apiInstance, originalSpec *provisionerv1
 		inst.Ssh = sshTargetFor(api.IP)
 	}
 	return inst
+}
+
+// lambdaTagKey is Lambda's own bound on a tag key. A key outside it fails
+// the launch with a 400.
+var lambdaTagKey = regexp.MustCompile(`^[a-z][a-z0-9-:]{0,54}$`)
+
+// launchTags renders the Spec's tags into Lambda's key/value array, dropping
+// any the vendor would reject.
+//
+// Dropping rather than refusing is deliberate. A tag is bookkeeping and a
+// launch is the thing the operator actually asked for, so failing the rent
+// over an unusable key would trade the expensive half for the cheap one. The
+// two keys iplane stamps itself always pass; this only bites a caller-supplied
+// tag, and such a tag is absent from the instance rather than silently
+// altered.
+//
+// Returns nil for an empty map so the caller can omit the field rather than
+// sending an empty array.
+func launchTags(tags map[string]string) []apiTag {
+	out := make([]apiTag, 0, len(tags))
+	for k, v := range tags {
+		if !lambdaTagKey.MatchString(k) || len(v) > 128 {
+			continue
+		}
+		out = append(out, apiTag{Key: k, Value: v})
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	// Stable order so a launch body is comparable between runs.
+	slices.SortFunc(out, func(a, b apiTag) int { return strings.Compare(a.Key, b.Key) })
+	return out
 }
 
 // parseVRAMFromDescription extracts a VRAM value in GB from
@@ -542,12 +608,22 @@ type instanceTypeBlock struct {
 	} `json:"specs"`
 }
 
+// apiTag is one key/value pair on an instance. Lambda bounds a key to
+// `^[a-z][a-z0-9-:]+$` at 55 characters and a value at 128, and rejects the
+// whole launch when a key is outside that, which is why Spawn filters rather
+// than forwarding whatever it was handed.
+type apiTag struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
+}
+
 type apiInstance struct {
 	ID           string            `json:"id"`
 	Name         string            `json:"name"`
 	Status       string            `json:"status"`
 	IP           string            `json:"ip"`
 	Hostname     string            `json:"hostname"`
+	Tags         []apiTag          `json:"tags"`
 	InstanceType instanceTypeBlock `json:"instance_type"`
 	Region       struct {
 		Name        string `json:"name"`

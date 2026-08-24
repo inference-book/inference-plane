@@ -134,6 +134,25 @@ an assigned address says the VM exists and says nothing about sshd. Both
 stages share `sshReadyTimeout` so the caller waits one budget rather than two
 that compound.
 
+## Ownership moved onto the tags, and the name stayed
+
+The adapter stamped `name` as `iplane-<id>` and read it back by prefix, which
+made ownership depend on a display field an operator can change from the
+console. `withSystemTags` has always put `iplane-id` and `iplane-operator` on
+the Spec before every Spawn and this adapter dropped them.
+
+Lambda's launch call takes `tags` directly, so there was never a second API
+call to justify the omission. Both are stamped now, and `List` prefers the
+tags where both answer, because a rental made before this carries only the
+name and the name may since have been changed.
+
+**A tag key outside `^[a-z][a-z0-9-:]+$` fails the whole launch with a 400**,
+so `launchTags` drops a key the vendor would reject rather than refusing to
+rent. A tag is bookkeeping and the launch is what the operator asked for;
+failing the expensive half over the cheap one is the wrong trade. The two keys
+iplane stamps itself always pass. `hack/lambda-watchdog.sh` claims an instance
+by either signal for the same reason the adapter reads both.
+
 ## The status vocabulary, checked against the vendor rather than against us
 
 Lambda publishes six instance statuses and the adapter handled five.
