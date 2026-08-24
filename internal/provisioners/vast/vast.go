@@ -14,13 +14,17 @@
 // the cheapest and rent it. RunPod's single-create-call pattern doesn't
 // fit because Vast offers come and go with marketplace availability.
 //
-// VM-style provisioning. Vast rents you a containerized GPU host with
-// SSH access; the engine container is docker-run via iplane's
-// sshdocker fallback executor (not a Deployer here). The Instance
-// returned by Spawn carries Ssh{} when the offer's machine info is
-// already populated; Describe (and WaitForSSHReady, which the Service
-// calls in the deploy path) handles the case where ssh_host arrives
-// a few seconds later.
+// Image-native provisioning since #252: Vast starts the engine image as
+// part of the rental, so deployer.go satisfies provisioners.Deployer and
+// the sshdocker fallback executor is not involved. The rental and the
+// engine container are one thing, which is why destroying the deployment
+// also releases the machine. Lambda Labs is the adapter where those are
+// still two things (see internal/provisioners/NOTES.md).
+//
+// The Instance returned by Spawn carries Ssh{} when the offer's machine
+// info is already populated; Describe (and WaitForSSHReady, which the
+// Service calls in the deploy path) handles the case where ssh_host
+// arrives a few seconds later.
 //
 // Tag stamping. Vast.ai instances have a free-form `label` field; we
 // stamp it with the prefix "iplane-<id>" so List filtering by label
@@ -57,6 +61,7 @@ package vast
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -387,9 +392,14 @@ func (p *Provider) Spawn(ctx context.Context, spec *provisionerv1.Spec) (*provis
 	return out, nil
 }
 
-// Terminate deletes a rented Vast.ai instance via DELETE /api/v0/instances/{id}.
-// 404 surfaces as ErrNotFound (the Service treats not-found as success
-// for terminate -- the desired end state matches).
+// Terminate releases a rented Vast.ai instance via DELETE
+// /api/v0/instances/{id}.
+//
+// Idempotent per the Provider contract: a 404 means the rental is already
+// in the end state this call exists to reach, so it returns nil. Every
+// other status still surfaces. Since issue 161 the coupled deployment
+// teardown calls Terminate on every replica it owns, so terminating an
+// instance the deployer already released is the routine case.
 func (p *Provider) Terminate(ctx context.Context, providerID string) error {
 	if providerID == "" {
 		return provisioners.NewProviderError(p.Name(), "terminate",
@@ -401,7 +411,11 @@ func (p *Provider) Terminate(ctx context.Context, providerID string) error {
 		return wrapErr("terminate", err)
 	}
 	if err := skhttp.CallVoid(ctx, req, p.client.callOpts()...); err != nil {
-		return wrapErr("terminate", err)
+		wrapped := wrapErr("terminate", err)
+		if errors.Is(wrapped, provisioners.ErrNotFound) {
+			return nil
+		}
+		return wrapped
 	}
 	return nil
 }

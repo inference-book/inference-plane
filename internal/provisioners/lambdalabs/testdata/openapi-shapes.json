@@ -1,0 +1,56 @@
+{
+  "_source": "https://cloud.lambdalabs.com/api/v1/openapi.json",
+  "_recorded": "2026-08-24",
+  "_api_version": "1.10.0",
+  "_note": "Trimmed to the shapes internal/provisioners/lambdalabs decodes. Re-record with the whole file when refreshing, and move the test with it.",
+  "instance_status_enum": [
+    "booting",
+    "active",
+    "unhealthy",
+    "terminated",
+    "terminating",
+    "preempted"
+  ],
+  "instance_properties": [
+    "actions",
+    "file_system_mounts",
+    "file_system_names",
+    "firewall_rulesets",
+    "hostname",
+    "id",
+    "image",
+    "instance_type",
+    "ip",
+    "jupyter_token",
+    "jupyter_url",
+    "name",
+    "private_ip",
+    "region",
+    "ssh_key_names",
+    "status",
+    "tags"
+  ],
+  "instance_type_properties": [
+    "architecture",
+    "description",
+    "gpu_description",
+    "name",
+    "price_cents_per_hour",
+    "specs"
+  ],
+  "instance_type_specs_properties": [
+    "gpus",
+    "memory_gib",
+    "storage_gib",
+    "vcpus"
+  ],
+  "region_properties": [
+    "description",
+    "name"
+  ],
+  "ssh_key_properties": [
+    "id",
+    "name",
+    "public_key"
+  ]
+}

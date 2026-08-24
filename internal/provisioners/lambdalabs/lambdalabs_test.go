@@ -37,11 +37,9 @@ func TestSpawn_HappyPath(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/ssh-keys", func(w http.ResponseWriter, r *http.Request) {
 		assertBasicAuth(t, r)
-		writeJSON(w, sshKeysResponse{Data: []struct {
-			ID        string `json:"id"`
-			Name      string `json:"name"`
-			PublicKey string `json:"public_key"`
-		}{{ID: "k1", Name: "OperatorKey", PublicKey: "ssh-rsa AAAA..."}}})
+		writeJSON(w, sshKeysResponse{Data: []apiSSHKey{
+			{ID: "k1", Name: "OperatorKey", PublicKey: "ssh-rsa AAAA..."},
+		}})
 	})
 	mux.HandleFunc("/api/v1/instance-operations/launch", func(w http.ResponseWriter, r *http.Request) {
 		assertBasicAuth(t, r)
@@ -161,20 +159,37 @@ func TestTerminate_OK(t *testing.T) {
 	}
 }
 
-// TestTerminate_NotFound: 404 returned from Lambda surfaces as
-// ProviderError wrapping ErrNotFound (idempotent destroy contract).
-func TestTerminate_NotFound(t *testing.T) {
+// A Lambda instance the vendor no longer has is the end state Terminate
+// exists to reach, so a 404 is success. The Provider contract says
+// Terminate is idempotent, and issue 161's coupled teardown now calls it
+// on every replica: without this, destroying a deployment whose VM Lambda
+// already reaped reports a teardown failure over nothing.
+func TestTerminate_NotFoundIsSuccess(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/instance-operations/terminate", func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, `{"error":{"code":"global/object-does-not-exist","message":"Instance not found"}}`, http.StatusNotFound)
 	})
 	p, _ := newTestProvider(t, mux)
-	err := p.Terminate(context.Background(), "missing")
-	if err == nil {
-		t.Fatal("expected NotFound error")
+	if err := p.Terminate(context.Background(), "missing"); err != nil {
+		t.Fatalf("Terminate on an already-gone instance = %v, want nil", err)
 	}
-	if !errors.Is(err, provisioners.ErrNotFound) {
-		t.Errorf("error should wrap ErrNotFound: %v", err)
+}
+
+// Every other failure still surfaces. The idempotency carve-out is
+// not-found and nothing else: swallowing a 403 would report a clean
+// teardown over a VM the key could not reach.
+func TestTerminate_OtherErrorsStillSurface(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/instance-operations/terminate", func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, `{"error":{"code":"global/forbidden","message":"nope"}}`, http.StatusForbidden)
+	})
+	p, _ := newTestProvider(t, mux)
+	err := p.Terminate(context.Background(), "inst-1")
+	if err == nil {
+		t.Fatal("expected a 403 to surface as an error")
+	}
+	if errors.Is(err, provisioners.ErrNotFound) {
+		t.Errorf("a 403 must not be mapped to ErrNotFound: %v", err)
 	}
 }
 
@@ -263,6 +278,11 @@ func TestMapLambdaState(t *testing.T) {
 		"":            provisionerv1.InstanceState_INSTANCE_STATE_PENDING,
 		"terminating": provisionerv1.InstanceState_INSTANCE_STATE_TERMINATING,
 		"terminated":  provisionerv1.InstanceState_INSTANCE_STATE_TERMINATED,
+		// A preempted VM is gone and is not coming back. Mapping it to the
+		// unknown-value default made the caller wait out the whole
+		// engine-ready deadline on a machine that no longer existed (427).
+		"preempted":   provisionerv1.InstanceState_INSTANCE_STATE_TERMINATED,
+		"  ACTIVE  ":  provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE,
 		"weird-state": provisionerv1.InstanceState_INSTANCE_STATE_PENDING,
 	}
 	for in, want := range cases {
