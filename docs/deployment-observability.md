@@ -49,6 +49,14 @@ capture, and the histogram could not say which was slow. Two GLM-5.2 deploys
 spent an hour each in it and the record still cannot attribute either. See
 `internal/provisioners/staging.go`.
 
+There is a second source that needs no cooperation from anything on the box.
+`Instance.usage` carries what the *provider* reports (disk used, GPU
+utilisation, bytes received), read from the same status call the ladder
+already makes. It has no preconditions: no agent, no credential, no shell. It
+is what distinguishes a slow download from a hung collective, since busy cards
+with a flat disk is not a fetch running late. See
+`internal/provisioners/NOTES.md`.
+
 The engine itself cannot help here: vLLM hands `snapshot_download` a disabled
 tqdm, so a container pulling a 474 GB checkpoint prints nothing at all until
 the fetch completes. Streaming its logs harder buys the load half and shows a

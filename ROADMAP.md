@@ -214,6 +214,14 @@ creator), `hack/deploy-watch.sh` (bytes, rate, ETA per replica per tick),
 abandons a hopeless download), and the `engine:download` / `engine:load`
 split behind them (#413).
 
+**The fifth attempt was the first one explained.** A B200 hung in NCCL
+initialisation: 188 MB on a 900 GB disk, 5.7 GB inbound and eight cards at
+86%, with the engine silent for 23 minutes after announcing its NCCL version.
+Busy cards with a flat disk is a collective that never completed, and no
+individual signal looked wrong. Detection now lives outside the engine
+(#424), because Torch's own NCCL watchdog is enabled by default and does not
+cover initialisation.
+
 **The number that matters is now measured.** On a B200 advertising 63.5
 Gbps, GLM-5.2's 474.2 GB checkpoint downloads at a sustained ~1.03 GB/s,
 about eight minutes. The hosts behind the two timeouts were doing ~134

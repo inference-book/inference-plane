@@ -194,3 +194,54 @@ to. A machine whose provider id was never recorded cannot be terminated
 through the API at all, which is the same hole #161 describes from the
 other side, and the instance record is deliberately left behind so an
 operator has something to act on.
+
+## A multi-GPU engine can hang before it fetches a byte, and every signal reads fine
+
+An eight-card B200 deploy sat in `engine:init` for half an hour. The
+provider's status API said 188 MB on a 900 GB disk, 5.7 GB inbound (the
+container image, not 474 GB of weights) and **86% GPU utilisation**. The last
+engine log line, 23 minutes stale, was `vLLM is using nccl==2.30.7`.
+
+Busy cards with a flat disk is a collective that never completed. vLLM
+initialises NCCL across the ranks before loading weights, so a rendezvous that
+hangs burns GPU in a busy-wait having fetched nothing. The failure belongs to
+the parallelism rather than the model: a single-card deploy has no collective
+to hang in.
+
+What makes it nasty is that no individual signal looks wrong. `/health` not
+answering reads as "still starting". 86% utilisation reads as "working". The
+container is up and the process is alive. **Utilisation measures effort, not
+progress**, and the only way to tell them apart is to watch something that
+should be *changing*.
+
+**Torch's NCCL watchdog does not catch this, and it is already on.** Verified
+in `torch/csrc/distributed/c10d` at v2.13.0, which `vllm:v0.27.1` pins:
+`TORCH_NCCL_ASYNC_ERROR_HANDLING` defaults to 3,
+`TORCH_NCCL_ENABLE_MONITORING` to true, `TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC` to
+480. It watches collectives *in flight*, and initialisation has no work item
+yet; NCCL communicators are created blocking by default, so init has no
+timeout either. Setting any of those is cargo. Two of them were proposed here
+before anyone checked.
+
+Detection is the mitigation, and it lives outside the engine:
+`hack/measure-run.sh` abandons a deploy whose cards stay busy while the disk
+stays flat. `NCCL_DEBUG=INFO` (set by that script) makes the next one name the
+stage it stopped at instead of going silent after one line.
+
+## The provider already knows things nothing was asking it
+
+The readings that diagnosed the hang were in the status response the deploy
+path fetches every tick to advance its phase. Nothing read them.
+`Instance.usage` (`ResourceUsage`) now carries disk used, GPU utilisation and
+bytes received, filled by the Vast adapter from that same record.
+
+The design point generalises past this bug: **prefer the observation with the
+fewest preconditions.** The SSH path needed a routable address, a recorded
+address, a registered key and a reachable box, and each missing one turned the
+observation into silence rather than into an error. The provider's own API
+needs none of them, and it answers on deploys where the shell cannot.
+
+`available` on that message carries the same weight it does on
+`InterconnectHealth` and `StagingProgress`. That is three signals now where
+absent and zero had to be kept apart, which makes it a rule rather than a
+coincidence: a fabricated zero looks exactly like a confident measurement.
