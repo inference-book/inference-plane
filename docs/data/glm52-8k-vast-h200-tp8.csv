@@ -1,0 +1,27 @@
+# schema_version 1
+# captured_at 2026-08-24T17:18:35Z
+# iplane_version c1df237
+# model cyankiwi/GLM-5.2-AWQ-INT4
+# endpoint http://localhost:18080
+# prompt_tokens 8192
+# max_tokens 512
+# stream true
+# measure_seconds 600
+# window_seconds 30
+# tolerance 0.1
+# stable_windows 3
+# provider vast
+# provider_instance_id 48579853
+# gpu_sku H200
+# gpu_count 8
+# replicas 1
+# plan tp8
+# hourly_rate_usd 32.87828947368422
+# engine_image vllm/vllm-openai:v0.27.1
+# engine_args --max-model-len=131072 --max-num-seqs=32 --tensor-parallel-size=8
+# provenance_note hardware lines recovered from state.json; the sweep ran without --target
+concurrency,achieved_batch,requests_per_sec,tokens_per_sec,successes,errors,completion_tokens,latency_p50_ms,latency_p95_ms,ttft_samples,ttft_p50_ms,ttft_p95_ms,itl_samples,itl_p50_ms,itl_p95_ms,warmup_sec,discarded_requests,steady_state
+1,0.9971392440808267,0.19333299199298043,77.39486335498303,116,0,46437,6325,6367,54,3974,4046,25023,0.003,0.008,90.000806542,15,true
+2,1.9811150848854593,0.33166606962186085,129.5331001558343,199,0,77720,7319,8147,68,4846,5640,30405,0.002,0.005,150.000676,49,true
+4,3.963981527626097,0.49833247194489166,189.98633826736486,299,0,113992,9590,11934,111,6087,7662,49394,0.002,0.005,180.001052083,82,true
+8,7.910048387571651,0.6599987949522002,251.02620833464795,396,0,150616,14618,17786,164,9145,12166,73428,0.002,0.006,120.001073292,73,true

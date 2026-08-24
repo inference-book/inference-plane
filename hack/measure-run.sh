@@ -522,14 +522,24 @@ for pt in $(echo "$PROMPT_TOKENS" | tr ',' ' '); do
   THIS_DURATION=$(echo "$SWEEP_DURATION" | tr ',' ' ' | awk -v i=$((CTX_INDEX + 1)) '{print (i <= NF) ? $i : $NF}')
   CTX_INDEX=$((CTX_INDEX + 1))
   log "  context ${pt} (measuring ${THIS_DURATION} per level)"
-  # --url, explicitly. `iplane load` defaults it to localhost:8080 and this
-  # script deliberately serves on $PORT (18080), so omitting it fires the
-  # whole sweep at a closed port: an empty csv, no traffic, and a rented box
-  # billing through all of it. Cost 13 minutes at $32.88/hr to find, because
-  # the failure is invisible from the log -- the sweep header prints the URL
-  # it is about to use and then simply never reports a level.
+  # --target AND --service-url, both explicitly, and neither is optional.
+  #
+  # Routing: `iplane load` defaults its URL to localhost:8080 and this script
+  # deliberately serves on $PORT (18080), so passing neither fires the whole
+  # sweep at a closed port: an empty csv, no traffic, and a rented box billing
+  # through all of it. Cost 13 minutes at $32.88/hr to find, because the
+  # failure is invisible from the log -- the sweep header prints the URL it is
+  # about to use and then simply never reports a level.
+  #
+  # Provenance: sweepFleetProvenance() returns an EMPTY struct unless BOTH
+  # --target and --service-url are set, and it returns it silently, before the
+  # warning that names the problem. So the flat --url form routes correctly
+  # and still writes an artifact with no provider, no gpu_sku, no gpu_count
+  # and no plan, which is precisely the hardware #347 says a figure's data
+  # file has to carry. A sweep that measures the right box and cannot say
+  # which box it was costs the same money and is worth less.
   "$IPLANE" load --sweep "$LADDER" --prompt-tokens "$pt" --model "$MODEL" \
-    --url "$SERVICE_URL" \
+    --target "$DEP_ID" --service-url "$SERVICE_URL" \
     --stream --max-tokens "$SWEEP_MAX_TOKENS" \
     --sweep-window "$SWEEP_WINDOW" --sweep-stable-windows "$SWEEP_STABLE_WINDOWS" \
     --sweep-duration "$THIS_DURATION" --sweep-warmup-max "$SWEEP_WARMUP_MAX" \
