@@ -90,6 +90,73 @@ for. `gpu_1x_rtx6000` is the 24 GB Turing Quadro, not the 48 GB RTX 6000
 Ada that `FamilyRTX6000Ada` names. Both stay rentable through an explicit
 `--gpu-sku`.
 
+## The key the VM boots with, and the key iplane holds
+
+Until #427 this adapter had no `KeyRegistrar`, and the package doc said it
+did. The Service skips registration for a provider that is not one, so
+iplane's own key never reached the account. `Spawn` then attached whatever
+key `/ssh-keys` listed first, which on a real account is the operator's own,
+and the deploy path handed `sshdocker` the private half of a key iplane had
+generated locally. The two were never the same key. **The deploy path could
+not have worked on hardware, and no unit test could see it**, because each
+half is correct on its own and only the pair is wrong.
+
+`keyregistrar.go` closes it. Lambda's key model is named objects rather than
+RunPod's single `authorized_keys` blob, so the shape is list, compare,
+replace, and the comparison is on parsed key material so a differing comment
+is not a differing key.
+
+**The stored name deliberately drops the timestamp.** iplane's key comment is
+`iplane-<operator>-<provider>-<rfc3339>`, and keeping the timestamp would
+give every regenerated keypair a new name, so a wiped keystore would leave
+the account accumulating `iplane-` keys with no way to tell which one the
+current private half matches. The derived name is stable per operator and
+provider, which turns re-registration into a replace. Lambda bounds the field
+at 1..64 characters, so it is sanitized and truncated.
+
+`Spawn` prefers the `iplane-` key and falls back to the account's first key,
+which keeps an operator driving the adapter by hand working the way it always
+did.
+
+## The SSH readiness gap was measured and then not waited for
+
+`WithSSHReadyWait` and `WithSSHProbe` have been on the Provider since the
+adapter landed, along with a comment putting Lambda's gap at "usually under
+60s". Nothing read either field: there was no `WaitForSSHReady`, so Lambda
+did not satisfy `SSHReadyWaiter` and the Service's wait was a no-op. Whatever
+address `Spawn`'s post-launch describe happened to return went straight to
+the executor, and Lambda's describe can answer with a booting instance and an
+empty `ip`.
+
+`sshready.go` implements it as two stages under one deadline, matching
+runpod's: poll describe until `ip` is non-empty, then probe the port, because
+an assigned address says the VM exists and says nothing about sshd. Both
+stages share `sshReadyTimeout` so the caller waits one budget rather than two
+that compound.
+
+## The status vocabulary, checked against the vendor rather than against us
+
+Lambda publishes six instance statuses and the adapter handled five.
+`preempted` fell through to the unknown-value default, which is `PENDING`,
+and `PENDING` is the one answer that costs something: the caller waits out
+the whole engine-ready deadline on a machine that is gone. Lambda sells no
+reclaimable tier, so a preemption is the vendor taking the box back rather
+than anything an operator asked for.
+
+`testdata/openapi-shapes.json` is the vendor's own OpenAPI document trimmed
+to the shapes this adapter decodes, recorded 2026-08-24 against API version
+1.10.0. Two tests read it. One checks that every `json` tag the adapter
+declares names a field Lambda actually publishes, because a tag that does not
+decodes to the zero value on every response and **a fabricated zero looks
+exactly like a measurement**. The other checks the status mapping against the
+published enum in both directions. Refreshing means re-recording the fixture
+and moving the code with it.
+
+Worth knowing from the same reading: the instance record carries a
+first-class `tags` array, which would be a better ownership signal than the
+`name` field this adapter stamps, and it carries no timestamp of any kind,
+which is why `hack/lambda-watchdog.sh` ages an instance from first sight.
+
 ## What Lambda does not sell
 
 **No reclaimable tier.** No bid, spot, preemptible or interruptible concept
@@ -111,9 +178,15 @@ API-provisionable nor on-demand, and a weekly invoice is a different
 commercial shape from the per-second rentals the cost model is built on.
 Checked 2026-08-21; see the comment on #352.
 
-**No API-creatable filesystems.** `POST /file-systems` returns 405; persistent
-filesystems exist and are dashboard-only. This is why Lambda has no
-`VolumeManager` and why the warm-cache path cannot reach it. See
+**No API-creatable filesystems, and this one wants re-checking.** `POST
+/file-systems` returns 405, which is what the warm-cache design recorded. But
+the published OpenAPI document (read 2026-08-24, v1.10.0) lists `POST
+/api/v1/filesystems` and `DELETE /api/v1/filesystems/{id}` **without the
+hyphen**, alongside the hyphenated `GET /api/v1/file-systems` the 405 came
+from. So the 405 may have been the wrong path rather than a missing
+capability. Nothing has been created through it and the claim below is
+unverified either way; Lambda still has no `VolumeManager` and the warm-cache
+path still cannot reach it. See
 `docs/design/0004-cross-provider-warm-cache.md`.
 
 ## min_ram_gb is unenforced here

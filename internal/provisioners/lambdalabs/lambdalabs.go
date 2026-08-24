@@ -29,13 +29,16 @@
 //
 // SSH key model. Lambda's API has first-class SSH key management:
 // keys live as named objects with their own endpoint, and Spawn
-// references them by name (`ssh_key_names: ["GMac"]`). The
-// KeyRegistrar implementation uploads the operator's iplane-managed
-// key once; subsequent Spawn calls reference it by name.
+// references them by name (`ssh_key_names: ["iplane-<operator>-
+// lambdalabs"]`). keyregistrar.go uploads iplane's own key under a
+// name derived from the key comment, and Spawn prefers that name over
+// anything else on the account. See keyregistrar.go for why the two
+// halves have to agree.
 package lambdalabs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -55,6 +58,9 @@ const (
 	// `name` field. List filtering uses it to find operator-owned
 	// instances on the account.
 	instanceNamePrefix = "iplane-"
+
+	// sshUser is the login on every image Lambda ships.
+	sshUser = "ubuntu"
 
 	// defaultRegion is the fallback when spec.region is empty.
 	// us-east-1 is one of Lambda's larger regions; capacity varies
@@ -166,13 +172,7 @@ func (p *Provider) Spawn(ctx context.Context, spec *provisionerv1.Spec) (*provis
 		region = defaultRegion
 	}
 
-	// Look up an existing SSH key to attach. v0.2 expects the
-	// operator to have run EnsurePublicKey (via KeyRegistrar)
-	// earlier; the key shows up in /api/v1/ssh-keys with a
-	// well-known name. For the smoke test the operator's
-	// pre-existing key (any name) is fine -- the catalog of one
-	// key is the simplest case.
-	keyName, err := p.firstSSHKeyName(ctx)
+	keyName, err := p.launchSSHKeyName(ctx)
 	if err != nil {
 		return nil, wrapErr("spawn:ssh-keys", err)
 	}
@@ -225,9 +225,17 @@ func (p *Provider) Spawn(ctx context.Context, spec *provisionerv1.Spec) (*provis
 	return p.instanceFromAPI(api, spec, instanceTypeName), nil
 }
 
-// Terminate deletes a rented Lambda Labs instance via POST
+// Terminate releases a rented Lambda Labs VM via POST
 // /api/v1/instance-operations/terminate with the instance id in
-// `instance_ids`. 404 surfaces as ErrNotFound.
+// `instance_ids`.
+//
+// Idempotent per the Provider contract: an instance Lambda no longer has
+// (`global/object-does-not-exist`, HTTP 404) is the end state this call
+// exists to reach, so it returns nil. Every other status still surfaces,
+// because swallowing a 403 would report a clean teardown over a VM that
+// is still billing. The distinction matters more since issue 161: the
+// coupled deployment teardown calls Terminate on every replica it owns,
+// so a double-terminate is now the routine case rather than the odd one.
 func (p *Provider) Terminate(ctx context.Context, providerID string) error {
 	if providerID == "" {
 		return provisioners.NewProviderError(p.Name(), "terminate",
@@ -241,7 +249,11 @@ func (p *Provider) Terminate(ctx context.Context, providerID string) error {
 		return wrapErr("terminate", err)
 	}
 	if err := skhttp.CallVoid(ctx, req, p.client.callOpts()...); err != nil {
-		return wrapErr("terminate", err)
+		wrapped := wrapErr("terminate", err)
+		if errors.Is(wrapped, provisioners.ErrNotFound) {
+			return nil
+		}
+		return wrapped
 	}
 	return nil
 }
@@ -312,26 +324,31 @@ func (p *Provider) describeOne(ctx context.Context, providerID string) (*apiInst
 	return &resp.Data, nil
 }
 
-// firstSSHKeyName returns the name of the first SSH key registered
-// on the operator's Lambda Labs account. v0.2's Spawn references a
-// single key by name; multi-key support would mean threading a
-// preference (e.g., "iplane-<operator>") through the API.
+// launchSSHKeyName picks the key the launch call attaches to the VM.
 //
-// Returns "" + nil error when no keys are present; the caller
-// distinguishes this from an actual API failure.
-func (p *Provider) firstSSHKeyName(ctx context.Context) (string, error) {
-	req, err := p.client.newReq(http.MethodGet, pathSSHKeys, nil, nil)
+// iplane's own key wins when it is on the account, because that is the one
+// whose private half the deploy path holds. Anything else and the VM boots
+// with a key sshdocker cannot present, which is a rental that bills and
+// cannot be reached.
+//
+// The account's first key stays the fallback for an operator driving the
+// adapter by hand, who has never run EnsurePublicKey and wants their own
+// key attached. Returns "" with a nil error when the account has no keys at
+// all; the caller tells that apart from an API failure.
+func (p *Provider) launchSSHKeyName(ctx context.Context) (string, error) {
+	keys, err := p.listSSHKeys(ctx)
 	if err != nil {
 		return "", err
 	}
-	resp, err := skhttp.Call[sshKeysResponse](ctx, req, p.client.callOpts()...)
-	if err != nil {
-		return "", err
+	for _, k := range keys {
+		if strings.HasPrefix(k.Name, provisioners.ReservedIDPrefix) {
+			return k.Name, nil
+		}
 	}
-	if len(resp.Data) == 0 {
+	if len(keys) == 0 {
 		return "", nil
 	}
-	return resp.Data[0].Name, nil
+	return keys[0].Name, nil
 }
 
 // instanceFromAPI renders a Lambda Labs instance record into the
@@ -390,11 +407,7 @@ func (p *Provider) instanceFromAPI(api *apiInstance, originalSpec *provisionerv1
 		Metadata: lambdaMetadata(api),
 	}
 	if api.IP != "" {
-		inst.Ssh = &provisionerv1.SshTarget{
-			Host: api.IP,
-			Port: 22,
-			User: "ubuntu", // Lambda Labs default SSH user
-		}
+		inst.Ssh = sshTargetFor(api.IP)
 	}
 	return inst
 }
@@ -448,29 +461,44 @@ func lambdaMetadata(api *apiInstance) map[string]*structpb.Value {
 }
 
 // mapLambdaState translates Lambda's status enum into iplane's
-// InstanceState. Values verified via the API docs + probe:
+// InstanceState. The vendor publishes six values and this handles all six:
 //
 //	"booting"      -> PENDING
 //	"active"       -> ACTIVE
 //	"unhealthy"    -> ACTIVE (still rented; not a terminal state)
 //	"terminating"  -> TERMINATING
 //	"terminated"   -> TERMINATED
+//	"preempted"    -> TERMINATED
 //
-// Unknown values default to PENDING (conservative; treat as
-// not-yet-active rather than ACTIVE-by-default).
+// `preempted` used to fall through to the unknown-value default, which is
+// PENDING, and PENDING is the one answer that costs something: the caller
+// waits out the whole engine-ready deadline on a machine that is gone and
+// never coming back. Lambda sells no reclaimable tier, so a preemption is
+// the vendor taking the box back rather than anything an operator asked
+// for, which makes it worth being precise about.
+//
+// An unrecognised value still defaults to PENDING, on the reasoning that a
+// vocabulary iplane has not caught up with is more likely a new
+// intermediate state than a new terminal one. The cost of that guess is the
+// preempted case above, so a new value showing up in
+// TestMapLambdaStateCoversTheVendorsEnum is worth reading carefully.
 func mapLambdaState(status string) provisionerv1.InstanceState {
-	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "active", "unhealthy":
-		return provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE
-	case "booting", "":
-		return provisionerv1.InstanceState_INSTANCE_STATE_PENDING
-	case "terminating":
-		return provisionerv1.InstanceState_INSTANCE_STATE_TERMINATING
-	case "terminated":
-		return provisionerv1.InstanceState_INSTANCE_STATE_TERMINATED
-	default:
-		return provisionerv1.InstanceState_INSTANCE_STATE_PENDING
+	if s, ok := lambdaStates[strings.ToLower(strings.TrimSpace(status))]; ok {
+		return s
 	}
+	return provisionerv1.InstanceState_INSTANCE_STATE_PENDING
+}
+
+// lambdaStates is the mapping as data rather than as a switch, so a test can
+// compare its keys against the vendor's recorded enum. A status Lambda
+// publishes and this map omits is the drift that matters.
+var lambdaStates = map[string]provisionerv1.InstanceState{
+	"booting":     provisionerv1.InstanceState_INSTANCE_STATE_PENDING,
+	"active":      provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE,
+	"unhealthy":   provisionerv1.InstanceState_INSTANCE_STATE_ACTIVE,
+	"terminating": provisionerv1.InstanceState_INSTANCE_STATE_TERMINATING,
+	"terminated":  provisionerv1.InstanceState_INSTANCE_STATE_TERMINATED,
+	"preempted":   provisionerv1.InstanceState_INSTANCE_STATE_TERMINATED,
 }
 
 // API response shapes. Field names verified via real-API probe
@@ -482,12 +510,17 @@ type launchResponse struct {
 	} `json:"data"`
 }
 
+// apiSSHKey is one stored key on the operator's Lambda account. Named
+// rather than inline because both the launch path and the KeyRegistrar
+// read it, and the registrar has to compare the public half.
+type apiSSHKey struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	PublicKey string `json:"public_key"`
+}
+
 type sshKeysResponse struct {
-	Data []struct {
-		ID        string `json:"id"`
-		Name      string `json:"name"`
-		PublicKey string `json:"public_key"`
-	} `json:"data"`
+	Data []apiSSHKey `json:"data"`
 }
 
 type instanceTypeBlock struct {
