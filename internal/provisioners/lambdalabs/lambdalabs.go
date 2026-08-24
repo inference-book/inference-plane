@@ -206,6 +206,19 @@ func (p *Provider) Spawn(ctx context.Context, spec *provisionerv1.Spec) (*provis
 	if tags := launchTags(spec.GetTags()); len(tags) > 0 {
 		launchBody["tags"] = tags
 	}
+	// Warm-cache filesystems, named here because this is the only chance.
+	// A Lambda filesystem appears at /lambda/nfs/<name> on the VM once it
+	// is attached, and it can only be attached at launch. The sshdocker
+	// executor binds that host path into the engine container minutes
+	// later, by which time there is nothing to ask.
+	//
+	// Handles are filesystem names: see the note in volume.go on why this
+	// adapter issues the name rather than the uuid as VolumeRef.ID. The
+	// field is omitted rather than sent empty, so a cold deploy's launch
+	// body is byte-for-byte what it always was.
+	if names := spec.GetVolumeIds(); len(names) > 0 {
+		launchBody["file_system_names"] = names
+	}
 	req, err := p.client.newReq(http.MethodPost, pathInstanceLaunch, nil, launchBody)
 	if err != nil {
 		return nil, wrapErr("spawn:launch", err)

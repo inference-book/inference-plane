@@ -244,34 +244,64 @@ API-provisionable nor on-demand, and a weekly invoice is a different
 commercial shape from the per-second rentals the cost model is built on.
 Checked 2026-08-21; see the comment on #352.
 
-**Filesystems ARE API-creatable, and the four weeks we believed otherwise are
-worth the paragraph.** `docs/design/0004` recorded that `POST /file-systems`
-returns 405 and concluded Lambda has no API-creatable filesystems, which is
-why this adapter has no `VolumeManager` and why the warm-cache path cannot
-reach it.
+## Filesystems, and why the handle is a name
 
-Lambda spells the collection two ways. `GET /api/v1/file-systems` is
-hyphenated and `POST /api/v1/filesystems` is not, and only the second takes a
-create. The 405 was fired at the read path, and the wrong conclusion held
-because a 405 is a confident-sounding answer: it says the method is not
-allowed here, which reads as "the vendor does not offer this" rather than
-"you knocked on the wrong door".
+`docs/design/0004` recorded that `POST /file-systems` returns 405 and
+concluded Lambda has no API-creatable filesystems. Lambda spells the
+collection two ways: `GET /api/v1/file-systems` is hyphenated and `POST
+/api/v1/filesystems` is not, and only the second takes a write. The 405 was
+fired at the read path, and the wrong conclusion held for four weeks because
+a 405 is a confident-sounding answer (#432).
 
-Probed live 2026-08-24. Creating and deleting a filesystem both work, the
-record carries `mount_point: /lambda/nfs/<name>` derived from the name, and a
-filesystem exists independently of any instance. `file_system_names` is
-accepted by the launch call and validated **before** capacity is checked, so
-a wrong volume name costs an error rather than a billed box that mounts
-nothing. Region-locking is the vendor's own rule and its error names both the
-filesystem and the region.
+**The handle this adapter issues is the filesystem name, not the uuid.**
+`VolumeRef.ID` is opaque to everything outside the adapter, and the name is
+what the rest of Lambda's API accepts: `file_system_names` at launch takes
+names, and the mount point is derived from the name. Only DELETE wants the
+uuid, so `DeleteVolume` resolves name to uuid and nothing else has to. The
+other way round would put a lookup on the far busier launch path.
 
-What is still unverified is whether the mount appears inside the engine
-container at that path, which needs a rented box and is folded into #427.
+**Size is not a thing here.** No size at create, and the guest reports 8.0E,
+so `VolumeSpec.SizeGB` is dropped and `VolumeRef.SizeGB` stays zero. Echoing
+the requested figure back would put a number in `iplane model ls` that no
+measurement supports.
 
-The general lesson is the one worth keeping: **a 4xx tells you about the
-request, not about the vendor.** Reading a 405 as a capability statement is
-how a whole feature stayed written off. Check the published path list before
-concluding an API does not do something.
+**A filesystem cannot be deleted while an instance has it, and "terminating"
+counts.** A DELETE seconds after a terminate returns
+`filesystems/filesystem-in-use`. `DeleteVolume` reports that as a wait rather
+than a failure, because the caller's next move is to retry rather than to
+investigate.
+
+## What the mount actually is
+
+Measured on hardware 2026-08-24, two rentals, $0.24. Details in
+[docs/design/0010](../../../docs/design/0010-lambda-validation-findings.md).
+
+Attached by naming it in the launch request, and the instance record echoes
+`file_system_names` back, so the attachment is readable rather than merely
+accepted. On the host:
+
+```
+drwxr-xr-x 2 ubuntu ubuntu 0 /lambda/nfs/iplane-cache-probe
+TARGET                         SOURCE       FSTYPE   OPTIONS
+/lambda/nfs/iplane-cache-probe 120642b1-... virtiofs rw,nosuid,nodev,relatime
+```
+
+**virtiofs, not NFS**, despite the path. Owned by `ubuntu` and writable
+without sudo, which is why the sshdocker executor can bind it as that user.
+A container mounting it with `docker run -v` reads host writes and writes
+back, and the writes survive the instance: a second machine launched against
+the same filesystem read both files the first one left.
+
+**Ownership persists and is not uniform.** A container writing as root leaves
+files the `ubuntu` SSH user cannot overwrite. That matters for whether
+staging is re-runnable, and it is the first thing to check when a second pin
+of the same model behaves oddly.
+
+**The mount is two-stage, unlike either other provider.** RunPod attaches a
+volume by id when it creates the pod, one call. Here the filesystem has to be
+named at launch before the host directory exists, and only then can the
+executor bind it into the container. That is why `Spec.volume_ids` exists and
+why `Spawn` reads it: by deploy time it is minutes too late to ask.
 
 ## min_ram_gb is unenforced here
 

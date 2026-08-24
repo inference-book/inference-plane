@@ -36,7 +36,7 @@ persistent-volume primitive to hang them on.
 | provider | persistent volume | create via API | stage | mount | verdict |
 | --- | --- | --- | --- | --- | --- |
 | **RunPod** | network volumes | yes (`POST /networkvolumes`) | CPU pod + v2 logs | `networkVolumeId` | **works today** |
-| **Lambda** | persistent filesystems (region-locked) | **YES — `POST /api/v1/filesystems`**, unhyphenated (#432) | GPU instance (no CPU tier) + SSH | `file_system_names` at launch | create + find |
+| **Lambda** | persistent filesystems (region-locked) | **YES — `POST /api/v1/filesystems`**, unhyphenated (#432) | GPU instance (no CPU tier) + SSH, **not built yet** | `file_system_names` at launch, then a host-path bind | create + find, **shipped** |
 | **AWS / GCP** | EBS / persistent disks + EFS/Filestore + **S3 / GCS** | yes, fully programmatic | cheap instance or bucket-native | block or object | **ideal, no adapter yet** (v0.3) |
 | **Vast** | host-local disk, mostly ephemeral | n/a | n/a | n/a | genuinely weak (marketplace) |
 
