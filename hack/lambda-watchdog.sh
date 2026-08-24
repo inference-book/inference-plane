@@ -12,9 +12,11 @@
 # This is hack/vast-watchdog.sh for the other VM provider, and it differs in
 # two places, both forced by the API.
 #
-# Ownership reads the `name` field rather than a label. Lambda has a real
-# tags array now, but internal/provisioners/lambdalabs stamps ownership into
-# `name` as "iplane-<deployment-id>", so that is what a guard has to match.
+# Ownership reads the instance tags and the `name` field. The adapter stamps
+# both, because `name` is a display field an operator can change from the
+# console and changing it used to be enough to hide a rented box. A rental
+# made before the adapter stamped tags carries only the name, so both are
+# checked and either one claims the instance.
 #
 # Age is measured from first sight, not from a launch timestamp. Lambda's
 # instance record carries no created_at, launched_at or start_date at all
@@ -25,8 +27,9 @@
 # is, which is the safe direction: --max-lifetime fires late rather than
 # early, and firing early would destroy somebody else's healthy run.
 #
-# Ownership is positive-only. An instance is a candidate when its name
-# carries the prefix, or when its id was written to the registry file.
+# Ownership is positive-only. An instance is a candidate when it carries an
+# iplane-id tag, when its name carries the prefix, or when its id was written
+# to the registry file.
 # Anything else is left alone however suspicious it looks, because the
 # account also holds boxes this project did not create and destroying one of
 # those is worse than leaking ours.
@@ -112,7 +115,12 @@ for i in ins:
     name = i.get("name") or ""
     if not iid:
         continue
-    if not (name.startswith(prefix) or iid in reg):
+    tags = i.get("tags") or []
+    tagged = any(
+        isinstance(t, dict) and t.get("key") == "iplane-id" and t.get("value")
+        for t in tags
+    )
+    if not (tagged or name.startswith(prefix) or iid in reg):
         continue
     print("\t".join([iid, name, str(i.get("status") or "")]))
 ' <<<"$body"

@@ -720,12 +720,25 @@ func (s *Service) ListInstances(ctx context.Context, req *provisionerv1.ListInst
 		if !ok {
 			return nil, status.Errorf(codes.InvalidArgument, "unknown provider %q", providerFilter)
 		}
-		refs, err := provider.List(ctx, map[string]string{TagOperator: s.operatorID})
+		// No tag filter. The API key already scopes the answer to one
+		// account, which is what filtering on iplane-operator was reaching
+		// for, and no adapter can recover that tag from its own wire data:
+		// asking for it returns either nothing (a strict adapter) or the
+		// whole account (a lenient one), and both used to ship.
+		//
+		// Ownership is decided here instead, on the one tag every adapter
+		// does recover. A box the operator rented by hand carries no
+		// iplane-id, and rendering it as an iplane Instance invites somebody
+		// to destroy it through a verb that says iplane owns it.
+		refs, err := provider.List(ctx, nil)
 		if err != nil {
 			return nil, status.Error(codes.Unknown, err.Error())
 		}
 		instances := make([]*provisionerv1.Instance, 0, len(refs))
 		for _, ref := range refs {
+			if ref.GetTags()[TagID] == "" {
+				continue
+			}
 			instances = append(instances, refToInstance(ref, provider.Name()))
 		}
 		return &provisionerv1.ListInstancesResponse{Instances: instances}, nil
@@ -748,13 +761,26 @@ func (s *Service) ListInstances(ctx context.Context, req *provisionerv1.ListInst
 		if !ok {
 			continue
 		}
-		refs, listErr := provider.List(ctx, map[string]string{
-			TagID:       id,
-			TagOperator: s.operatorID,
-		})
+		// Filter on iplane-id alone. Every adapter recovers it, and an
+		// empty answer therefore means "the provider does not have this
+		// instance" rather than "the provider could not answer". The
+		// distinction is the whole of this branch: the length of this slice
+		// is about to be read as evidence that a machine is gone.
+		//
+		// Adding iplane-operator to the filter is what broke it. No adapter
+		// recovers that tag, so a match-all adapter answered empty for every
+		// instance, alive or dead, and a record stuck in TERMINATING because
+		// its terminate errored was declared TERMINATED with nothing left to
+		// retry it.
+		refs, listErr := provider.List(ctx, map[string]string{TagID: id})
 		if listErr != nil {
 			continue
 		}
+		// Re-check locally rather than trusting the adapter's filtering. An
+		// adapter that drops the filter returns the whole account, which is
+		// never empty, so the branch below would never fire. Cheap, and it
+		// keeps this correct against an adapter that regresses.
+		refs = FilterRefs(refs, map[string]string{TagID: id})
 		if len(refs) == 0 {
 			// Provider has no record; if we are terminating, declare terminated.
 			// If we are pending, leave it -- user inspects and decides.
