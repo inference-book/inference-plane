@@ -26,8 +26,11 @@
 # it on clean exit. See hack/README.md.
 set -uo pipefail
 
-API=https://console.vast.ai/api/v0
-V1=https://console.vast.ai/api/v1
+# VAST_API_BASE / VAST_API_V1_BASE are test seams. tests/watchdog points them
+# at a local server so the guard's ownership rules and its destroy call can be
+# exercised without renting anything. Nothing in normal operation sets them.
+API="${VAST_API_BASE:-https://console.vast.ai/api/v0}"
+V1="${VAST_API_V1_BASE:-https://console.vast.ai/api/v1}"
 
 HEARTBEAT=""; REGISTRY=""; LABEL_PREFIX="iplane-"
 MAX_STALE=300; MAX_LIFETIME=0; INTERVAL=30; MAX_RUNTIME=0; DRY_RUN=0
