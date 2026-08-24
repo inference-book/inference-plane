@@ -441,6 +441,15 @@ func (p *Provider) Describe(ctx context.Context, providerID string) (*provisione
 
 // List returns the operator's currently-running instances. Filter
 // keys honored:
+// Tag keys are applied match-all over the tags recovered above, which for
+// Vast is iplane-id and nothing else: a Vast instance carries one free-form
+// label and the operator id is not in it. Filtering on a tag Vast cannot
+// recover therefore matches nothing, which is the honest answer to a
+// question this adapter cannot answer. Dropping such a key instead returned
+// the whole account, and the Service read the length of that as evidence
+// about one instance (#431).
+//
+// Filter keys honored:
 //   - "label-prefix" -> server-side filter for instances whose label
 //     starts with this prefix. The Service uses "iplane-" to scope.
 //
@@ -465,21 +474,27 @@ func (p *Provider) List(ctx context.Context, filter map[string]string) ([]*provi
 		if prefix != "" && !strings.HasPrefix(a.Label, prefix) {
 			continue
 		}
-		// Strip the iplane- prefix to recover the iplane Instance id.
 		// InstanceRef carries ProviderId + ProviderState (raw); the
 		// Service maps ProviderState -> InstanceState via the
 		// IsActiveProviderState callback and the iplane Instance id
-		// via Tags["iplane-id"]. We stamp both.
-		iplaneID := strings.TrimPrefix(a.Label, instanceLabelPrefix)
+		// via Tags["iplane-id"].
+		//
+		// The id is stamped only when the label actually carried the
+		// prefix. TrimPrefix returns the string unchanged when it does
+		// not, so a box the operator rented by hand used to come back
+		// wearing its own label as an iplane id, and the Service's
+		// ownership check reads exactly this tag.
+		tags := map[string]string{}
+		if id, ok := strings.CutPrefix(a.Label, instanceLabelPrefix); ok && id != "" {
+			tags[provisioners.TagID] = id
+		}
 		out = append(out, &provisionerv1.InstanceRef{
 			ProviderId:    strconv.Itoa(a.ID),
 			ProviderState: a.ActualStatus,
-			Tags: map[string]string{
-				provisioners.TagID: iplaneID,
-			},
+			Tags:          tags,
 		})
 	}
-	return out, nil
+	return provisioners.FilterRefs(out, provisioners.TagsOnly(filter, "label-prefix")), nil
 }
 
 // findOffer searches /api/v0/bundles/ for the cheapest rentable

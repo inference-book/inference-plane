@@ -546,12 +546,17 @@ func (p *Provider) Describe(ctx context.Context, providerID string) (*provisione
 }
 
 // List calls GET /pods. When the filter includes iplane-id, we add
-// ?name=iplane-<id> for server-side filtering. Other filter keys
-// (e.g., iplane-operator) are applied client-side, but in v0.1 only
-// iplane-id ends up encoded on the pod (via the name), so other tags
-// would never match -- they silently filter out everything. Callers
-// asking for operator-level filtering should consult the iplane state
-// file instead, which IS the source of truth for that scope in v0.1.
+// ?name=iplane-<id> for server-side filtering, then apply the full filter
+// match-all over the tags recovered from the pod name.
+//
+// iplane-id is the only tag that ends up encoded on a pod, so filtering on
+// anything else matches nothing. That is the honest answer to a question
+// this adapter cannot answer, and it is why the Service stopped asking:
+// the self-heal sweep used to pass iplane-operator alongside the id, which
+// matched nothing here whatever the account held, and a record stuck in
+// TERMINATING was declared TERMINATED with nothing left to retry it (#431).
+// Operator-level scope is the state file's, and the API key already bounds
+// the account.
 func (p *Provider) List(ctx context.Context, filter map[string]string) ([]*provisionerv1.InstanceRef, error) {
 	q := url.Values{}
 	if id, ok := filter[provisioners.TagID]; ok && id != "" {
@@ -574,7 +579,7 @@ func (p *Provider) List(ctx context.Context, filter map[string]string) ([]*provi
 		if name := strings.TrimPrefix(pod.Name, podNamePrefix); name != pod.Name && name != "" {
 			tags[provisioners.TagID] = name
 		}
-		if !matchesFilter(tags, filter) {
+		if !provisioners.MatchesTags(tags, filter) {
 			continue
 		}
 		refs = append(refs, &provisionerv1.InstanceRef{
@@ -709,19 +714,6 @@ func specFromPod(pod *podBody, tags map[string]string) *provisionerv1.Spec {
 			MinVramGb: int32(pod.gpuVRAMGB()),
 		},
 	}
-}
-
-// matchesFilter applies the post-fetch tag filter. v0.1 only encodes
-// iplane-id on the pod (via name), so any filter key beyond iplane-id
-// either matches because the value happens to be empty on both sides
-// (rare) or filters out the pod entirely. Documented behavior.
-func matchesFilter(podTags, want map[string]string) bool {
-	for k, v := range want {
-		if podTags[k] != v {
-			return false
-		}
-	}
-	return true
 }
 
 func parseRunPodTime(s string) *timestamppb.Timestamp {
