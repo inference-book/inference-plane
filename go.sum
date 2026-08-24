@@ -56,6 +56,8 @@ github.com/panyam/oneauth v0.0.83 h1:tuvuzAzKaV78FAoWlfNonCfLf51rPufDzqycohEAsJU
 github.com/panyam/oneauth v0.0.83/go.mod h1:EXZsjH05mFz12xUX7YaWnol0NMYMzMQdXJnDR9bQ5iA=
 github.com/panyam/servicekit v0.1.2 h1:2IfSVhgjQonUM6lkqVH6dm0QA700UsJSbASE95lWj+Y=
 github.com/panyam/servicekit v0.1.2/go.mod h1:wk/9hY9Vgl83WuYJt7n4NYPvV6nbxnZwpKpNRIAPoR8=
+github.com/panyam/servicekit v0.1.5 h1:4MeRZvVd2jaJg5A3+2Czkdguf/lqzUHwoEvkbN0JSZs=
+github.com/panyam/servicekit v0.1.5/go.mod h1:wk/9hY9Vgl83WuYJt7n4NYPvV6nbxnZwpKpNRIAPoR8=
 github.com/pelletier/go-toml/v2 v2.2.4 h1:mye9XuhQ6gvn5h28+VilKrrPoQVanw5PMw/TB0t5Ec4=
 github.com/pelletier/go-toml/v2 v2.2.4/go.mod h1:2gIqNv+qfxSVS7cM2xJQKtLSTLUE9V8t9Stt+h56mCY=
 github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=

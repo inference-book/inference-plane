@@ -39,7 +39,15 @@ import (
 // gaps after it is that a growing batch stretches the second while leaving
 // the first roughly alone, and a mock that emits its whole reply in one
 // burst cannot show that.
-func streamChatCompletion(w http.ResponseWriter, resp *backends.GenerateResponse, tokenGap time.Duration) {
+// chatShape selects which of the two OpenAI streaming shapes to emit.
+// /v1/chat/completions sends choices[].delta.content inside a
+// "chat.completion.chunk"; /v1/completions sends choices[].text inside a
+// "text_completion". The mock answered both endpoints in the chat shape for
+// as long as it existed, which made a loadgen that only parsed chat deltas
+// look complete while it was discarding every sample from the completions
+// half of real traffic (#437). A mock that is wrong in the same direction as
+// the code under test cannot fail.
+func streamChatCompletion(w http.ResponseWriter, resp *backends.GenerateResponse, tokenGap time.Duration, chatShape bool) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		// No flushing means no streaming; everything would buffer to the
@@ -75,13 +83,18 @@ func streamChatCompletion(w http.ResponseWriter, resp *backends.GenerateResponse
 	}
 	type choice struct {
 		Index        int    `json:"index"`
-		Delta        delta  `json:"delta"`
+		Delta        *delta `json:"delta,omitempty"`
+		Text         string `json:"text,omitempty"`
 		FinishReason string `json:"finish_reason,omitempty"`
+	}
+	object := "text_completion"
+	if chatShape {
+		object = "chat.completion.chunk"
 	}
 	frame := func(c choice, usage *backends.Usage) map[string]any {
 		f := map[string]any{
 			"id":      resp.ID,
-			"object":  "chat.completion.chunk",
+			"object":  object,
 			"created": resp.Created,
 			"model":   resp.Model,
 			"choices": []choice{c},
@@ -91,8 +104,21 @@ func streamChatCompletion(w http.ResponseWriter, resp *backends.GenerateResponse
 		}
 		return f
 	}
+	// content builds the one frame that actually carries text, in whichever
+	// shape this endpoint speaks.
+	content := func(chunk string) choice {
+		if chatShape {
+			return choice{Delta: &delta{Content: chunk}}
+		}
+		return choice{Text: chunk}
+	}
 
-	send(frame(choice{Delta: delta{Role: "assistant"}}, nil))
+	// The role-only opener is a chat-protocol artifact and has no analogue
+	// on /v1/completions. Emitting it only for chat keeps the mock honest
+	// about the case a TTFT parser must skip.
+	if chatShape {
+		send(frame(choice{Delta: &delta{Role: "assistant"}}, nil))
+	}
 
 	for i, chunk := range chunkContent(completionText(resp)) {
 		// After the first, not before it. The gap before the first
@@ -102,10 +128,10 @@ func streamChatCompletion(w http.ResponseWriter, resp *backends.GenerateResponse
 		if i > 0 {
 			pace()
 		}
-		send(frame(choice{Delta: delta{Content: chunk}}, nil))
+		send(frame(content(chunk), nil))
 	}
 
-	send(frame(choice{Delta: delta{}, FinishReason: "stop"}, &resp.Usage))
+	send(frame(choice{FinishReason: "stop"}, &resp.Usage))
 	fmt.Fprint(w, "data: [DONE]\n\n")
 	flusher.Flush()
 }

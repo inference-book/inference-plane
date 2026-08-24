@@ -347,11 +347,20 @@ func parseChatResponse(resp *http.Response, stream bool, start time.Time) chatRe
 		if bytes.Equal(payload, []byte("[DONE]")) {
 			break
 		}
+		// Two frame shapes, because the loadgen fires at two endpoints.
+		// /v1/chat/completions streams choices[].delta.content;
+		// /v1/completions streams choices[].text. Reading only the chat
+		// shape silently discarded every TTFT and ITL sample from the
+		// completions half of the traffic, which is the majority of it at
+		// the default --chat-fraction 0.4 (#437). The bug survived because
+		// iplane mock-engine answers both endpoints with chat-shaped
+		// frames, so against the mock the parser looked complete.
 		var frame struct {
 			Choices []struct {
 				Delta struct {
 					Content string `json:"content"`
 				} `json:"delta"`
+				Text string `json:"text"`
 			} `json:"choices"`
 			Usage struct {
 				CompletionTokens int64 `json:"completion_tokens"`
@@ -367,7 +376,11 @@ func parseChatResponse(resp *http.Response, stream bool, start time.Time) chatRe
 			// the engine acknowledged the request rather than the moment
 			// it produced anything, understating TTFT by the whole
 			// prefill on a long prompt.
-			if chunk := frame.Choices[0].Delta.Content; chunk != "" {
+			chunk := frame.Choices[0].Delta.Content
+			if chunk == "" {
+				chunk = frame.Choices[0].Text
+			}
+			if chunk != "" {
 				now := time.Now()
 				if !hasTTFT {
 					ttft = now.Sub(start)

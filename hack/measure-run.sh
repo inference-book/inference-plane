@@ -479,8 +479,21 @@ lines = []
 for r in rows:
     succ = int(r["successes"])
     g, why = grade(succ, r["steady_state"].lower() == "true")
-    if int(r["ttft_samples"]) == 0:
+    # TTFT percentiles are drawn from ttft_samples, not from successes, so a
+    # row can be p95 on throughput and much weaker on TTFT. They were far
+    # apart once already: the loadgen parsed only chat-shaped frames while
+    # sending most traffic to /v1/completions, so ttft_samples sat at exactly
+    # --chat-fraction of successes and the grader called those rows p95
+    # anyway (#437). Grade the column on its own evidence.
+    ttft = int(r["ttft_samples"])
+    if ttft == 0:
         g, why = "UNUSABLE", why + "; no TTFT (streaming off?)"
+    elif ttft < succ * 0.9:
+        g, why = "UNUSABLE", why + "; TTFT on only %d of %d requests" % (ttft, succ)
+    else:
+        tg, _ = grade(ttft, True)
+        if tg != g and g != "UNUSABLE":
+            why += "; TTFT is %s-grade on %d samples" % (tg, ttft)
     counts[g] = counts.get(g, 0) + 1
     lines.append("    N=%-3s %-8s %s" % (r["concurrency"], g, why))
 print("  VALIDITY at %s tokens: %s" % (

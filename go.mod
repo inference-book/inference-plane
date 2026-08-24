@@ -7,7 +7,7 @@ require (
 	github.com/chzyer/readline v1.5.1
 	github.com/go-viper/mapstructure/v2 v2.4.0
 	github.com/panyam/oneauth v0.0.83
-	github.com/panyam/servicekit v0.1.2
+	github.com/panyam/servicekit v0.1.5
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/viper v1.21.0
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.68.0

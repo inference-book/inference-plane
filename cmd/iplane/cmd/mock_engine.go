@@ -94,33 +94,35 @@ func newMockEngineMux(be *backends.MockBackend, label string) *http.ServeMux {
 // were and only the sweep harness has to know pacing exists.
 func newMockEngineMuxWithPacing(be *backends.MockBackend, label string, tokenGap time.Duration) *http.ServeMux {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	chat := func(w http.ResponseWriter, r *http.Request) {
-		var req backends.GenerateRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
+	handler := func(chatShape bool) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			var req backends.GenerateRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			logger.Info("mock-engine request",
+				"label", label,
+				"session", r.Header.Get("X-IPlane-Session"),
+				"messages", len(req.Messages),
+				"model", req.Model)
+			resp, err := be.Generate(r.Context(), req)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if req.Stream {
+				streamChatCompletion(w, &resp, tokenGap, chatShape)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(resp)
 		}
-		logger.Info("mock-engine request",
-			"label", label,
-			"session", r.Header.Get("X-IPlane-Session"),
-			"messages", len(req.Messages),
-			"model", req.Model)
-		resp, err := be.Generate(r.Context(), req)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		if req.Stream {
-			streamChatCompletion(w, &resp, tokenGap)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(resp)
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/chat/completions", chat)
-	mux.HandleFunc("POST /v1/completions", chat)
+	mux.HandleFunc("POST /v1/chat/completions", handler(true))
+	mux.HandleFunc("POST /v1/completions", handler(false))
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"status":"ok"}`)
