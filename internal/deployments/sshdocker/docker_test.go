@@ -49,6 +49,21 @@ func (f *fakeRunner) on(match string, resp fakeResp) {
 	})
 }
 
+// lastCallContaining returns the most recent recorded command containing a
+// substring. Tests use it rather than indexing calls[0], because every
+// Docker helper is preceded by the one-off `docker info` probe that decides
+// whether this host needs sudo.
+func (f *fakeRunner) lastCallContaining(t *testing.T, s string) string {
+	t.Helper()
+	for i := len(f.calls) - 1; i >= 0; i-- {
+		if strings.Contains(f.calls[i], s) {
+			return f.calls[i]
+		}
+	}
+	t.Fatalf("no recorded command contains %q: %v", s, f.calls)
+	return ""
+}
+
 // callsContaining counts how many recorded commands contain a substring.
 func (f *fakeRunner) callsContaining(s string) int {
 	n := 0
@@ -205,10 +220,10 @@ func TestRun_BuildsExpectedCommand(t *testing.T) {
 	if id != "abc1234" {
 		t.Errorf("container id = %q, want abc1234", id)
 	}
-	if len(r.calls) != 1 {
-		t.Fatalf("expected 1 call, got %d: %v", len(r.calls), r.calls)
+	if got := r.callsContaining("docker run"); got != 1 {
+		t.Fatalf("expected 1 docker run, got %d: %v", got, r.calls)
 	}
-	cmd := r.calls[0]
+	cmd := r.lastCallContaining(t, "docker run")
 	wantSubs := []string{
 		"docker run -d",
 		"--name 'iplane-deployment-foo'",
@@ -246,7 +261,7 @@ func TestRun_MountsBecomeBindFlags(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	cmd := r.calls[0]
+	cmd := r.lastCallContaining(t, "docker run")
 	if !strings.Contains(cmd, "-v '/mnt/models:/models'") {
 		t.Errorf("docker run missing bind mount\nfull cmd: %s", cmd)
 	}

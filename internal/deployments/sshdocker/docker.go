@@ -51,11 +51,39 @@ func (c *ContainerState) Matches(image, model string) bool {
 // every command for a single deployment.
 type Docker struct {
 	r RemoteRunner
+
+	// prefix is what every docker command is invoked through: empty when
+	// the SSH user can reach the daemon socket directly, "sudo " when it
+	// needs elevation. Resolved lazily on first use, not at construction,
+	// because it costs a round trip and because a caller that forgets a
+	// setup step is exactly how this went wrong the first time: Destroy
+	// builds its own Docker and never calls EnsureInstalled, so anything
+	// resolved only there is missing on every teardown.
+	prefix   string
+	resolved bool
 }
 
 // NewDocker constructs a Docker wrapper.
 func NewDocker(r RemoteRunner) *Docker {
 	return &Docker{r: r}
+}
+
+// run invokes one docker command, resolving how to invoke docker on this
+// host first. Every helper goes through here so no path can skip it.
+func (d *Docker) run(ctx context.Context, format string, args ...any) ([]byte, []byte, int, error) {
+	if err := d.resolveElevation(ctx); err != nil {
+		return nil, nil, 0, err
+	}
+	return d.r.Run(ctx, d.prefix+"docker "+fmt.Sprintf(format, args...))
+}
+
+// dockerCmd renders the "docker" token itself for the callers that build an
+// argv slice rather than a format string.
+func (d *Docker) dockerCmd(ctx context.Context) (string, error) {
+	if err := d.resolveElevation(ctx); err != nil {
+		return "", err
+	}
+	return d.prefix + "docker", nil
 }
 
 // EnsureInstalled makes sure the docker CLI + daemon are present on
@@ -112,6 +140,43 @@ func (d *Docker) EnsureInstalled(ctx context.Context) error {
 	return nil
 }
 
+// resolveElevation decides whether docker commands need sudo on this host,
+// by asking the daemon rather than by inspecting the user.
+//
+// The executor was written against providers whose SSH user is root, where
+// the question never comes up. Lambda Labs logs in as `ubuntu`, and Lambda's
+// image ships docker with that user in `ubuntu, users, admin` and **not** in
+// `docker`, so every command failed with "permission denied while trying to
+// connect to the Docker daemon socket". Found on a rented A10 (#427), and it
+// is the shape every stock cloud image has: a non-root login with passwordless
+// sudo. Raw AWS and GCP will land in exactly the same place (#428).
+//
+// Probing beats inferring. Group membership, socket permissions and rootless
+// docker can each make the answer different from what `id` suggests, and
+// `docker info` is the question actually being asked. Two commands on the
+// fast path, one on a root host.
+func (d *Docker) resolveElevation(ctx context.Context) error {
+	if d.resolved {
+		return nil
+	}
+	if _, _, code, err := d.r.Run(ctx, "docker info >/dev/null 2>&1"); err == nil && code == 0 {
+		d.prefix = ""
+		d.resolved = true
+		return nil
+	}
+	// -n so a host that would prompt for a password fails immediately
+	// rather than hanging on a tty that is not there.
+	if _, _, code, err := d.r.Run(ctx, "sudo -n docker info >/dev/null 2>&1"); err == nil && code == 0 {
+		d.prefix = "sudo "
+		d.resolved = true
+		return nil
+	}
+	return fmt.Errorf("ensure docker: the SSH user cannot reach the docker daemon, with or without sudo\n" +
+		"  docker is installed but `docker info` is denied and `sudo -n docker info` does not work either.\n" +
+		"  Usual cause: a non-root SSH user that is not in the `docker` group and has no passwordless sudo.\n" +
+		"  Fix on the host with `usermod -aG docker $USER` (then reconnect), or use an image whose SSH user is root.")
+}
+
 // Inspect runs `docker inspect <name> --format=...` and parses the
 // state into a ContainerState. If the container does not exist,
 // returns ContainerState{Exists: false} with no error -- "not found"
@@ -119,8 +184,7 @@ func (d *Docker) EnsureInstalled(ctx context.Context) error {
 func (d *Docker) Inspect(ctx context.Context, name string) (*ContainerState, error) {
 	// Use the structured JSON output so parsing is robust to docker
 	// version differences in the human-readable formatter.
-	cmd := fmt.Sprintf("docker inspect %s", shellEscape(name))
-	stdout, stderr, code, err := d.r.Run(ctx, cmd)
+	stdout, stderr, code, err := d.run(ctx, "inspect %s", shellEscape(name))
 	if err != nil {
 		return nil, err
 	}
@@ -175,8 +239,7 @@ func decodeInspect(raw []byte) (*ContainerState, error) {
 // to download large engine images; the caller's ctx bounds the
 // wait.
 func (d *Docker) Pull(ctx context.Context, image string) error {
-	cmd := fmt.Sprintf("docker pull %s", shellEscape(image))
-	stdout, stderr, code, err := d.r.Run(ctx, cmd)
+	stdout, stderr, code, err := d.run(ctx, "pull %s", shellEscape(image))
 	if err != nil {
 		return err
 	}
@@ -230,7 +293,11 @@ func (d *Docker) Run(ctx context.Context, spec RunSpec) (string, error) {
 	}
 
 	var args []string
-	args = append(args, "docker run -d")
+	dockerBin, err := d.dockerCmd(ctx)
+	if err != nil {
+		return "", err
+	}
+	args = append(args, dockerBin+" run -d")
 	args = append(args, "--name", shellEscape(spec.Name))
 	args = append(args, "--gpus all")
 	args = append(args, "--restart", "unless-stopped")
@@ -274,8 +341,7 @@ func (d *Docker) Run(ctx context.Context, spec RunSpec) (string, error) {
 // container does not exist -- the desired end state is "stopped"
 // and we should not error when it's already true.
 func (d *Docker) Stop(ctx context.Context, name string) error {
-	cmd := fmt.Sprintf("docker stop %s", shellEscape(name))
-	_, stderr, code, err := d.r.Run(ctx, cmd)
+	_, stderr, code, err := d.run(ctx, "stop %s", shellEscape(name))
 	if err != nil {
 		return err
 	}
@@ -290,8 +356,7 @@ func (d *Docker) Stop(ctx context.Context, name string) error {
 
 // Remove runs `docker rm <name>`. Same idempotent treatment as Stop.
 func (d *Docker) Remove(ctx context.Context, name string) error {
-	cmd := fmt.Sprintf("docker rm %s", shellEscape(name))
-	_, stderr, code, err := d.r.Run(ctx, cmd)
+	_, stderr, code, err := d.run(ctx, "rm %s", shellEscape(name))
 	if err != nil {
 		return err
 	}
