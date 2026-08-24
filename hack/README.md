@@ -96,6 +96,48 @@ this. Polling `/api/v1/instances/` did. Use `/api/v1/`, never `/api/v0/instances
 which is deprecated and answers with an error object that parses as an
 empty list.
 
+## lambda-watchdog.sh
+
+The same guard for Lambda Labs. Arm it before anything can be rented on that
+provider; `vast-watchdog.sh` reads a different API and will not see a Lambda
+VM at all.
+
+```sh
+date +%s > run.hb
+hack/lambda-watchdog.sh --heartbeat run.hb --max-stale 300 --max-lifetime 5400 &
+```
+
+Flags match the Vast guard except for two: `--name-prefix` (default
+`iplane-`) instead of `--label-prefix`, and `--state`, which is where
+first-sight ages are kept.
+
+**Ownership reads `name`.** Lambda has a first-class `tags` array now, but
+`internal/provisioners/lambdalabs` stamps ownership into the instance's
+`name` field as `iplane-<deployment-id>`, so that is what a guard has to
+match. `--registry` claims ids by hand for anything that called Lambda
+directly and so never had a name stamped for it.
+
+**Age is measured from first sight.** Lambda's instance record carries no
+`created_at`, `launched_at` or `start_date`; the whole schema is `id`,
+`name`, `ip`, `status`, `region`, `instance_type` and a few mount and
+firewall lists. There is nothing to subtract, so the guard writes down when
+it first saw each id and ages it from there. An instance already running
+when the guard started therefore looks younger than it is, and
+`--max-lifetime` fires late rather than early. That is the direction to be
+wrong in: firing early destroys a healthy run somebody else is paying
+attention to.
+
+**Terminate is a POST, not a DELETE.** Lambda releases an instance through
+`POST /api/v1/instance-operations/terminate` with the id in an
+`instance_ids` array, and authenticates with HTTP Basic rather than a Bearer
+token. A guard copied from the Vast one and edited will 401 on every call
+and report a teardown failure it cannot act on.
+
+`tests/watchdog` drives the script against a stand-in for Lambda's API and
+asserts what it terminates. Ownership, the fail-safe on an unreadable API,
+first-sight ageing and `--dry-run` are each covered, because every branch in
+here is either a termination nobody asked for or a rental nobody hands back.
+
 ## hf-throughput-probe.sh
 
 Measures how fast one rented box actually pulls weights from Hugging Face,
