@@ -24,7 +24,22 @@ OUT="${1:-${CAPACITY_SAMPLE_OUT:-capacity-samples.jsonl}}"
 IPLANE="${IPLANE_BIN:-./bin/iplane}"
 PROVIDERS="${CAPACITY_SAMPLE_PROVIDERS:-runpod,vast,lambdalabs}"
 WIDTHS="${CAPACITY_SAMPLE_WIDTHS:-1 2 4 8}"
-MIN_VRAM="${CAPACITY_SAMPLE_MIN_VRAM_GB:-80}"
+
+# Floors, plural, and that is the whole point of this variable.
+#
+# `iplane capacity` returns the cheapest few SKUs clearing the floor, capped
+# at skucatalog.MaxResults, so that an operator asking for "small" does not
+# land on a frontier card because the cheap tiers were busy. The cap is right
+# and it makes a single floor a narrow window rather than a floor: at 80 the
+# five cheapest 80 GB-plus cards are A100s and H100s, and H200, B200 and B300
+# never appear however much of them the market is holding.
+#
+# Sampling one floor therefore produced six days of eight-card observations
+# that recorded no Blackwell at all while 8x B200 was live on Vast at $47/hr,
+# and this log is what the epic's "blocked on capacity" judgements are made
+# from. 140 clears every Hopper part and reaches the Blackwell tier; 80 keeps
+# the series that already exists comparable.
+MIN_VRAMS="${CAPACITY_SAMPLE_MIN_VRAM_GB:-80 140}"
 TIMEOUT="${CAPACITY_SAMPLE_TIMEOUT:-60}"
 
 if [ ! -x "$IPLANE" ]; then
@@ -37,7 +52,9 @@ fi
 STATE_DIR="${CAPACITY_SAMPLE_STATE_DIR:-$(mktemp -d)}"
 
 ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+rows=0
 for n in $WIDTHS; do
+ for MIN_VRAM in $MIN_VRAMS; do
   # --service-url "" forces the in-process path. Without it the flag
   # defaults to http://localhost:8080 and the sample silently describes
   # whatever daemon happens to be up.
@@ -83,6 +100,8 @@ print(json.dumps({
     "sample_error": d.get("sample_error"),
 }, separators=(",", ":")))
 ' "$ts" "$n" "$MIN_VRAM" >> "$OUT"
+  rows=$(( rows + 1 ))
+ done
 done
 
-echo "capacity-sample: appended $(echo "$WIDTHS" | wc -w | tr -d ' ') rows to $OUT at $ts" >&2
+echo "capacity-sample: appended $rows rows to $OUT at $ts" >&2
