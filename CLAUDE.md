@@ -21,7 +21,7 @@ Reference implementation of the control plane for *Inference Is All You Need* (A
 | `make check-pins`  | Verify `pinned-versions.env` matches book's `.tex`     |
 | `make check-names` | Verify generated names match `metric-names.yaml`       |
 | `make check-constraints` | Verify architectural constraints (CP/DP-1, ...)  |
-| `hack/capacity-sample.sh` | Sample what every provider would rent, appended to JSONL. Free and read-only; see [hack/README.md](hack/README.md) |
+| `hack/capacity-sample.sh` | Sample what every provider would rent, appended to JSONL. Free and read-only. Samples **several VRAM floors** per width, because the resolver caps at the cheapest few SKUs and one low floor can never show the top of the market; see [hack/README.md](hack/README.md) |
 | `hack/vast-watchdog.sh` | Destroys Vast rentals whose creator died or which outlived a deadline. **Arm it before anything can be rented**; see [hack/README.md](hack/README.md) |
 | `hack/lambda-watchdog.sh` | The same guard for Lambda Labs, which the Vast one cannot see. Ages an instance from first sight, because Lambda publishes no launch timestamp |
 | `hack/measure-run.sh` | Drives one paid measurement run end to end and records why it failed. Refuses to start without a watchdog; `--dry-run` and `--provider local` exercise it for nothing, but neither reaches the sweep and nothing exercises that end to end |

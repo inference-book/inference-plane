@@ -44,6 +44,29 @@ The raw log is gitignored. A distilled artifact is what gets committed,
 the same way `iplane load --sweep --output csv` carries provenance rather
 than a terminal paste (#347).
 
+### One floor is a window, not a floor
+
+`iplane capacity` returns the cheapest few SKUs above the floor, capped at
+`skucatalog.MaxResults`, so an operator asking for a small card does not land
+on a frontier one because the cheap tiers were busy. That cap is deliberate
+and right. It also means asking a single low floor never shows you the top of
+the market: at 80 GB the five cheapest qualifying cards are A100s and H100s,
+and H200, B200 and B300 cannot appear however many of them are for sale.
+
+The sampler ran that way for six days. The log recorded no Blackwell in 171
+eight-card observations while 8x B200 was live on Vast at $47/hr, and this
+log is what the frontier-MoE epic's "blocked on capacity" judgements are made
+from. **A blind floor is invisible in the output by construction**, because
+the whole purpose of the series is to tell "nobody had any" apart from
+"nobody looked", and it produces the first while meaning the second.
+
+`CAPACITY_SAMPLE_MIN_VRAM_GB` is therefore a list, defaulting to `80 140`,
+and one tick writes a row per (width, floor). `tests/constraints` asserts the
+sampler asks a floor above every Hopper part;
+`internal/provisioners/vast/vramfloor_test.go` asserts against the real
+catalog that the low floor genuinely cannot reach Blackwell and the high one
+can, so a catalog change fails there rather than silently narrowing the log.
+
 ## vast-watchdog.sh
 
 Destroys Vast instances whose creator has died or which have outlived a
