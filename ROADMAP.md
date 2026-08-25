@@ -220,6 +220,16 @@ creator), `hack/deploy-watch.sh` (bytes, rate, ETA per replica per tick),
 abandons a hopeless download), and the `engine:download` / `engine:load`
 split behind them (#413).
 
+The last dark window closed with #438. The sweep printed a header and then
+nothing until every level finished, which was 48 identical minutes at $32.88/hr,
+and the same run fired its first sweep at a closed port and looked exactly
+like a level still warming up for 13 of them. It now narrates per window and
+per level, on stderr so the artifact is untouched, **reporting successes and
+errors rather than requests**: a refused connection returns instantly, so a
+closed port completes tens of thousands of attempts per window and settles the
+steady-state detector, and a request count would have read healthier than a
+working engine. Every phase of a paid run now reports continuously.
+
 **The fifth attempt was the first one explained.** A B200 hung in NCCL
 initialisation: 188 MB on a 900 GB disk, 5.7 GB inbound and eight cards at
 86%, with the engine silent for 23 minutes after announcing its NCCL version.
