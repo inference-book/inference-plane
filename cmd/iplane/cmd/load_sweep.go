@@ -103,6 +103,21 @@ type sweepLevel struct {
 	SteadyState bool `json:"steady_state"`
 }
 
+// sweepProgress is where a running sweep narrates itself. Stderr, never the
+// writer the artifact goes to, because the artifact is captured by redirect
+// and one stray line corrupts a file that costs thousands of dollars of
+// rented hardware to reproduce.
+//
+// A variable rather than a parameter so tests can read what was said without
+// every helper in this file growing a writer argument. Reset by
+// resetSweepFlags alongside the other package-level knobs.
+var sweepProgress io.Writer = os.Stderr
+
+// progressf writes one line of narration.
+func progressf(format string, args ...any) {
+	fmt.Fprintf(sweepProgress, format+"\n", args...)
+}
+
 // sweepReport is the machine-readable form, and the artifact a figure
 // gets drawn from.
 //
@@ -293,7 +308,7 @@ func runLoadSweep(ctx context.Context, out io.Writer) error {
 	}
 	client := &http.Client{Timeout: 5 * time.Minute}
 
-	fmt.Fprintf(os.Stderr, "iplane load --sweep: levels %v, %s per level after steady state -> %s\n",
+	progressf("iplane load --sweep: levels %v, %s per level after steady state -> %s",
 		levels, loadSweepDuration, base)
 
 	report := sweepReport{
@@ -312,14 +327,15 @@ func runLoadSweep(ctx context.Context, out io.Writer) error {
 		StableWindows:  loadSweepStableRuns,
 		Fleet:          sweepFleetProvenance(ctx),
 	}
-	for _, n := range levels {
+	for i, n := range levels {
 		lvl, err := measureSweepLevel(ctx, client, &cfg, n)
 		if err != nil {
 			return err
 		}
+		reportSweepLevel(i+1, len(levels), lvl)
 		report.Levels = append(report.Levels, lvl)
 		if ctx.Err() != nil {
-			fmt.Fprintf(os.Stderr, "interrupted after %d concurrent; reporting what completed\n", n)
+			progressf("interrupted after %d concurrent; reporting what completed", n)
 			break
 		}
 	}
@@ -334,6 +350,30 @@ func runLoadSweep(ctx context.Context, out io.Writer) error {
 	}
 	writeSweepTable(os.Stderr, report)
 	return nil
+}
+
+// reportSweepLevel narrates one finished level.
+//
+// The fields are chosen so a reader can tell a healthy level from a broken
+// one without waiting for the table at the end. Request count separates "slow
+// but working" from "nothing is happening", which is the distinction a closed
+// port hides: a sweep firing into a refused connection produces no traffic and
+// looks exactly like a level still warming up. Whether it settled says whether
+// the row beside it is a measurement or a snapshot of a ramp.
+func reportSweepLevel(idx, total int, l sweepLevel) {
+	settled := fmt.Sprintf("settled after %.0fs", l.WarmupSec)
+	if !l.SteadyState {
+		settled = fmt.Sprintf("never settled in %.0fs", l.WarmupSec)
+	}
+	line := fmt.Sprintf("level %d/%d (n=%d): %s, %d requests, %.2f req/s, %.1f tok/s",
+		idx, total, l.Concurrency, settled, l.Successes, l.RequestsPerSec, l.TokensPerSec)
+	if l.LatencyP50Ms > 0 {
+		line += fmt.Sprintf(", p50 %dms", l.LatencyP50Ms)
+	}
+	if l.Errors > 0 {
+		line += fmt.Sprintf(", %d errors", l.Errors)
+	}
+	progressf("%s", line)
 }
 
 // sweepFleetProvenance asks the control plane what hardware this sweep is
@@ -357,7 +397,7 @@ func sweepFleetProvenance(ctx context.Context) fleetProvenance {
 
 	fleet, err := describeFleet(ctx, dc, ic, loadTarget)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: could not describe %q, the artifact will name no hardware: %v\n", loadTarget, err)
+		progressf("warning: could not describe %q, the artifact will name no hardware: %v", loadTarget, err)
 		return fleetProvenance{}
 	}
 	return fleet
@@ -373,12 +413,23 @@ func measureSweepLevel(ctx context.Context, client *http.Client, cfg *loadFireCo
 	var completed atomic.Int64
 
 	stats := &loadStats{}
+	// warmStats exists so the warm-up can be narrated. It is a second
+	// object rather than an early switch-on, so `stats` still never sees a
+	// warm-up request and the discard is exactly what it was.
+	//
+	// It is needed because the completion counter alone lies about the case
+	// this narration exists for. A refused connection returns instantly, so
+	// a sweep firing at a closed port completes tens of thousands of
+	// attempts per window, reports a stable rate, and settles. The number
+	// looks healthier than a working engine's. Successes and errors are the
+	// pair that tells them apart.
+	warmStats := &loadStats{}
 	var statsOn atomic.Bool
 	recording := func() *loadStats {
 		if statsOn.Load() {
 			return stats
 		}
-		return nil
+		return warmStats
 	}
 
 	levelCtx, stop := context.WithCancel(ctx)
@@ -406,15 +457,12 @@ func measureSweepLevel(ctx context.Context, client *http.Client, cfg *loadFireCo
 	}
 
 	warmupStart := time.Now()
-	discarded, steady := awaitSteadyState(levelCtx, &completed)
+	discarded, steady := awaitSteadyState(levelCtx, &completed, warmStats, n)
 	warmup := time.Since(warmupStart)
 
 	statsOn.Store(true)
 	measureStart := time.Now()
-	select {
-	case <-time.After(loadSweepDuration):
-	case <-levelCtx.Done():
-	}
+	awaitMeasureWindow(levelCtx, stats, n)
 	elapsed := time.Since(measureStart)
 	stop()
 	wg.Wait()
@@ -422,10 +470,67 @@ func measureSweepLevel(ctx context.Context, client *http.Client, cfg *loadFireCo
 	return summariseSweepLevel(n, stats, elapsed, warmup, discarded, steady), nil
 }
 
+// describeProgress renders the running counts, naming errors only when there
+// are some.
+//
+// Cumulative rather than per-window, because the number an operator is
+// deciding on is whether anything has worked at all. A per-window figure of
+// zero successes is ambiguous during a slow level; a cumulative zero after
+// four minutes is not.
+func describeProgress(successes, errors int64) string {
+	if errors == 0 {
+		return fmt.Sprintf("%d ok", successes)
+	}
+	return fmt.Sprintf("%d ok, %d errors", successes, errors)
+}
+
+// settledSuffix labels a warm-up window with what the detector made of it.
+func settledSuffix(settled bool) string {
+	if settled {
+		return " (settled)"
+	}
+	return ""
+}
+
+// awaitMeasureWindow holds the level open for --sweep-duration, narrating as
+// it goes.
+//
+// This was one silent sleep, and it is the longer of a level's two phases on
+// the real settings. Ticking on the same window the warm-up uses keeps the
+// cadence uniform, so an operator watching the log sees the same rhythm
+// throughout a level rather than a burst and then nothing.
+//
+// Elapsed time is still measured by the caller from before this call to after
+// it, so the ticking changes what is reported not at all.
+func awaitMeasureWindow(ctx context.Context, stats *loadStats, n int) {
+	start := time.Now()
+	deadline := start.Add(loadSweepDuration)
+	tick := loadSweepWindow
+	if tick <= 0 || tick > loadSweepDuration {
+		tick = loadSweepDuration
+	}
+	ticker := time.NewTicker(tick)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		if time.Now().After(deadline) {
+			return
+		}
+		ok, failed := stats.snapshot()
+		progressf("  n=%d measuring: %.0fs of %.0fs, %s",
+			n, time.Since(start).Seconds(), loadSweepDuration.Seconds(), describeProgress(ok, failed))
+	}
+}
+
 // awaitSteadyState samples completion counts until the rate settles or
 // --sweep-warmup-max runs out. Returns what completed during warm-up and
 // whether it settled.
-func awaitSteadyState(ctx context.Context, completed *atomic.Int64) (int64, bool) {
+func awaitSteadyState(ctx context.Context, completed *atomic.Int64, warm *loadStats, n int) (int64, bool) {
 	det := newSteadyDetector(loadSweepTolerance, loadSweepStableRuns, loadSweepWindow)
 	deadline := time.Now().Add(loadSweepWarmupMax)
 	ticker := time.NewTicker(loadSweepWindow)
@@ -441,7 +546,17 @@ func awaitSteadyState(ctx context.Context, completed *atomic.Int64) (int64, bool
 		now := completed.Load()
 		count := now - last
 		last = now
-		if det.observe(count) {
+		settled := det.observe(count)
+		// Successes and errors, not the completion count the detector uses.
+		// A refused connection completes instantly, so the counter spins and
+		// the rate settles: at a closed port this line would otherwise read
+		// "23439 requests in the last 2s" and look better than a working
+		// engine. The error column is what makes the two distinguishable
+		// while there is still money to save.
+		ok, failed := warm.snapshot()
+		progressf("  n=%d warming up: %s%s",
+			n, describeProgress(ok, failed), settledSuffix(settled))
+		if settled {
 			return now, true
 		}
 		if time.Now().After(deadline) {

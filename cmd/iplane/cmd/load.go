@@ -447,6 +447,27 @@ func (s *loadStats) recordError() {
 	atomic.AddInt64(&s.errors, 1)
 }
 
+// snapshot reads the two counters a progress line needs, while the level is
+// still running.
+//
+// The two fields are guarded differently and this has to match: successes is
+// written under the mutex by recordSuccess, errors atomically by
+// recordError. Reading errors under the mutex instead would be a race with
+// the atomic writer, not a stricter version of it.
+//
+// The pair is therefore not a single instant, which is fine for narration
+// and would not be for a reported figure. summariseSweepLevel is what
+// produces those, after the workers have stopped.
+func (s *loadStats) snapshot() (successes, errors int64) {
+	if s == nil {
+		return 0, 0
+	}
+	errors = atomic.LoadInt64(&s.errors)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.successes, errors
+}
+
 // recordITLs adds one request's inter-token gaps. Appended rather than
 // summarised per request, because the interesting percentile is over
 // gaps and not over per-request means: a request that stalls once in

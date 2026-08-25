@@ -551,12 +551,19 @@ for pt in $(echo "$PROMPT_TOKENS" | tr ',' ' '); do
   # and no plan, which is precisely the hardware #347 says a figure's data
   # file has to carry. A sweep that measures the right box and cannot say
   # which box it was costs the same money and is worth less.
+  #
+  # stderr is teed rather than redirected, so the sweep's own progress lines
+  # reach this runner's output as well as the log. Every other phase here
+  # reports continuously and the sweep is the longest and dearest, so a file
+  # somebody reads afterwards is the wrong place for the one signal that
+  # says whether the level is working (#438). Process substitution rather
+  # than a pipe, so the sweep's exit status still reaches the || below.
   "$IPLANE" load --sweep "$LADDER" --prompt-tokens "$pt" --model "$MODEL" \
     --target "$DEP_ID" --service-url "$SERVICE_URL" \
     --stream --max-tokens "$SWEEP_MAX_TOKENS" \
     --sweep-window "$SWEEP_WINDOW" --sweep-stable-windows "$SWEEP_STABLE_WINDOWS" \
     --sweep-duration "$THIS_DURATION" --sweep-warmup-max "$SWEEP_WARMUP_MAX" \
-    --output csv > "${OUT}/sweep-${pt}.csv" 2> "${OUT}/sweep-${pt}.log" \
+    --output csv > "${OUT}/sweep-${pt}.csv" 2> >(tee "${OUT}/sweep-${pt}.log" >&2) \
     || log "  sweep at ${pt} failed; see sweep-${pt}.log"
   sweep_validity "${OUT}/sweep-${pt}.csv" "$pt"
 done

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -29,6 +30,7 @@ func resetSweepFlags() {
 	loadPriority = ""
 	loadTenant = ""
 	loadOutput = "text"
+	sweepProgress = os.Stderr
 }
 
 func TestParseSweepLevelsSortsAndDeduplicates(t *testing.T) {
