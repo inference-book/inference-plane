@@ -287,6 +287,19 @@ type chatResult struct {
 	// batch that doubles will often leave the first roughly alone and
 	// stretch the second, which is invisible in a single latency number.
 	ITLs []time.Duration
+
+	// Complete reports that the response ended the way the protocol says
+	// it should: a [DONE] sentinel on the streaming path, a parsed body on
+	// the non-streaming one.
+	//
+	// False means the read stopped early, which in a sweep means the
+	// measurement window closed while the response was still arriving. Such
+	// a request has a valid TTFT and valid inter-token gaps for the frames
+	// that did arrive, and an invalid latency and token count: the clock
+	// stopped because we stopped listening, not because the engine
+	// finished. Counting it as a success is what let a 120k level report
+	// 6.2 completion tokens against a 512 cap (#451).
+	Complete bool
 }
 
 // parseChatResponse extracts the assistant reply text, completion token
@@ -327,7 +340,7 @@ func parseChatResponse(resp *http.Response, stream bool, start time.Time) chatRe
 		if len(r.Choices) > 0 {
 			content = r.Choices[0].Message.Content
 		}
-		return chatResult{Content: content, Tokens: r.Usage.CompletionTokens}
+		return chatResult{Content: content, Tokens: r.Usage.CompletionTokens, Complete: true}
 	}
 
 	sc := bufio.NewScanner(resp.Body)
@@ -337,6 +350,7 @@ func parseChatResponse(resp *http.Response, stream bool, start time.Time) chatRe
 	var ttft time.Duration
 	var hasTTFT bool
 	var itls []time.Duration
+	var done bool
 	last := start
 	for sc.Scan() {
 		line := sc.Bytes()
@@ -345,6 +359,7 @@ func parseChatResponse(resp *http.Response, stream bool, start time.Time) chatRe
 		}
 		payload := bytes.TrimPrefix(line, []byte("data: "))
 		if bytes.Equal(payload, []byte("[DONE]")) {
+			done = true
 			break
 		}
 		// Two frame shapes, because the loadgen fires at two endpoints.
@@ -396,7 +411,7 @@ func parseChatResponse(resp *http.Response, stream bool, start time.Time) chatRe
 			tokens = frame.Usage.CompletionTokens
 		}
 	}
-	return chatResult{Content: sb.String(), Tokens: tokens, TTFT: ttft, HasTTFT: hasTTFT, ITLs: itls}
+	return chatResult{Content: sb.String(), Tokens: tokens, TTFT: ttft, HasTTFT: hasTTFT, ITLs: itls, Complete: done}
 }
 
 // sessionID is the stable per-conversation identity stamped into

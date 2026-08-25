@@ -70,8 +70,15 @@ type sweepLevel struct {
 	TokensPerSec   float64 `json:"tokens_per_sec"`
 
 	Successes int64 `json:"successes"`
-	Errors    int64 `json:"errors"`
-	Tokens    int64 `json:"completion_tokens"`
+	// TruncatedRequests counts responses the measurement window closed on
+	// before the engine finished them. Separate from both Successes and
+	// Errors: nothing failed, and the request is not an observation of a
+	// completed one. A large value beside a small Successes says the level
+	// was too short for its context length rather than that the engine
+	// was slow.
+	TruncatedRequests int64 `json:"truncated_requests"`
+	Errors            int64 `json:"errors"`
+	Tokens            int64 `json:"completion_tokens"`
 
 	LatencyP50Ms int64 `json:"latency_p50_ms"`
 	LatencyP95Ms int64 `json:"latency_p95_ms"`
@@ -573,6 +580,7 @@ func summariseSweepLevel(n int, s *loadStats, elapsed, warmup time.Duration, dis
 	lvl := sweepLevel{
 		Concurrency:       n,
 		Successes:         s.successes,
+		TruncatedRequests: s.truncated,
 		Errors:            s.errors,
 		Tokens:            s.tokens,
 		WarmupSec:         warmup.Seconds(),
