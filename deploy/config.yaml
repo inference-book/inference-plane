@@ -105,6 +105,18 @@ health:
   failure_threshold: 3
   success_threshold: 3
   probe_timeout: 2s
+  # activity_window vetoes a quarantine when the replica finished a request
+  # this recently. A saturated engine can miss its 2s probe three ticks
+  # running while still serving; quarantining it turns a slow deployment into
+  # a failed one, because the router then 503s every request for want of a
+  # healthy replica (#450).
+  #
+  # Sized for the slowest legitimate request, not for the probe cadence: at
+  # 120k context one request takes minutes, so completions are sparse even on
+  # a healthy engine. The cost is one-sided -- an engine that dies right after
+  # completing something stays in service up to this much longer, while an
+  # engine that never completed anything is unaffected.
+  activity_window: 2m
   max_concurrent: 32
 
 # model_cache (v0.2 Ch 9): warm model cache. When set, deployments mount

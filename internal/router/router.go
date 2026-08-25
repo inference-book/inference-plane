@@ -160,6 +160,11 @@ type Router struct {
 	// bounded and cheap; cleanup is a follow-up.
 	inFlight sync.Map
 
+	// completions records when each replica last finished a request, so
+	// the health checker can tell a saturated engine from a dead one
+	// (#450). Written on the completion edge in trackInFlight.
+	completions lastCompletion
+
 	// sessionLastReplica observes, per (deploy, session), the replica a
 	// session last landed on, so the router can record affinity hit/miss
 	// independent of the active policy (v0.2 ch8, #173). Keyed

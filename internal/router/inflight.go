@@ -3,6 +3,7 @@ package router
 import (
 	"context"
 	"sync/atomic"
+	"time"
 )
 
 // trackInFlight wraps the dispatch + response window for one request.
@@ -30,5 +31,9 @@ func (r *Router) trackInFlight(ctx context.Context, deployID, replicaID string) 
 	return func() {
 		current := counter.Add(-1)
 		r.recorder.RecordReplicaInFlight(ctx, deployID, replicaID, current)
+		// The completion edge is the only place a "still making progress"
+		// signal can honestly be stamped. Incrementing side would mark a
+		// wedged engine as active forever.
+		r.completions.mark(deployID, replicaID, time.Now())
 	}
 }

@@ -344,3 +344,131 @@ func TestRunner_RunStopsOnContextCancel(t *testing.T) {
 		t.Fatal("Run did not exit within 1s of context cancel")
 	}
 }
+
+// fakeActivity reports a settable "last completion" age, and whether it has
+// seen the replica at all.
+type fakeActivity struct {
+	mu    sync.Mutex
+	since time.Duration
+	known bool
+}
+
+func (a *fakeActivity) SinceLastCompletion(_, _ string, _ time.Time) (time.Duration, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.since, a.known
+}
+
+func (a *fakeActivity) set(since time.Duration, known bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.since, a.known = since, known
+}
+
+// A replica that fails K probes while still completing requests is saturated,
+// not dead. Quarantining it removes the only healthy replica and the router
+// then 503s every request, which is how a 120k-context measurement run lost a
+// working engine (#450).
+func TestRunner_RecentCompletionVetoesQuarantine(t *testing.T) {
+	engine := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer engine.Close()
+
+	q := &fakeQuarantiner{}
+	src := &fakeSource{snap: []DeploymentSnapshot{{
+		DeployID: "d1",
+		Replicas: []ReplicaSnapshot{{InstanceID: "a", Endpoint: engine.URL}},
+	}}}
+	act := &fakeActivity{}
+	act.set(5*time.Second, true)
+
+	r := New(Config{
+		PollInterval:     time.Hour,
+		FailureThreshold: 3,
+		SuccessThreshold: 3,
+		ProbeTimeout:     500 * time.Millisecond,
+		MaxConcurrent:    4,
+		ActivityWindow:   time.Minute,
+	}, src, q, nil).WithActivity(act)
+
+	ctx := context.Background()
+	for range 6 {
+		r.tick(ctx)
+	}
+	if q.qCount() != 0 {
+		t.Fatalf("replica completing requests 5s ago should not be quarantined, got %d calls", q.qCount())
+	}
+
+	// Completions go stale: the veto lifts and the probe result decides.
+	act.set(10*time.Minute, true)
+	r.tick(ctx)
+	if q.qCount() != 1 {
+		t.Fatalf("stale completions should stop vetoing, got %d Quarantine calls", q.qCount())
+	}
+}
+
+// A replica nobody has sent traffic to has no completions, and that must not
+// read as evidence of health. The veto is positive evidence only; absence
+// falls through to the probe.
+func TestRunner_UnknownActivityDoesNotVeto(t *testing.T) {
+	engine := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer engine.Close()
+
+	q := &fakeQuarantiner{}
+	src := &fakeSource{snap: []DeploymentSnapshot{{
+		DeployID: "d1",
+		Replicas: []ReplicaSnapshot{{InstanceID: "a", Endpoint: engine.URL}},
+	}}}
+	act := &fakeActivity{}
+	act.set(0, false)
+
+	r := New(Config{
+		PollInterval:     time.Hour,
+		FailureThreshold: 3,
+		SuccessThreshold: 3,
+		ProbeTimeout:     500 * time.Millisecond,
+		MaxConcurrent:    4,
+		ActivityWindow:   time.Minute,
+	}, src, q, nil).WithActivity(act)
+
+	ctx := context.Background()
+	for range 3 {
+		r.tick(ctx)
+	}
+	if q.qCount() != 1 {
+		t.Fatalf("never-seen replica should quarantine on probes alone, got %d calls", q.qCount())
+	}
+}
+
+// No reporter wired is the pre-#450 behaviour and every existing caller's
+// path. Probes alone decide.
+func TestRunner_NoActivityReporterQuarantinesOnProbes(t *testing.T) {
+	engine := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer engine.Close()
+
+	q := &fakeQuarantiner{}
+	src := &fakeSource{snap: []DeploymentSnapshot{{
+		DeployID: "d1",
+		Replicas: []ReplicaSnapshot{{InstanceID: "a", Endpoint: engine.URL}},
+	}}}
+	r := New(Config{
+		PollInterval:     time.Hour,
+		FailureThreshold: 3,
+		SuccessThreshold: 3,
+		ProbeTimeout:     500 * time.Millisecond,
+		MaxConcurrent:    4,
+	}, src, q, nil)
+
+	ctx := context.Background()
+	for range 3 {
+		r.tick(ctx)
+	}
+	if q.qCount() != 1 {
+		t.Fatalf("no reporter should quarantine on probes alone, got %d calls", q.qCount())
+	}
+}

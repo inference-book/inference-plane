@@ -51,6 +51,7 @@ func DefaultConfig() Config {
 		SuccessThreshold: 3,
 		ProbeTimeout:     2 * time.Second,
 		MaxConcurrent:    32,
+		ActivityWindow:   2 * time.Minute,
 	}
 }
 
@@ -75,6 +76,50 @@ type Config struct {
 	// MaxConcurrent bounds in-flight probes inside a tick. Caps the
 	// goroutine fan-out under "many deployments, many replicas."
 	MaxConcurrent int
+	// ActivityWindow is how recently a replica must have completed a
+	// request for that to veto a quarantine.
+	//
+	// Sized for the slowest legitimate request rather than for the probe
+	// cadence. At 120k context a single request takes minutes, so a
+	// healthy engine can go a long time between completions and a window
+	// tuned to PollInterval would veto nothing exactly when it matters.
+	//
+	// The cost of a generous window is bounded and one-sided: an engine
+	// that dies immediately after completing a request stays in service
+	// for up to ActivityWindow longer than it would have. An engine that
+	// never completed anything is unaffected, because there is no
+	// completion to be stale.
+	//
+	// Zero falls back to DefaultConfig like every other field here. The
+	// veto is switched off by wiring no ActivityReporter, not by tuning
+	// this to zero.
+	ActivityWindow time.Duration
+}
+
+// ActivityReporter answers when a replica last finished a request.
+//
+// Optional. A Runner with no reporter quarantines purely on probe results,
+// which is what every caller did before #450 and what the local and test
+// wirings still do.
+//
+// The bool return must be false when the reporter has never seen the
+// replica complete anything. Collapsing that into a large duration would
+// make a replica nobody has sent traffic to look like one that has stopped
+// responding, which is the failure this interface exists to avoid.
+type ActivityReporter interface {
+	SinceLastCompletion(deployID, replicaID string, now time.Time) (time.Duration, bool)
+}
+
+// WithActivity attaches the reporter whose recent completions can veto a
+// quarantine, and returns the Runner so it can be chained onto New.
+//
+// Separate from New because most callers do not have one: the local and
+// external providers route nothing through the in-process router, and every
+// test that predates #450 constructs a Runner with probes as the only
+// signal. Passing nil leaves that behaviour exactly as it was.
+func (r *Runner) WithActivity(a ActivityReporter) *Runner {
+	r.activity = a
+	return r
 }
 
 // DeploymentSource snapshots running deployments and their replicas
@@ -122,6 +167,10 @@ type Runner struct {
 	client *http.Client
 	logger *slog.Logger
 
+	// activity vetoes a quarantine when the replica is still completing
+	// requests. Optional; nil means quarantine on probe results alone.
+	activity ActivityReporter
+
 	// streaks is keyed by deployID + "/" + instanceID. Values are
 	// *streak. Entries grow forever in the current implementation
 	// (a destroyed deployment's keys linger); follow-up cleanup is
@@ -158,6 +207,9 @@ func New(cfg Config, src DeploymentSource, q Quarantiner, logger *slog.Logger) *
 	}
 	if cfg.MaxConcurrent <= 0 {
 		cfg.MaxConcurrent = def.MaxConcurrent
+	}
+	if cfg.ActivityWindow <= 0 {
+		cfg.ActivityWindow = def.ActivityWindow
 	}
 	if logger == nil {
 		logger = slog.Default()
@@ -246,6 +298,23 @@ func (r *Runner) probe(ctx context.Context, deployID, instanceID, endpoint strin
 
 	switch {
 	case !quarantined && fails >= r.cfg.FailureThreshold:
+		// A replica that is still finishing requests is saturated, not
+		// dead, and quarantining it converts a slow deployment into a
+		// failed one: every subsequent request gets a 503 because no
+		// healthy replica remains. Measured on a 120k-context run, where
+		// an engine too loaded to answer a 2s /health probe was removed
+		// from service while it was still serving (#450).
+		//
+		// Deliberately a veto and never a trigger. Absence of recent
+		// completions means "no evidence", not "dead", so it must not be
+		// able to cause a quarantine on its own -- an idle healthy
+		// deployment has no completions either.
+		if why, vetoed := r.activityVeto(deployID, instanceID); vetoed {
+			r.logger.Info("quarantine vetoed: replica still completing requests",
+				"deploy", deployID, "instance", instanceID,
+				"consecutive_failures", fails, "last_completion", why)
+			return
+		}
 		if err := r.q.Quarantine(deployID, instanceID); err != nil {
 			r.logger.Warn("quarantine call failed",
 				"deploy", deployID, "instance", instanceID, "err", err)
@@ -289,4 +358,22 @@ func (r *Runner) doProbe(ctx context.Context, endpoint string) bool {
 // pass/fail history. Exposed for tests that want to inspect state.
 func streakKey(deployID, instanceID string) string {
 	return fmt.Sprintf("%s/%s", deployID, instanceID)
+}
+
+// activityVeto reports whether recent completions should block a quarantine,
+// and how long ago the replica last completed a request.
+//
+// False whenever the answer is unknown: no reporter configured, the window
+// disabled, or the reporter has never seen this replica finish anything. A
+// veto has to be positive evidence that the engine is working, so every
+// uncertain case falls through to the probe result.
+func (r *Runner) activityVeto(deployID, instanceID string) (time.Duration, bool) {
+	if r.activity == nil || r.cfg.ActivityWindow <= 0 {
+		return 0, false
+	}
+	since, ok := r.activity.SinceLastCompletion(deployID, instanceID, time.Now())
+	if !ok {
+		return 0, false
+	}
+	return since, since <= r.cfg.ActivityWindow
 }
