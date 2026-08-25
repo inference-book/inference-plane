@@ -1,8 +1,16 @@
 # schema_version 1
-# captured_at 2026-08-24T17:18:35Z
-# iplane_version c1df237
+# captured_at 2026-08-24T19:59:23Z
+# iplane_version 84adb17
+# version_note stamp read 'dev'; the binary was built without VERSION_LDFLAGS.
+# version_note 84adb17 is the source it was built from, recorded by hand (#347).
 # model cyankiwi/GLM-5.2-AWQ-INT4
 # endpoint http://localhost:18080
+# deploy_id run-20260824-123929
+# provider vast
+# gpu_sku H200
+# gpu_count 8
+# replicas 1
+# plan tp8
 # prompt_tokens 8192
 # max_tokens 512
 # stream true
@@ -10,22 +18,19 @@
 # window_seconds 30
 # tolerance 0.1
 # stable_windows 3
-# provider vast
-# provider_instance_id 48579853
-# gpu_sku H200
-# gpu_count 8
-# replicas 1
-# plan tp8
-# hourly_rate_usd 32.87828947368422
-# engine_image vllm/vllm-openai:v0.27.1
-# engine_args --max-model-len=131072 --max-num-seqs=32 --tensor-parallel-size=8
-# provenance_note hardware lines recovered from state.json; the sweep ran without --target
-# WARNING ttft_* and itl_* in this file were measured through the router,
-# WARNING which buffers the stream (#441), so they do not describe the engine.
-# WARNING ttft_samples is also only the --chat-fraction 0.4 share of successes (#437).
-# WARNING Do not chart them. Throughput, batch, req/s, latency and errors are unaffected.
+# NOTE ttft_* and itl_* here ARE trustworthy: measured after the router
+# NOTE stopped buffering the stream (#441) and after the loadgen learned the
+# NOTE /v1/completions frame shape (#437).
+# NOTE ttft_samples is 79-88% of successes rather than 100%. A GPU-free
+# NOTE rehearsal on real vLLM at the same context reached 99-100% coverage,
+# NOTE so the shortfall is specific to this model or its much longer
+# NOTE requests, not to the instrumentation. TTFT percentiles describe the
+# NOTE requests that reported one; treat the column as sound and the
+# NOTE coverage as unexplained.
 concurrency,achieved_batch,requests_per_sec,tokens_per_sec,successes,errors,completion_tokens,latency_p50_ms,latency_p95_ms,ttft_samples,ttft_p50_ms,ttft_p95_ms,itl_samples,itl_p50_ms,itl_p95_ms,warmup_sec,discarded_requests,steady_state
-1,0.9971392440808267,0.19333299199298043,77.39486335498303,116,0,46437,6325,6367,54,3974,4046,25023,0.003,0.008,90.000806542,15,true
-2,1.9811150848854593,0.33166606962186085,129.5331001558343,199,0,77720,7319,8147,68,4846,5640,30405,0.002,0.005,150.000676,49,true
-4,3.963981527626097,0.49833247194489166,189.98633826736486,299,0,113992,9590,11934,111,6087,7662,49394,0.002,0.005,180.001052083,82,true
-8,7.910048387571651,0.6599987949522002,251.02620833464795,396,0,150616,14618,17786,164,9145,12166,73428,0.002,0.006,120.001073292,73,true
+1,0.9933791225612496,0.20333315430154095,76.35826610102541,122,0,45815,6322,6354,96,836,871,45798,10.752,14.546,90.00060975,18,true
+2,1.9856464166882235,0.3149995129540531,131.45313008313266,189,0,78872,7331,8137,167,845,1592,79034,11.208,14.823,180.001076167,56,true
+4,3.972023912663267,0.4899997997468818,192.12992148034368,294,0,115278,9590,11212,243,848,905,115576,12.583,17.911,120.000517917,54,true
+8,7.891997553091793,0.6799997335251045,244.35323757740835,408,0,146612,14655,18478,328,865,1652,147826,15.009,21.375,120.001105209,74,true
+16,15.698768956790392,0.8166662398442232,297.9965109217702,490,0,178798,24453,29138,398,880,1678,181892,18.707,32.643,120.000993375,82,true
+32,30.672633489415393,0.9299986108145751,324.7011816442766,558,0,194821,42303,50979,453,922,2519,201794,24.524,805.194,150.001202875,112,true

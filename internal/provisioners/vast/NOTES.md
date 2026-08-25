@@ -64,6 +64,39 @@ operator never typed.
 
 - **A dead Vast host used to bill the full timeout.** The provider says when a container will never run (`cur_state: stopped` plus a `status_msg` carrying docker's verbatim error), and the readiness loop ignored it, so a broken host cost the whole engine-ready wait. `internal/provisioners/vast/failure.go` now aborts on a terminal `status_msg`. Keyed on the **message, not `cur_state`**: `stopped` occurs benignly early in a container's life, while both observed failures carried unambiguous text. `terminalSignatures` holds only strings seen on real failed hosts, and `transientSignatures` is checked **first** so `Retrying` wins over an error word in the same message. That ordering is load-bearing: docker prints `Retrying` while still working and hosts do recover, so a false positive kills healthy deploys, and a slow deploy is the normal case (a 10 GB image on community capacity routinely takes minutes). A describe failure against Vast's control API is explicitly **not** terminal, since that API goes slow in bursts and was observed recovering mid-deploy. Exposed to the shared readiness path as `provisioners.FailureReporter` (#265). **RunPod does not have the same shape of signal** -- that was assumed and then disproven by measurement; see `internal/provisioners/runpod/NOTES.md`.
 
+### A marketplace card is not an empty card
+
+A Vast GPU can already be holding another tenant's memory when your container
+starts, and nothing in the offer says so. Measured 2026-08-24 on an RTX 3090
+advertised as 24GB:
+
+```
+ValueError: Free memory on device cuda:0 (16.6/23.56 GiB) on startup is less
+than desired GPU memory utilization (0.92, 21.67 GiB).
+```
+
+**vLLM's `--gpu-memory-utilization` is a fraction of TOTAL memory, not of
+free.** Unset, it defaults near 0.9, so the engine asks for ~21.7 GiB of a
+23.56 GiB card and refuses to start when 7 GiB is already spoken for. Three
+consecutive deploys died this way on two different hosts, and because the
+weights fetch stops as soon as the engine core dies, both looked like a
+stalled download frozen at the same 11.5 MB. Two hosts stopping 16 bytes apart
+is what gave it away: a network stall is not deterministic.
+
+`deploy-watch` reports the co-tenant's memory as `gpu_mem_used_mb` before our
+engine allocates anything, which reads exactly like our own engine making
+progress. It is the clearest early signal and the easiest to misread.
+
+**Do not fix this by setting a default utilization in the deploy path.** The
+fraction sets KV capacity, KV capacity sets the concurrency ceiling, and the
+ceiling is a measured quantity in Part IV. A default chosen to survive
+co-tenants would quietly change the numbers the book reports. Pass it per-run
+through `--engine-args` when a specific box needs it.
+
+The cost is not the failure, it is how long the failure takes: the engine dies
+in seconds and the deploy waits out the whole engine-ready timeout. Making
+that abort promptly is issue #448.
+
 ### The two real failures, and why neither was predictable
 
 Both hosts below cleared every pre-rent quality filter. Neither failure is
