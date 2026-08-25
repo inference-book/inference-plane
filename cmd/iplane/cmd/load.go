@@ -342,6 +342,25 @@ func fireLoadRequest(ctx context.Context, c *http.Client, cfg *loadFireConfig, s
 	// comparing two engines on it would be meaningless.
 	dur := time.Since(t0)
 
+	// A response we stopped reading is not a completed request. c.Do returns
+	// as soon as the SSE headers arrive, so a truncated stream still looks
+	// like a 200 here, and counting it as a success records a latency the
+	// engine never took and a token count it never produced. At 120k context
+	// that reported 6.2 completion tokens against a 512 cap and a throughput
+	// figure five times below what the frames themselves implied (#451).
+	//
+	// The partial observations are still real and are kept: the first token
+	// did arrive, and the gaps between the frames that came are gaps the
+	// engine produced.
+	if !res.Complete {
+		st.recordTruncated()
+		st.recordITLs(res.ITLs)
+		if res.HasTTFT {
+			st.recordTTFT(res.TTFT)
+		}
+		return
+	}
+
 	st.recordSuccess(dur, res.Tokens)
 	st.recordITLs(res.ITLs)
 	// Only when actually measured. A stream that carried no content has
@@ -397,6 +416,12 @@ type loadStats struct {
 	successes int64
 	errors    int64
 	skipped   int64
+	// truncated counts responses the client stopped reading before the
+	// engine finished, which in a sweep means the measurement window
+	// closed mid-stream. Kept apart from both successes and errors: the
+	// engine did nothing wrong, and the request is not an observation of
+	// a completed one.
+	truncated int64
 	tokens    int64
 	latencies []time.Duration
 
@@ -417,6 +442,21 @@ type loadStats struct {
 // keeps firing requests through its warm-up window without letting them
 // into the measurement. The alternative, gating at each call site, put
 // the same condition in four places and got it wrong in one.
+// recordTruncated counts a response that was cut off before it finished.
+//
+// No latency and no token count, because neither is a measurement of the
+// engine: the clock stopped when the client stopped listening. TTFT and the
+// inter-token gaps that did arrive are recorded separately by the caller,
+// since those are real observations of the part that happened.
+func (s *loadStats) recordTruncated() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.truncated++
+	s.mu.Unlock()
+}
+
 func (s *loadStats) recordSuccess(d time.Duration, tokens int64) {
 	if s == nil {
 		return
