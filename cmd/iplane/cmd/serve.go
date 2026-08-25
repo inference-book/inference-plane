@@ -157,6 +157,7 @@ func registerServeDefaults() {
 	viper.SetDefault("health.success_threshold", 3)
 	viper.SetDefault("health.probe_timeout", 2*time.Second)
 	viper.SetDefault("health.max_concurrent", 32)
+	viper.SetDefault("health.activity_window", 2*time.Minute)
 }
 
 // loopbackURL turns the daemon's HTTP bind address into a fully-qualified
@@ -358,14 +359,13 @@ func runServe(parent context.Context) error {
 		SuccessThreshold: viper.GetInt("health.success_threshold"),
 		ProbeTimeout:     viper.GetDuration("health.probe_timeout"),
 		MaxConcurrent:    viper.GetInt("health.max_concurrent"),
+		ActivityWindow:   viper.GetDuration("health.activity_window"),
 	}
 	healthAdapter := healthcheck.NewServiceAdapter(provisionerSvc)
 	healthRunner := healthcheck.New(healthCfg, healthAdapter, healthAdapter, logger)
-	go healthRunner.Run(healthCtx)
-	logger.Info("health-poll runner started",
-		"poll_interval", healthCfg.PollInterval,
-		"failure_threshold", healthCfg.FailureThreshold,
-		"success_threshold", healthCfg.SuccessThreshold)
+	// Started below, once the router exists: the runner takes the router as
+	// its activity reporter, and attaching that after Run has begun would
+	// race the tick goroutine.
 
 	// v0.2 ch10 (#204): the push side of fleet tracking. Engines register
 	// themselves and renew a lease; the sweeper declares an engine LOST when
@@ -425,6 +425,20 @@ func runServe(parent context.Context) error {
 		routerOpts...,
 	)
 	deploymentRouter.Start(parent)
+
+	// The router is the only component that knows whether an engine is
+	// still turning requests around, so the health runner starts here
+	// rather than at construction. Without it a saturated engine that
+	// cannot spare a 2s /health response inside three ticks gets
+	// quarantined, and every request then 503s against a deployment that
+	// was working (#450).
+	healthRunner.WithActivity(deploymentRouter)
+	go healthRunner.Run(healthCtx)
+	logger.Info("health-poll runner started",
+		"poll_interval", healthCfg.PollInterval,
+		"failure_threshold", healthCfg.FailureThreshold,
+		"success_threshold", healthCfg.SuccessThreshold,
+		"activity_window", healthCfg.ActivityWindow)
 
 	// Echo the scheduler / queue config at startup so operators can
 	// confirm which values the daemon actually loaded. Otherwise it's
