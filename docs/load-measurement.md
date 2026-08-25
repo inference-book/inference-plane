@@ -274,3 +274,39 @@ TTFT and hundreds of ITLs. Measured against `iplane mock-engine --latency
 200ms --token-latency 8ms`, a streamed sweep reports TTFT p50 201ms and ITL
 p50 9.97ms from 20,572 inter-token samples at four-way concurrency, against
 zero samples for both with streaming off.
+
+## What a running sweep tells you
+
+A sweep used to print its header and then nothing until every level had
+finished. On the GLM-5.2 run that was 48 identical minutes while an 8x H200
+billed at $32.88/hr, and the same run fired its first sweep at a closed port,
+produced no traffic at all, and looked exactly like a level still warming up
+for 13 minutes (#438).
+
+It now narrates to stderr, one line per window and one per finished level:
+
+```
+iplane load --sweep: levels [1 2], 6s per level after steady state -> http://…
+  n=1 warming up: 7 ok
+  n=1 warming up: 14 ok
+  n=1 warming up: 21 ok (settled)
+  n=1 measuring: 2s of 6s, 6 ok
+level 1/2 (n=1): settled after 6s, 21 requests, 3.50 req/s, 84.0 tok/s, p50 277ms
+```
+
+**Successes and errors, not the request count.** That distinction is the
+whole point and it is not obvious. A refused connection returns instantly, so
+a sweep pointed at a closed port completes tens of thousands of attempts per
+window at a beautifully stable rate, and the steady-state detector settles on
+it. Narrating the attempt count would report `23287 requests in the last 2s`,
+which reads healthier than a working engine. The same failure now reads:
+
+```
+  n=1 warming up: 0 ok, 23287 errors
+```
+
+Errors are named only when there are some, so a healthy run stays quiet.
+
+**stdout is still exactly the artifact.** All of this goes to stderr, so
+`--output csv > sweep.csv` captures data and nothing else. `hack/measure-run.sh`
+tees it, so the lines reach both the run log and the operator watching.
