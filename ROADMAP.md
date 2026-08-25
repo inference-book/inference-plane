@@ -253,7 +253,10 @@ a five-to-eight-times spread between the marketplaces and the
 hyperscalers, eight-card capacity that went from three offers to none and
 back inside four hours, a seven-times spread in host download bandwidth
 that decides whether staging weights is worth building at all, and the
-arithmetic showing Kimi K3 cannot fit a single node at any price.
+arithmetic showing Kimi K3 could not fit a single node at any price then
+available. **That last one has since been overtaken**: #354 catalogued the
+B300 at 2304 GB, against K3's 1560 GB at four bits, so the model this epic
+exists to serve now fits on one node. The audit's other findings stand.
 
 **Whole-node rental verified 2026-08-18 (#349), and it needed no code.**
 `gpu_count` already means N cards on one machine and
@@ -266,6 +269,25 @@ ones describing a whole instance, and all seven are single-GPU, so the
 resolver excludes every shape before the adapter asks (#380). Findings and
 the captured output are in
 [docs/design/0008-whole-node-rental.md](docs/design/0008-whole-node-rental.md).
+
+### The remaining runs no longer need a cluster
+
+Reviewed 2026-08-24 against the tickets rather than the plan. Part IV's later
+phases were written around Lambda 1-Click Clusters, and #352 closed that
+NOT_PLANNED because 1CC is a console reservation stated in weeks and settled by
+invoice rather than an API product. Re-checked against Lambda's published
+OpenAPI (v1.10.0): it lists **no cluster paths at all**, which is firmer than
+the 404s that first settled it. #353 went with it.
+
+That leaves #359 (16x H100 via 1CC) describing a route that does not exist, and
+#355 offering a second vendor for a capability with no first vendor. #360's
+scope carries the answer in its own "or": an 8x B300 holds 2304 GB against K3's
+1560 GB at four bits, so the frontier run is single-node work. Notes are on each
+ticket; none closed unilaterally, since what the book still wants to *show* is
+an authoring decision rather than an engineering one.
+
+The critical path is therefore #358, then a funded single-node K3 run, and
+cross-node becomes something Part IV explains rather than demonstrates.
 
 ### What has not been tested against hardware
 
