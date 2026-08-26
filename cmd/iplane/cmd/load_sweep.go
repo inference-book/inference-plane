@@ -646,7 +646,61 @@ func writeSweepTable(w io.Writer, r sweepReport) {
 		if !l.SteadyState {
 			fmt.Fprintf(w, "level %d never settled within --sweep-warmup-max; its row was measured mid-ramp.\n", l.Concurrency)
 		}
+		if note := inconsistencyNote(l); note != "" {
+			fmt.Fprintf(w, "level %d %s\n", l.Concurrency, note)
+		}
 	}
+}
+
+// tokenDisagreementFactor is how far the two independent token counts may
+// diverge before the row is called contradictory.
+//
+// Generous on purpose. The two are counted differently (a usage total against
+// a frame tally) and neither is exact, so a small gap is ordinary. The failure
+// worth catching is not subtle: a 120k level reported 6.2 tokens per request
+// from usage while its frames implied 103, a factor of 17, and every published
+// figure derived from the first number (#451).
+const tokenDisagreementFactor = 3.0
+
+// minTokensToCompare is the count below which the comparison stops meaning
+// anything, since a request yielding n tokens yields n-1 gaps and the ratio
+// skews hard at small n.
+const minTokensToCompare = 4.0
+
+// inconsistencyNote reports when a level's own columns contradict each other,
+// and returns "" when they agree or cannot be compared.
+//
+// A sweep row carries two independent counts of the same quantity. Tokens come
+// from the engine's usage block; inter-token gaps come from counting frames as
+// they arrive. On a level that measured what it claims, tokens-per-request and
+// gaps-per-request land within a few percent of each other. When they diverge
+// by a large factor, one of the two is describing something other than the
+// engine's output, and the row cannot be trusted whichever way it resolves.
+//
+// This is a cross-check rather than a threshold: it needs no notion of what a
+// correct value looks like, only that two measurements of one thing should
+// agree. That is what makes it useful against defects nobody predicted, which
+// is the category that has cost the most here.
+func inconsistencyNote(l sweepLevel) string {
+	if l.Successes <= 0 || l.TTFTSamples <= 0 || l.ITLSamples <= 0 {
+		return ""
+	}
+	fromUsage := float64(l.Tokens) / float64(l.Successes)
+	fromFrames := float64(l.ITLSamples) / float64(l.TTFTSamples)
+	if fromUsage < minTokensToCompare || fromFrames < minTokensToCompare {
+		return ""
+	}
+	hi, lo := fromUsage, fromFrames
+	if lo > hi {
+		hi, lo = lo, hi
+	}
+	if hi/lo < tokenDisagreementFactor {
+		return ""
+	}
+	return fmt.Sprintf(
+		"disagrees with itself: %.1f tokens per request from usage against %.1f from streamed frames (%.0fx). "+
+			"One of the two is not the engine's output; do not chart this row.",
+		fromUsage, fromFrames, hi/lo)
 }
 
 // msOrDash keeps an unmeasured cell distinguishable from a fast one.
