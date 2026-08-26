@@ -201,9 +201,58 @@ twice (#382). Expert parallelism divides the routed experts and replicates
 everything else, which the budget now computes rather than dividing the
 whole model by one number (#376).
 
-**What is left is #358, the measurement run**, which is the first thing in
-Part IV that spends money. #387 closed, so the budget and the deploy path
-agree on an expert-parallel plan.
+**#358 has produced its curve, and the thesis gate passes.** GLM-5.2 on 8x
+H200 at 8k context, six concurrency levels, all p95-grade:
+
+| B | 1 | 2 | 4 | 8 | 16 | 32 |
+| --- | --- | --- | --- | --- | --- | --- |
+| tok/s | 76.4 | 131.5 | 192.1 | 244.4 | 298.0 | 324.7 |
+| $/M out | 119.61 | 69.48 | 47.53 | 37.38 | 30.65 | 28.13 |
+
+Fitting the predicted form on the endpoints and checking the four interior
+points gives `cost/M = 94.43/B + 25.18` with 4.2% maximum error, so the
+mechanism is recovered from the data rather than merely consistent with it.
+$94.43 is the amortisable weight read; **$25.18 per million output tokens is
+a floor no batch size beats** on this hardware at this price. Committed as
+`docs/data/glm52-8k-vast-h200-tp8.csv`.
+
+**At 120k the curve inverts, and the reason is not the one Part IV
+predicted.** A ranging shot at 1, 8, 16, 32 gives $491, $590, $822 per
+million and then collapse: throughput is highest at concurrency 1 and falls
+monotonically. Batching amortises a weight read across a decode step, and
+prefill has nothing to amortise, since every one of 120,000 prompt tokens is
+processed for every request. TTFT is 13% of latency at 8k and 73% at 120k.
+
+The control that makes it an argument rather than a guess is the inter-token
+gap, which barely moves: 10.75ms against 10.93ms at concurrency 1, 15.01ms
+against 15.88ms at concurrency 8. Decode speed is the same at both contexts.
+The entire difference is prefill.
+
+So **context length is a bigger cost lever than concurrency**: batching at 8k
+buys 4.25x, while moving 8k to 120k costs 17.5x. And the wall is not the one
+the plan names. KV had room throughout; prefill contention bit well before
+memory did. Ch 14's outline needs that correction, since it pairs the
+asymptote with a KV ceiling as two points on one curve, and they are two
+regimes with different dominant costs.
+
+**Four defects had to be fixed before any of those numbers meant
+anything**, and all four were the control plane describing itself rather than
+the engine. The router buffered streamed responses, so TTFT collapsed onto
+total latency and reported the 8k workload as prefill-dominated when it is
+not (#441). The load generator parsed one of the two OpenAI frame shapes
+while sending most traffic to the other, discarding 60% of samples, and the
+mock answered both endpoints in one shape so nothing could catch it (#437).
+The health check could not tell a saturated engine from a dead one and
+quarantined a working deployment mid-measurement (#449). And a request the
+measurement window closed on was counted as a success, which reported 6.2
+completion tokens against a 512 cap (#451).
+
+Two guards came out of that (#452). A level cross-checks its own columns,
+since a row carries two independent token counts that agree on a real
+measurement and disagreed by 17x on the broken one, and the check needs no
+model of a correct value. And `measure-run`'s pre-flight became a 30-second
+micro-sweep that reads those columns before an hour is spent, because every
+one of the four defects returned HTTP 200 throughout.
 
 **Four attempts, no sweep yet, and the reason was never the model.** Every
 failure was in observing the run rather than in GLM-5.2: two hour-long
@@ -291,12 +340,24 @@ cross-node becomes something Part IV explains rather than demonstrates.
 
 ### What has not been tested against hardware
 
-Everything above is arithmetic and a mock. Two claims in particular are
-predictions rather than measurements, and the GLM run (#358) is the first
-thing that tests them: that a compressed latent is replicated across
-tensor-parallel ranks rather than sharded, and the modelled concurrency
-ceiling generally. `model budget --sessions-at` and `load --sweep` have
-never been pointed at each other on a real engine.
+The 8k curve above is measured. What remains arithmetic:
+
+- **Where the regime flips.** 8k is decode-dominated and 120k is
+  prefill-dominated, with nothing measured in between. A mid-context run
+  (32k) would locate the turn, and it is the point Ch 14 most wants.
+- **A publishable 120k sweep.** Every row of the ranging shot is
+  sample-starved: at 120k a request takes 20 to 257 seconds, so a 600s level
+  yields 6 to 32 samples. Sizing a window from observed latency rather than a
+  constant is what makes this affordable.
+- **The predicted concurrency ceiling.** Recorded before the 120k run as ~50
+  sessions from the budget arithmetic; the measurement never reached a KV
+  limit at all, so `model budget --sessions-at` and `load --sweep` still have
+  not been reconciled against each other.
+- **Kimi K3 at 1M context.** #358 asks for 8k / 128k / 1M. If 120k already
+  inverts, 1M is worse and may not be measurable at a sensible price, so that
+  criterion is worth revisiting rather than assuming.
+- **The compressed latent** replicated across tensor-parallel ranks rather
+  than sharded, which nothing has yet tested.
 
 ---
 

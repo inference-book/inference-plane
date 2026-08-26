@@ -1,0 +1,33 @@
+# schema_version 1
+# captured_at 2026-08-26T03:53:30Z
+# iplane_version a7db18f
+# model cyankiwi/GLM-5.2-AWQ-INT4
+# endpoint http://localhost:18080
+# deploy_id run-20260825-203516
+# provider vast
+# gpu_sku H200
+# gpu_count 8
+# replicas 1
+# plan tp8
+# prompt_tokens 120000
+# max_tokens 512
+# stream true
+# measure_seconds 600
+# window_seconds 30
+# tolerance 0.1
+# stable_windows 3
+# NOTE RANGING SHOT, not a publishable sweep. Every row is sample-starved:
+# NOTE at 120k a request takes 20 to 257s, so a 600s level yields 6 to 32
+# NOTE samples. The grader calls three of four UNUSABLE and it is right.
+# NOTE What this file is for is the SHAPE, which is unambiguous: throughput is
+# NOTE highest at concurrency 1 and falls monotonically, so batching inverts at
+# NOTE this context instead of amortising. TTFT is 73% of latency here against
+# NOTE 13% at 8k, and itl_p50 barely moves between the two contexts, so decode
+# NOTE speed is unchanged and the whole difference is prefill.
+# NOTE Measured after #441, #437, #449 and #451, so the columns describe the
+# NOTE engine rather than the control plane in front of it.
+concurrency,achieved_batch,requests_per_sec,tokens_per_sec,successes,truncated_requests,errors,completion_tokens,latency_p50_ms,latency_p95_ms,ttft_samples,ttft_p50_ms,ttft_p95_ms,itl_samples,itl_p50_ms,itl_p95_ms,warmup_sec,discarded_requests,steady_state
+1,0.9801237368830884,0.05333328916296992,17.856651877876867,32,1,0,10714,20087,20388,27,14721,15818,10488,10.925,11.557,90.000992,4,true
+8,5.736681957160937,0.05333323618168809,14.873306240168265,32,8,0,8924,103257,191326,30,43822,69823,9438,15.884,1037.833,90.001151416,2,true
+16,8.267245073697048,0.0366666018686534,10.671647807499442,22,18,0,6403,234939,280557,26,161811,183283,8053,15.798,1035.89,90.001149458,2,true
+32,2.4855664776805204,0.009999993234721245,0.009999993234721245,6,58,0,6,257073,295442,20,228094,281863,1232,966.577,1102.308,90.001145541,1,true

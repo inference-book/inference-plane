@@ -310,3 +310,71 @@ Errors are named only when there are some, so a healthy run stays quiet.
 **stdout is still exactly the artifact.** All of this goes to stderr, so
 `--output csv > sweep.csv` captures data and nothing else. `hack/measure-run.sh`
 tees it, so the lines reach both the run log and the operator watching.
+
+
+## Two regimes, and which one you are in
+
+Measured on GLM-5.2, 8x H200, tp8, 512 output tokens, the same harness at two
+context lengths:
+
+| | 8k | 120k |
+| --- | --- | --- |
+| tok/s at B=1 | 76.4 | 17.9 |
+| best $/M output | **28.13** (at B=32) | **491** (at B=1) |
+| direction with concurrency | falls 4.25x | **rises** |
+| TTFT share of latency at B=1 | 13% | 73% |
+| ITL p50 at B=1 | 10.75ms | 10.93ms |
+| ITL p50 at B=8 | 15.01ms | 15.88ms |
+
+At 8k the run is decode-dominated and batching works: a batched decode step
+reads the active weights once regardless of how many sequences share it, so
+cost per token falls as `94.43/B + 25.18` toward a floor set by per-token
+FLOPs.
+
+At 120k the run is prefill-dominated and batching inverts. Prefill has
+nothing to amortise, because every one of 120,000 prompt tokens is processed
+for every request, so added concurrency adds competing work rather than
+sharing a fixed cost.
+
+**The inter-token gap is the control that turns this from a guess into an
+argument.** It barely moves between the two contexts at matched concurrency.
+Decode speed is unchanged; the whole difference is prefill. Without that
+column the throughput collapse at long context could equally be memory
+pressure or scheduling.
+
+**The practical consequence is that context length is a bigger cost lever
+than concurrency.** Batching at 8k buys 4.25x. Moving from 8k to 120k costs
+17.5x. A reader tuning batch size is optimising the smaller variable.
+
+The regime flips somewhere between the two, and nothing has measured where.
+
+## Reading a row that cannot be trusted
+
+Three columns exist because a measurement that is quietly wrong has cost more
+here than one that fails loudly.
+
+**`truncated_requests`** counts responses the measurement window closed on
+before the engine finished them. Neither a success nor an error: nothing
+failed, and there is no completed request to measure. An HTTP client returns
+the response as soon as the streaming headers arrive, so a cut-off request
+looks like a 200 and was previously counted as a success carrying a latency
+the engine never took and a token count it never produced. A large value
+beside a small `successes` says the level was too short for its context
+length rather than that the engine was slow.
+
+**The self-consistency note** fires when a level's two independent token
+counts disagree. Tokens come from the engine's `usage` block; inter-token
+gaps come from counting frames as they arrive. On a level that measured what
+it claims these agree within a few percent; on the truncated 120k level they
+differed by 17x, and every published figure came from the smaller one. The
+check takes no view on what a correct value looks like, only that two
+measurements of one quantity should agree, which is what makes it work
+against defects nobody anticipated.
+
+**The grader** (`hack/measure-run.sh`) grades each row p95 / p50 / UNUSABLE
+on its sample count, and grades the TTFT columns on `ttft_samples` rather
+than on `successes`, because the two can describe different populations.
+
+Note that `ttft_samples` may now exceed `successes`. A truncated request
+contributes a real time-to-first-token, since the first token genuinely
+arrived, while contributing no completed request.
