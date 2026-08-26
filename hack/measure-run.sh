@@ -516,16 +516,60 @@ log "=== ENGINE IS SERVING ==="
 # Deliberately checks the path rather than the port. A listener on the right
 # port proves nothing about whether a completion round-trips, and a 200 here
 # is the same call the sweep makes.
-log "pre-flight: one completion through ${SERVICE_URL}"
-PREFLIGHT=$(curl -s -o /dev/null -w '%{http_code}' --max-time 120 \
-  -H 'Content-Type: application/json' \
-  -d "{\"model\":\"${MODEL}\",\"prompt\":\"hello\",\"max_tokens\":1}" \
-  "${SERVICE_URL}/v1/completions" 2>/dev/null)
-if [ "$PREFLIGHT" != "200" ]; then
-  fail "pre-flight got HTTP '${PREFLIGHT}' from ${SERVICE_URL}/v1/completions.
-  The engine is serving but the sweep cannot reach it, so every level would
-  measure nothing while the box bills. Teardown follows."
-fi
+log "pre-flight: 30s micro-sweep through ${SERVICE_URL}"
+# A reachability check is not a measurement check. The earlier version of this
+# sent one completion and looked for a 200, which every broken measurement this
+# harness has produced would also have passed: the router buffered the stream
+# and still answered 200, the parser read one frame shape and still answered
+# 200, truncated requests were counted as successes and still answered 200.
+#
+# So the pre-flight runs the real thing in miniature and reads the columns it
+# is about to spend an hour collecting. Thirty seconds at concurrency 1 costs
+# about $0.30 on an eight-card box and rejects a run whose numbers would have
+# been unusable.
+"$IPLANE" load --sweep 1 --prompt-tokens "$(echo "$PROMPT_TOKENS" | cut -d, -f1)" \
+  --model "$MODEL" --target "$DEP_ID" --service-url "$SERVICE_URL" \
+  --stream --max-tokens "$SWEEP_MAX_TOKENS" \
+  --sweep-window 5s --sweep-stable-windows 2 \
+  --sweep-duration 30s --sweep-warmup-max 60s \
+  --output csv > "${OUT}/preflight.csv" 2> "${OUT}/preflight.log" \
+  || fail "pre-flight sweep did not run; see ${OUT}/preflight.log"
+
+python3 - "${OUT}/preflight.csv" <<'PYPF' || fail "pre-flight rejected the measurement path; see ${OUT}/preflight.csv"
+import csv, sys
+rows = [r for r in csv.DictReader(l for l in open(sys.argv[1]) if not l.startswith("#"))]
+if not rows:
+    print("  pre-flight: the sweep produced no rows"); raise SystemExit(1)
+r = rows[0]
+succ, tok = int(r["successes"]), int(r["completion_tokens"])
+ttft, itl = int(r["ttft_samples"]), int(r["itl_samples"])
+trunc = int(r.get("truncated_requests", 0) or 0)
+print("  pre-flight: %d ok, %d truncated, %d tokens, %d ttft, %d itl" % (succ, trunc, tok, ttft, itl))
+
+fatal = []
+if succ == 0:
+    fatal.append("no request completed")
+if tok == 0:
+    fatal.append("no completion tokens; the engine served nothing measurable")
+# Streaming is what the whole sweep is for. Zero samples here means TTFT and
+# ITL will be zero for the entire run, which is how a $44 sweep produced two
+# empty columns before the router stopped buffering (#441).
+if ttft == 0:
+    fatal.append("no TTFT samples; the streaming path is not being measured")
+if itl == 0:
+    fatal.append("no inter-token samples; frames are not arriving incrementally")
+# The same cross-check the sweep applies per level, applied before paying for
+# the levels: two independent counts of one quantity should agree.
+if succ and ttft:
+    a, b = tok / succ, itl / ttft
+    if min(a, b) >= 4 and max(a, b) / min(a, b) >= 3:
+        fatal.append("token counts disagree: %.1f per request from usage against %.1f from frames" % (a, b))
+
+if fatal:
+    for f in fatal:
+        print("  pre-flight FAILED: " + f)
+    raise SystemExit(1)
+PYPF
 log "pre-flight ok"
 log "sweeping: ladder=$LADDER prompt-tokens=$PROMPT_TOKENS"
 CTX_INDEX=0

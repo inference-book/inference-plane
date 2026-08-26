@@ -347,6 +347,23 @@ caught it: the sizing work in #426 verified `iplane load` against
 `iplane mock-engine` directly, with an explicit URL, rather than through this
 script. Thirteen minutes at $32.88/hr bought an empty csv.
 
+**The pre-flight is a 30-second micro-sweep, not a reachability check.** It
+runs the real measurement in miniature at concurrency 1 and reads the columns
+the run is about to spend an hour collecting: successes, tokens, TTFT samples,
+inter-token samples, and whether the two independent token counts agree. It
+refuses the run when any of those says the measurement path is broken.
+
+The earlier version sent one completion and looked for a 200, which every
+broken measurement this harness has produced would also have passed. The
+router buffered the stream and answered 200. The parser read one frame shape
+and answered 200. Truncated requests were counted as successes and answered
+200. Each cost a full paid run to discover. Run against the artifacts those
+produced, the micro-sweep rejects both: the buffered one for zero TTFT and ITL
+samples, the truncated one for reporting 6.2 tokens per request from usage
+against 103.6 from its own frames.
+
+Thirty seconds is about $0.30 on an eight-card box.
+
 **Nothing exercises this script end to end against a serving engine.** Until
 something does, treat every edit to the sweep invocation as unverified, and
 watch the first minute of a real sweep for traffic rather than trusting the
