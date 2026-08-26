@@ -527,7 +527,13 @@ log "pre-flight: 30s micro-sweep through ${SERVICE_URL}"
 # is about to spend an hour collecting. Thirty seconds at concurrency 1 costs
 # about $0.30 on an eight-card box and rejects a run whose numbers would have
 # been unusable.
-"$IPLANE" load --sweep 1 --prompt-tokens "$(echo "$PROMPT_TOKENS" | cut -d, -f1)" \
+# A short prompt on purpose, whatever the run's own context is. The pre-flight
+# checks that tokens, TTFT and inter-token gaps are being measured at all, and
+# that the two token counts agree; none of that needs the real context length.
+# Using it would be actively harmful: at 120k a single request takes about 18
+# seconds, so a 30s window can complete none, and the pre-flight would tear
+# down a healthy deploy for "no request completed".
+"$IPLANE" load --sweep 1 --prompt-tokens 512 \
   --model "$MODEL" --target "$DEP_ID" --service-url "$SERVICE_URL" \
   --stream --max-tokens "$SWEEP_MAX_TOKENS" \
   --sweep-window 5s --sweep-stable-windows 2 \
