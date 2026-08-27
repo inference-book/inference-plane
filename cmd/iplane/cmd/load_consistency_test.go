@@ -20,7 +20,7 @@ func TestInconsistencyNoteCatchesTheTruncated120kRow(t *testing.T) {
 	if note == "" {
 		t.Fatal("a 17x disagreement between the two token counts should be reported")
 	}
-	for _, want := range []string{"6.2", "103", "do not chart"} {
+	for _, want := range []string{"6.2", "104", "do not chart"} {
 		if !strings.Contains(note, want) {
 			t.Errorf("note should mention %q, got: %s", want, note)
 		}
@@ -34,6 +34,10 @@ func TestInconsistencyNoteSilentOnAgreeingRows(t *testing.T) {
 		{Concurrency: 1, Successes: 122, Tokens: 45815, TTFTSamples: 96, ITLSamples: 45798},
 		{Concurrency: 8, Successes: 408, Tokens: 146612, TTFTSamples: 328, ITLSamples: 147826},
 		{Concurrency: 1, Successes: 74, Tokens: 35701, TTFTSamples: 74, ITLSamples: 35685},
+		// Two tokens per request is one gap per request. Short replies are
+		// compared like any other row, because the n-1 relation is corrected
+		// for rather than excused.
+		{Concurrency: 4, Successes: 100, Tokens: 200, TTFTSamples: 100, ITLSamples: 100},
 	} {
 		if note := inconsistencyNote(l); note != "" {
 			t.Errorf("level %d: agreeing counts should be silent, got: %s", l.Concurrency, note)
@@ -47,10 +51,29 @@ func TestInconsistencyNoteSilentWhenUncomparable(t *testing.T) {
 	for name, l := range map[string]sweepLevel{
 		"no stream":    {Successes: 100, Tokens: 40000, TTFTSamples: 0, ITLSamples: 0},
 		"no successes": {Successes: 0, Tokens: 0, TTFTSamples: 0, ITLSamples: 0},
-		"tiny replies": {Successes: 100, Tokens: 200, TTFTSamples: 100, ITLSamples: 100},
 	} {
 		if note := inconsistencyNote(l); note != "" {
 			t.Errorf("%s: should be silent, got: %s", name, note)
 		}
+	}
+}
+
+// The hole the floor left behind. On the 120k ranging shot's N=32 level the
+// usage block reported one token per completed request while the frames
+// implied sixty. The old check skipped the row because one of the two counts
+// fell under its minimum, so the single most contradictory row in the run was
+// the one row exempt from the contradiction check. The grader caught it on
+// sample count instead, which is luck rather than design.
+func TestInconsistencyNoteCatchesRowsWithATinySideCount(t *testing.T) {
+	note := inconsistencyNote(sweepLevel{
+		Concurrency: 32,
+		Successes:   4,
+		Tokens:      4,
+		TTFTSamples: 19,
+		ITLSamples:  1150,
+	})
+
+	if note == "" {
+		t.Fatal("a 60x disagreement should be reported even when one side is below the old floor")
 	}
 }

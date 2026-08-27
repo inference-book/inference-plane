@@ -121,6 +121,10 @@ func init() {
 		"closed-loop concurrency ladder instead of a fixed rate, e.g. 1,2,4,8,16 (ignores --rps and --duration)")
 	loadCmd.Flags().DurationVar(&loadSweepDuration, "sweep-duration", 30*time.Second,
 		"how long to measure each --sweep level, after it reaches steady state")
+	loadCmd.Flags().IntVar(&loadSweepMinSamples, "sweep-min-samples", 0,
+		"extend a --sweep level past --sweep-duration until it has completed this many requests; 0 keeps the flat window. Requires --sweep-duration-max")
+	loadCmd.Flags().DurationVar(&loadSweepDurationMax, "sweep-duration-max", 0,
+		"ceiling on how long one --sweep level may run when --sweep-min-samples extends it")
 	loadCmd.Flags().DurationVar(&loadSweepWarmupMax, "sweep-warmup-max", 90*time.Second,
 		"give up waiting for a --sweep level to settle after this long and measure it anyway")
 	loadCmd.Flags().DurationVar(&loadSweepWindow, "sweep-window", 3*time.Second,
