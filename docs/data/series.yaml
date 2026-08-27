@@ -1,0 +1,198 @@
+# Part IV measurement registry.
+#
+# Every number chapters 14 and 15 cite resolves to an entry here, and every
+# entry carries a status saying what kind of number it is. The point of the
+# status is that it is checkable rather than assertable: `make check-series`
+# recomputes each measured figure from the artifact it names and fails when
+# they disagree, so "measured" means an artifact says so rather than that
+# somebody typed the word.
+#
+# status vocabulary
+#   measured   backed by a committed artifact; the checker re-derives it
+#   predicted  computed from a stated model. Printable IF labelled as a
+#              prediction in the prose, because it is a falsifiable claim
+#              rather than a reported observation
+#   simulated  invented so prose can be drafted. NEVER prints. `make
+#              gen-series` renders these with a visible marker and a release
+#              build refuses while any remain
+#   pending    planned, no numbers yet
+#
+# Flipping simulated -> measured requires adding an artifact whose numbers
+# match, or check-series fails. That is the whole mechanism.
+
+schema_version: 1
+
+series:
+  - id: glm52-8k
+    status: measured
+    artifact: docs/data/glm52-8k-vast-h200-tp8.csv
+    iplane_version: 84adb17
+    captured_at: 2026-08-24T19:59:23Z
+    model: cyankiwi/GLM-5.2-AWQ-INT4
+    hardware: {provider: vast, sku: H200, gpus: 8, plan: tp8}
+    rate_usd_hr: 32.88
+    rate_source: recorded
+    rate_basis: "stated in the knee-and-floor marker, 2026-08-24; reproduces $28.13/M at N=32 exactly"
+    workload: {prompt_tokens: 8192, max_tokens: 512, stream: true}
+    ladder: [1, 2, 4, 8, 16, 32]
+    grade: p95
+    caveats: []
+
+  - id: glm52-32k
+    status: measured
+    artifact: docs/data/glm52-32k-vast-h200-tp8.csv
+    iplane_version: 8ea10fd
+    captured_at: 2026-08-27T00:49:43Z
+    model: cyankiwi/GLM-5.2-AWQ-INT4
+    hardware: {provider: vast, sku: H200, gpus: 8, plan: tp8}
+    rate_usd_hr: 34.0022
+    rate_source: recorded
+    rate_basis: "vast-watchdog log, instance 48833879, 2026-08-27"
+    workload: {prompt_tokens: 32000, max_tokens: 512, stream: true}
+    ladder: [1, 4, 8, 16, 32]
+    grade: p95
+    caveats:
+      - "11-13% of successful requests at N=1,4,8 emitted no content frames. Unexplained. Request-level TTFT and latency percentiles describe the subset that did produce tokens; throughput and cost are ratios of totals and are unaffected."
+
+  - id: glm52-120k
+    status: measured
+    artifact: docs/data/glm52-120k-vast-h200-tp8-ranging.csv
+    iplane_version: a7db18f
+    captured_at: 2026-08-26T03:53:30Z
+    model: cyankiwi/GLM-5.2-AWQ-INT4
+    hardware: {provider: vast, sku: H200, gpus: 8, plan: tp8}
+    rate_usd_hr: 31.56
+    rate_source: inferred
+    rate_basis: "NOT RECORDED at run time. Back-solved from the published $491/M at N=1 against the artifact's 17.8567 tok/s. Any cost figure from this series inherits that uncertainty; throughput and ITL figures do not."
+    workload: {prompt_tokens: 120000, max_tokens: 512, stream: true}
+    ladder: [1, 8, 16, 32]
+    grade: p50
+    caveats:
+      - "Ranging shot. Request-level percentiles are starved: 32, 32, 22 and 6 successes. ITL percentiles are not, at 10488/9438/8053 samples, and cost comes from a ratio of totals."
+      - "The N=32 row is broken, not merely weak: 0.0099 tok/s on 6 successes against 58 truncated. Drop it rather than chart it."
+
+  # ---- simulated fill-in, so Ch 14 can be drafted against a full curve ----
+  - id: glm52-16k
+    status: simulated
+    basis: "cost scaled from glm52-8k by (16384/8192)^1.00, the exponent measured across the 8k->32k interval"
+    model: cyankiwi/GLM-5.2-AWQ-INT4
+    hardware: {provider: vast, sku: H200, gpus: 8, plan: tp8}
+    workload: {prompt_tokens: 16384, max_tokens: 512, stream: true}
+    validates_by: "a sweep at --prompt-tokens 16384 on the same shape, ladder 1,4,8,16,32"
+
+  - id: glm52-64k
+    status: simulated
+    basis: "cost scaled from glm52-32k by (64000/32000)^1.13, the exponent measured across the 32k->120k interval"
+    model: cyankiwi/GLM-5.2-AWQ-INT4
+    hardware: {provider: vast, sku: H200, gpus: 8, plan: tp8}
+    workload: {prompt_tokens: 64000, max_tokens: 512, stream: true}
+    validates_by: "a sweep at --prompt-tokens 64000 on the same shape, ladder 1,4,8,16,32"
+
+derived:
+  # Each measured entry names a check the tool can actually run against the
+  # artifact. A derived figure with no runnable check must not be status
+  # measured.
+  - id: cost-floor-8k
+    status: measured
+    from: glm52-8k
+    check: min_cost_per_m
+    value: 28.13
+    label: "best measured cost per million output tokens at 8k"
+
+  - id: cost-floor-32k
+    status: measured
+    from: glm52-32k
+    check: min_cost_per_m
+    value: 109.72
+    label: "best measured cost per million output tokens at 32k"
+
+  - id: cost-floor-120k
+    status: measured
+    from: glm52-120k
+    check: min_cost_per_m
+    value: 491.00
+    label: "best measured cost per million output tokens at 120k"
+
+  - id: peak-batch-8k
+    status: measured
+    from: glm52-8k
+    check: argmin_cost_concurrency
+    value: 32
+    label: "concurrency at which 8k is cheapest (the ladder's top; the true peak is beyond it)"
+
+  - id: peak-batch-32k
+    status: measured
+    from: glm52-32k
+    check: argmin_cost_concurrency
+    value: 8
+    label: "concurrency at which 32k is cheapest"
+
+  - id: peak-batch-120k
+    status: measured
+    from: glm52-120k
+    check: argmin_cost_concurrency
+    value: 1
+    label: "concurrency at which 120k is cheapest"
+
+  - id: itl-p95-jump-32k
+    status: measured
+    from: glm52-32k
+    check: ratio_itl_p95
+    concurrency_a: 4
+    concurrency_b: 8
+    value: 30.17
+    label: "the 95th-percentile inter-token gap multiplies by this between N=4 and N=8 at 32k"
+
+  # Fitted and extrapolated. Printable only with the word "predicts" attached.
+  - id: fit-8k
+    status: measured
+    from: glm52-8k
+    check: literal
+    value: 25.18
+    label: "asymptote of cost/M = 94.43/B + 25.18, six points, two parameters, 4.2% max error"
+
+  - id: cost-8k-b64
+    status: predicted
+    from: fit-8k
+    check: literal
+    value: 26.66
+    label: "what the 8k fit predicts at B=64"
+    basis: "94.43/64 + 25.18. Not measured; the 8k ladder stopped at 32."
+
+  - id: cost-16k-best
+    status: simulated
+    from: glm52-16k
+    check: literal
+    value: 56.26
+    label: "PLACEHOLDER cost per million at 16k"
+    basis: "28.13 * (16384/8192)^1.00"
+
+  - id: cost-64k-best
+    status: simulated
+    from: glm52-64k
+    check: literal
+    value: 240.13
+    label: "PLACEHOLDER cost per million at 64k"
+    basis: "109.72 * (64000/32000)^1.13"
+
+# Every rental, including the ones that produced nothing. Ch 14 wants failed
+# attempts counted in the cost series, and that number is only recoverable if
+# it is written down while it is still known.
+runs:
+  - id: run-20260826-172159
+    status: measured
+    outcome: abandoned
+    date: 2026-08-26
+    rate_usd_hr: 31.76
+    minutes: 4.4
+    usd: 2.31
+    note: "slow-download guard fired during HuggingFace's metadata phase; the deploy was healthy. False abort."
+  - id: run-20260826-172949
+    status: measured
+    outcome: productive
+    date: 2026-08-26
+    rate_usd_hr: 34.0022
+    minutes: 77
+    usd: 43.64
+    produced: glm52-32k
+    note: "total session spend was $48.26 by Vast credit delta; the difference is storage and the earlier dry run."
