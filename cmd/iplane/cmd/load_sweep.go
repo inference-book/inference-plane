@@ -970,11 +970,25 @@ func sweepCSVPreamble(r sweepReport) []string {
 	if r.Fleet.Plan != "" {
 		lines = append(lines, fmt.Sprintf("plan %s", r.Fleet.Plan))
 	}
-	return append(lines,
+	lines = append(lines,
 		fmt.Sprintf("prompt_tokens %d", r.PromptTokens),
 		fmt.Sprintf("max_tokens %d", r.MaxTokens),
 		fmt.Sprintf("stream %t", r.Stream),
 		fmt.Sprintf("measure_seconds %g", r.MeasureSeconds),
+	)
+	// Without these the header reads as though every level measured for
+	// measure_seconds, which stops being true the moment a sample target is
+	// set: that figure becomes the floor and each row carries its own
+	// measure_sec. A reader reconstructing the method from the artifact
+	// alone would otherwise get the window wrong on every row.
+	if r.MinSamples > 0 {
+		lines = append(lines,
+			fmt.Sprintf("min_samples %d", r.MinSamples),
+			fmt.Sprintf("max_measure_seconds %g", r.MaxMeasureSeconds),
+			"measure_seconds_is a floor; see the per-row measure_sec column",
+		)
+	}
+	return append(lines,
 		fmt.Sprintf("window_seconds %g", r.WindowSeconds),
 		fmt.Sprintf("tolerance %g", r.Tolerance),
 		fmt.Sprintf("stable_windows %d", r.StableWindows),
