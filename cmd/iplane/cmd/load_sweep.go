@@ -677,10 +677,9 @@ func awaitSteadyState(ctx context.Context, completed *atomic.Int64, warm *loadSt
 			return now, true, meanPerSec(okDeltas, loadSweepWindow)
 		}
 		if time.Now().After(deadline) {
-			// Not settled, so the rate is a reading of a level still moving.
-			// Returned anyway and treated as no reading by measureWindowFor
-			// only when it is zero: a slow level that never settled is
-			// exactly the one that needs the longer window.
+			// Not settled, so the rate is a reading of a level still
+			// moving. Returned anyway: it only feeds the narrated estimate,
+			// and the window itself ends on the sample count.
 			return now, false, meanPerSec(okDeltas, loadSweepWindow)
 		}
 	}
