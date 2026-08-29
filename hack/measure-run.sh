@@ -87,7 +87,18 @@ SWEEP_WARMUP_MAX="${SWEEP_WARMUP_MAX:-8m}"
 SWEEP_MAX_TOKENS="${SWEEP_MAX_TOKENS:-512}"
 # Below this many successes a percentile is an extremum. Rows under it are
 # reported as unpublishable rather than quietly charted.
+#
+# It is also what the sweep aims at, when SWEEP_DURATION_MAX gives it a
+# ceiling to aim within: a run should target the same sample count it is about
+# to be graded against, rather than a duration that happens to earn it at one
+# context length and not at another.
 SWEEP_MIN_SAMPLES="${SWEEP_MIN_SAMPLES:-100}"
+# Empty means the flat window, unchanged. Set it and each level runs until it
+# has SWEEP_MIN_SAMPLES successes, floored at SWEEP_DURATION and capped here.
+# Deliberately not defaulted: a ceiling on how long a level may hold a rented
+# GPU is a number an operator agrees to, not one this script picks. Takes a
+# comma-separated list per context, like SWEEP_DURATION.
+SWEEP_DURATION_MAX="${SWEEP_DURATION_MAX:-}"
 DEPLOY_TIMEOUT="${DEPLOY_TIMEOUT:-75m}"
 
 # Abort thresholds, MIRRORING internal/provisioners/staging.go. The control
@@ -264,6 +275,11 @@ if [ "$DRY_RUN" = 1 ]; then
   # plumbing that has broken before, without renting anything.
   log "DRY RUN: would deploy $DEP_ID as ${GPUS}x${SKU} tp=$TP, engine-args '$ENGINE_ARGS'"
   log "DRY RUN: would then sweep ladder=$LADDER at prompt-tokens=$PROMPT_TOKENS"
+  if [ -n "$SWEEP_DURATION_MAX" ]; then
+    log "DRY RUN: each level would run to $SWEEP_MIN_SAMPLES samples, floor $SWEEP_DURATION, cap $SWEEP_DURATION_MAX"
+  else
+    log "DRY RUN: each level would run for a flat $SWEEP_DURATION"
+  fi
   log "DRY RUN: stopping before anything is rented"
   exit 0
 fi
@@ -565,11 +581,13 @@ if ttft == 0:
 if itl == 0:
     fatal.append("no inter-token samples; frames are not arriving incrementally")
 # The same cross-check the sweep applies per level, applied before paying for
-# the levels: two independent counts of one quantity should agree.
-if succ and ttft:
-    a, b = tok / succ, itl / ttft
-    if min(a, b) >= 4 and max(a, b) / min(a, b) >= 3:
-        fatal.append("token counts disagree: %.1f per request from usage against %.1f from frames" % (a, b))
+# the levels: two independent counts of one quantity should agree. A request of
+# n tokens yields n-1 gaps, so the frame tally gets that token added back
+# rather than the row being excused from the comparison for being small.
+if succ and ttft and tok:
+    a, b = tok / succ, itl / ttft + 1
+    if max(a, b) / min(a, b) >= 3:
+        fatal.append("token counts disagree: %.1f per request from usage against %.1f implied by frames" % (a, b))
 
 if fatal:
     for f in fatal:
@@ -583,6 +601,12 @@ for pt in $(echo "$PROMPT_TOKENS" | tr ',' ' '); do
   # Nth duration for the Nth context, or the last one given, so a single
   # value still applies everywhere.
   THIS_DURATION=$(echo "$SWEEP_DURATION" | tr ',' ' ' | awk -v i=$((CTX_INDEX + 1)) '{print (i <= NF) ? $i : $NF}')
+  SAMPLE_TARGET_ARGS=()
+  if [ -n "$SWEEP_DURATION_MAX" ]; then
+    THIS_DURATION_MAX=$(echo "$SWEEP_DURATION_MAX" | tr ',' ' ' | awk -v i=$((CTX_INDEX + 1)) '{print (i <= NF) ? $i : $NF}')
+    SAMPLE_TARGET_ARGS=(--sweep-min-samples "$SWEEP_MIN_SAMPLES" --sweep-duration-max "$THIS_DURATION_MAX")
+    log "  ${pt}: measuring to $SWEEP_MIN_SAMPLES samples per level, floor $THIS_DURATION, cap $THIS_DURATION_MAX"
+  fi
   CTX_INDEX=$((CTX_INDEX + 1))
   log "  context ${pt} (measuring ${THIS_DURATION} per level)"
   # --target AND --service-url, both explicitly, and neither is optional.
@@ -613,6 +637,7 @@ for pt in $(echo "$PROMPT_TOKENS" | tr ',' ' '); do
     --stream --max-tokens "$SWEEP_MAX_TOKENS" \
     --sweep-window "$SWEEP_WINDOW" --sweep-stable-windows "$SWEEP_STABLE_WINDOWS" \
     --sweep-duration "$THIS_DURATION" --sweep-warmup-max "$SWEEP_WARMUP_MAX" \
+    "${SAMPLE_TARGET_ARGS[@]+"${SAMPLE_TARGET_ARGS[@]}"}" \
     --output csv > "${OUT}/sweep-${pt}.csv" 2> >(tee "${OUT}/sweep-${pt}.log" >&2) \
     || log "  sweep at ${pt} failed; see sweep-${pt}.log"
   sweep_validity "${OUT}/sweep-${pt}.csv" "$pt"

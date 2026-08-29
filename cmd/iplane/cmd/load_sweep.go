@@ -45,6 +45,15 @@ var (
 	loadSweepWindow     time.Duration
 	loadSweepTolerance  float64
 	loadSweepStableRuns int
+
+	// A flat window per level is the wrong shape when the levels differ by
+	// an order of magnitude in latency. The 8k sweep earned 558 samples in
+	// its 600s and the 120k sweep earned 6 in the same 600s, because the
+	// window was chosen before anything was known about how long a request
+	// takes. After warm-up the completion rate is known, so the window can
+	// be sized to earn a sample count instead of a stopwatch reading.
+	loadSweepMinSamples  int
+	loadSweepDurationMax time.Duration
 )
 
 // sweepLevel is one point on the ladder, after measurement.
@@ -100,8 +109,15 @@ type sweepLevel struct {
 	// reported rather than logged, because a reader comparing two sweeps
 	// needs to know what was excluded to know whether the comparison
 	// holds.
-	WarmupSec         float64 `json:"warmup_sec"`
-	DiscardedRequests int64   `json:"discarded_requests"`
+	WarmupSec float64 `json:"warmup_sec"`
+
+	// MeasureSec is how long this level's window actually ran. Constant
+	// across a sweep until --sweep-min-samples is set, after which levels
+	// get different windows and a reader comparing two rows cannot infer
+	// either one from the run header.
+	MeasureSec float64 `json:"measure_sec"`
+
+	DiscardedRequests int64 `json:"discarded_requests"`
 
 	// SteadyState is false when the level hit --sweep-warmup-max with its
 	// throughput still drifting. The row is still reported, since a
@@ -159,10 +175,14 @@ type sweepReport struct {
 
 	// The method, so a reader can tell a settled measurement from a
 	// hurried one without being told.
-	MeasureSeconds float64 `json:"measure_seconds"`
-	WindowSeconds  float64 `json:"window_seconds"`
-	Tolerance      float64 `json:"tolerance"`
-	StableWindows  int     `json:"stable_windows"`
+	// MeasureSeconds is the floor once MinSamples is set, not the window
+	// every level ran; each row carries its own measure_sec.
+	MeasureSeconds    float64 `json:"measure_seconds"`
+	MinSamples        int     `json:"min_samples"`
+	MaxMeasureSeconds float64 `json:"max_measure_seconds"`
+	WindowSeconds     float64 `json:"window_seconds"`
+	Tolerance         float64 `json:"tolerance"`
+	StableWindows     int     `json:"stable_windows"`
 
 	Levels []sweepLevel `json:"levels"`
 }
@@ -300,6 +320,19 @@ func runLoadSweep(ctx context.Context, out io.Writer) error {
 	if loadSweepStableRuns < 2 {
 		return fmt.Errorf("--sweep-stable-windows must be at least 2, since one window cannot be compared to anything")
 	}
+	if loadSweepMinSamples < 0 {
+		return fmt.Errorf("--sweep-min-samples cannot be negative")
+	}
+	// The cap is required rather than defaulted. Sizing a window from a
+	// measured rate is the same thing as letting the engine decide how long
+	// a rented GPU is held, and a default multiplier would be this tool
+	// picking a number nobody agreed to spend.
+	if loadSweepMinSamples > 0 && loadSweepDurationMax <= 0 {
+		return fmt.Errorf("--sweep-min-samples needs --sweep-duration-max, which is the longest any one level may hold the hardware")
+	}
+	if loadSweepDurationMax > 0 && loadSweepDurationMax < loadSweepDuration {
+		return fmt.Errorf("--sweep-duration-max (%s) is below --sweep-duration (%s); the floor cannot exceed the ceiling", loadSweepDurationMax, loadSweepDuration)
+	}
 
 	base, chatPath, completionsPath, err := loadEndpoint()
 	if err != nil {
@@ -315,24 +348,31 @@ func runLoadSweep(ctx context.Context, out io.Writer) error {
 	}
 	client := &http.Client{Timeout: 5 * time.Minute}
 
-	progressf("iplane load --sweep: levels %v, %s per level after steady state -> %s",
-		levels, loadSweepDuration, base)
+	if loadSweepMinSamples > 0 {
+		progressf("iplane load --sweep: levels %v, %s per level after steady state, extended toward %d samples and capped at %s -> %s",
+			levels, loadSweepDuration, loadSweepMinSamples, loadSweepDurationMax, base)
+	} else {
+		progressf("iplane load --sweep: levels %v, %s per level after steady state -> %s",
+			levels, loadSweepDuration, base)
+	}
 
 	report := sweepReport{
-		SchemaVersion:  sweepSchemaVersion,
-		CapturedAt:     time.Now().UTC().Format(time.RFC3339),
-		IplaneVersion:  version.Version,
-		Model:          loadModel,
-		Endpoint:       base,
-		DeployID:       loadTarget,
-		PromptTokens:   loadPromptTokens,
-		MaxTokens:      loadMaxTokens,
-		Stream:         loadStream,
-		MeasureSeconds: loadSweepDuration.Seconds(),
-		WindowSeconds:  loadSweepWindow.Seconds(),
-		Tolerance:      loadSweepTolerance,
-		StableWindows:  loadSweepStableRuns,
-		Fleet:          sweepFleetProvenance(ctx),
+		SchemaVersion:     sweepSchemaVersion,
+		CapturedAt:        time.Now().UTC().Format(time.RFC3339),
+		IplaneVersion:     version.Version,
+		Model:             loadModel,
+		Endpoint:          base,
+		DeployID:          loadTarget,
+		PromptTokens:      loadPromptTokens,
+		MaxTokens:         loadMaxTokens,
+		Stream:            loadStream,
+		MeasureSeconds:    loadSweepDuration.Seconds(),
+		MinSamples:        loadSweepMinSamples,
+		MaxMeasureSeconds: loadSweepDurationMax.Seconds(),
+		WindowSeconds:     loadSweepWindow.Seconds(),
+		Tolerance:         loadSweepTolerance,
+		StableWindows:     loadSweepStableRuns,
+		Fleet:             sweepFleetProvenance(ctx),
 	}
 	for i, n := range levels {
 		lvl, err := measureSweepLevel(ctx, client, &cfg, n)
@@ -464,12 +504,12 @@ func measureSweepLevel(ctx context.Context, client *http.Client, cfg *loadFireCo
 	}
 
 	warmupStart := time.Now()
-	discarded, steady := awaitSteadyState(levelCtx, &completed, warmStats, n)
+	discarded, steady, okRate := awaitSteadyState(levelCtx, &completed, warmStats, n)
 	warmup := time.Since(warmupStart)
 
 	statsOn.Store(true)
 	measureStart := time.Now()
-	awaitMeasureWindow(levelCtx, stats, n)
+	awaitMeasureWindow(levelCtx, stats, n, okRate)
 	elapsed := time.Since(measureStart)
 	stop()
 	wg.Wait()
@@ -499,8 +539,43 @@ func settledSuffix(settled bool) string {
 	return ""
 }
 
-// awaitMeasureWindow holds the level open for --sweep-duration, narrating as
-// it goes.
+// projectedMeasureWindow estimates how long a level needs to earn
+// --sweep-min-samples, from the rate its warm-up settled at.
+//
+// An estimate and nothing more. It is narrated so an operator watching a paid
+// run knows whether the next level is two minutes or fifteen, and the window
+// itself is ended by counting samples rather than by trusting this number. A
+// warm-up rate projects badly whenever latency is heavy-tailed: a local
+// rehearsal against the mock projected 30s for a level that went on to earn
+// four samples in it, because the warm-up happened to catch the fast mode.
+func projectedMeasureWindow(okRatePerSec float64) time.Duration {
+	if loadSweepMinSamples <= 0 || okRatePerSec <= 0 {
+		return loadSweepDuration
+	}
+	need := time.Duration(float64(loadSweepMinSamples) / okRatePerSec * float64(time.Second))
+	if need < loadSweepDuration {
+		return loadSweepDuration
+	}
+	if loadSweepDurationMax > 0 && need > loadSweepDurationMax {
+		return loadSweepDurationMax
+	}
+	return need
+}
+
+// awaitMeasureWindow holds the level open until it has been measured, and
+// narrates as it goes.
+//
+// Without --sweep-min-samples this is --sweep-duration and nothing else, which
+// is the historical behaviour. With it, the window runs until the level has
+// completed the requested number of successes, floored at --sweep-duration so
+// it can never come back shorter than what was asked for and capped at
+// --sweep-duration-max so it can never run away with the hardware.
+//
+// Counting samples beats projecting them from the warm-up rate. The projection
+// is one number taken before the window starts, and it is wrong in exactly the
+// case the sample target exists for: a heavy-tailed latency distribution whose
+// warm-up caught the fast mode. Counting is a measurement of the thing that
+// actually has to be earned.
 //
 // This was one silent sleep, and it is the longer of a level's two phases on
 // the real settings. Ticking on the same window the warm-up uses keeps the
@@ -509,12 +584,19 @@ func settledSuffix(settled bool) string {
 //
 // Elapsed time is still measured by the caller from before this call to after
 // it, so the ticking changes what is reported not at all.
-func awaitMeasureWindow(ctx context.Context, stats *loadStats, n int) {
+func awaitMeasureWindow(ctx context.Context, stats *loadStats, n int, okRate float64) {
+	floor, ceiling := loadSweepDuration, loadSweepDuration
+	if loadSweepMinSamples > 0 {
+		ceiling = loadSweepDurationMax
+		progressf("  n=%d measuring until %d samples: floor %s, cap %s, roughly %s at the warm-up rate of %.2f req/s",
+			n, loadSweepMinSamples, floor, ceiling,
+			projectedMeasureWindow(okRate).Round(time.Second), okRate)
+	}
+
 	start := time.Now()
-	deadline := start.Add(loadSweepDuration)
 	tick := loadSweepWindow
-	if tick <= 0 || tick > loadSweepDuration {
-		tick = loadSweepDuration
+	if tick <= 0 || tick > floor {
+		tick = floor
 	}
 	ticker := time.NewTicker(tick)
 	defer ticker.Stop()
@@ -525,29 +607,52 @@ func awaitMeasureWindow(ctx context.Context, stats *loadStats, n int) {
 			return
 		case <-ticker.C:
 		}
-		if time.Now().After(deadline) {
+		elapsed := time.Since(start)
+		ok, failed := stats.snapshot()
+		if elapsed >= ceiling {
 			return
 		}
-		ok, failed := stats.snapshot()
+		if elapsed >= floor && (loadSweepMinSamples <= 0 || ok >= int64(loadSweepMinSamples)) {
+			return
+		}
+		if loadSweepMinSamples > 0 {
+			progressf("  n=%d measuring: %.0fs elapsed of at most %.0fs, %d of %d samples, %s",
+				n, elapsed.Seconds(), ceiling.Seconds(), ok, loadSweepMinSamples,
+				describeProgress(ok, failed))
+			continue
+		}
 		progressf("  n=%d measuring: %.0fs of %.0fs, %s",
-			n, time.Since(start).Seconds(), loadSweepDuration.Seconds(), describeProgress(ok, failed))
+			n, elapsed.Seconds(), floor.Seconds(), describeProgress(ok, failed))
 	}
 }
 
 // awaitSteadyState samples completion counts until the rate settles or
-// --sweep-warmup-max runs out. Returns what completed during warm-up and
-// whether it settled.
-func awaitSteadyState(ctx context.Context, completed *atomic.Int64, warm *loadStats, n int) (int64, bool) {
+// --sweep-warmup-max runs out. Returns what completed during warm-up, whether
+// it settled, and the rate it settled at in successes per second.
+//
+// The returned rate counts successes rather than the completions the detector
+// watches, and the difference is the whole point of quoting it. A refused
+// connection completes instantly, so a closed port produces a completion rate
+// that is enormous and perfectly stable. Sizing the measurement window from
+// that number would hand the shortest window to the run that measured
+// nothing. Successes are what the window has to earn, so successes are what
+// it is sized from.
+func awaitSteadyState(ctx context.Context, completed *atomic.Int64, warm *loadStats, n int) (int64, bool, float64) {
 	det := newSteadyDetector(loadSweepTolerance, loadSweepStableRuns, loadSweepWindow)
 	deadline := time.Now().Add(loadSweepWarmupMax)
 	ticker := time.NewTicker(loadSweepWindow)
 	defer ticker.Stop()
 
+	// The success deltas of the same windows the detector retains, so the
+	// rate describes the settled tail rather than the ramp that preceded it.
+	var okDeltas []int64
+	lastOK, _ := warm.snapshot()
+
 	last := completed.Load()
 	for {
 		select {
 		case <-ctx.Done():
-			return completed.Load(), false
+			return completed.Load(), false, meanPerSec(okDeltas, loadSweepWindow)
 		case <-ticker.C:
 		}
 		now := completed.Load()
@@ -561,15 +666,36 @@ func awaitSteadyState(ctx context.Context, completed *atomic.Int64, warm *loadSt
 		// engine. The error column is what makes the two distinguishable
 		// while there is still money to save.
 		ok, failed := warm.snapshot()
+		okDeltas = append(okDeltas, ok-lastOK)
+		if len(okDeltas) > loadSweepStableRuns {
+			okDeltas = okDeltas[len(okDeltas)-loadSweepStableRuns:]
+		}
+		lastOK = ok
 		progressf("  n=%d warming up: %s%s",
 			n, describeProgress(ok, failed), settledSuffix(settled))
 		if settled {
-			return now, true
+			return now, true, meanPerSec(okDeltas, loadSweepWindow)
 		}
 		if time.Now().After(deadline) {
-			return now, false
+			// Not settled, so the rate is a reading of a level still
+			// moving. Returned anyway: it only feeds the narrated estimate,
+			// and the window itself ends on the sample count.
+			return now, false, meanPerSec(okDeltas, loadSweepWindow)
 		}
 	}
+}
+
+// meanPerSec averages per-window counts into a rate, and returns zero when
+// there is nothing to average. Zero is read downstream as no reading.
+func meanPerSec(counts []int64, window time.Duration) float64 {
+	if len(counts) == 0 || window <= 0 {
+		return 0
+	}
+	var sum int64
+	for _, c := range counts {
+		sum += c
+	}
+	return float64(sum) / float64(len(counts)) / window.Seconds()
 }
 
 // summariseSweepLevel turns one level's samples into its row.
@@ -584,6 +710,7 @@ func summariseSweepLevel(n int, s *loadStats, elapsed, warmup time.Duration, dis
 		Errors:            s.errors,
 		Tokens:            s.tokens,
 		WarmupSec:         warmup.Seconds(),
+		MeasureSec:        elapsed.Seconds(),
 		DiscardedRequests: discarded,
 		SteadyState:       steady,
 	}
@@ -662,11 +789,6 @@ func writeSweepTable(w io.Writer, r sweepReport) {
 // figure derived from the first number (#451).
 const tokenDisagreementFactor = 3.0
 
-// minTokensToCompare is the count below which the comparison stops meaning
-// anything, since a request yielding n tokens yields n-1 gaps and the ratio
-// skews hard at small n.
-const minTokensToCompare = 4.0
-
 // inconsistencyNote reports when a level's own columns contradict each other,
 // and returns "" when they agree or cannot be compared.
 //
@@ -686,9 +808,18 @@ func inconsistencyNote(l sweepLevel) string {
 		return ""
 	}
 	fromUsage := float64(l.Tokens) / float64(l.Successes)
-	fromFrames := float64(l.ITLSamples) / float64(l.TTFTSamples)
-	if fromUsage < minTokensToCompare || fromFrames < minTokensToCompare {
-		return ""
+	// A request of n tokens yields n-1 gaps between them, so the frame tally
+	// is put back into token units before the two are compared. Correcting
+	// the relation is what lets the check run on every row: the previous
+	// version excused any row whose per-request count fell under four, which
+	// is the shape a pathological row has rather than a benign one. The 120k
+	// N=32 level reported 1.0 token per request from usage against 61.6 from
+	// frames and the floor waved it through, because one side was small.
+	fromFrames := float64(l.ITLSamples)/float64(l.TTFTSamples) + 1
+	if fromUsage <= 0 {
+		return fmt.Sprintf(
+			"disagrees with itself: usage reported no completion tokens while streamed frames imply %.1f per request. "+
+				"One of the two is not the engine's output; do not chart this row.", fromFrames)
 	}
 	hi, lo := fromUsage, fromFrames
 	if lo > hi {
@@ -698,7 +829,7 @@ func inconsistencyNote(l sweepLevel) string {
 		return ""
 	}
 	return fmt.Sprintf(
-		"disagrees with itself: %.1f tokens per request from usage against %.1f from streamed frames (%.0fx). "+
+		"disagrees with itself: %.1f tokens per request from usage against %.1f implied by streamed frames (%.0fx). "+
 			"One of the two is not the engine's output; do not chart this row.",
 		fromUsage, fromFrames, hi/lo)
 }
@@ -839,11 +970,25 @@ func sweepCSVPreamble(r sweepReport) []string {
 	if r.Fleet.Plan != "" {
 		lines = append(lines, fmt.Sprintf("plan %s", r.Fleet.Plan))
 	}
-	return append(lines,
+	lines = append(lines,
 		fmt.Sprintf("prompt_tokens %d", r.PromptTokens),
 		fmt.Sprintf("max_tokens %d", r.MaxTokens),
 		fmt.Sprintf("stream %t", r.Stream),
 		fmt.Sprintf("measure_seconds %g", r.MeasureSeconds),
+	)
+	// Without these the header reads as though every level measured for
+	// measure_seconds, which stops being true the moment a sample target is
+	// set: that figure becomes the floor and each row carries its own
+	// measure_sec. A reader reconstructing the method from the artifact
+	// alone would otherwise get the window wrong on every row.
+	if r.MinSamples > 0 {
+		lines = append(lines,
+			fmt.Sprintf("min_samples %d", r.MinSamples),
+			fmt.Sprintf("max_measure_seconds %g", r.MaxMeasureSeconds),
+			"measure_seconds_is a floor; see the per-row measure_sec column",
+		)
+	}
+	return append(lines,
 		fmt.Sprintf("window_seconds %g", r.WindowSeconds),
 		fmt.Sprintf("tolerance %g", r.Tolerance),
 		fmt.Sprintf("stable_windows %d", r.StableWindows),

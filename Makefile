@@ -1,4 +1,4 @@
-.PHONY: build up down infra-up infra-down rebuild pull smoke load logs dashboards clean check-pins help install examples dist dist-checksums dist-clean
+.PHONY: build up down infra-up infra-down rebuild pull smoke load logs dashboards clean check-pins help install examples dist dist-checksums dist-clean gen-series check-series check-series-print-ready
 
 PKG    := ./cmd/iplane
 BINARY := iplane
@@ -149,6 +149,15 @@ check-names: ## Verify generated name files are up-to-date with the YAML schema 
 	@echo "name files in sync with metric-names.yaml"
 
 # ── Architectural constraints ───────────────────────────────────────────
+gen-series: ## Regenerate the book's Part IV value macros from docs/data/series.yaml
+	go run ./cmd/iplane gen-series
+
+check-series: ## Verify every "measured" Part IV figure matches its artifact (CI runs this)
+	go test ./internal/series/
+
+check-series-print-ready: ## Fail while any Part IV figure a chapter cites is still simulated
+	go run ./cmd/iplane gen-series --fail-on-simulated
+
 check-constraints: ## Verify CONSTRAINTS.md architectural rules (CI runs this)
 	@matches=$$(grep -rln '"github.com/inference-book/inference-plane/internal/provisioners"' internal/router internal/dataplane 2>/dev/null || true); \
 	if [ -n "$$matches" ]; then \

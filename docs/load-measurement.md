@@ -53,10 +53,37 @@ tolerance, the configured one dominates.
 A level that never settles inside `--sweep-warmup-max` is measured and
 flagged rather than omitted. A gap in the ladder reads as an oversight.
 
-Workers keep running across the warm-up boundary; only the recording is
-switched on. Restarting would drain the engine's batch and hand the
-measured window the exact ramp the warm-up just discarded. (This is why
-`loadStats` tolerates a nil receiver.)
+### Sizing the window to a sample count
+
+`--sweep-duration` is a stopwatch, and a stopwatch measures levels of very
+different speeds as though they were the same. The GLM-5.2 runs make the
+point: 600 seconds per level earned 558 samples at 8k context and 6 at
+120k, and three of the four rows in the 120k artifact are unusable for it.
+A p95 drawn from six observations is the second-slowest of six.
+
+`--sweep-min-samples N` holds each level open until it has completed N
+requests. `--sweep-duration` stays the floor, so a level can only get
+longer than what was asked for, and `--sweep-duration-max` is the ceiling.
+That ceiling is required rather than defaulted to some multiple, because
+sizing a window from what an engine does is the same thing as letting the
+engine decide how long a rented GPU is held.
+
+```sh
+--sweep-duration 120s --sweep-min-samples 200 --sweep-duration-max 900s
+```
+
+**Counted, not projected.** The warm-up already knows a completion rate,
+and dividing the sample target by it looks like the obvious way to pick a
+window. It is wrong in exactly the case the target exists for. A rehearsal
+against the mock engine projected 30 seconds for a level that went on to
+earn four samples in it, because the latency distribution is heavy-tailed
+and the warm-up happened to catch the fast mode. The projection is still
+narrated, so an operator watching a paid run knows whether the next level
+is two minutes or fifteen, but the window ends on the count.
+
+A level that would need longer than the ceiling gets the ceiling, so it
+comes back sample-starved, which is visible in the row, rather than
+open-ended, which is visible on the invoice.
 
 ### Reading the columns
 
@@ -76,6 +103,10 @@ measured window the exact ramp the warm-up just discarded. (This is why
   land at the same instant.
 - **`discarded` and `warmup`** say what was excluded, so two sweeps can
   be compared knowing what each is made of.
+- **`measure_sec`** is how long that level's window actually ran. Constant
+  across a sweep until `--sweep-min-samples` is set, after which levels get
+  different windows and a reader cannot infer either one from the run
+  header.
 
 ## Context length
 

@@ -20,6 +20,8 @@ func resetSweepFlags() {
 	loadSweepWindow = 3 * time.Second
 	loadSweepTolerance = 0.1
 	loadSweepStableRuns = 3
+	loadSweepMinSamples = 0
+	loadSweepDurationMax = 0
 	loadURL = ""
 	loadServiceURL = ""
 	loadTarget = ""
