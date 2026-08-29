@@ -139,7 +139,7 @@ Per the cadence note above: if the manual path and the iplane move don't each fi
 ## v0.4 — Frontier MoE (active, see epic #361)
 
 **Chapters:** Ch 13–15 (Part IV) · **Branch:** `release/v0.4`, cut 2026-08-29
-· **Tags:** `ch13-final` and `v0.4.0` cut 2026-08-29; `ch14-final` and `ch15-final` to follow on the same branch
+· **Tags:** `ch13-final`/`v0.4.0` and `ch14-final`/`v0.4.1` both cut 2026-08-29; `ch15-final` to follow on the same branch
 
 Part IV was restructured 2026-08-17 around a single capstone approached
 from the large end: take the biggest open-weight model that exists, work
