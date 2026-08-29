@@ -71,18 +71,29 @@ series:
       - "Ranging shot. Request-level percentiles are starved: 32, 32, 22 and 6 successes. ITL percentiles are not, at 10488/9438/8053 samples, and cost comes from a ratio of totals."
       - "The N=32 row is broken, not merely weak: 0.0099 tok/s on 6 successes against 58 truncated. Drop it rather than chart it."
 
-  # ---- simulated fill-in, so Ch 14 can be drafted against a full curve ----
+  # ---- predicted, not invented ----
+  #
+  # These two were simulated placeholders while the exponents they depend on
+  # were still being measured. They are now interpolations BETWEEN measured
+  # points using measured, rate-normalised exponents:
+  #
+  #   8k (1.00) ---- 16k ---- 32k (3.77) ---- 64k ---- 120k (18.18)
+  #
+  # which is what `predicted` is for: a falsifiable claim from a stated model,
+  # rather than a number invented so prose could be drafted. A later sweep at
+  # either length checks them. Both are expressed as multiples of the cheapest
+  # 8k point, so neither carries a rental price.
   - id: glm52-16k
-    status: simulated
-    basis: "cost scaled from glm52-8k by (16384/8192)^1.00, the exponent measured across the 8k->32k interval"
+    status: predicted
+    basis: "interpolated from the cheapest 8k point by (16384/8192)^0.974, the rate-normalised exponent measured across the 8k to 32k interval"
     model: cyankiwi/GLM-5.2-AWQ-INT4
     hardware: {provider: vast, sku: H200, gpus: 8, plan: tp8}
     workload: {prompt_tokens: 16384, max_tokens: 512, stream: true}
     validates_by: "a sweep at --prompt-tokens 16384 on the same shape, ladder 1,4,8,16,32"
 
   - id: glm52-64k
-    status: simulated
-    basis: "cost scaled from glm52-32k by (64000/32000)^1.13, the exponent measured across the 32k->120k interval"
+    status: predicted
+    basis: "interpolated from the cheapest 32k point by (64000/32000)^1.19, the rate-normalised exponent measured across the 32k to 120k interval"
     model: cyankiwi/GLM-5.2-AWQ-INT4
     hardware: {provider: vast, sku: H200, gpus: 8, plan: tp8}
     workload: {prompt_tokens: 64000, max_tokens: 512, stream: true}
@@ -159,21 +170,21 @@ derived:
     label: "what the 8k fit predicts at B=64"
     basis: "94.43/64 + 25.18. Not measured; the 8k ladder stopped at 32."
 
-  - id: cost-16k-best
-    status: simulated
+  - id: cost-ratio-16k-best
+    status: predicted
     from: glm52-16k
     check: literal
-    value: 56.26
-    label: "PLACEHOLDER cost per million at 16k"
-    basis: "28.13 * (16384/8192)^1.00"
+    value: 1.965
+    label: "predicted best cost at 16k, as a multiple of the cheapest 8k point"
+    basis: "(16384/8192)^0.974, anchored on the cheapest 8k point at 1.00. Interpolation between two measured points, so a 16k sweep checks it rather than replacing it"
 
-  - id: cost-64k-best
-    status: simulated
+  - id: cost-ratio-64k-best
+    status: predicted
     from: glm52-64k
     check: literal
-    value: 240.13
-    label: "PLACEHOLDER cost per million at 64k"
-    basis: "109.72 * (64000/32000)^1.13"
+    value: 8.606
+    label: "predicted best cost at 64k, as a multiple of the cheapest 8k point"
+    basis: "3.772 * (64000/32000)^1.19, with 3.772 the measured 32k point in the same units. Interpolation between two measured points"
 
   # ---- rate-free figures ------------------------------------------------
   #
