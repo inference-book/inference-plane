@@ -18,18 +18,15 @@
 
 snapshots:
 
-  # DRAFTED AHEAD OF THE TAG. `date: TBD` because ch13-final is not cut yet:
-  # release/v0.4 does not exist and P4-Z1 (reconciling ROADMAP.md and
-  # RELEASE.md onto the v0.4 mapping) has to land first. The capability set
-  # itself is locked, which is what licenses drafting this now: open decision 1
-  # settled 2026-08-29 with multi-node out of scope, so nothing below is
-  # waiting on a decision. Editable until the tag is cut, immutable after.
+  # The first tag on the v0.4 line, which opens with this commit. Ch 13's
+  # capability set locked when open decision 1 settled on 2026-08-29 with
+  # multi-node out of scope, and the entry was drafted then and finalised here.
   - tag: ch13-final
     alias: v0.4.0
     chapter: 13
     chapter_title: Serving a Frontier Model, and What the Market Will Sell You
     branch: release/v0.4
-    date: TBD
+    date: 2026-08-29
 
     summary: |
       Serving a seven-hundred-billion-parameter sparse model turned out to be
