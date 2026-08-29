@@ -18,6 +18,151 @@
 
 snapshots:
 
+  # DRAFTED AHEAD OF THE TAG. `date: TBD` because ch13-final is not cut yet:
+  # release/v0.4 does not exist and P4-Z1 (reconciling ROADMAP.md and
+  # RELEASE.md onto the v0.4 mapping) has to land first. The capability set
+  # itself is locked, which is what licenses drafting this now: open decision 1
+  # settled 2026-08-29 with multi-node out of scope, so nothing below is
+  # waiting on a decision. Editable until the tag is cut, immutable after.
+  - tag: ch13-final
+    alias: v0.4.0
+    chapter: 13
+    chapter_title: Serving a Frontier Model, and What the Market Will Sell You
+    branch: release/v0.4
+    date: TBD
+
+    summary: |
+      Serving a seven-hundred-billion-parameter sparse model turned out to be
+      mostly qualification rather than engineering. The memory arithmetic was
+      an afternoon and it is all here: a model's expert shape crosses the
+      wire, total parameters are held apart from active ones, and a budget
+      command answers across a context ladder rather than at one point. What
+      consumed the chapter was everything that had to be true before that
+      arithmetic mattered, and none of those gates is a property of the model.
+      The kernels are a property of the silicon, the four-bit weights are
+      whoever happened to publish a build, and the link between two machines
+      is a property of a rental market that does not sell it. So the control
+      plane learned to refuse earlier and more specifically: an expert count
+      that does not divide, a plan the cards cannot hold, a card tier that
+      does not exist in the catalog. What is deferred here is deferred because
+      the market is shaped that way rather than because the work was hard.
+
+    capabilities:
+      - name: Sparse model shape read over the wire
+        status: shipped
+        notes: |
+          `ModelArchitecture` carries the expert fields, so a caller learns
+          that a model is sparse and by how much without parsing a config
+          itself. The multi-token-prediction layer counts toward the expert
+          layer count, which it has to or the budget is short by one.
+        prs: [363, 383]
+      - name: Total parameters separated from active parameters
+        status: shipped
+        notes: |
+          `ActiveParams` and `ActiveWeightBytes`. A sparse model's weights all
+          land on the cards while only a fraction run per token, so a budget
+          built on either number alone is wrong in a different direction. The
+          weight term splits again for expert-parallel plans.
+        prs: [364, 365, 388]
+      - name: Session budget across a context ladder
+        status: shipped
+        notes: |
+          `iplane model budget --sessions-at` takes a ladder rather than a
+          single context, because the question an operator actually has is how
+          many sessions fit at each length they might serve.
+        prs: [366]
+      - name: Expert parallelism as a third split
+        status: shipped
+        notes: |
+          `--ep` alongside `--tp` and `--pp`, translated on the way out since
+          no engine takes an expert degree as a flag. Expert parallelism costs
+          more memory per card rather than less, which is the opposite of what
+          the other two splits do and the reason it needs its own budget term.
+        prs: [377, 389]
+      - name: Expert-count divisibility refused before renting
+        status: shipped
+        notes: |
+          `internal/provisioners/expertshape.go`. The refusal names the
+          divisors that would have worked, because a rejection that does not
+          say what to try next costs the operator the same hour it saved.
+        prs: [378]
+      - name: Pre-rent refusal understands sparse shapes
+        status: shipped
+        notes: |
+          `budgetcheck.go` and `expertshape.go` together. A plan the cards
+          cannot hold is refused before any provider Spawn fires rather than
+          discovered at load, on a machine already billing.
+        prs: [385, 386, 410]
+      - name: Whole-node rental verified
+        status: shipped
+        notes: |
+          Nothing needed building, which is the finding. See
+          `docs/design/0008-whole-node-rental.md`.
+      - name: Blackwell SKU entries
+        status: shipped
+        notes: |
+          B300 catalogued on both providers, so the tier a frontier model
+          needs can be asked for by name. GB300 is not catalogued and was not
+          wanted.
+        prs: [402]
+      - name: Cross-node pool as one deployment member
+        status: shipped
+        notes: |
+          A deployment can span machines as a single member, so the model of a
+          multi-node deployment exists in the control plane even where the
+          market will not sell the fabric to fill it. Issue 212 closed.
+        prs: [407]
+        related_issues: [212]
+      - name: Cluster-shaped readiness and terminal failure
+        status: shipped
+        notes: |
+          A span is reported honestly rather than as a single machine's
+          health, so `fleet status` carries a real value in its span column
+          and a partial cluster is distinguishable from a healthy one.
+        prs: [408, 409]
+      - name: Per-instance cost metering
+        status: shipped
+        notes: |
+          `instance.cost.usd.total`, billed from the moment the machine is
+          rented rather than from the moment the engine answers. Unknown stays
+          distinct from zero, and a failed rental that recorded no rate is no
+          longer counted as free.
+        prs: [372, 398]
+
+      - name: A cluster vendor with a self-service fabric
+        status: deferred
+        moved_to: v1.0
+        notes: |
+          Nebius is the only vendor checked that sells an InfiniBand cluster
+          through a CLI and SDKs, at the cost of an adapter with a
+          JWT-to-IAM auth flow nothing else in the repo uses. Lambda was
+          written off against its published schema: 24 paths, none
+          cluster-shaped, and a launch call with no quantity field. Its API is
+          cluster-aware without being cluster-capable, since instances carry a
+          `cluster_id` that only describes machines you already reserved
+          through the console. Settled 2026-08-29 as out of scope. The chapter
+          teaches the fabric question through the refusal instead, which is a
+          finding about market segmentation rather than a gap in the software.
+        related_issues: [212]
+      - name: Multi-node proof run
+        status: deferred
+        moved_to: v1.0
+        notes: |
+          Follows the vendor above and cannot precede it. Deferred with it.
+      - name: Object-store staging of frontier weights
+        status: deferred
+        moved_to: v1.0
+        notes: |
+          A warm cache on this marketplace belongs to a machine rather than a
+          region, so pinning one is a bet on re-renting a specific physical
+          box, and it may be unbuildable in whichever datacentre is holding
+          the capacity on the day. Whether staging pays turns out to depend on
+          the host's achieved link rather than on the model's size, which is
+          the beat the chapter kept. Object-store staging is the general
+          answer and needs a client we do not have.
+        related_issues: [254, 292]
+
+
   # The last tag on the v0.3 line, so release/v0.3 stops moving after this and
   # becomes a maintenance branch. Cut at the release-branch tip after a
   # forward-merge of main, which is where everything Chapter 12 describes lives.
