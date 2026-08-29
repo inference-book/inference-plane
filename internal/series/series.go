@@ -106,7 +106,16 @@ type Derived struct {
 	Concurrency  int     `yaml:"concurrency"`
 	ConcurrencyA int     `yaml:"concurrency_a"`
 	ConcurrencyB int     `yaml:"concurrency_b"`
+
+	// Against names a second series, for checks that compare two runs.
+	// From is the baseline and Against is the other end, so an exponent
+	// reads in the direction the ids are written.
+	Against string `yaml:"against"`
 }
+
+// Lookup resolves a second series and its artifact, for cross-series checks.
+// Single-series checks pass nil.
+type Lookup func(id string) (Series, []Level, error)
 
 // Run is one rental, including the ones that produced nothing.
 type Run struct {
@@ -215,7 +224,7 @@ func CostPerM(rateUSDHr, tokensPerSec float64) (float64, bool) {
 // returns it. A check it does not implement is an error rather than a pass,
 // since an unrecognised check name silently approving the figure is the
 // failure mode this whole file exists to prevent.
-func Recompute(d Derived, s Series, levels []Level) (float64, error) {
+func Recompute(d Derived, s Series, levels []Level, lookup Lookup) (float64, error) {
 	find := func(n int) (Level, error) {
 		for _, l := range levels {
 			if l.Concurrency == n {
@@ -272,6 +281,137 @@ func Recompute(d Derived, s Series, levels []Level) (float64, error) {
 			return 0, fmt.Errorf("%s: no itl_p95 at concurrency %d", s.ID, d.ConcurrencyA)
 		}
 		return b.ITLP95Ms / a.ITLP95Ms, nil
+
+	// The ratio checks below never touch RateUSDHr, and that is the reason
+	// they exist. Cost per million is rate / (tokens per second * 3600) *
+	// 1e6, so a ratio of two costs drawn from the same rented machine
+	// cancels the rate exactly and reduces to an inverse throughput ratio.
+	// A figure expressed this way is immune to the provenance gap that
+	// makes the 120k run's absolute cost circular.
+
+	// The anchor paragraph in Ch 14 quotes one rental rate so the reader can
+	// rebuild an absolute number from the ratios. It comes from here rather
+	// than from prose so it cannot drift from the series it belongs to.
+	case "rate_usd_hr":
+		if s.RateUSDHr <= 0 {
+			return 0, fmt.Errorf("%s: %s has no recorded rate", d.ID, s.ID)
+		}
+		return s.RateUSDHr, nil
+
+	case "cost_ratio_to_best":
+		l, err := find(d.Concurrency)
+		if err != nil {
+			return 0, err
+		}
+		best := 0.0
+		for _, x := range levels {
+			if x.TokensPerSec > best {
+				best = x.TokensPerSec
+			}
+		}
+		if best <= 0 || l.TokensPerSec <= 0 {
+			return 0, fmt.Errorf("%s: no throughput to ratio at concurrency %d", s.ID, d.Concurrency)
+		}
+		return best / l.TokensPerSec, nil
+
+	case "cost_ratio_at":
+		a, err := find(d.ConcurrencyA)
+		if err != nil {
+			return 0, err
+		}
+		b, err := find(d.ConcurrencyB)
+		if err != nil {
+			return 0, err
+		}
+		if a.TokensPerSec <= 0 || b.TokensPerSec <= 0 {
+			return 0, fmt.Errorf("%s: no throughput to ratio", s.ID)
+		}
+		return a.TokensPerSec / b.TokensPerSec, nil
+
+	// The amortisation coefficient of cost = K/B + F, reported as K/F so it
+	// carries no currency. Solved on the ladder's two endpoints, which is
+	// how the chapter's fit was built: the interior points are left free so
+	// they can disagree.
+	case "fit_ratio_coefficient":
+		a, err := find(d.ConcurrencyA)
+		if err != nil {
+			return 0, err
+		}
+		b, err := find(d.ConcurrencyB)
+		if err != nil {
+			return 0, err
+		}
+		if a.TokensPerSec <= 0 || b.TokensPerSec <= 0 {
+			return 0, fmt.Errorf("%s: no throughput to fit", s.ID)
+		}
+		// Work in rate-free units: hours per million tokens, up to a constant.
+		ca, cb := 1/a.TokensPerSec, 1/b.TokensPerSec
+		na, nb := float64(d.ConcurrencyA), float64(d.ConcurrencyB)
+		den := 1/na - 1/nb
+		if den == 0 {
+			return 0, fmt.Errorf("%s: fit needs two different concurrencies", d.ID)
+		}
+		k := (ca - cb) / den
+		f := ca - k/na
+		if f <= 0 {
+			return 0, fmt.Errorf("%s: fit produced a non-positive floor", d.ID)
+		}
+		return k / f, nil
+
+	// Cost per token against context length, with the rental rate divided
+	// out of both ends. Two runs rented at different prices otherwise put
+	// the market into a number the chapter presents as a property of the
+	// workload.
+	// The same comparison as cost_exponent_normalised, before the logarithm.
+	// Best cost at one context against best cost at another, with each run's
+	// rental rate divided out, which leaves an inverse throughput ratio.
+	case "cost_ratio_normalised":
+		if lookup == nil {
+			return 0, fmt.Errorf("%s: %s needs a second series", d.ID, d.Check)
+		}
+		other, otherLevels, err := lookup(d.Against)
+		if err != nil {
+			return 0, err
+		}
+		ta, tb := 0.0, 0.0
+		for _, x := range levels {
+			if x.TokensPerSec > ta {
+				ta = x.TokensPerSec
+			}
+		}
+		for _, x := range otherLevels {
+			if x.TokensPerSec > tb {
+				tb = x.TokensPerSec
+			}
+		}
+		if ta <= 0 || tb <= 0 {
+			return 0, fmt.Errorf("%s: cannot ratio %s against %s", d.ID, s.ID, other.ID)
+		}
+		return ta / tb, nil
+
+	case "cost_exponent_normalised":
+		if lookup == nil {
+			return 0, fmt.Errorf("%s: %s needs a second series", d.ID, d.Check)
+		}
+		other, otherLevels, err := lookup(d.Against)
+		if err != nil {
+			return 0, err
+		}
+		bestTps := func(ls []Level) float64 {
+			b := 0.0
+			for _, x := range ls {
+				if x.TokensPerSec > b {
+					b = x.TokensPerSec
+				}
+			}
+			return b
+		}
+		ta, tb := bestTps(levels), bestTps(otherLevels)
+		xa, xb := float64(s.Workload.PromptTokens), float64(other.Workload.PromptTokens)
+		if ta <= 0 || tb <= 0 || xa <= 0 || xb <= 0 || xa == xb {
+			return 0, fmt.Errorf("%s: cannot take an exponent between %s and %s", d.ID, s.ID, other.ID)
+		}
+		return math.Log(ta/tb) / math.Log(xb/xa), nil
 
 	default:
 		return 0, fmt.Errorf("%s: unknown check %q", d.ID, d.Check)

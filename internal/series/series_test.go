@@ -1,6 +1,7 @@
 package series
 
 import (
+	"fmt"
 	"path/filepath"
 	"testing"
 )
@@ -53,7 +54,18 @@ func TestMeasuredDerivedFiguresMatchTheirArtifacts(t *testing.T) {
 			t.Errorf("%s: %v", d.ID, err)
 			continue
 		}
-		got, err := Recompute(d, s, levels)
+		lookup := func(id string) (Series, []Level, error) {
+			other, ok := byID[id]
+			if !ok {
+				return Series{}, nil, fmt.Errorf("%s: against %q which is not a series", d.ID, id)
+			}
+			ls, err := ReadArtifact(filepath.Join(repoRoot(), other.Artifact))
+			if err != nil {
+				return Series{}, nil, fmt.Errorf("%s: %w", d.ID, err)
+			}
+			return other, ls, nil
+		}
+		got, err := Recompute(d, s, levels, lookup)
 		if err != nil {
 			t.Errorf("%s: %v", d.ID, err)
 			continue

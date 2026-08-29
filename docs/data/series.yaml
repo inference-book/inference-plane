@@ -175,6 +175,122 @@ derived:
     label: "PLACEHOLDER cost per million at 64k"
     basis: "109.72 * (64000/32000)^1.13"
 
+  # ---- rate-free figures ------------------------------------------------
+  #
+  # Cost per million is rate / (tokens per second * 3600) * 1e6, so a ratio
+  # of two costs drawn from the same rented machine cancels the rate exactly
+  # and reduces to an inverse throughput ratio. Everything in this block is
+  # therefore checkable without knowing what the hardware cost, which is why
+  # Ch 14 quotes these rather than dollars: a rental price is a fact about
+  # the market on the day, and it ages. The shape of the curve does not.
+  #
+  # It also means the 120k run's unrecorded rate, which makes its absolute
+  # cost circular, costs these entries nothing at all.
+
+  - id: anchor-rate-8k
+    status: measured
+    from: glm52-8k
+    check: rate_usd_hr
+    value: 32.88
+    label: "the hourly rate the 8k run was rented at, quoted once so a reader can rebuild absolute numbers from the ratios"
+
+  - id: cost-ratio-8k-b1
+    status: measured
+    from: glm52-8k
+    check: cost_ratio_to_best
+    concurrency: 1
+    value: 4.25
+    label: "a single stream at 8k, against the cheapest point on its own ladder"
+
+  - id: cost-ratio-8k-b2
+    status: measured
+    from: glm52-8k
+    check: cost_ratio_to_best
+    concurrency: 2
+    value: 2.47
+    label: "8k at B=2, against the cheapest point on its own ladder"
+
+  - id: cost-ratio-8k-b4
+    status: measured
+    from: glm52-8k
+    check: cost_ratio_to_best
+    concurrency: 4
+    value: 1.6900
+    label: "8k at B=4, against the cheapest point on its own ladder"
+
+  - id: cost-ratio-8k-b8
+    status: measured
+    from: glm52-8k
+    check: cost_ratio_to_best
+    concurrency: 8
+    value: 1.33
+    label: "8k at B=8, against the cheapest point on its own ladder"
+
+  - id: cost-ratio-8k-b16
+    status: measured
+    from: glm52-8k
+    check: cost_ratio_to_best
+    concurrency: 16
+    value: 1.09
+    label: "8k at B=16, against the cheapest point on its own ladder"
+
+  - id: cost-ratio-120k-b8
+    status: measured
+    from: glm52-120k
+    check: cost_ratio_to_best
+    concurrency: 8
+    value: 1.20
+    label: "120k at B=8, against its own cheapest point, which is a batch of one"
+
+  - id: cost-ratio-120k-b16
+    status: measured
+    from: glm52-120k
+    check: cost_ratio_to_best
+    concurrency: 16
+    value: 1.67
+    label: "120k at B=16, against its own cheapest point. Rises rather than falls"
+
+  - id: fit-coefficient-8k
+    status: measured
+    from: glm52-8k
+    check: fit_ratio_coefficient
+    concurrency_a: 1
+    concurrency_b: 32
+    value: 3.75
+    label: "K in cost(B) = floor * (1 + K/B), solved on the ladder's endpoints. Dimensionless, so it survives any rental price"
+
+  - id: cost-ratio-normalised-8k-32k
+    status: measured
+    from: glm52-8k
+    against: glm52-32k
+    check: cost_ratio_normalised
+    value: 3.77
+    label: "how much dearer a token is at 32k than at 8k, with both rental rates divided out"
+
+  - id: cost-ratio-normalised-32k-120k
+    status: measured
+    from: glm52-32k
+    against: glm52-120k
+    check: cost_ratio_normalised
+    value: 4.82
+    label: "how much dearer a token is at 120k than at 32k, with both rental rates divided out"
+
+  - id: exponent-8k-32k
+    status: measured
+    from: glm52-8k
+    against: glm52-32k
+    check: cost_exponent_normalised
+    value: 0.974
+    label: "cost against context from 8k to 32k, with each run's rental rate divided out"
+
+  - id: exponent-32k-120k
+    status: measured
+    from: glm52-32k
+    against: glm52-120k
+    check: cost_exponent_normalised
+    value: 1.190
+    label: "cost against context from 32k to 120k, with each run's rental rate divided out"
+
 # Every rental, including the ones that produced nothing. Ch 14 wants failed
 # attempts counted in the cost series, and that number is only recoverable if
 # it is written down while it is still known.
