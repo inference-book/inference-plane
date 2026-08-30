@@ -18,18 +18,164 @@
 
 snapshots:
 
-  # DRAFTED AHEAD OF THE TAG. `date: TBD` because ch13-final is not cut yet:
-  # release/v0.4 does not exist and P4-Z1 (reconciling ROADMAP.md and
-  # RELEASE.md onto the v0.4 mapping) has to land first. The capability set
-  # itself is locked, which is what licenses drafting this now: open decision 1
-  # settled 2026-08-29 with multi-node out of scope, so nothing below is
-  # waiting on a decision. Editable until the tag is cut, immutable after.
+  # Second tag on the v0.4 line. The branch stays live after this one, since
+  # Ch 15 closes on it too. The pin lock that goes with the tag lives on
+  # release/v0.4; main keeps CP_VERSION=dev by design.
+  - tag: ch14-final
+    alias: v0.4.1
+    chapter: 14
+    chapter_title: What It Costs, and Why Batching Stops Helping
+    branch: release/v0.4
+    date: 2026-08-29
+
+    summary: |
+      Everything here is instrument rather than feature. Chapter 14 asks what
+      a token costs and the answer is only worth as much as the harness that
+      produced it, so most of this tag is the harness learning not to lie. A
+      window sizes itself by how many samples it has earned rather than by a
+      clock, because a fixed duration measured 558 samples at one context
+      length and 6 at another on the same hardware. A row carries two
+      independent counts of the same quantity and says so when they disagree,
+      which is the check that found a defect nobody had thought to look for.
+      Rows the window closed on stopped being counted as successes that
+      produced no tokens. And every figure the chapter prints resolves to a
+      registry entry that a tool re-derives from a committed artifact, so
+      "measured" means an artifact agrees rather than that somebody typed the
+      word. The figures that are not measured say which model produced them
+      and print as predictions. What is deferred is measurement rather than
+      engineering, and it is tracked so the funding ask is a number.
+
+    capabilities:
+      - name: Concurrency ladder with explicit steady state
+        status: shipped
+        notes: |
+          A sweep walks a ladder rather than holding a fixed rate, and
+          steady-state detection is a stated condition instead of a sleep
+          long enough to look safe.
+        prs: [368]
+      - name: Context length as a sweep parameter
+        status: shipped
+        notes: |
+          `--prompt-tokens` against a committed corpus, which is what makes
+          the three-context comparison possible at all. Context turned out to
+          be a bigger cost lever than concurrency, and it could not have been
+          measured without this.
+        prs: [369]
+      - name: Sweep output as a committed artifact with provenance
+        status: shipped
+        notes: |
+          Provenance rides as leading comment lines, so the file says what
+          produced it. Eighteen fields, and the chapter is explicit about the
+          two that are missing.
+        prs: [373]
+      - name: Windows sized by sample count
+        status: shipped
+        notes: |
+          `--sweep-min-samples`, with the requested duration as a floor and a
+          required cap. A level holds open until it has earned its samples.
+          The obvious alternative, projecting a window from the warm-up rate,
+          was killed by a free rehearsal that projected thirty seconds and
+          earned four samples in them. Each row records the window it used,
+          since levels no longer share one.
+        prs: [453]
+      - name: A row that checks itself
+        status: shipped
+        notes: |
+          Two independent counts of the same quantity, tokens as the engine
+          reports them and frames as the client counted them arriving. A
+          cross-check needs no model of correct behaviour, only the
+          assumption that two measurements of one thing agree, which is why
+          it catches what nobody anticipated. The floor that had been
+          exempting the most contradictory row is gone.
+        prs: [453]
+      - name: Truncated requests no longer counted as zero-token successes
+        status: shipped
+        notes: |
+          A request the window closed on was recorded as a success that
+          produced nothing, which understates throughput and overstates cost,
+          and does so more at higher concurrency.
+      - name: Streaming preserved through the router
+        status: shipped
+        notes: |
+          A logging wrapper had stripped the flusher the proxy needed, so
+          every frame arrived at once and inter-token latency read as
+          microseconds. The mock now speaks the completions shape on the
+          completions endpoint as well, because a mock wrong in the same
+          direction as the code under test cannot fail.
+        related_issues: [437, 441]
+      - name: A running sweep reports whether it is working
+        status: shipped
+        notes: |
+          Watching a paid run and not knowing whether it is progressing is
+          its own cost.
+      - name: A measurement registry with checkable statuses
+        status: shipped
+        notes: |
+          `docs/data/series.yaml` plus `make check-series`, which re-derives
+          every figure marked measured from the artifact its entry names and
+          fails past half a percent. `make check-series-print-ready` refuses
+          a release while any cited figure is still simulated. The failure
+          this guards against is that a chapter drafted against placeholders
+          reads exactly like one drafted against measurements.
+      - name: Rate-free figures
+        status: shipped
+        notes: |
+          Cost per million is the rate divided by the tokens that hour
+          produced, so a ratio of two costs from one machine cancels the rate
+          and reduces to an inverse throughput ratio. Four check types never
+          read the hourly rate at all, which is what lets the chapter quote
+          prices once and work in multiples afterwards, and what stops one
+          run's unrecorded rate from reaching a printed figure.
+        prs: [453]
+
+      - name: Measured cost at 16k and 64k context
+        status: deferred
+        moved_to: v1.0
+        notes: |
+          Both points are interpolations between measured points using
+          measured exponents, so they print as predictions and a sweep at
+          either length checks them rather than replacing a guess. Refuting
+          one would be a better outcome for the chapter than confirming it.
+        related_issues: [454, 455, 458]
+      - name: A properly sampled 120k run with its rate recorded
+        status: deferred
+        moved_to: v1.0
+        notes: |
+          The existing 120k artifact is a ranging shot whose levels earned 32,
+          32, 22 and 6 successes, and the superlinear drift at the long end
+          rests on it. Its rate was never written down and had to be
+          back-solved, which the move to ratios made harmless for the law but
+          not for any absolute drawn from it.
+        related_issues: [456, 458]
+      - name: Engine build and scheduler configuration in the artifact header
+        status: deferred
+        moved_to: v1.0
+        notes: |
+          The header names the control plane, which says what orchestrated a
+          run and nothing about what served it. Nothing records whether
+          chunked prefill was active, and that bounds the exact interference
+          the chapter measures, so three sweeps may not have shared a
+          scheduler policy and no artifact can settle it. Costs nothing and
+          should land before any funded run.
+        related_issues: [457]
+      - name: Cost-versus-concurrency panel driven by a real run
+        status: deferred
+        moved_to: v1.0
+        notes: |
+          The panel exists and has never been pointed at a paid deployment's
+          data, so the chapter plots from committed artifacts instead.
+        prs: [375]
+
+
+  # The first tag on the v0.4 line, which opens with this commit. Ch 13's
+  # capability set locked when open decision 1 settled on 2026-08-29 with
+  # multi-node out of scope, and the entry was drafted then and finalised here.
   - tag: ch13-final
     alias: v0.4.0
     chapter: 13
     chapter_title: Serving a Frontier Model, and What the Market Will Sell You
     branch: release/v0.4
-    date: TBD
+    date: 2026-08-29
 
     summary: |
       Serving a seven-hundred-billion-parameter sparse model turned out to be
