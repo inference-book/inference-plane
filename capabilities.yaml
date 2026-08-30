@@ -18,6 +18,82 @@
 
 snapshots:
 
+  # Third and last tag on the v0.4 line, and the last chapter tag the book
+  # cuts. Ch 15 closes the manuscript, so release/v0.4 stops moving here and
+  # becomes an errata channel. v1.0 comes after publication and no chapter
+  # closes on it (RELEASE.md, step 5).
+  - tag: ch15-final
+    alias: v0.4.2
+    chapter: 15
+    chapter_title: The Ceiling, and What Comes Next
+    branch: release/v0.4
+    date: 2026-08-30
+
+    summary: |
+      The thinnest tag in the book, and that is the finding rather than an
+      omission. Chapter 15 says where self-hosted inference tops out, and
+      nearly everything it argues from was built and tagged under Ch 13 and
+      Ch 14. What it did need was an instrument good enough to state a
+      ceiling from, and the one we had was not. The capacity sampler asked a
+      single memory floor, and `iplane capacity` returns the cheapest few
+      offers clearing whatever floor it is given, so every tier above that
+      floor stayed invisible however much of it the market was holding.
+      Eleven days of eight-card sampling recorded nothing above 81 GB a card
+      while H200, B200 and B300 were all rentable on the provider being
+      queried. Giving the sampler a second floor moved what it could see at
+      eight cards from 648 GB to 2200 on the first run after the fix, which
+      is above what a 1.5T model at four bits needs and which falsifies the
+      number the chapter had been drafted against. The chapter's argument
+      survived that; only its number moved. The observation is now pinned as
+      a committed artifact rather than living in a gitignored working log,
+      because Ch 15 closes by promising every figure in it is reproducible
+      from a file committed beside the text, and a number sourced from one
+      laptop would break that promise on the page that makes it. What is
+      deferred here is a series rather than a feature: one market
+      observation at one instant is not what the sampler was built to
+      produce.
+
+    capabilities:
+      - name: Capacity sampled at more than one memory floor
+        status: shipped
+        notes: |
+          Sampling at 80 and 140 GB clears every Hopper part and reaches the
+          Blackwell tier while keeping the existing 80 GB series comparable.
+          At eight cards the two floors return disjoint offer sets, and in
+          the same instant the 80 GB floor had vast answering `no_capacity`
+          while the 140 GB floor held six eight-card frontier offers. The
+          single-floor behaviour was never a bug in `capacity`; the cap on
+          results is what an operator asking for "small" wants. It was a bug
+          in asking the question once.
+        commits: [383b066]
+
+      - name: The capacity observation the chapter cites, pinned as an artifact
+        status: shipped
+        notes: |
+          The 2026-08-29 two-floor run committed under `docs/data/` with the
+          derivations Ch 15 prints, so the ceiling is checkable rather than
+          asserted, and `docs/data/README.md` carries the provenance a JSONL
+          cannot hold in a header the way the sweep CSVs do. Deliberately
+          has no `series.yaml` entry: a market observation is not a
+          sweep-derived figure, there is no artifact-backed check to run
+          against it, and `literal` would be a self-approving number of
+          exactly the kind that registry exists to prevent.
+        commits: [3670a94]
+        docs: [docs/data/README.md]
+
+      - name: A capacity series rather than a single observation
+        status: deferred
+        moved_to: v1.0
+        notes: |
+          The sampler has no schedule and never had one. It ran by hand, 172
+          times across eleven days, and every run but the last asked a single
+          memory floor. Then it went unrun for four days, across the one fix
+          that changed its answers. So the ceiling Ch 15 names rests on one
+          instant, which is the anecdote-versus-series problem the sampler
+          was written to solve, turned back on the sampler. Costs a schedule
+          and somewhere durable to keep the log, and the log is currently
+          gitignored on one machine.
+
   # Second tag on the v0.4 line. The branch stays live after this one, since
   # Ch 15 closes on it too. The pin lock that goes with the tag lives on
   # release/v0.4; main keeps CP_VERSION=dev by design.
