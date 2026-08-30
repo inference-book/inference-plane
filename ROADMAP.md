@@ -139,7 +139,10 @@ Per the cadence note above: if the manual path and the iplane move don't each fi
 ## v0.4 — Frontier MoE (active, see epic #361)
 
 **Chapters:** Ch 13–15 (Part IV) · **Branch:** `release/v0.4`, cut 2026-08-29
-· **Tags:** `ch13-final`/`v0.4.0` and `ch14-final`/`v0.4.1` both cut 2026-08-29; `ch15-final` to follow on the same branch
+· **Tags:** `ch13-final`/`v0.4.0` and `ch14-final`/`v0.4.1` both cut 2026-08-29,
+`ch15-final`/`v0.4.2` cut 2026-08-30. Ch 15 is the version's last chapter and
+the book's, so `release/v0.4` stops moving here and becomes an errata channel
+(`RELEASE.md`, step 5). No `release/v0.5` is cut; v1.0 comes after publication.
 
 Part IV was restructured 2026-08-17 around a single capstone approached
 from the large end: take the biggest open-weight model that exists, work
